@@ -880,6 +880,28 @@ impl StudioLayout {
         }
     }
 
+    /// A track's persisted Soundfont Player settings, so an opening window shows
+    /// the `.sf2` and preset the engine is already playing rather than an empty
+    /// panel.
+    fn soundfont_track_state(
+        &self,
+        track_id: &str,
+        cx: &App,
+    ) -> crate::components::soundfont_player_window::SoundfontPlayerTrackState {
+        use crate::components::soundfont_player_window::SoundfontPlayerTrackState;
+        let timeline = self.timeline.read(cx);
+        let Some(track) = timeline.state.find_track(track_id) else {
+            return SoundfontPlayerTrackState::default();
+        };
+        SoundfontPlayerTrackState {
+            path: track.soundfont_path.clone(),
+            preset: track.soundfont_preset,
+            volume: track.soundfont_volume,
+            reverb_chorus: track.soundfont_reverb_chorus,
+            polyphony: track.soundfont_polyphony,
+        }
+    }
+
     /// Opens the built-in Soundfont Player MDI window, or focuses it (and its
     /// document) if already open. Called from the Inspector's Open button for
     /// an Instrument track whose `builtin_soundfont_player` marker is set.
@@ -889,10 +911,11 @@ impl StudioLayout {
         track_id: String,
         cx: &mut Context<Self>,
     ) {
+        let initial = self.soundfont_track_state(&track_id, cx);
         if let Some(handle) = self.external_windows.soundfont_player.clone() {
             let activated = handle
                 .update(cx, |window, w, cx| {
-                    window.focus_soundfont_player(track_id.clone());
+                    window.focus_soundfont_player(track_id.clone(), initial.clone(), cx);
                     w.activate_window();
                     cx.notify();
                 })
@@ -962,6 +985,7 @@ impl StudioLayout {
         match crate::components::soundfont_player_window::open_soundfont_player_window(
             owner_bounds,
             track_id,
+            initial,
             on_close,
             on_update_track,
             on_preview,

@@ -802,6 +802,14 @@ mod tests {
     }
 
     #[test]
+    fn a_freshly_loaded_panel_reports_full_volume() {
+        // The panel is the authority for volume (the engine reads it from the
+        // track), so it must not start at RustySynth's own internal default.
+        let panel = SoundfontPlayerPanelState::default();
+        assert_eq!(panel.master_volume, 1.0);
+    }
+
+    #[test]
     fn panel_is_only_playable_once_a_font_is_loaded() {
         let mut panel = SoundfontPlayerPanelState::default();
         assert!(!panel.is_playable(), "no font loaded yet");
