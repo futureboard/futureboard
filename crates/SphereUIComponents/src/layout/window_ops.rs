@@ -942,11 +942,29 @@ impl StudioLayout {
             });
         });
 
+        // The window's own player is control-side only. Auditioning routes
+        // through the engine's MIDI preview so the sound comes from the track's
+        // instrument — the same signal path playback uses.
+        let studio = cx.entity().clone();
+        let on_preview: Arc<
+            dyn Fn(
+                    &str,
+                    crate::components::soundfont_player_window::SoundfontPlayerPreview,
+                    &mut App,
+                ) + Send
+                + Sync,
+        > = Arc::new(move |track_id, event, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.dispatch_soundfont_preview(track_id, event, cx);
+            });
+        });
+
         match crate::components::soundfont_player_window::open_soundfont_player_window(
             owner_bounds,
             track_id,
             on_close,
             on_update_track,
+            on_preview,
             cx,
         ) {
             Ok(handle) => self.external_windows.soundfont_player = Some(handle),

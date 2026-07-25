@@ -4,15 +4,21 @@
 //! `TrackState::builtin_soundfont_player`) in a simple floating utility window.
 //! The player panel fills the window directly — no nested MDI/document chrome.
 //!
-//! This window owns a real [`SoundfontPlayer`] instance (control/offline
-//! side only — see that crate's doc comment). Loading a `.sf2`, browsing its
-//! real presets, and switching preset/volume/reverb/polyphony all mutate the
-//! live instance. There is no audio device attached to this preview window,
-//! so none of this produces sound yet; wiring the built-in player into the
-//! audio engine as a real track instrument is a separate, larger task.
+//! Two separate players are in play here, and the split is deliberate:
+//!
+//! - this window owns a control-side [`SoundfontPlayer`] used to read the
+//!   `.sf2`'s real bank name and preset list and to validate a preset choice;
+//! - the audible instrument is the engine's own player on the owning track,
+//!   rebuilt from the track state this window publishes.
+//!
+//! So the keyboard and the Test button do not play the window's instance. They
+//! send MIDI preview through [`SoundfontPlayerPreview`] to the engine, which is
+//! the same path the piano roll uses — what you hear here is what the track
+//! will play back.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
@@ -32,11 +38,34 @@ use crate::soundfont_player::{
 use crate::theme::Colors;
 
 pub const SOUNDFONT_PLAYER_WINDOW_WIDTH: f32 = 640.0;
-pub const SOUNDFONT_PLAYER_WINDOW_HEIGHT: f32 = 460.0;
+pub const SOUNDFONT_PLAYER_WINDOW_HEIGHT: f32 = 520.0;
 pub const SOUNDFONT_PLAYER_WINDOW_MIN_WIDTH: f32 = 480.0;
-pub const SOUNDFONT_PLAYER_WINDOW_MIN_HEIGHT: f32 = 360.0;
+pub const SOUNDFONT_PLAYER_WINDOW_MIN_HEIGHT: f32 = 420.0;
 
 const PREVIEW_MIDI_CHANNEL: u8 = 0;
+const PREVIEW_VELOCITY: u8 = 100;
+/// Notes the Test button auditions: a C major triad, low enough to be clear on
+/// a bass or pad preset and high enough not to disappear on a lead.
+const TEST_CHORD: [u8; 3] = [60, 64, 67];
+/// How long the Test button holds its chord. Long enough to hear a slow
+/// attack, short enough that the button is not a mode the user has to exit.
+const TEST_CHORD_HOLD: Duration = Duration::from_millis(1_400);
+
+/// One MIDI preview gesture from this window, addressed to the track that owns
+/// the built-in player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundfontPlayerPreview {
+    NoteOn {
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        channel: u8,
+        pitch: u8,
+    },
+    AllNotesOff,
+}
 
 #[derive(Debug, Clone)]
 pub struct SoundfontPlayerTrackUpdate {
@@ -48,14 +77,20 @@ pub struct SoundfontPlayerTrackUpdate {
     pub polyphony: usize,
 }
 
+type PreviewCb = Arc<dyn Fn(&str, SoundfontPlayerPreview, &mut App) + Send + Sync>;
+
 pub struct SoundfontPlayerWindow {
     track_id: String,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
+    on_preview: PreviewCb,
     focus_handle: FocusHandle,
     player: Option<SoundfontPlayer>,
     loaded_path: Option<PathBuf>,
     panel: SoundfontPlayerPanelState,
+    /// Bumped whenever an audition starts or is cancelled, so a hold timer that
+    /// belongs to an earlier press cannot release the notes of a later one.
+    test_generation: u64,
 }
 
 impl SoundfontPlayerWindow {
@@ -63,17 +98,123 @@ impl SoundfontPlayerWindow {
         track_id: String,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
+        on_preview: PreviewCb,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             track_id,
             on_close,
             on_update_track,
+            on_preview,
             focus_handle: cx.focus_handle(),
             player: None,
             loaded_path: None,
             panel: SoundfontPlayerPanelState::default(),
+            test_generation: 0,
         }
+    }
+
+    fn preview(&self, event: SoundfontPlayerPreview, app: &mut App) {
+        (self.on_preview)(&self.track_id, event, app);
+    }
+
+    /// The channel this window must preview on. A drum-bank preset only exists
+    /// on the percussion channel — auditioning it on channel 1 would play
+    /// whatever melodic preset that channel happens to hold.
+    fn preview_channel(&self) -> u8 {
+        match self.panel.selected_preset {
+            Some((bank, _)) if bank >= sphere_soundfont_player::DRUM_BANK => {
+                sphere_soundfont_player::PERCUSSION_CHANNEL
+            }
+            _ => PREVIEW_MIDI_CHANNEL,
+        }
+    }
+
+    /// Presses one panel key. Held until [`Self::note_off`] so a sustained
+    /// preset actually sustains, matching the piano roll's key behavior.
+    fn note_on(&mut self, pitch: u8, app: &mut App) {
+        if !self.panel.is_playable() || self.panel.active_notes.contains(&pitch) {
+            return;
+        }
+        let channel = self.preview_channel();
+        self.panel.active_notes.push(pitch);
+        self.panel.status = None;
+        self.preview(
+            SoundfontPlayerPreview::NoteOn {
+                channel,
+                pitch,
+                velocity: PREVIEW_VELOCITY,
+            },
+            app,
+        );
+    }
+
+    fn note_off(&mut self, pitch: u8, app: &mut App) {
+        if !self.panel.active_notes.contains(&pitch) {
+            return;
+        }
+        let channel = self.preview_channel();
+        self.panel.active_notes.retain(|held| *held != pitch);
+        if self.panel.active_notes.is_empty() {
+            self.panel.testing = false;
+        }
+        self.preview(SoundfontPlayerPreview::NoteOff { channel, pitch }, app);
+    }
+
+    /// Auditions the loaded preset through the engine and releases the chord
+    /// after [`TEST_CHORD_HOLD`].
+    fn start_test(&mut self, cx: &mut Context<Self>) {
+        if !self.panel.is_playable() {
+            self.panel.status = Some("Load a SoundFont before testing.".into());
+            return;
+        }
+        self.release_all(cx);
+        self.test_generation = self.test_generation.wrapping_add(1);
+        let generation = self.test_generation;
+        let channel = self.preview_channel();
+        self.panel.testing = true;
+        self.panel.status = None;
+        for pitch in TEST_CHORD {
+            self.panel.active_notes.push(pitch);
+            self.preview(
+                SoundfontPlayerPreview::NoteOn {
+                    channel,
+                    pitch,
+                    velocity: PREVIEW_VELOCITY,
+                },
+                cx,
+            );
+        }
+
+        let entity = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor().timer(TEST_CHORD_HOLD).await;
+            let _ = entity.update(cx, |this, cx| {
+                if this.test_generation != generation {
+                    return;
+                }
+                this.release_all(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Releases every note this panel is holding. Also invalidates any pending
+    /// audition timer.
+    fn release_all(&mut self, app: &mut App) {
+        self.test_generation = self.test_generation.wrapping_add(1);
+        self.panel.testing = false;
+        if self.panel.active_notes.is_empty() {
+            return;
+        }
+        self.panel.active_notes.clear();
+        self.preview(SoundfontPlayerPreview::AllNotesOff, app);
+    }
+
+    fn shift_octave(&mut self, delta: i32, app: &mut App) {
+        self.release_all(app);
+        self.panel.shift_keyboard_octave(delta);
     }
 
     /// Kept for the existing Inspector open path. The window now contains one
@@ -155,7 +296,7 @@ impl SoundfontPlayerWindow {
                 self.panel.selected_preset = None;
                 self.panel.status = None;
                 if let Some(first) = self.panel.presets.first() {
-                    match player.select_preset(PREVIEW_MIDI_CHANNEL, first.bank, first.patch) {
+                    match player.select_preset_all_channels(first.bank, first.patch) {
                         Ok(()) => self.panel.selected_preset = Some((first.bank, first.patch)),
                         Err(error) => {
                             self.panel.status =
@@ -184,7 +325,7 @@ impl SoundfontPlayerWindow {
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        match player.select_preset(PREVIEW_MIDI_CHANNEL, bank, patch) {
+        match player.select_preset_all_channels(bank, patch) {
             Ok(()) => {
                 self.panel.selected_preset = Some((bank, patch));
                 self.panel.preset_list_open = false;
@@ -227,7 +368,7 @@ impl SoundfontPlayerWindow {
             Ok(mut player) => {
                 player.set_master_volume(self.panel.master_volume);
                 if let Some((bank, patch)) = self.panel.selected_preset {
-                    if let Err(error) = player.select_preset(PREVIEW_MIDI_CHANNEL, bank, patch) {
+                    if let Err(error) = player.select_preset_all_channels(bank, patch) {
                         self.panel.status = Some(format!("Preset reselect failed: {error}"));
                     }
                 }
@@ -257,6 +398,7 @@ impl Render for SoundfontPlayerWindow {
         }
         let on_close = self.on_close.clone();
         let entity = cx.entity().clone();
+        let self_entity = entity.clone();
 
         let panel_callbacks = SoundfontPlayerCallbacks {
             on_browse: Arc::new({
@@ -308,11 +450,59 @@ impl Render for SoundfontPlayerWindow {
                     });
                 }
             }),
-            on_set_polyphony: Arc::new(move |value: &usize, _window, app: &mut App| {
-                let value = *value;
+            on_set_polyphony: Arc::new({
+                let entity = entity.clone();
+                move |value: &usize, _window, app: &mut App| {
+                    let value = *value;
+                    let _ = entity.update(app, |this, cx| {
+                        this.set_polyphony(value);
+                        this.notify_track_update(cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_note_on: Arc::new({
+                let entity = entity.clone();
+                move |pitch: &u8, _window, app: &mut App| {
+                    let pitch = *pitch;
+                    let _ = entity.update(app, |this, cx| {
+                        this.note_on(pitch, cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_note_off: Arc::new({
+                let entity = entity.clone();
+                move |pitch: &u8, _window, app: &mut App| {
+                    let pitch = *pitch;
+                    let _ = entity.update(app, |this, cx| {
+                        this.note_off(pitch, cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_test: Arc::new({
+                let entity = entity.clone();
+                move |_window, app: &mut App| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.start_test(cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_all_notes_off: Arc::new({
+                let entity = entity.clone();
+                move |_window, app: &mut App| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.release_all(cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_shift_octave: Arc::new(move |delta: &i32, _window, app: &mut App| {
+                let delta = *delta;
                 let _ = entity.update(app, |this, cx| {
-                    this.set_polyphony(value);
-                    this.notify_track_update(cx);
+                    this.shift_octave(delta, cx);
                     cx.notify();
                 });
             }),
@@ -330,9 +520,15 @@ impl Render for SoundfontPlayerWindow {
             .child(external_window_titlebar(
                 SOUNDFONT_PLAYER_MDI_TITLE,
                 "soundfont-player-window-close",
-                move |window, cx| {
-                    on_close(window, cx);
-                    window.remove_window();
+                {
+                    let entity = self_entity.clone();
+                    move |window, cx| {
+                        // Closing must not leave an auditioned note held on the
+                        // engine — nothing would ever send its note-off.
+                        let _ = entity.update(cx, |this, cx| this.release_all(cx));
+                        on_close(window, cx);
+                        window.remove_window();
+                    }
                 },
             ))
             .child(
@@ -350,6 +546,7 @@ pub fn open_soundfont_player_window(
     track_id: String,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
+    on_preview: PreviewCb,
     cx: &mut App,
 ) -> Result<WindowHandle<SoundfontPlayerWindow>, String> {
     let window_bounds = crate::window_position::centered_window_bounds(
@@ -373,7 +570,7 @@ pub fn open_soundfont_player_window(
     crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| SoundfontPlayerWindow::new(track_id, on_close, on_update_track, cx))
+        cx.new(|cx| SoundfontPlayerWindow::new(track_id, on_close, on_update_track, on_preview, cx))
     })
     .map_err(|error| error.to_string())
 }

@@ -95,6 +95,55 @@ impl StudioLayout {
         )
     }
 
+    /// Routes a gesture from the Soundfont Player window's keyboard or Test
+    /// button. The built-in player is a track instrument with no plugin
+    /// instance, so this always lands on the engine's track MIDI preview.
+    pub(crate) fn dispatch_soundfont_preview(
+        &mut self,
+        track_id: &str,
+        event: components::soundfont_player_window::SoundfontPlayerPreview,
+        cx: &mut Context<Self>,
+    ) {
+        use components::soundfont_player_window::SoundfontPlayerPreview;
+
+        // The engine builds its player from the project snapshot, so a font or
+        // preset chosen moments ago has to reach the graph before the note
+        // does. Only forced when something is actually pending.
+        if self.audio_bridge.project_dirty {
+            self.schedule_audio_project_sync(cx, true, "soundfont_preview");
+        }
+
+        let event = match event {
+            SoundfontPlayerPreview::NoteOn {
+                channel,
+                pitch,
+                velocity,
+            } => MidiInputEvent::NoteOn {
+                note: pitch,
+                velocity,
+                channel,
+            },
+            SoundfontPlayerPreview::NoteOff { channel, pitch } => MidiInputEvent::NoteOff {
+                note: pitch,
+                channel,
+            },
+            SoundfontPlayerPreview::AllNotesOff => MidiInputEvent::AllNotesOff,
+        };
+        let status = self.route_midi_input_event(
+            MidiInputSource::VirtualKeyboard,
+            MidiInputTarget {
+                track_id: track_id.to_string(),
+                plugin_instance_id: None,
+            },
+            event,
+            cx,
+        );
+        match status {
+            MidiInputRouteStatus::Routed => {}
+            other => eprintln!("[soundfont-player] preview not routed: {other:?}"),
+        }
+    }
+
     pub(super) fn route_midi_input_event(
         &mut self,
         source: MidiInputSource,
@@ -264,6 +313,23 @@ impl StudioLayout {
             .or_else(|| first_instrument_insert_id(track));
 
         let Some(plugin_instance_id) = plugin_instance_id else {
+            // The built-in Soundfont Player is a track instrument rather than a
+            // hosted plugin, so it has no instance id — the engine's track MIDI
+            // preview reaches it directly.
+            if track.builtin_soundfont_player {
+                let loaded = track
+                    .soundfont_path
+                    .as_deref()
+                    .is_some_and(|path| !path.is_empty());
+                return VirtualKeyboardTargetStatus {
+                    target: loaded.then(|| MidiInputTarget {
+                        track_id: track.id.clone(),
+                        plugin_instance_id: None,
+                    }),
+                    label: Some(track.name.clone()),
+                    hint: (!loaded).then(|| "Load a SoundFont on the selected track.".to_string()),
+                };
+            }
             return VirtualKeyboardTargetStatus {
                 target: None,
                 label: Some(track.name.clone()),

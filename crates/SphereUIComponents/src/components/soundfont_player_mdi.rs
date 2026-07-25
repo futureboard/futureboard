@@ -42,7 +42,22 @@ pub struct SoundfontPlayerPanelState {
     pub preset_list_open: bool,
     pub loading: bool,
     pub status: Option<String>,
+    /// MIDI note of the leftmost key on the panel keyboard.
+    pub keyboard_root: u8,
+    /// Notes the panel is currently holding on the engine, so keys and the
+    /// Test button show what is actually sounding.
+    pub active_notes: Vec<u8>,
+    /// `true` while the Test button's audition is holding notes.
+    pub testing: bool,
 }
+
+/// Two octaves starting at C3 — enough to reach a recognisable range without
+/// crowding the window, and centred where a General MIDI preset sounds best.
+pub const KEYBOARD_DEFAULT_ROOT: u8 = 48;
+/// How many white keys the panel keyboard shows.
+const KEYBOARD_WHITE_KEYS: usize = 14;
+const KEYBOARD_LOWEST_ROOT: u8 = 0;
+const KEYBOARD_HIGHEST_ROOT: u8 = 108;
 
 impl Default for SoundfontPlayerPanelState {
     fn default() -> Self {
@@ -57,7 +72,24 @@ impl Default for SoundfontPlayerPanelState {
             preset_list_open: false,
             loading: false,
             status: None,
+            keyboard_root: KEYBOARD_DEFAULT_ROOT,
+            active_notes: Vec::new(),
+            testing: false,
         }
+    }
+}
+
+impl SoundfontPlayerPanelState {
+    /// Whether the panel has a loaded font to play. Gestures are disabled
+    /// rather than sending MIDI that could not make a sound.
+    pub fn is_playable(&self) -> bool {
+        self.file_name.is_some() && !self.loading
+    }
+
+    pub fn shift_keyboard_octave(&mut self, delta: i32) {
+        let root = self.keyboard_root as i32 + delta * 12;
+        self.keyboard_root =
+            root.clamp(KEYBOARD_LOWEST_ROOT as i32, KEYBOARD_HIGHEST_ROOT as i32) as u8;
     }
 }
 
@@ -65,6 +97,8 @@ type SoundfontVoidCb = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
 type SoundfontPresetCb = Arc<dyn Fn(&(i32, i32), &mut Window, &mut App) + 'static>;
 type SoundfontF32Cb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 type SoundfontUsizeCb = Arc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
+type SoundfontNoteCb = Arc<dyn Fn(&u8, &mut Window, &mut App) + 'static>;
+type SoundfontI32Cb = Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone)]
 pub struct SoundfontPlayerCallbacks {
@@ -74,6 +108,15 @@ pub struct SoundfontPlayerCallbacks {
     pub on_set_volume: SoundfontF32Cb,
     pub on_toggle_reverb_chorus: SoundfontVoidCb,
     pub on_set_polyphony: SoundfontUsizeCb,
+    /// Press and release of one panel key — routed to the engine so the note
+    /// sounds through the track it belongs to.
+    pub on_note_on: SoundfontNoteCb,
+    pub on_note_off: SoundfontNoteCb,
+    /// Auditions the selected preset without needing the transport or a clip.
+    pub on_test: SoundfontVoidCb,
+    /// Releases everything the panel is holding.
+    pub on_all_notes_off: SoundfontVoidCb,
+    pub on_shift_octave: SoundfontI32Cb,
 }
 
 const PRESET_LIST_MAX_H: f32 = 150.0;
@@ -159,14 +202,8 @@ pub fn soundfont_player_panel(
                 .flex()
                 .flex_col()
                 .gap(px(5.0))
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_faint())
-                        .child("Keyboard Range"),
-                )
-                .child(keyboard_preview()),
+                .child(keyboard_header(panel, &cb))
+                .child(keyboard(panel, &cb)),
         )
         .into_any_element()
 }
@@ -293,18 +330,45 @@ fn preset_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) 
     } else {
         "Choose…"
     };
+    let test = cb.on_test.clone();
+    let panic = cb.on_all_notes_off.clone();
+    let playing = panel.testing || !panel.active_notes.is_empty();
     field_row(
         "Preset",
         value,
         Some(
-            fb_button(
-                "soundfont-preset-toggle",
-                toggle_label,
-                FbButtonKind::Default,
-                has_presets,
-                move |_, w, cx| toggle(w, cx),
-            )
-            .into_any_element(),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(fb_button(
+                    "soundfont-preset-toggle",
+                    toggle_label,
+                    FbButtonKind::Default,
+                    has_presets,
+                    move |_, w, cx| toggle(w, cx),
+                ))
+                .child(if playing {
+                    fb_button(
+                        "soundfont-test-stop",
+                        "Stop",
+                        FbButtonKind::Default,
+                        true,
+                        move |_, w, cx| panic(w, cx),
+                    )
+                    .into_any_element()
+                } else {
+                    fb_button(
+                        "soundfont-test",
+                        "Test",
+                        FbButtonKind::Primary,
+                        panel.is_playable(),
+                        move |_, w, cx| test(w, cx),
+                    )
+                    .into_any_element()
+                })
+                .into_any_element(),
         ),
     )
 }
@@ -471,34 +535,207 @@ fn status_banner(message: String) -> AnyElement {
         .into_any_element()
 }
 
-fn keyboard_preview() -> AnyElement {
-    let mut row = div()
+/// Semitone offsets of the white keys within one octave, and of the black keys
+/// with the white key each sits between.
+const WHITE_SEMITONES: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+const BLACK_SEMITONES: [(usize, u8); 5] = [(0, 1), (1, 3), (3, 6), (4, 8), (5, 10)];
+const WHITE_KEY_W: f32 = 30.0;
+const BLACK_KEY_W: f32 = 18.0;
+const KEY_H: f32 = 62.0;
+const BLACK_KEY_H: f32 = 38.0;
+
+const NOTE_NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
+
+/// `60` → `"C4"`, matching the pitch labels used elsewhere in Studio.
+pub fn note_label(pitch: u8) -> String {
+    let octave = pitch as i32 / 12 - 1;
+    format!("{}{octave}", NOTE_NAMES[pitch as usize % 12])
+}
+
+fn keyboard_header(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
+    let down = cb.on_shift_octave.clone();
+    let up = cb.on_shift_octave.clone();
+    let highest = panel
+        .keyboard_root
+        .saturating_add((KEYBOARD_WHITE_KEYS.div_ceil(7) * 12) as u8)
+        .min(127);
+    let range = format!(
+        "{} – {}",
+        note_label(panel.keyboard_root),
+        note_label(highest)
+    );
+    let holding = if panel.active_notes.is_empty() {
+        range
+    } else {
+        let names: Vec<String> = panel.active_notes.iter().copied().map(note_label).collect();
+        format!("Playing {}", names.join(" "))
+    };
+
+    div()
         .flex()
         .flex_row()
-        .h(px(48.0))
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child("Keyboard"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(10.0))
+                .text_color(if panel.active_notes.is_empty() {
+                    Colors::text_muted()
+                } else {
+                    Colors::accent_primary()
+                })
+                .child(holding),
+        )
+        .child(fb_stepper_button(
+            "soundfont-octave-down",
+            "–",
+            move |_, w, cx| down(&-1, w, cx),
+        ))
+        .child(fb_stepper_button(
+            "soundfont-octave-up",
+            "+",
+            move |_, w, cx| up(&1, w, cx),
+        ))
+        .into_any_element()
+}
+
+/// The panel keyboard. Press-and-hold plays through the engine on the owning
+/// track: this is the same MIDI preview path the piano roll uses, not a
+/// separate preview synth.
+fn keyboard(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
+    let playable = panel.is_playable();
+    let mut white_row = div().flex().flex_row().h(px(KEY_H));
+    for index in 0..KEYBOARD_WHITE_KEYS {
+        let Some(pitch) = white_pitch(panel.keyboard_root, index) else {
+            continue;
+        };
+        white_row = white_row.child(key(
+            ("soundfont-white-key", index),
+            pitch,
+            false,
+            panel.active_notes.contains(&pitch),
+            playable,
+            cb,
+        ));
+    }
+
+    let mut board = div()
+        .relative()
+        .w(px(WHITE_KEY_W * KEYBOARD_WHITE_KEYS as f32))
+        .h(px(KEY_H))
+        .rounded_md()
+        .overflow_hidden()
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_muted())
-        .overflow_hidden()
-        .rounded_md();
+        .child(white_row);
 
-    for i in 0..18 {
-        let is_dark = matches!(i % 7, 1 | 3 | 6);
-        row = row.child(
-            div()
-                .flex_1()
-                .h_full()
-                .border_l(px(if i == 0 { 0.0 } else { 1.0 }))
-                .border_color(Colors::border_subtle())
-                .bg(if is_dark {
-                    Colors::surface_base()
-                } else {
-                    Colors::surface_input()
-                }),
+    for index in 0..KEYBOARD_WHITE_KEYS {
+        let octave = index / 7;
+        let degree = index % 7;
+        let Some((_, semitone)) = BLACK_SEMITONES.iter().find(|(white, _)| *white == degree) else {
+            continue;
+        };
+        let pitch = panel.keyboard_root as u16 + (octave * 12) as u16 + *semitone as u16;
+        if pitch > 127 {
+            continue;
+        }
+        let pitch = pitch as u8;
+        let left = WHITE_KEY_W * (index as f32 + 1.0) - BLACK_KEY_W / 2.0;
+        board = board.child(
+            key(
+                ("soundfont-black-key", index),
+                pitch,
+                true,
+                panel.active_notes.contains(&pitch),
+                playable,
+                cb,
+            )
+            .absolute()
+            .left(px(left))
+            .top(px(0.0)),
         );
     }
 
-    row.into_any_element()
+    board.into_any_element()
+}
+
+fn white_pitch(root: u8, index: usize) -> Option<u8> {
+    let pitch = root as u16 + ((index / 7) * 12) as u16 + WHITE_SEMITONES[index % 7] as u16;
+    (pitch <= 127).then_some(pitch as u8)
+}
+
+fn key(
+    id: impl Into<gpui::ElementId>,
+    pitch: u8,
+    black: bool,
+    active: bool,
+    playable: bool,
+    cb: &SoundfontPlayerCallbacks,
+) -> gpui::Stateful<gpui::Div> {
+    let note_on = cb.on_note_on.clone();
+    let note_off = cb.on_note_off.clone();
+    let mut key = div()
+        .id(id)
+        .w(px(if black { BLACK_KEY_W } else { WHITE_KEY_W }))
+        .h(px(if black { BLACK_KEY_H } else { KEY_H }))
+        .flex()
+        .items_end()
+        .justify_center()
+        .pb(px(4.0))
+        .border_r(px(1.0))
+        .border_color(if active {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if active {
+            Colors::accent_muted()
+        } else if black {
+            Colors::surface_base()
+        } else {
+            Colors::surface_input()
+        })
+        .text_size(px(8.0))
+        .text_color(if active {
+            Colors::accent_primary()
+        } else {
+            Colors::text_faint()
+        })
+        .child(if black || pitch % 12 != 0 {
+            String::new()
+        } else {
+            note_label(pitch)
+        });
+
+    if black {
+        key = key.rounded_b_md().border(px(1.0));
+    }
+
+    if playable {
+        key = key
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.bg(Colors::surface_hover()))
+            .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
+                note_on(&pitch, w, cx)
+            })
+            .on_mouse_up(gpui::MouseButton::Left, move |_, w, cx| {
+                note_off(&pitch, w, cx)
+            });
+    }
+    key
 }
 
 fn empty_document() -> AnyElement {
@@ -524,5 +761,55 @@ mod tests {
         let second = ensure_soundfont_player_document(&mut state);
         assert_eq!(first, second);
         assert_eq!(state.document_count(), 1);
+    }
+
+    #[test]
+    fn note_labels_match_middle_c_convention() {
+        assert_eq!(note_label(60), "C4");
+        assert_eq!(note_label(61), "C#4");
+        assert_eq!(note_label(48), "C3");
+        assert_eq!(note_label(0), "C-1");
+    }
+
+    #[test]
+    fn white_keys_walk_the_major_scale_from_the_root() {
+        let root = KEYBOARD_DEFAULT_ROOT;
+        let pitches: Vec<u8> = (0..8).filter_map(|i| white_pitch(root, i)).collect();
+        assert_eq!(pitches, vec![48, 50, 52, 53, 55, 57, 59, 60]);
+    }
+
+    #[test]
+    fn white_keys_stop_at_the_top_of_the_midi_range() {
+        assert_eq!(white_pitch(120, 0), Some(120));
+        assert_eq!(white_pitch(120, 6), None);
+    }
+
+    #[test]
+    fn octave_shift_clamps_to_the_playable_range() {
+        let mut panel = SoundfontPlayerPanelState::default();
+        panel.shift_keyboard_octave(-1);
+        assert_eq!(panel.keyboard_root, KEYBOARD_DEFAULT_ROOT - 12);
+
+        for _ in 0..12 {
+            panel.shift_keyboard_octave(-1);
+        }
+        assert_eq!(panel.keyboard_root, 0);
+
+        for _ in 0..12 {
+            panel.shift_keyboard_octave(1);
+        }
+        assert_eq!(panel.keyboard_root, 108);
+    }
+
+    #[test]
+    fn panel_is_only_playable_once_a_font_is_loaded() {
+        let mut panel = SoundfontPlayerPanelState::default();
+        assert!(!panel.is_playable(), "no font loaded yet");
+
+        panel.file_name = Some("GeneralUser-GS.sf2".to_string());
+        assert!(panel.is_playable());
+
+        panel.loading = true;
+        assert!(!panel.is_playable(), "a load in flight blocks gestures");
     }
 }
