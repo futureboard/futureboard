@@ -2463,7 +2463,10 @@ mod live_input_monitor_tests {
 mod soundfont_instrument_tests {
     use super::render_project_block_interleaved;
     use crate::runtime::RuntimeProject;
-    use crate::types::{EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackSnapshot};
+    use crate::types::{
+        EngineMidiClipSnapshot, EngineMidiNoteSnapshot, EngineProjectSnapshot,
+        EngineRoutingSnapshot, EngineTrackSnapshot,
+    };
     use sphere_soundfont_player::test_font;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -2663,6 +2666,120 @@ mod soundfont_instrument_tests {
 
         cloned.midi_preview_note_on("sf-1", 0, 60, 100);
         assert!(render_peak(&mut cloned) > 0.001);
+    }
+
+    /// Renders a whole bar of transport playback offline and reports the peak
+    /// level in each 0.25-beat slice, so a test can assert *when* the notes of
+    /// a MIDI clip sound rather than only that something did.
+    fn render_bar_envelope(runtime: &mut RuntimeProject, beats: f64, bpm: f64) -> Vec<f32> {
+        let samples_per_beat = SAMPLE_RATE as f64 * 60.0 / bpm;
+        let total = (samples_per_beat * beats) as u64;
+        let mut envelope = Vec::new();
+        let mut position = 0u64;
+        let slice = (samples_per_beat * 0.25) as u64;
+        while position < total {
+            let mut slice_peak = 0.0f32;
+            let slice_end = (position + slice).min(total);
+            while position < slice_end {
+                let frames = FRAMES.min((slice_end - position) as usize);
+                let mut output = vec![0.0f32; frames * 2];
+                crate::engine::schedule_midi_render_block(runtime, position, frames as u64, None);
+                render_project_block_interleaved(
+                    runtime,
+                    position,
+                    1.0,
+                    &mut output,
+                    2,
+                    true,
+                    4,
+                    4,
+                    None,
+                );
+                slice_peak = output.iter().fold(slice_peak, |peak, s| peak.max(s.abs()));
+                position += frames as u64;
+            }
+            envelope.push(slice_peak);
+        }
+        envelope
+    }
+
+    #[test]
+    fn midi_clip_notes_play_through_the_soundfont_during_transport() {
+        // The arrangement path: a MIDI clip on a Soundfont Player track, played
+        // by the transport rather than auditioned. Two notes a bar apart, so
+        // the rendered envelope has to be silent before the first, loud on each
+        // note, and quiet in the gap between them.
+        let font = FontFile::new("clip");
+        let bpm = 120.0;
+        let mut snapshot = EngineProjectSnapshot {
+            project_id: "soundfont-clip".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: SAMPLE_RATE,
+            tracks: vec![
+                soundfont_track("sf-1", &font, test_font::MELODIC_PRESET),
+                master_track(),
+            ],
+            clips: Vec::new(),
+            midi_clips: vec![EngineMidiClipSnapshot {
+                id: "clip-1".to_string(),
+                track_id: "sf-1".to_string(),
+                start_beat: 1.0,
+                length_beats: 4.0,
+                notes: vec![
+                    EngineMidiNoteSnapshot {
+                        id: 1,
+                        pitch: 60,
+                        start_beat: 0.0,
+                        length_beats: 0.5,
+                        velocity: 100,
+                        channel: 0,
+                    },
+                    EngineMidiNoteSnapshot {
+                        id: 2,
+                        pitch: 67,
+                        start_beat: 3.0,
+                        length_beats: 0.5,
+                        velocity: 100,
+                        channel: 0,
+                    },
+                ],
+                controllers: Vec::new(),
+            }],
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: SAMPLE_RATE,
+                buffer_size: FRAMES as u32,
+            },
+        };
+        snapshot.midi_clips[0].length_beats = 4.0;
+
+        let mut runtime =
+            RuntimeProject::build(&snapshot, SAMPLE_RATE, &mut HashMap::new(), None, true)
+                .expect("runtime builds");
+        let envelope = render_bar_envelope(&mut runtime, 6.0, bpm);
+
+        // Beat 0..1 is before the clip starts.
+        let before = envelope[..4].iter().fold(0.0f32, |a, b| a.max(*b));
+        assert!(before < 1.0e-6, "silent before the clip: {before}");
+
+        // The clip's first note lands on beat 1, the second on beat 4.
+        let first = envelope[4..6].iter().fold(0.0f32, |a, b| a.max(*b));
+        let second = envelope[16..18].iter().fold(0.0f32, |a, b| a.max(*b));
+        assert!(first > 0.001, "first note should sound: {first}");
+        assert!(second > 0.001, "second note should sound: {second}");
+
+        // The two-beat gap in the middle decays well below the note attacks.
+        let gap = envelope[10..15].iter().fold(0.0f32, |a, b| a.max(*b));
+        assert!(
+            gap < first * 0.5,
+            "gap between notes should decay: gap={gap} first={first}"
+        );
     }
 
     #[test]

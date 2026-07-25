@@ -78,6 +78,30 @@ pub struct SoundfontPlayerTrackUpdate {
     pub polyphony: usize,
 }
 
+/// A track's saved Soundfont Player settings, used to restore the window when
+/// it is opened on a track that already has a `.sf2` (a reopened project, or a
+/// window closed and reopened in the same session).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundfontPlayerTrackState {
+    pub path: Option<String>,
+    pub preset: Option<(i32, i32)>,
+    pub volume: f32,
+    pub reverb_chorus: bool,
+    pub polyphony: usize,
+}
+
+impl Default for SoundfontPlayerTrackState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            preset: None,
+            volume: 1.0,
+            reverb_chorus: true,
+            polyphony: 64,
+        }
+    }
+}
+
 type PreviewCb = Arc<dyn Fn(&str, SoundfontPlayerPreview, &mut App) + Send + Sync>;
 
 pub struct SoundfontPlayerWindow {
@@ -97,12 +121,13 @@ pub struct SoundfontPlayerWindow {
 impl SoundfontPlayerWindow {
     pub fn new(
         track_id: String,
+        initial: SoundfontPlayerTrackState,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
         on_preview: PreviewCb,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut window = Self {
             track_id,
             on_close,
             on_update_track,
@@ -112,7 +137,67 @@ impl SoundfontPlayerWindow {
             loaded_path: None,
             panel: SoundfontPlayerPanelState::default(),
             test_generation: 0,
+        };
+        window.restore_track_state(initial, cx);
+        window
+    }
+
+    /// Reloads the panel from a track's saved settings. Without this the window
+    /// would open on "No .sf2 loaded" for a track whose SoundFont the engine has
+    /// had loaded since the project opened, and the first gesture would publish
+    /// that empty state back over the saved one.
+    fn restore_track_state(&mut self, state: SoundfontPlayerTrackState, cx: &mut Context<Self>) {
+        self.panel.master_volume = state.volume.clamp(0.0, 1.0);
+        self.panel.reverb_chorus = state.reverb_chorus;
+        self.panel.polyphony = state.polyphony.clamp(1, 256);
+
+        let Some(path) = state
+            .path
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            self.player = None;
+            self.loaded_path = None;
+            self.panel.file_name = None;
+            self.panel.bank_name = None;
+            self.panel.presets.clear();
+            self.panel.selected_preset = None;
+            return;
+        };
+        if self.loaded_path.as_deref() == Some(path.as_path()) {
+            return;
         }
+
+        // Parsing a General MIDI bank takes long enough to stall the first
+        // frame, so load it the same way Browse does — off the UI thread, with
+        // the panel showing its loading state until it lands.
+        self.panel.loading = true;
+        self.panel.status = None;
+        let settings = SoundfontPlayerSettings {
+            sample_rate: 44_100,
+            block_size: 0,
+            maximum_polyphony: self.panel.polyphony,
+            enable_reverb_and_chorus: self.panel.reverb_chorus,
+        };
+        let entity = cx.entity().clone();
+        let preset = state.preset;
+        cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_spawn({
+                    let path = path.clone();
+                    async move { SoundfontPlayer::from_path(&path, settings) }
+                })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.apply_loaded_player(path, result);
+                // Prefer the track's saved preset over the font's first one.
+                if let Some((bank, patch)) = preset {
+                    this.select_preset(bank, patch);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn preview(&self, event: SoundfontPlayerPreview, app: &mut App) {
@@ -218,10 +303,20 @@ impl SoundfontPlayerWindow {
         self.panel.shift_keyboard_octave(delta);
     }
 
-    /// Kept for the existing Inspector open path. The window now contains one
-    /// direct panel, so focusing the OS window is handled by the caller.
-    pub fn focus_soundfont_player(&mut self, track_id: String) {
-        self.track_id = track_id;
+    /// Retargets an already-open window at `track_id` and reloads the panel from
+    /// that track's saved settings. Focusing the OS window is the caller's job.
+    pub fn focus_soundfont_player(
+        &mut self,
+        track_id: String,
+        state: SoundfontPlayerTrackState,
+        cx: &mut Context<Self>,
+    ) {
+        if self.track_id != track_id {
+            self.release_all(cx);
+            self.track_id = track_id;
+            self.loaded_path = None;
+        }
+        self.restore_track_state(state, cx);
     }
 
     fn notify_track_update(&self, app: &mut App) {
@@ -305,7 +400,11 @@ impl SoundfontPlayerWindow {
                         }
                     }
                 }
-                self.panel.master_volume = player.master_volume();
+                // The panel (and through it the track state the engine reads) is
+                // the authority for volume — a freshly built synthesizer starts
+                // at RustySynth's own default, which would otherwise show up as
+                // a volume the user never chose and disagree with playback.
+                player.set_master_volume(self.panel.master_volume);
                 self.panel.reverb_chorus = player.enable_reverb_and_chorus();
                 self.panel.polyphony = player.maximum_polyphony();
                 self.player = Some(player);
@@ -545,6 +644,7 @@ impl Render for SoundfontPlayerWindow {
 pub fn open_soundfont_player_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     track_id: String,
+    initial: SoundfontPlayerTrackState,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
     on_preview: PreviewCb,
@@ -571,7 +671,9 @@ pub fn open_soundfont_player_window(
     crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| SoundfontPlayerWindow::new(track_id, on_close, on_update_track, on_preview, cx))
+        cx.new(|cx| {
+            SoundfontPlayerWindow::new(track_id, initial, on_close, on_update_track, on_preview, cx)
+        })
     })
     .map_err(|error| error.to_string())
 }
