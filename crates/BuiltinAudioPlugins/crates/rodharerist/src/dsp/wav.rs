@@ -45,11 +45,7 @@ pub struct WavAudio {
 
 impl WavAudio {
     pub fn frames(&self) -> usize {
-        if self.channels == 0 {
-            0
-        } else {
-            self.samples.len() / self.channels
-        }
+        self.samples.len().checked_div(self.channels).unwrap_or(0)
     }
 
     /// One channel's samples, deinterleaved into `out` (resized to fit).

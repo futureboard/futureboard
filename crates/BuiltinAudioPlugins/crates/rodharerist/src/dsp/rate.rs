@@ -60,7 +60,10 @@ impl GuardLp {
     /// `sample_rate`. Falls back to a pass-through if the corner is not
     /// meaningfully below Nyquist (nothing to guard against).
     fn lowpass(cutoff_hz: f32, sample_rate: f32) -> Self {
-        if !(cutoff_hz > 0.0) || cutoff_hz >= sample_rate * 0.5 {
+        // The finite check is spelled out rather than left to a negated `>`:
+        // a non-finite corner must fall through to the pass-through, and
+        // `cutoff_hz <= 0.0` alone is false for NaN.
+        if !cutoff_hz.is_finite() || cutoff_hz <= 0.0 || cutoff_hz >= sample_rate * 0.5 {
             return Self::none();
         }
         let mut me = Self::none();
