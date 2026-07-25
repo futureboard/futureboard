@@ -1959,7 +1959,7 @@ impl StereoEffect for Dsp {
 // Shared realtime-safe building blocks used by the stage modules.
 // ---------------------------------------------------------------------------
 
-use biquad::{Biquad, DirectForm1};
+use biquad::{Biquad, Coefficients, DirectForm1};
 
 /// A biquad with independent left/right state but shared coefficients, so a
 /// stereo stage filters each channel correctly (a single instance cannot serve
@@ -1978,11 +1978,36 @@ impl StereoBiquad {
         }
     }
 
-    /// Install (or clear) the filter for both channels. `DirectForm1` is `Copy`,
-    /// so both channels start from identical coefficients and state.
-    pub(crate) fn set(&mut self, filter: Option<DirectForm1<f32>>) {
-        self.left = filter;
-        self.right = filter;
+    /// Retune (or clear) the filter for both channels, **keeping its running
+    /// history**.
+    ///
+    /// Every stage's `configure` re-sets all of its filters, and `configure`
+    /// runs on any parameter change — so installing a fresh `DirectForm1` here
+    /// would zero x1/x2/y1/y2 mid-signal on every knob edit. That step is
+    /// audible on its own, and ahead of a drive model's 30–40 dB of pre-gain it
+    /// can flip the clipped sign near a zero crossing, which reads as a click
+    /// while a knob is dragged or automated. `update_coefficients` retunes in
+    /// place instead, so a swap is continuous.
+    ///
+    /// Going from a filter to `None` still steps — that is a real topology
+    /// change (a band switching to true bypass), not a retune.
+    pub(crate) fn set(&mut self, coefficients: Option<Coefficients<f32>>) {
+        let Some(coefficients) = coefficients else {
+            self.left = None;
+            self.right = None;
+            return;
+        };
+        match (self.left.as_mut(), self.right.as_mut()) {
+            (Some(left), Some(right)) => {
+                left.update_coefficients(coefficients);
+                right.update_coefficients(coefficients);
+            }
+            // First install: there is no history to carry over.
+            _ => {
+                self.left = Some(DirectForm1::<f32>::new(coefficients));
+                self.right = Some(DirectForm1::<f32>::new(coefficients));
+            }
+        }
     }
 
     pub(crate) fn reset(&mut self) {
@@ -2823,13 +2848,18 @@ mod tests {
     /// 10) Abrupt Drive/Tone automation: no NaN, no single-sample spike.
     #[test]
     fn topology_models_survive_abrupt_automation() {
-        for model in TOPOLOGY_MODELS {
-            let mut dsp = drive_only_dsp(model, 2.0, 48_000.0);
+        /// Largest sample-to-sample step over a 382 Hz tone, either with both
+        /// knobs slammed between their extremes every 6000 samples, or held at
+        /// one setting for the whole run.
+        fn max_step(model: DriveModel, held: Option<f32>) -> f32 {
+            let mut dsp = drive_only_dsp(model, held.unwrap_or(2.0), 48_000.0);
+            if let Some(knob) = held {
+                assert!(dsp.apply_ui_param("drive_tone", knob));
+            }
             let mut prev = 0.0f32;
-            let mut max_step: f32 = 0.0;
+            let mut worst = 0.0f32;
             for n in 0..48_000 {
-                if n % 6_000 == 0 {
-                    // Slam both knobs across their full range.
+                if held.is_none() && n % 6_000 == 0 {
                     let hi = (n / 6_000) % 2 == 0;
                     assert!(dsp.apply_ui_param("drive_gain", if hi { 10.0 } else { 0.0 }));
                     assert!(dsp.apply_ui_param("drive_tone", if hi { 10.0 } else { 0.0 }));
@@ -2838,17 +2868,67 @@ mod tests {
                 let (l, _) = dsp.process_stereo(x, x);
                 assert!(l.is_finite(), "{model:?} NaN during automation");
                 if n > 100 {
-                    max_step = max_step.max((l - prev).abs());
+                    worst = worst.max((l - prev).abs());
                 }
                 prev = l;
             }
-            // Filter swaps allow small discontinuities; a hard glitch would be
-            // a near-full-scale jump.
+            worst
+        }
+
+        for model in TOPOLOGY_MODELS {
+            // A clipped voicing already slews most of its amplitude in a couple
+            // of samples, so an absolute bound would only measure how loud the
+            // model is. Judge the automated run against what the same model does
+            // with the knobs held at the extremes the automation visits: knob
+            // motion must not add a discontinuity of its own.
+            let natural = max_step(model, Some(0.0)).max(max_step(model, Some(10.0)));
+            let automated = max_step(model, None);
             assert!(
-                max_step < 1.5,
-                "{model:?} automation glitch: step={max_step}"
+                automated < natural + 0.35,
+                "{model:?} automation glitch: step={automated} vs {natural} held still"
             );
         }
+    }
+
+    /// Retuning a running filter must not restart it. Installing a fresh
+    /// `DirectForm1` zeroes x1/x2/y1/y2, which steps the signal on every knob
+    /// edit — `configure` re-sets every filter on any parameter change, so this
+    /// is the difference between a silent retune and a click per edit.
+    #[test]
+    fn biquad_retune_keeps_its_running_state() {
+        let coeffs =
+            |hz: f32| builtin_dsp_core::make_eq_coefficients("lowpass", hz, 0.0, 0.707, 48_000.0);
+        let mut swapped = StereoBiquad::none();
+        let mut untouched = StereoBiquad::none();
+        swapped.set(coeffs(4_000.0));
+        untouched.set(coeffs(4_000.0));
+
+        let tone = |n: usize| (n as f32 * 900.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5;
+        for n in 0..2_000 {
+            let _ = swapped.run(tone(n), tone(n));
+            let _ = untouched.run(tone(n), tone(n));
+        }
+
+        // Re-set the *same* coefficients: a state-preserving retune is then a
+        // complete no-op, so the two must stay sample-identical.
+        swapped.set(coeffs(4_000.0));
+        for n in 2_000..2_400 {
+            let (a, _) = swapped.run(tone(n), tone(n));
+            let (b, _) = untouched.run(tone(n), tone(n));
+            assert!(
+                (a - b).abs() < 1.0e-6,
+                "re-setting identical coefficients restarted the filter at {n}: {a} vs {b}"
+            );
+        }
+
+        // A genuine retune may change the output, but only continuously.
+        let before = swapped.run(tone(2_400), tone(2_400)).0;
+        swapped.set(coeffs(1_200.0));
+        let after = swapped.run(tone(2_401), tone(2_401)).0;
+        assert!(
+            (after - before).abs() < 0.1,
+            "retune stepped the signal: {before} -> {after}"
+        );
     }
 
     /// Every drive voicing must process finite, audible output at high gain —

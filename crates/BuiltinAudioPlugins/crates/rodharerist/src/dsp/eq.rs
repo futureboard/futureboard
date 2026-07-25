@@ -3,7 +3,7 @@
 //! cascade pattern as the cabinet sim. Flat settings are bit-transparent by
 //! construction: a band at 0 dB installs no filter at all.
 
-use builtin_dsp_core::make_eq_biquad;
+use builtin_dsp_core::make_eq_coefficients;
 
 use super::StereoBiquad;
 
@@ -60,7 +60,7 @@ impl EqStage {
             if gain.abs() < 0.05 {
                 None
             } else {
-                make_eq_biquad(kind, freq, gain.clamp(-15.0, 15.0), q, sr)
+                make_eq_coefficients(kind, freq, gain.clamp(-15.0, 15.0), q, sr)
             }
         };
         self.low

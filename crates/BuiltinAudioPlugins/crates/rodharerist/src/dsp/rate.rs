@@ -19,7 +19,7 @@
 //! Realtime: [`RateAdapter::run`] allocates nothing, locks nothing and never
 //! panics; every buffer is a fixed-size array built in [`RateAdapter::new`].
 
-use builtin_dsp_core::make_eq_biquad;
+use builtin_dsp_core::make_eq_coefficients;
 
 use super::StereoBiquad;
 
@@ -65,7 +65,13 @@ impl GuardLp {
         }
         let mut me = Self::none();
         for (stage, q) in me.stages.iter_mut().zip(BUTTERWORTH_Q) {
-            stage.set(make_eq_biquad("lowpass", cutoff_hz, 0.0, q, sample_rate));
+            stage.set(make_eq_coefficients(
+                "lowpass",
+                cutoff_hz,
+                0.0,
+                q,
+                sample_rate,
+            ));
         }
         me
     }

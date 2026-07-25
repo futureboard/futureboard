@@ -218,14 +218,19 @@ impl SoftKneeCompressor {
     }
 }
 
-/// Build a `biquad` DirectForm1 from common EQ band kinds.
-pub fn make_eq_biquad(
+/// Build biquad coefficients from common EQ band kinds.
+///
+/// Prefer this over [`make_eq_biquad`] for a filter that is already running:
+/// coefficients can be handed to `Biquad::update_coefficients`, which retunes
+/// in place, whereas installing a fresh `DirectForm1` also installs its zeroed
+/// history and steps the signal.
+pub fn make_eq_coefficients(
     kind: &str,
     freq_hz: f32,
     gain_db: f32,
     q: f32,
     sample_rate: f32,
-) -> Option<DirectForm1<f32>> {
+) -> Option<Coefficients<f32>> {
     let fs = sample_rate.max(1.0);
     let f0 = clamp(freq_hz, 10.0, fs * 0.45);
     let q = clamp(q, 0.1, 12.0);
@@ -238,8 +243,18 @@ pub fn make_eq_biquad(
         "notch" => Type::Notch,
         _ => return None,
     };
-    let coeffs = Coefficients::<f32>::from_params(filter_type, fs.hz(), f0.hz(), q).ok()?;
-    Some(DirectForm1::<f32>::new(coeffs))
+    Coefficients::<f32>::from_params(filter_type, fs.hz(), f0.hz(), q).ok()
+}
+
+/// Build a `biquad` DirectForm1 from common EQ band kinds.
+pub fn make_eq_biquad(
+    kind: &str,
+    freq_hz: f32,
+    gain_db: f32,
+    q: f32,
+    sample_rate: f32,
+) -> Option<DirectForm1<f32>> {
+    make_eq_coefficients(kind, freq_hz, gain_db, q, sample_rate).map(DirectForm1::<f32>::new)
 }
 
 #[cfg(test)]

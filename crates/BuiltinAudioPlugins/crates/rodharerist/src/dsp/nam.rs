@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use builtin_dsp_core::make_eq_biquad;
+use builtin_dsp_core::make_eq_coefficients;
 use nam_rs::{Model, NamModel};
 
 use super::StereoBiquad;
@@ -338,7 +338,7 @@ impl NamCapture {
     }
 
     fn recompute_sample_rate_derived(&mut self) {
-        self.dc_hpf.set(make_eq_biquad(
+        self.dc_hpf.set(make_eq_coefficients(
             "highpass",
             20.0,
             0.0,

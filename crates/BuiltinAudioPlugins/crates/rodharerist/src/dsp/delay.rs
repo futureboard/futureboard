@@ -11,7 +11,7 @@
 //! [`DelayStage::new`] / [`DelayStage::set_sample_rate`];
 //! [`DelayStage::process`] performs no allocation, locking or logging.
 
-use builtin_dsp_core::{make_eq_biquad, mix};
+use builtin_dsp_core::{make_eq_coefficients, mix};
 
 use super::smooth::Smoothed;
 use super::{DelayModel, InterpDelay, Lfo, StereoBiquad, soft_clip};
@@ -237,7 +237,7 @@ impl DelayStage {
         let tone_hz = (self.voicing.tone_hz * octaves.exp2()).clamp(400.0, 18_000.0);
         if (tone_hz - self.tone_hz_current).abs() > 1.0 {
             self.tone_hz_current = tone_hz;
-            self.tone.set(make_eq_biquad(
+            self.tone.set(make_eq_coefficients(
                 "lowpass",
                 tone_hz,
                 0.0,
@@ -250,7 +250,7 @@ impl DelayStage {
         if (body_hz - self.body_hz_current).abs() > 1.0 {
             self.body_hz_current = body_hz;
             self.body.set(if body_hz > 0.0 {
-                make_eq_biquad("highpass", body_hz, 0.0, 0.707, self.sample_rate)
+                make_eq_coefficients("highpass", body_hz, 0.0, 0.707, self.sample_rate)
             } else {
                 None
             });

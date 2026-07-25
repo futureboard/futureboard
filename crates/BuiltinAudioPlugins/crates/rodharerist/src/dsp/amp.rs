@@ -235,8 +235,11 @@ impl AmpProfile {
                 power_drive: 2.25,
                 power_headroom: 1.08,
                 power_asymmetry: 0.045,
-                feedback: 0.43,
-                presence_depth: 0.58,
+                // Little global feedback — that looseness and raw upper-order
+                // content is the voice. Presence keeps its authority because
+                // it rides `presence_depth`, not the damping term.
+                feedback: 0.20,
+                presence_depth: 0.95,
                 resonance: 0.30,
                 damping: 0.62,
                 sag_amount: 0.07,
@@ -299,8 +302,10 @@ impl AmpProfile {
                 power_drive: 2.40,
                 power_headroom: 1.02,
                 power_asymmetry: 0.055,
-                feedback: 0.47,
-                presence_depth: 0.62,
+                // As Recto: minimal global feedback so the power section stays
+                // nonlinear at the top of the Gain knob.
+                feedback: 0.24,
+                presence_depth: 1.00,
                 resonance: 0.26,
                 damping: 0.66,
                 sag_amount: 0.055,
@@ -513,6 +518,13 @@ fn envelope_tick(state: &mut f32, input: f32, attack: f32, release: f32) -> f32 
 
 /// Four deliberately different stage transfer curves. Each has a soft knee
 /// and unequal positive/negative behavior; none is reused for adjacent stages.
+///
+/// The curve's own ceiling is the stage's level reference — there is no
+/// drive-dependent makeup. A `1/sqrt(drive)` normalization here (what this
+/// used to do) makes every stage quieter the harder it is driven, so the whole
+/// amp reads *louder with Gain down* and never reaches a saturated wall with
+/// Gain up. A valve stage does the opposite: more drive, more level, until the
+/// plate voltage runs out.
 #[inline]
 fn stage_shape(x: f32, shape: u8, bias: f32, drive: f32) -> f32 {
     let d = drive.max(0.25);
@@ -539,7 +551,7 @@ fn stage_shape(x: f32, shape: u8, bias: f32, drive: f32) -> f32 {
             }
         }
     };
-    finite((shaped - zero) / d.sqrt().max(0.5))
+    finite(shaped - zero)
 }
 
 impl AmpCore {
@@ -814,15 +826,20 @@ impl AmpLane {
 
         // Gain moves stage gain, interstage drive, bias, compression and the
         // coupling corner together. It is deliberately not an input multiply.
+        // Wide open every stage is well past its knee, so the cascade reaches a
+        // real saturated wall instead of asymptoting a few dB above clean.
         self.stage_gain
-            .set_target(self.profile.pre_gain * (0.20 + g * 1.65));
+            .set_target(self.profile.pre_gain * (0.22 + g * 2.60));
         self.inter_gain
-            .set_target(self.profile.inter_gain * (0.35 + g * 1.10));
-        self.bias.set_target(self.profile.bias * (0.65 + g * 0.70));
+            .set_target(self.profile.inter_gain * (0.30 + g * 1.95));
+        self.bias.set_target(self.profile.bias * (0.65 + g * 0.85));
         self.bias_move
-            .set_target(self.profile.bias_move * (0.30 + g * 0.90));
+            .set_target(self.profile.bias_move * (0.30 + g * 1.05));
+        // Stage compression tracks Gain only loosely: coupled too tightly it
+        // becomes an automatic gain control that spends the drive it was
+        // given, which is how the knob went inert above ~4.
         self.pre_compression
-            .set_target(self.profile.pre_compression * (0.35 + g * 0.85));
+            .set_target(self.profile.pre_compression * (0.55 + g * 0.55));
         let coupling_hz = self.profile.coupling_hpf * (1.0 + g * self.profile.tightness * 1.45);
         self.coupling_pole.set_target(pole(coupling_hz, osr));
         self.spectral_alpha
