@@ -4,9 +4,9 @@ use super::{
     MidiControllerPoint, MidiNote, MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob,
     ProjectAsset, ProjectClip, ProjectInsert, ProjectLyricSyllable, ProjectLyricSyllableMode,
     ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongSectionType, ProjectSongTextEvent,
-    ProjectSongTextEventKind, ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion,
-    ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
-    ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
+    ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTempoPoint, ProjectTimelineMarker,
+    ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
+    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -50,7 +50,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v27 replaces combined chord/lyric cues with typed Song Text events and adds
 /// lyric timing/syllable data plus section metadata. v24-v26 cues migrate on load;
 /// pre-v24 projects have no Song Text events.
-pub const PROJECT_VERSION: u32 = 27;
+/// v28 persists the built-in Soundfont Player instrument per track (`.sf2`
+/// path, preset bank/patch, volume, reverb/chorus, polyphony). Pre-v28 tracks
+/// load with no soundfont, which is what they had before the field existed.
+pub const PROJECT_VERSION: u32 = 28;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -783,6 +786,49 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
         encode_clip(w, c);
     }
     w.write_opt_f32(&t.row_height_px);
+    encode_soundfont_player(w, t.soundfont.as_ref()); // v28
+}
+
+/// v28: built-in Soundfont Player instrument state. A leading flag keeps the
+/// common case (no soundfont on this track) to a single byte.
+fn encode_soundfont_player(w: &mut FbWriter, soundfont: Option<&ProjectSoundfontPlayer>) {
+    let Some(soundfont) = soundfont else {
+        w.write_bool(false);
+        return;
+    };
+    w.write_bool(true);
+    w.write_opt_path(&soundfont.path);
+    // Bank and patch are only meaningful together, and both are non-negative
+    // (MIDI bank select / program change), so one flag plus two u32s round-trips
+    // the pair without a signed encoding.
+    let preset = soundfont.preset_bank.zip(soundfont.preset_patch);
+    w.write_bool(preset.is_some());
+    let (bank, patch) = preset.unwrap_or((0, 0));
+    w.write_u32(bank.max(0) as u32);
+    w.write_u32(patch.max(0) as u32);
+    w.write_f32(soundfont.volume);
+    w.write_bool(soundfont.reverb_chorus);
+    w.write_u32(soundfont.polyphony);
+}
+
+fn decode_soundfont_player(
+    r: &mut FbReader,
+) -> Result<Option<ProjectSoundfontPlayer>, ProjectError> {
+    if !r.read_bool()? {
+        return Ok(None);
+    }
+    let path = r.read_opt_path()?;
+    let has_preset = r.read_bool()?;
+    let bank = r.read_u32()? as i32;
+    let patch = r.read_u32()? as i32;
+    Ok(Some(ProjectSoundfontPlayer {
+        path,
+        preset_bank: has_preset.then_some(bank),
+        preset_patch: has_preset.then_some(patch),
+        volume: r.read_f32()?.clamp(0.0, 1.0),
+        reverb_chorus: r.read_bool()?,
+        polyphony: r.read_u32()?.clamp(1, 256),
+    }))
 }
 
 fn encode_asset(w: &mut FbWriter, a: &ProjectAsset) {
@@ -1666,6 +1712,12 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         None
     };
 
+    let soundfont = if version >= 28 {
+        decode_soundfont_player(r)?
+    } else {
+        None
+    };
+
     Ok(ProjectTrack {
         id,
         name,
@@ -1682,6 +1734,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         automation_lanes,
         clips,
         row_height_px,
+        soundfont,
     })
 }
 
@@ -2719,6 +2772,108 @@ mod tests {
         assert!(!decoded.stretch.preserve_pitch);
     }
 
+    #[test]
+    fn soundfont_player_track_round_trips() {
+        let mut track = track_with_clip(ProjectClip {
+            id: "c1".to_string(),
+            name: "clip".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Empty,
+            stretch: AudioClipStretchState::default(),
+        });
+        track.soundfont = Some(ProjectSoundfontPlayer {
+            path: Some(PathBuf::from("/home/user/SoundFonts/GeneralUser-GS.sf2")),
+            preset_bank: Some(128),
+            preset_patch: Some(8),
+            volume: 0.65,
+            reverb_chorus: false,
+            polyphony: 96,
+        });
+
+        let mut project = FutureboardProject::new("Soundfont");
+        project.tracks.push(track);
+        let decoded = decode_project(&encode_project(&project)).expect("round trip");
+        let soundfont = decoded.tracks[0]
+            .soundfont
+            .as_ref()
+            .expect("soundfont persisted");
+        assert_eq!(
+            soundfont.path.as_deref(),
+            Some(std::path::Path::new(
+                "/home/user/SoundFonts/GeneralUser-GS.sf2"
+            ))
+        );
+        assert_eq!(soundfont.preset_bank, Some(128));
+        assert_eq!(soundfont.preset_patch, Some(8));
+        assert!((soundfont.volume - 0.65).abs() < 1.0e-6);
+        assert!(!soundfont.reverb_chorus);
+        assert_eq!(soundfont.polyphony, 96);
+    }
+
+    #[test]
+    fn track_without_a_soundfont_round_trips_as_none() {
+        let track = track_with_clip(ProjectClip {
+            id: "c1".to_string(),
+            name: "clip".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Empty,
+            stretch: AudioClipStretchState::default(),
+        });
+        let mut project = FutureboardProject::new("Plain");
+        project.tracks.push(track);
+        let decoded = decode_project(&encode_project(&project)).expect("round trip");
+        assert!(decoded.tracks[0].soundfont.is_none());
+    }
+
+    #[test]
+    fn pre_v28_track_loads_without_a_soundfont() {
+        // A v27 track body ends at the row height; decoding it must not read
+        // into the next record looking for a soundfont block.
+        let mut w = FbWriter::new();
+        encode_track_body_v27(&mut w);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_track(&mut r, 27).expect("v27 track decodes");
+        assert!(decoded.soundfont.is_none());
+        assert_eq!(decoded.id, "t1");
+    }
+
+    /// Writes exactly the track body a v27 writer produced — everything through
+    /// the v17 row height, and nothing after it.
+    fn encode_track_body_v27(w: &mut FbWriter) {
+        w.write_str("t1");
+        w.write_str("Audio 1");
+        encode_track_type(w, ProjectTrackType::Audio);
+        w.write_str("#56C7C9");
+        w.write_f32(1.0);
+        w.write_f32(0.0);
+        w.write_bool(false);
+        w.write_bool(false);
+        w.write_bool(false);
+        encode_input_monitor(w, InputMonitorMode::Off);
+        let routing = TrackRouting::default();
+        encode_track_input_routing(w, &routing.input);
+        encode_track_output_routing(w, &routing.output);
+        encode_track_audio_format(w, routing.audio_format);
+        encode_track_midi_input_routing(w, &routing.midi_input);
+        w.write_opt_u8(&None);
+        w.write_bool(false);
+        w.write_opt_str(&None);
+        w.write_u32(0); // sends
+        w.write_u32(0); // inserts
+        w.write_u32(0); // automation lanes
+        w.write_u32(0); // clips
+        w.write_opt_f32(&None); // row height
+    }
+
     fn track_with_clip(clip: ProjectClip) -> ProjectTrack {
         ProjectTrack {
             id: "t1".to_string(),
@@ -2736,6 +2891,7 @@ mod tests {
             automation_lanes: Vec::new(),
             clips: vec![clip],
             row_height_px: None,
+            soundfont: None,
         }
     }
 

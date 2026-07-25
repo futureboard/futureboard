@@ -47,9 +47,10 @@ const PREVIEW_VELOCITY: u8 = 100;
 /// Notes the Test button auditions: a C major triad, low enough to be clear on
 /// a bass or pad preset and high enough not to disappear on a lead.
 const TEST_CHORD: [u8; 3] = [60, 64, 67];
-/// How long the Test button holds its chord. Long enough to hear a slow
-/// attack, short enough that the button is not a mode the user has to exit.
-const TEST_CHORD_HOLD: Duration = Duration::from_millis(1_400);
+/// How long the Test button holds its chord. Long enough to judge a slow
+/// attack or a pad, short enough that the button is not a mode the user has to
+/// exit — and Stop is there for the impatient.
+const TEST_CHORD_HOLD: Duration = Duration::from_millis(2_200);
 
 /// One MIDI preview gesture from this window, addressed to the track that owns
 /// the built-in player.
