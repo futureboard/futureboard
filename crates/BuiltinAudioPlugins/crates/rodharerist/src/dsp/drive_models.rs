@@ -23,10 +23,17 @@
 //! place and keeps the filter's history — necessary here, because `configure`
 //! re-sets every filter on any parameter change, and a zeroed history ahead of
 //! this much gain steps the signal hard enough to flip the clipped sign.
+//!
+//! Every clipping stage is a [`DiodeClipper`] node solved per sample, never a
+//! transfer curve. Asymmetry is an unequal diode pair rather than an envelope
+//! offset injected ahead of a symmetric shaper, and each node's capacitor gives
+//! the stage memory, so the break-up rounds and moves with playing instead of
+//! folding at a fixed level the way a static clipper does.
 
 use builtin_dsp_core::{db_to_linear, make_eq_coefficients, time_constant};
 
 use super::StereoBiquad;
+use super::nonlinear::{DiodeClipper, DiodeParams};
 use super::smooth::{Oversampler4x, Oversampler8x, Smoothed};
 
 /// Glide time for all smoothed drive internals.
@@ -155,38 +162,6 @@ impl EnvFollower {
     }
 }
 
-/// Hard clip with a small tanh knee and independent positive/negative
-/// thresholds (both given as positive numbers). `knee = 0` degenerates to a
-/// pure clamp.
-#[inline]
-fn hard_clip_asym(x: f32, t_pos: f32, t_neg: f32, knee: f32) -> f32 {
-    let (sign, mag, th) = if x >= 0.0 {
-        (1.0, x, t_pos)
-    } else {
-        (-1.0, -x, t_neg)
-    };
-    if knee <= 1.0e-6 {
-        return sign * mag.min(th);
-    }
-    let knee_start = (th - knee).max(0.0);
-    if mag <= knee_start {
-        x
-    } else {
-        sign * (knee_start + knee * ((mag - knee_start) / knee).tanh())
-    }
-}
-
-/// Soft asymmetric saturation: separate drive per half-cycle, normalized so
-/// small signals pass at ~unity.
-#[inline]
-fn soft_asym(x: f32, k_pos: f32, k_neg: f32) -> f32 {
-    if x >= 0.0 {
-        (x * k_pos).tanh() / k_pos.max(1.0e-6)
-    } else {
-        (x * k_neg).tanh() / k_neg.max(1.0e-6)
-    }
-}
-
 /// Equal-power dry/wet: keeps perceived level steady across the mix knob
 /// (the legacy models' linear crossfade dips in the middle).
 #[inline]
@@ -216,42 +191,6 @@ fn drive_makeup(d: f32) -> f32 {
 /// the same "turn it up, it gets quieter" trap as an inverse makeup gain.
 const OD_CEILING: f32 = 0.62;
 
-/// Overdrive soft clip stacked *in front* of the main distortion: an
-/// asymmetric tanh (hotter on the negative half for even harmonics) into a
-/// fixed ceiling, so raising its drive raises both level and grit. This is the
-/// tube screamer trick — tighten, thicken and grit the signal, then let the
-/// model's own pre-gain slam it into the real clipper. Runs inside the model's
-/// oversampler (memoryless), so its harmonics don't alias.
-#[inline]
-fn od_clip(x: f32, drive: f32) -> f32 {
-    let d = drive.max(1.0);
-    let g = x * d;
-    let y = if g >= 0.0 {
-        g.tanh()
-    } else {
-        // Negative half saturates ~25% hotter → even harmonics + a little DC
-        // (each model's `dc_out` strips the offset downstream).
-        (g * 0.8).tanh() * (1.0 / 0.8)
-    };
-    y * OD_CEILING
-}
-
-/// Bias offset for a clipper's *input*, driven by a pre-gain envelope.
-///
-/// Unequal clip thresholds alone do not survive DC blocking: once a clipper is
-/// fully engaged its two halves differ only by a constant, which is exactly
-/// what the blocker removes — leaving a purely odd-harmonic square, thin and
-/// fizzy no matter how hard it is driven (measured: h2 sixty-odd dB below the
-/// fundamental at full drive). Offsetting the *input* changes the pulse width
-/// instead, and pulse-width asymmetry is real even-harmonic content that
-/// survives DC blocking. Driving it from the envelope keeps the offset
-/// proportional to what is being played, so the duty shift is level-invariant
-/// and blooms with pick attack rather than sitting there as a static buzz.
-#[inline]
-fn duty_bias(env: f32, depth: f32) -> f32 {
-    depth * env.min(1.5)
-}
-
 /// Supply sag from an envelope of the *pre-gain* signal, bounded.
 ///
 /// Detecting on the post-gain signal turns sag into an automatic gain control:
@@ -276,6 +215,7 @@ fn sag_supply(env: f32, amount: f32, floor: f32) -> f32 {
 pub(super) struct OdBoost {
     tighten_hpf: StereoBiquad,
     mid_push: StereoBiquad,
+    clipper: DiodeClipper,
     drive: Smoothed,
 }
 
@@ -284,6 +224,7 @@ impl OdBoost {
         Self {
             tighten_hpf: StereoBiquad::none(),
             mid_push: StereoBiquad::none(),
+            clipper: DiodeClipper::new(Self::diodes(sample_rate)),
             drive: Smoothed::new(sample_rate.max(1.0), SMOOTH_SECONDS, 1.0),
         }
     }
@@ -295,13 +236,40 @@ impl OdBoost {
     pub(super) fn reset(&mut self) {
         self.tighten_hpf.reset();
         self.mid_push.reset();
+        self.clipper.reset();
         self.drive.snap();
+    }
+
+    /// A soft germanium pair: plenty of grit, no corner. The node runs at the
+    /// host model's oversampled rate, so `node_rate` is the caller's rate times
+    /// its oversampling factor.
+    fn diodes(node_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            1.0,
+            1.04,
+            0.20,
+            0.19,
+            1.0e-6,
+            1.3e-6,
+            18_000.0,
+            node_rate.max(1.0),
+        )
     }
 
     /// `amount` (0..1, typically the drive curve) scales both the soft-clip
     /// hardness and the mid push; `mid_hz` voices the honk that cuts through.
-    pub(super) fn configure(&mut self, amount: f32, mid_hz: f32, sample_rate: f32) {
+    /// `oversample` is the host model's factor, so the clipping node's own
+    /// capacitor is tuned to the rate it actually runs at.
+    pub(super) fn configure(
+        &mut self,
+        amount: f32,
+        mid_hz: f32,
+        sample_rate: f32,
+        oversample: f32,
+    ) {
         let a = amount.clamp(0.0, 1.0);
+        self.clipper
+            .set_params(Self::diodes(sample_rate.max(1.0) * oversample));
         // Gentle grit at low drive, screaming at full.
         self.drive.set_target(1.5 + a * 7.5);
         // Tighten the lows entering the clipper so bass doesn't turn to mush;
@@ -335,6 +303,16 @@ impl OdBoost {
     pub(super) fn tick_drive(&mut self) -> f32 {
         self.drive.tick()
     }
+
+    /// Solve the boost's clipping node. Call inside the host model's
+    /// oversampler; the fixed ceiling keeps the stage a grit/voicing stage and
+    /// leaves raw level to the model's own pre-gain.
+    #[inline]
+    pub(super) fn clip(&mut self, l: f32, r: f32, drive: f32) -> (f32, f32) {
+        let d = drive.max(1.0);
+        let (a, b) = self.clipper.process(l * d, r * d);
+        (a * OD_CEILING, b * OD_CEILING)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,12 +331,8 @@ pub(super) struct DsClassic {
     edge: StereoBiquad,
     post_lpf: StereoBiquad,
     os: Oversampler4x,
-    env: EnvFollower,
+    clipper: DiodeClipper,
     pre_gain: Smoothed,
-    t_pos: Smoothed,
-    t_neg: Smoothed,
-    knee: Smoothed,
-    bias_depth: Smoothed,
     out_gain: Smoothed,
     mix: Smoothed,
 }
@@ -375,12 +349,8 @@ impl DsClassic {
             edge: StereoBiquad::none(),
             post_lpf: StereoBiquad::none(),
             os: Oversampler4x::new(),
-            env: EnvFollower::new(sr, 0.003, 0.070),
+            clipper: DiodeClipper::new(Self::diodes(sr)),
             pre_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
-            t_pos: Smoothed::new(sr, SMOOTH_SECONDS, 0.6),
-            t_neg: Smoothed::new(sr, SMOOTH_SECONDS, 0.75),
-            knee: Smoothed::new(sr, SMOOTH_SECONDS, 0.12),
-            bias_depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.1),
             out_gain: Smoothed::new(sr, SMOOTH_SECONDS, 0.5),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
         }
@@ -390,16 +360,8 @@ impl DsClassic {
         self.sample_rate = sample_rate.max(1.0);
         self.dc.set_sample_rate(self.sample_rate);
         self.dc_out.set_sample_rate(self.sample_rate);
-        self.env.set_sample_rate(self.sample_rate);
-        for s in [
-            &mut self.pre_gain,
-            &mut self.t_pos,
-            &mut self.t_neg,
-            &mut self.knee,
-            &mut self.bias_depth,
-            &mut self.out_gain,
-            &mut self.mix,
-        ] {
+        self.clipper.set_params(Self::diodes(self.sample_rate));
+        for s in [&mut self.pre_gain, &mut self.out_gain, &mut self.mix] {
             s.set_time(self.sample_rate, SMOOTH_SECONDS);
         }
     }
@@ -412,18 +374,26 @@ impl DsClassic {
         self.edge.reset();
         self.post_lpf.reset();
         self.os.reset();
-        self.env.reset();
-        for s in [
-            &mut self.pre_gain,
-            &mut self.t_pos,
-            &mut self.t_neg,
-            &mut self.knee,
-            &mut self.bias_depth,
-            &mut self.out_gain,
-            &mut self.mix,
-        ] {
+        self.clipper.reset();
+        for s in [&mut self.pre_gain, &mut self.out_gain, &mut self.mix] {
             s.snap();
         }
+    }
+
+    /// Silicon pair to ground, two diodes up against one down — the orange
+    /// box's actual asymmetry, which is where its rude even-harmonic bite
+    /// comes from. Voltages are normalized so a nominal drop is 1.0.
+    fn diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            0.84,
+            1.16,
+            0.048,
+            0.046,
+            2.5e-7,
+            5.5e-7,
+            7_000.0,
+            sample_rate.max(1.0) * 4.0,
+        )
     }
 
     /// Editor knobs 0..10. Drive maps onto gain, thresholds, knee hardness,
@@ -437,19 +407,11 @@ impl DsClassic {
 
         let gain_db = 10.0 + d * 30.0; // 10..40 dB into the clipper
         self.pre_gain.set_target(db_to_linear(gain_db));
-        // Thresholds stay near-fixed (they are what sets the output level);
-        // the halves stay deliberately unequal for the rude even-harmonic bite.
-        self.t_pos.set_target(0.60 - d * 0.05);
-        self.t_neg.set_target(0.76 - d * 0.04);
-        // Knee hardens as drive rises — full drive is a bare clamp.
-        self.knee.set_target(0.17 - d * 0.16);
-        // ...which is exactly when unequal thresholds stop producing even
-        // harmonics, so the duty-cycle bias takes over as drive climbs.
-        self.bias_depth.set_target(0.06 + d * 0.15);
-        // No inverse compensation: the clamp already sets the level, so the
-        // knob only has to nudge it up. See `drive_makeup`.
+        // The diodes set the ceiling and the asymmetry; Drive only decides how
+        // hard they are hit. No inverse compensation on the output — see
+        // `drive_makeup`.
         self.out_gain
-            .set_target(drive_makeup(d) * (0.40 + lvl * 1.25));
+            .set_target(drive_makeup(d) * (0.18 + lvl * 0.57));
         self.mix.set_target(1.0);
 
         self.dc.set_sample_rate(sr);
@@ -481,29 +443,16 @@ impl DsClassic {
     #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         let pre = self.pre_gain.tick();
-        let t_pos = self.t_pos.tick();
-        let t_neg = self.t_neg.tick();
-        let knee = self.knee.tick().max(0.0);
-        let depth = self.bias_depth.tick();
         let out = self.out_gain.tick();
         let mix = self.mix.tick();
 
         let (l, r) = self.dc.run(left, right);
         let (l, r) = self.input_hpf.run(l, r);
         let (l, r) = self.pre_emph.run(l, r);
-        // Bias the clipper's input (pre-gain, so the duty shift is the same at
-        // any playing level) — see `duty_bias`; `dc_out` strips the offset.
-        let (el, er) = self.env.tick(l, r);
-        let bias_l = duty_bias(el, depth);
-        let bias_r = duty_bias(er, depth);
-        let (mut wl, mut wr) =
-            self.os
-                .process_stereo((l + bias_l) * pre, (r + bias_r) * pre, |a, b| {
-                    (
-                        hard_clip_asym(a, t_pos, t_neg, knee),
-                        hard_clip_asym(b, t_pos, t_neg, knee),
-                    )
-                });
+        let clipper = &mut self.clipper;
+        let (mut wl, mut wr) = self
+            .os
+            .process_stereo(l * pre, r * pre, |a, b| clipper.process(a, b));
         (wl, wr) = self.edge.run(wl, wr);
         (wl, wr) = self.post_lpf.run(wl, wr);
         // Asymmetric clipping generates DC — strip it before it eats
@@ -535,11 +484,11 @@ pub(super) struct SuperDrive {
     low_keep: StereoBiquad,
     post_lpf: StereoBiquad,
     os: Oversampler4x,
+    clipper: DiodeClipper,
     env: EnvFollower,
     pre_gain: Smoothed,
     sag_amount: Smoothed,
     low_blend: Smoothed,
-    bias_depth: Smoothed,
     out_gain: Smoothed,
     mix: Smoothed,
 }
@@ -556,11 +505,11 @@ impl SuperDrive {
             low_keep: StereoBiquad::none(),
             post_lpf: StereoBiquad::none(),
             os: Oversampler4x::new(),
+            clipper: DiodeClipper::new(Self::diodes(sr)),
             env: EnvFollower::new(sr, 0.005, 0.090),
             pre_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             sag_amount: Smoothed::new(sr, SMOOTH_SECONDS, 0.0),
             low_blend: Smoothed::new(sr, SMOOTH_SECONDS, 0.18),
-            bias_depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.05),
             out_gain: Smoothed::new(sr, SMOOTH_SECONDS, 0.6),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
         }
@@ -571,11 +520,11 @@ impl SuperDrive {
         self.dc.set_sample_rate(self.sample_rate);
         self.dc_out.set_sample_rate(self.sample_rate);
         self.env.set_sample_rate(self.sample_rate);
+        self.clipper.set_params(Self::diodes(self.sample_rate));
         for s in [
             &mut self.pre_gain,
             &mut self.sag_amount,
             &mut self.low_blend,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
@@ -591,17 +540,35 @@ impl SuperDrive {
         self.low_keep.reset();
         self.post_lpf.reset();
         self.os.reset();
+        self.clipper.reset();
         self.env.reset();
         for s in [
             &mut self.pre_gain,
             &mut self.sag_amount,
             &mut self.low_blend,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
             s.snap();
         }
+    }
+
+    /// Two soft diodes one way against one the other, in the feedback loop of
+    /// an overdrive: a gentle knee and a real, static asymmetry. The touch
+    /// sensitivity this model is built around comes from the supply sag and
+    /// from the node's own capacitor, not from an envelope steering the shape
+    /// of a symmetric curve.
+    fn diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            0.80,
+            1.20,
+            0.115,
+            0.105,
+            6.0e-7,
+            1.1e-6,
+            13_000.0,
+            sample_rate.max(1.0) * 4.0,
+        )
     }
 
     /// Tone shifts the mid hump up and opens the top together.
@@ -618,13 +585,8 @@ impl SuperDrive {
         self.sag_amount.set_target(0.20 + d * 0.30);
         // Clean-low blend stays subtle and eases off as drive saturates.
         self.low_blend.set_target(0.22 - d * 0.10);
-        // Unequal half-cycle ceilings alone read as symmetric once both halves
-        // flat-top and the DC blocker centres them, so the touch-sensitive even
-        // harmonics this model is built around need a duty shift too — gentler
-        // than the hard-clipping models, since this one is meant to stay smooth.
-        self.bias_depth.set_target(0.05 + d * 0.13);
         self.out_gain
-            .set_target(drive_makeup(d) * (0.38 + lvl * 1.15));
+            .set_target(drive_makeup(d) * (0.18 + lvl * 0.54));
         self.mix.set_target(1.0);
 
         self.dc.set_sample_rate(sr);
@@ -652,7 +614,6 @@ impl SuperDrive {
         let pre = self.pre_gain.tick();
         let sag = self.sag_amount.tick();
         let low_amt = self.low_blend.tick();
-        let depth = self.bias_depth.tick();
         let out = self.out_gain.tick();
         let mix = self.mix.tick();
 
@@ -660,31 +621,21 @@ impl SuperDrive {
         let (low_l, low_r) = self.low_keep.run(l, r);
         let (l, r) = self.input_hpf.run(l, r);
 
-        // Envelope drives both the sag and the asymmetry: dig in → more
-        // compression, more even harmonics. The detector sits *before* the
-        // pre-gain so playing dynamics move it, not the Drive knob.
-        //
-        // `soft_asym` normalizes by `1/k`, so a *lower* k is a *higher*
-        // ceiling. The asymmetry therefore has to stay in a narrow band around
-        // `SOFT_K`: an SD-1's extra diode offsets one half by a couple of dB,
-        // and a wide range here instead produces a wildly lopsided wave
-        // (+0.7/-2.0 at the extreme) that slews hard enough to read as a click.
-        const SOFT_K: f32 = 1.45;
-        // Metered before the mid hump, so dynamics move it and pitch does not.
+        // The supply sags with playing: dig in and the rail feeding the gain
+        // stage droops, so the diodes are reached later and the pedal
+        // compresses. Metered before the mid hump, so dynamics move it and
+        // pitch does not.
         let (el, er) = self.env.tick(l, r);
         let sag_l = sag_supply(el, sag, 0.55);
         let sag_r = sag_supply(er, sag, 0.55);
-        let asym_l = (SOFT_K - el * 0.55).clamp(1.0, SOFT_K);
-        let asym_r = (SOFT_K - er * 0.55).clamp(1.0, SOFT_K);
-        let bias_l = duty_bias(el, depth);
-        let bias_r = duty_bias(er, depth);
 
         let (l, r) = self.mid_hump.run(l, r);
-        let (mut wl, mut wr) = self.os.process_stereo(
-            (l + bias_l) * pre * sag_l,
-            (r + bias_r) * pre * sag_r,
-            |a, b| (soft_asym(a, SOFT_K, asym_l), soft_asym(b, SOFT_K, asym_r)),
-        );
+        let clipper = &mut self.clipper;
+        let (mut wl, mut wr) = self
+            .os
+            .process_stereo(l * pre * sag_l, r * pre * sag_r, |a, b| {
+                clipper.process(a, b)
+            });
         (wl, wr) = self.post_lpf.run(wl, wr);
         wl = sanitize(wl + low_l * low_amt);
         wr = sanitize(wr + low_r * low_amt);
@@ -723,12 +674,12 @@ pub(super) struct MetalCore {
     resonance: StereoBiquad,
     fizz_lpf: StereoBiquad,
     os: Oversampler8x,
+    body: DiodeClipper,
+    wall: DiodeClipper,
     env: EnvFollower,
     od: OdBoost,
     pre_gain: Smoothed,
     inter_gain: Smoothed,
-    ceiling: Smoothed,
-    bias_depth: Smoothed,
     out_gain: Smoothed,
     mix: Smoothed,
 }
@@ -748,12 +699,12 @@ impl MetalCore {
             resonance: StereoBiquad::none(),
             fizz_lpf: StereoBiquad::none(),
             os: Oversampler8x::new(),
+            body: DiodeClipper::new(Self::body_diodes(sr)),
+            wall: DiodeClipper::new(Self::wall_diodes(sr)),
             env: EnvFollower::new(sr, 0.002, 0.060),
             od: OdBoost::new(sr),
             pre_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             inter_gain: Smoothed::new(sr, SMOOTH_SECONDS, 2.0),
-            ceiling: Smoothed::new(sr, SMOOTH_SECONDS, 0.85),
-            bias_depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.1),
             out_gain: Smoothed::new(sr, SMOOTH_SECONDS, 0.4),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
         }
@@ -765,11 +716,11 @@ impl MetalCore {
         self.dc_out.set_sample_rate(self.sample_rate);
         self.env.set_sample_rate(self.sample_rate);
         self.od.set_sample_rate(self.sample_rate);
+        self.body.set_params(Self::body_diodes(self.sample_rate));
+        self.wall.set_params(Self::wall_diodes(self.sample_rate));
         for s in [
             &mut self.pre_gain,
             &mut self.inter_gain,
-            &mut self.ceiling,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
@@ -788,18 +739,49 @@ impl MetalCore {
         self.resonance.reset();
         self.fizz_lpf.reset();
         self.os.reset();
+        self.body.reset();
+        self.wall.reset();
         self.env.reset();
         self.od.reset();
         for s in [
             &mut self.pre_gain,
             &mut self.inter_gain,
-            &mut self.ceiling,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
             s.snap();
         }
+    }
+
+    /// Stage 1: an unequal soft pair that keeps transient shape and supplies
+    /// the even harmonics. A real component mismatch, so the asymmetry no
+    /// longer has to be faked with an envelope-driven offset at the input.
+    fn body_diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            0.82,
+            1.18,
+            0.120,
+            0.110,
+            3.0e-7,
+            5.5e-7,
+            15_000.0,
+            sample_rate.max(1.0) * 8.0,
+        )
+    }
+
+    /// Stage 2: a matched pair with a very tight knee, which is the wall. Its
+    /// capacitor is what keeps that wall from cornering into digital fizz.
+    fn wall_diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            1.0,
+            0.98,
+            0.030,
+            0.029,
+            1.5e-8,
+            2.2e-8,
+            6_000.0,
+            sample_rate.max(1.0) * 8.0,
+        )
     }
 
     /// Tone rebalances scoop depth ↔ presence ↔ fizz ceiling in one gesture:
@@ -817,18 +799,14 @@ impl MetalCore {
         let stage2_db = 6.0 + d * 21.0; // 6..27 dB more
         self.pre_gain.set_target(db_to_linear(stage1_db));
         self.inter_gain.set_target(db_to_linear(stage2_db));
-        // The ceiling is this model's level reference — it must not move with
-        // the knob, or the wall gets quieter exactly as it gets meaner. Even
-        // harmonics come from the duty-cycle bias instead (see `duty_bias`),
-        // which is the only asymmetry a fully-engaged clipper keeps.
-        self.ceiling.set_target(0.82);
-        self.bias_depth.set_target(0.06 + d * 0.22);
+        // The diodes are this model's level reference and they do not move with
+        // the knob, so the wall can never get quieter as it gets meaner.
         self.out_gain
-            .set_target(drive_makeup(d) * (0.45 + lvl * 1.45));
+            .set_target(drive_makeup(d) * (0.37 + lvl * 1.19));
         self.mix.set_target(1.0);
         // Overdrive stacked in front: mid-focused grit that tightens the lows
         // and thickens the body before the metal clipper — kills the fizz.
-        self.od.configure(d, 750.0, sr);
+        self.od.configure(d, 750.0, sr, 8.0);
 
         self.dc.set_sample_rate(sr);
         self.dc_out.set_sample_rate(sr);
@@ -876,8 +854,6 @@ impl MetalCore {
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         let pre = self.pre_gain.tick();
         let inter = self.inter_gain.tick();
-        let ceiling = self.ceiling.tick().max(0.2);
-        let depth = self.bias_depth.tick();
         let out = self.out_gain.tick();
         let mix = self.mix.tick();
         let od_drive = self.od.tick_drive();
@@ -886,41 +862,35 @@ impl MetalCore {
         let (l, r) = self.input_hpf.run(l, r);
         let (l, r) = self.tighten.run(l, r);
 
-        // Detectors read the signal *before* the voicing bells. The OD mid push
-        // is up to +10 dB at its centre, so metering after it would make sag
-        // and duty bias swing with the pitch of the note rather than how hard
-        // it was played (measured: 12 dB of h2 between a 375 and a 750 Hz tone).
-        // Subtle sag only: enough to feel alive, never enough to pump — and
-        // detected pre-gain, so it never claws back what Drive just added.
+        // The sag detector reads the signal *before* the voicing bells. The OD
+        // mid push is up to +10 dB at its centre, so metering after it would
+        // make sag swing with the pitch of the note rather than how hard it was
+        // played. Subtle sag only: enough to feel alive, never enough to pump —
+        // and detected pre-gain, so it never claws back what Drive just added.
         let (el, er) = self.env.tick(l, r);
         let sag_l = sag_supply(el, 0.22, 0.7);
         let sag_r = sag_supply(er, 0.22, 0.7);
-        let bias_l = duty_bias(el, depth);
-        let bias_r = duty_bias(er, depth);
 
         // Overdrive voicing EQ (base rate) ahead of the clipper.
         let (l, r) = self.od.pre_eq(l, r);
 
         let inter_hpf = &mut self.inter_hpf;
         let inter_presence = &mut self.inter_presence;
-        // The OD clip runs at near-unity level *inside* the oversampler, then
+        let od = &mut self.od;
+        let body = &mut self.body;
+        let wall = &mut self.wall;
+        // The OD node runs at near-unity level *inside* the oversampler, then
         // the model's pre-gain slams its output into the two clip stages.
         let (mut wl, mut wr) = self.os.process_stereo(l * sag_l, r * sag_r, |a, b| {
-            // Overdrive stacked in front: boost + grit + tighten. The bias
-            // goes in ahead of the first clipper so the pulse-width asymmetry
-            // it creates is carried by every stage after it.
-            let a = od_clip(a + bias_l, od_drive) * pre;
-            let b = od_clip(b + bias_r, od_drive) * pre;
+            // Overdrive stacked in front: boost + grit + tighten.
+            let (a, b) = od.clip(a, b, od_drive);
             // Stage 1: asymmetric body — keeps transient shape.
-            let a1 = soft_asym(a, 1.2, 0.78);
-            let b1 = soft_asym(b, 1.2, 0.78);
-            // Interstage EQ at 8×: no bass into stage 2, presence in.
+            let (a1, b1) = body.process(a * pre, b * pre);
+            // Interstage EQ at 8x: no bass into stage 2, presence in.
             let (a2, b2) = inter_hpf.run(a1, b1);
             let (a3, b3) = inter_presence.run(a2, b2);
-            // Stage 2: harder, symmetric, near-bare clamp — the wall.
-            let a4 = hard_clip_asym((a3 * inter).tanh() * 1.4, ceiling, ceiling, 0.03);
-            let b4 = hard_clip_asym((b3 * inter).tanh() * 1.4, ceiling, ceiling, 0.03);
-            (a4, b4)
+            // Stage 2: harder, matched, tight-kneed. The wall.
+            wall.process(a3 * inter, b3 * inter)
         });
         (wl, wr) = self.scoop.run(wl, wr);
         (wl, wr) = self.resonance.run(wl, wr);
@@ -961,16 +931,16 @@ pub(super) struct TightRift {
     pick_bite: StereoBiquad,
     fizz_lpf: StereoBiquad,
     os: Oversampler8x,
+    body: DiodeClipper,
+    wall: DiodeClipper,
+    /// The transient path gets its own soft node so the sharpened attack is
+    /// limited by a circuit rather than clamped by a curve.
+    transient_clip: DiodeClipper,
     /// Sag detector — high-passed, so lows never pump the gain.
     env: EnvFollower,
-    /// Bias detector — full band, because duty-cycle asymmetry has to track
-    /// the note being played, not just its pick attack.
-    bias_env: EnvFollower,
     od: OdBoost,
     pre_gain: Smoothed,
-    ceiling: Smoothed,
     trans_amt: Smoothed,
-    bias_depth: Smoothed,
     out_gain: Smoothed,
     mix: Smoothed,
 }
@@ -990,13 +960,13 @@ impl TightRift {
             pick_bite: StereoBiquad::none(),
             fizz_lpf: StereoBiquad::none(),
             os: Oversampler8x::new(),
+            body: DiodeClipper::new(Self::body_diodes(sr)),
+            wall: DiodeClipper::new(Self::wall_diodes(sr)),
+            transient_clip: DiodeClipper::new(Self::transient_diodes(sr)),
             env: EnvFollower::new(sr, 0.001, 0.030),
-            bias_env: EnvFollower::new(sr, 0.002, 0.055),
             od: OdBoost::new(sr),
             pre_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
-            ceiling: Smoothed::new(sr, SMOOTH_SECONDS, 0.85),
             trans_amt: Smoothed::new(sr, SMOOTH_SECONDS, 0.12),
-            bias_depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.08),
             out_gain: Smoothed::new(sr, SMOOTH_SECONDS, 0.4),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
         }
@@ -1007,13 +977,14 @@ impl TightRift {
         self.dc.set_sample_rate(self.sample_rate);
         self.dc_out.set_sample_rate(self.sample_rate);
         self.env.set_sample_rate(self.sample_rate);
-        self.bias_env.set_sample_rate(self.sample_rate);
         self.od.set_sample_rate(self.sample_rate);
+        self.body.set_params(Self::body_diodes(self.sample_rate));
+        self.wall.set_params(Self::wall_diodes(self.sample_rate));
+        self.transient_clip
+            .set_params(Self::transient_diodes(self.sample_rate));
         for s in [
             &mut self.pre_gain,
-            &mut self.ceiling,
             &mut self.trans_amt,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
@@ -1032,19 +1003,64 @@ impl TightRift {
         self.pick_bite.reset();
         self.fizz_lpf.reset();
         self.os.reset();
+        self.body.reset();
+        self.wall.reset();
+        self.transient_clip.reset();
         self.env.reset();
-        self.bias_env.reset();
         self.od.reset();
         for s in [
             &mut self.pre_gain,
-            &mut self.ceiling,
             &mut self.trans_amt,
-            &mut self.bias_depth,
             &mut self.out_gain,
             &mut self.mix,
         ] {
             s.snap();
         }
+    }
+
+    /// Stage 1: a lightly unequal soft pair for body without smearing the
+    /// attack. The mismatch is the asymmetry, so no envelope has to fake one.
+    fn body_diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            0.87,
+            1.13,
+            0.130,
+            0.125,
+            1.8e-7,
+            3.0e-7,
+            17_000.0,
+            sample_rate.max(1.0) * 8.0,
+        )
+    }
+
+    /// Stage 2: matched, very tight knee, small capacitor. Tight and modern,
+    /// but still a node with memory rather than a clamp.
+    fn wall_diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            1.0,
+            0.98,
+            0.028,
+            0.027,
+            1.0e-8,
+            1.4e-8,
+            6_500.0,
+            sample_rate.max(1.0) * 8.0,
+        )
+    }
+
+    /// The parallel transient path runs at base rate and only needs a ceiling
+    /// so the sharpened attack cannot become a click layer.
+    fn transient_diodes(sample_rate: f32) -> DiodeParams {
+        DiodeParams::new(
+            1.0,
+            1.0,
+            0.150,
+            0.150,
+            2.0e-8,
+            2.0e-8,
+            20_000.0,
+            sample_rate.max(1.0),
+        )
     }
 
     /// Tone rebalances definition ↔ pick bite ↔ high damping.
@@ -1057,20 +1073,15 @@ impl TightRift {
 
         let gain_db = 14.0 + d * 29.0; // 14..43 dB
         self.pre_gain.set_target(db_to_linear(gain_db));
-        // Fixed ceiling: this model's level reference, not a drive-dependent
-        // one (see `drive_makeup`).
-        self.ceiling.set_target(0.80);
         self.trans_amt.set_target(0.08 + d * 0.14);
-        // Tight means controlled, not sterile: less duty-cycle bias than the
-        // Metal Core wall, but enough that the top of the knob keeps some even
-        // harmonic weight instead of collapsing to a bare odd-harmonic square.
-        self.bias_depth.set_target(0.06 + d * 0.20);
+        // The diodes are this model's level reference, not a drive-dependent
+        // ceiling (see `drive_makeup`).
         self.out_gain
-            .set_target(drive_makeup(d) * (0.28 + lvl * 0.82));
+            .set_target(drive_makeup(d) * (0.22 + lvl * 0.66));
         self.mix.set_target(1.0);
         // Overdrive stacked in front: mid focus + tight lows before the tight
         // high-gain clipper, so the tone thickens instead of thinning to fizz.
-        self.od.configure(d, 800.0, sr);
+        self.od.configure(d, 800.0, sr, 8.0);
 
         self.dc.set_sample_rate(sr);
         self.dc_out.set_sample_rate(sr);
@@ -1112,9 +1123,7 @@ impl TightRift {
     #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         let pre = self.pre_gain.tick();
-        let ceiling = self.ceiling.tick().max(0.2);
         let trans_amt = self.trans_amt.tick();
-        let depth = self.bias_depth.tick();
         let out = self.out_gain.tick();
         let mix = self.mix.tick();
         let od_drive = self.od.tick_drive();
@@ -1127,40 +1136,34 @@ impl TightRift {
 
         // Fast-recovery sag on a high-passed, pre-gain detector: palm mutes
         // recover instantly, lows never pump the gain, and the Drive knob is
-        // not silently undone by its own envelope. The bias detector is full
-        // band but still reads the signal before the OD's mid push, so the duty
-        // shift tracks playing dynamics rather than the pitch of the note.
+        // not silently undone by its own envelope.
         let (el, er) = self.env.tick(tl, tr);
         let sag_l = sag_supply(el, 0.18, 0.75);
         let sag_r = sag_supply(er, 0.18, 0.75);
-        let (bl, br) = self.bias_env.tick(l, r);
-        let bias_l = duty_bias(bl, depth);
-        let bias_r = duty_bias(br, depth);
 
         // Overdrive voicing EQ (base rate) ahead of the clipper.
         let (l, r) = self.od.pre_eq(l, r);
 
         let inter_hpf = &mut self.inter_hpf;
-        // OD clip at near-unity level inside the oversampler, then pre-gain
+        let od = &mut self.od;
+        let body = &mut self.body;
+        let wall = &mut self.wall;
+        // OD node at near-unity level inside the oversampler, then pre-gain
         // drives its output into the tight clipper stages.
         let (mut wl, mut wr) = self.os.process_stereo(l * sag_l, r * sag_r, |a, b| {
-            // Overdrive stacked in front: boost + grit + tighten, biased ahead
-            // of the first clipper so the duty-cycle asymmetry carries through.
-            let a = od_clip(a + bias_l, od_drive) * pre;
-            let b = od_clip(b + bias_r, od_drive) * pre;
-            // Stage 1: light asym for body...
-            let a1 = soft_asym(a, 1.15, 0.83);
-            let b1 = soft_asym(b, 1.15, 0.83);
+            // Overdrive stacked in front: boost + grit + tighten.
+            let (a, b) = od.clip(a, b, od_drive);
+            // Stage 1: light asymmetry for body...
+            let (a1, b1) = body.process(a * pre, b * pre);
             // ...then keep stage 2 tight...
             let (a2, b2) = inter_hpf.run(a1, b1);
-            // ...into a near-bare clamp with a hard ceiling.
-            let a3 = hard_clip_asym((a2 * 3.2).tanh() * 1.3, ceiling, ceiling, 0.025);
-            let b3 = hard_clip_asym((b2 * 3.2).tanh() * 1.3, ceiling, ceiling, 0.025);
-            (a3, b3)
+            // ...into the tight-kneed node that sets the wall.
+            wall.process(a2 * 3.2, b2 * 3.2)
         });
         // Subtle transient recombination: sharpened attack, not a click layer.
-        wl += soft_asym(tl * 2.0, 1.0, 1.0) * trans_amt;
-        wr += soft_asym(tr * 2.0, 1.0, 1.0) * trans_amt;
+        let (trans_l, trans_r) = self.transient_clip.process(tl * 2.0, tr * 2.0);
+        wl += trans_l * trans_amt;
+        wr += trans_r * trans_amt;
         (wl, wr) = self.definition.run(wl, wr);
         (wl, wr) = self.pick_bite.run(wl, wr);
         (wl, wr) = self.fizz_lpf.run(wl, wr);

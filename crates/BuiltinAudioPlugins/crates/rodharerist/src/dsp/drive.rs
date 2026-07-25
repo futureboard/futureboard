@@ -1,30 +1,32 @@
 //! Overdrive / boost / fuzz pedals — multiple voicings sharing one processor.
 //!
-//! The legacy six voicings share a TS-inspired split topology: a phase-coherent
-//! one-pole split keeps the low band clean while the high band is mid-emphasized
-//! *before* the clipper (voicing into, not after, the nonlinearity — full-band
-//! clipping is what made these muddy), then re-blends the clean lows on the way
-//! out so the pedal stays tight without going thin. An envelope-driven bias
-//! shifts the shaper's operating point with pick attack, so harmonics bloom
-//! with dynamics instead of a static waveshape; the resulting moving DC offset
-//! is absorbed by a post DC blocker. The waveshaper runs 2× oversampled
-//! ([`Oversampler2x`]) so high-gain voicings (Rat, Fuzz) fold back far less
-//! aliasing, and the gain/mix controls are smoothed ([`Smoothed`]) so live
-//! knob drags don't zipper.
+//! The legacy six voicings model the real pedal topology instead of drawing a
+//! curve. The Drive knob feeds a gain stage whose coupling network only lifts
+//! the band *above* its corner, so the low end arrives at the diodes at unity
+//! and never reaches their threshold at all. That is how a pedal keeps its bass
+//! clean — by not driving it — and it replaces the old split-band trick, which
+//! re-blended a full-level clean low band onto a compressed clipped one and so
+//! grew muddier the harder it was driven.
+//!
+//! The clipper itself is [`DiodeClipper`]: an implicit diode node solved per
+//! sample, not a `tanh`. Its state is the charge held by the fixed capacitor
+//! *and* by the junctions themselves, so the node's history moves where the
+//! next sample lands, edges round off instead of cornering into
+//! digital-sounding fizz, and the two diodes leave conduction at their own
+//! rates — which is where the even harmonics come from. The diode exponential,
+//! not a chosen clamp, sets the ceiling. It runs 2× oversampled
+//! ([`Oversampler2x`]) with its state at that rate, and the gain/mix controls
+//! are smoothed ([`Smoothed`]) so live knob drags don't zipper.
 
 use builtin_dsp_core::{make_eq_coefficients, mix};
 
-use super::drive_models::{DcBlock, DsClassic, EnvFollower, MetalCore, SuperDrive, TightRift};
+use super::drive_models::{DcBlock, DsClassic, MetalCore, SuperDrive, TightRift};
+use super::nonlinear::{DiodeClipper, DiodeParams};
 use super::smooth::{Oversampler2x, Smoothed};
-use super::{DriveModel, StereoBiquad, soft_clip};
+use super::{DriveModel, StereoBiquad};
 
 /// Glide time for gain/level/mix edits (fast enough to feel immediate).
 const SMOOTH_SECONDS: f32 = 0.010;
-
-/// Dynamic-bias envelope: fast enough to catch pick attack, slow enough that
-/// the bloom rides the note instead of buzzing.
-const ENV_ATTACK_SECONDS: f32 = 0.002;
-const ENV_RELEASE_SECONDS: f32 = 0.060;
 
 /// Drive taper for the legacy voicings.
 ///
@@ -39,16 +41,104 @@ fn drive_taper(g01: f32) -> f32 {
     g01.clamp(0.0, 1.0).powf(2.1)
 }
 
-/// Stereo one-pole low-pass used as a phase-coherent band splitter:
-/// `low = lp(x)`, `high = x - low` reconstructs exactly.
+/// The diode pair, its charge storage, and the clipping corner per voicing.
+///
+/// The diode voltages are normalized so a nominal drop is 1.0 — that puts the
+/// clipping threshold at plugin unity, so the node is transparent under it and
+/// its ceiling needs no makeup gain. Everything here is a component choice, not
+/// a tone control: matched silicon has a tight knee, germanium is much softer,
+/// and an unequal pair is a genuinely asymmetric pedal.
+///
+/// `tau_pos`/`tau_neg` are junction transit times, which decide how much
+/// diffusion charge each diode holds while it conducts. This is the parameter
+/// that separates the family: a fast silicon switching part (nanoseconds)
+/// stores essentially nothing and clips cleanly, while germanium and rectifier
+/// junctions (microseconds) hold enough charge to leave conduction slowly,
+/// which thickens the tone and — because the two diodes are unequal — skews the
+/// half-cycle durations into real even harmonics that survive DC blocking.
+///
+/// `bass_hz` is the corner of the gain stage's own coupling network. Below it
+/// the Drive knob adds no gain at all, so the low end never reaches the diodes
+/// and cannot be turned to mud — a TS-9 really does leave everything under
+/// ~720 Hz at unity, which is why it stays tight wherever the knob sits.
+#[derive(Debug, Clone, Copy)]
+struct DiodeVoicing {
+    v_pos: f32,
+    v_neg: f32,
+    knee_pos: f32,
+    knee_neg: f32,
+    tau_pos: f32,
+    tau_neg: f32,
+    smooth_hz: f32,
+    bass_hz: f32,
+}
+
+impl DiodeVoicing {
+    #[allow(clippy::too_many_arguments)]
+    const fn new(
+        v_pos: f32,
+        v_neg: f32,
+        knee_pos: f32,
+        knee_neg: f32,
+        tau_pos: f32,
+        tau_neg: f32,
+        smooth_hz: f32,
+        bass_hz: f32,
+    ) -> Self {
+        Self {
+            v_pos,
+            v_neg,
+            knee_pos,
+            knee_neg,
+            tau_pos,
+            tau_neg,
+            smooth_hz,
+            bass_hz,
+        }
+    }
+
+    fn for_model(model: DriveModel) -> Self {
+        match model {
+            // Matched silicon in the feedback loop, boosting from the classic
+            // 720 Hz corner up.
+            DriveModel::Screamer => {
+                Self::new(1.0, 0.97, 0.075, 0.074, 1.2e-8, 1.6e-8, 11_000.0, 720.0)
+            }
+            // Germanium: soft knee and a low corner, so it stays transparent
+            // rather than mid-honky.
+            DriveModel::Minotaur => {
+                Self::new(1.0, 1.02, 0.190, 0.190, 1.1e-6, 1.5e-6, 16_000.0, 380.0)
+            }
+            // Silicon to ground with a hard knee and a low corner — the whole
+            // guitar band gets driven, which is where the filth comes from.
+            DriveModel::Rat => Self::new(1.0, 0.965, 0.042, 0.041, 4.0e-7, 6.5e-7, 7_000.0, 180.0),
+            // Two diodes up against one down: real asymmetry.
+            DriveModel::Breaker => {
+                Self::new(0.70, 1.30, 0.045, 0.043, 1.5e-7, 4.0e-7, 9_000.0, 300.0)
+            }
+            // Leaky germanium, very soft, and a corner low enough that
+            // everything reaches the diodes.
+            DriveModel::Fuzz => Self::new(0.76, 1.24, 0.250, 0.220, 3.0e-6, 1.4e-6, 5_000.0, 70.0),
+            // Germanium like the Minotaur but voiced brighter.
+            DriveModel::Centurion => {
+                Self::new(1.0, 0.975, 0.160, 0.158, 8.0e-7, 1.05e-6, 14_000.0, 540.0)
+            }
+            // Dedicated-topology models never reach this table.
+            _ => Self::new(1.0, 1.0, 0.075, 0.075, 2.0e-8, 2.0e-8, 12_000.0, 400.0),
+        }
+    }
+}
+
+/// Stereo one-pole high-pass. The gain stage's feedback network: it decides
+/// which band the Drive knob actually boosts.
 #[derive(Debug, Clone)]
-struct StereoOnePoleLp {
+struct StereoOnePoleHp {
     a: f32,
     y_l: f32,
     y_r: f32,
 }
 
-impl StereoOnePoleLp {
+impl StereoOnePoleHp {
     fn new() -> Self {
         Self {
             a: 1.0,
@@ -68,6 +158,7 @@ impl StereoOnePoleLp {
         self.y_r = 0.0;
     }
 
+    /// Returns the *high* band; the low band is `x - high`.
     #[inline]
     fn run(&mut self, l: f32, r: f32) -> (f32, f32) {
         self.y_l += self.a * (l - self.y_l);
@@ -78,7 +169,7 @@ impl StereoOnePoleLp {
         if !self.y_r.is_finite() {
             self.y_r = 0.0;
         }
-        (self.y_l, self.y_r)
+        (l - self.y_l, r - self.y_r)
     }
 }
 
@@ -86,18 +177,15 @@ impl StereoOnePoleLp {
 pub(super) struct Drive {
     sample_rate: f32,
     model: DriveModel,
+    /// Gain applied to the band above the clipping corner only. The bass keeps
+    /// unity all the way up the knob, so it can never be driven into mud.
     pre_gain: Smoothed,
     out_gain: Smoothed,
     mix: Smoothed,
-    /// Clean low band level re-blended after the clipper (TS-style: lows pass
-    /// un-clipped instead of being discarded or muddying the shaper).
-    low_mix: Smoothed,
-    /// How far the envelope pushes the shaper's operating point (per model).
-    bias: f32,
-    low_split: StereoOnePoleLp,
+    gain_hp: StereoOnePoleHp,
     mid_boost: StereoBiquad,
     tone_lpf: StereoBiquad,
-    env: EnvFollower,
+    clipper: DiodeClipper,
     dc: DcBlock,
     oversampler: Oversampler2x,
     // The four modern models own full dedicated topologies (multi-stage,
@@ -112,18 +200,26 @@ pub(super) struct Drive {
 impl Drive {
     pub(super) fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
+        let voicing = DiodeVoicing::for_model(DriveModel::Screamer);
         Self {
             sample_rate: sr,
             model: DriveModel::Screamer,
             pre_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             out_gain: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
-            low_mix: Smoothed::new(sr, SMOOTH_SECONDS, 0.0),
-            bias: 0.0,
-            low_split: StereoOnePoleLp::new(),
+            gain_hp: StereoOnePoleHp::new(),
             mid_boost: StereoBiquad::none(),
             tone_lpf: StereoBiquad::none(),
-            env: EnvFollower::new(sr, ENV_ATTACK_SECONDS, ENV_RELEASE_SECONDS),
+            clipper: DiodeClipper::new(DiodeParams::new(
+                voicing.v_pos,
+                voicing.v_neg,
+                voicing.knee_pos,
+                voicing.knee_neg,
+                voicing.tau_pos,
+                voicing.tau_neg,
+                voicing.smooth_hz,
+                sr * 2.0,
+            )),
             dc: DcBlock::new(sr),
             oversampler: Oversampler2x::new(),
             ds_one: DsClassic::new(sr),
@@ -138,8 +234,6 @@ impl Drive {
         self.pre_gain.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.out_gain.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.mix.set_time(self.sample_rate, SMOOTH_SECONDS);
-        self.low_mix.set_time(self.sample_rate, SMOOTH_SECONDS);
-        self.env.set_sample_rate(self.sample_rate);
         self.dc.set_sample_rate(self.sample_rate);
         self.ds_one.set_sample_rate(self.sample_rate);
         self.super_drive.set_sample_rate(self.sample_rate);
@@ -148,16 +242,15 @@ impl Drive {
     }
 
     pub(super) fn reset(&mut self) {
-        self.low_split.reset();
+        self.gain_hp.reset();
         self.mid_boost.reset();
         self.tone_lpf.reset();
-        self.env.reset();
+        self.clipper.reset();
         self.dc.reset();
         self.oversampler.reset();
         self.pre_gain.snap();
         self.out_gain.snap();
         self.mix.snap();
-        self.low_mix.snap();
         self.ds_one.reset();
         self.super_drive.reset();
         self.metal_core.reset();
@@ -181,50 +274,50 @@ impl Drive {
         let lvl = (level / 10.0).clamp(0.0, 1.0);
         let sr = self.sample_rate;
 
-        // (pre_gain, out_gain, low_mix, mix, bias) targets — the continuous
-        // ones glide, `bias` steps with the (already discontinuous) model swap.
-        // `low_mix` re-blends the clean low band post-clip: near-unity for
-        // TS/Klon-style pedals whose lows famously pass un-clipped, low for
-        // Rat, zero for Fuzz (a fuzz clips everything).
-        //
-        // The low end of each `pre` range sits *below* unity so Drive at 0 is
-        // genuinely close to clean — starting at 1.0 with these slopes meant a
-        // 2/10 setting was already fully saturated and the rest of the knob only
-        // changed the tone filters.
-        let (pre, out, low, mix_amount, bias) = match model {
-            DriveModel::Screamer => (0.40 + g * 24.0, 0.25 + lvl * 1.1, 0.85, 1.0, 0.10),
-            // Minotaur and Breaker used to run 3–5 dB hotter than the rest of
-            // the family, hot enough to clip the output at their own defaults.
-            DriveModel::Minotaur => (0.45 + g * 11.0, 0.23 + lvl * 0.76, 0.90, 0.85, 0.05),
-            DriveModel::Rat => (0.35 + g * 60.0, 0.18 + lvl * 0.95, 0.50, 1.0, 0.18),
-            DriveModel::Breaker => (0.45 + g * 14.0, 0.24 + lvl * 0.78, 0.60, 0.92, 0.12),
-            DriveModel::Fuzz => (0.35 + g * 54.0, 0.15 + lvl * 0.85, 0.0, 1.0, 0.30),
-            DriveModel::Centurion => (0.42 + g * 16.0, 0.32 + lvl * 1.2, 0.75, 0.88, 0.07),
+        let voicing = DiodeVoicing::for_model(model);
+        let params = DiodeParams::new(
+            voicing.v_pos,
+            voicing.v_neg,
+            voicing.knee_pos,
+            voicing.knee_neg,
+            voicing.tau_pos,
+            voicing.tau_neg,
+            voicing.smooth_hz,
+            sr * 2.0,
+        );
+        self.clipper.set_params(params);
+        // The gain stage boosts exactly the band the diodes can see.
+        self.gain_hp.set(voicing.bass_hz, sr);
+
+        // (pre_gain, out_gain, mix) targets. The low end of each `pre` range
+        // sits *below* unity so Drive at 0 is genuinely close to clean.
+        let (pre, out, mix_amount) = match model {
+            DriveModel::Screamer => (0.40 + g * 24.0, 0.17 + lvl * 0.75, 1.0),
+            DriveModel::Minotaur => (0.45 + g * 11.0, 0.20 + lvl * 0.66, 0.85),
+            DriveModel::Rat => (0.35 + g * 60.0, 0.16 + lvl * 0.82, 1.0),
+            DriveModel::Breaker => (0.45 + g * 14.0, 0.21 + lvl * 0.68, 0.92),
+            DriveModel::Fuzz => (0.35 + g * 54.0, 0.10 + lvl * 0.55, 1.0),
+            DriveModel::Centurion => (0.42 + g * 16.0, 0.20 + lvl * 0.74, 0.88),
             // Dedicated-topology models returned above.
-            _ => (1.0, 1.0, 0.0, 1.0, 0.0),
+            _ => (1.0, 1.0, 1.0),
         };
         self.pre_gain.set_target(pre);
-        // Slight upward trim with Drive. The shaper's ceiling fixes the output
-        // level once it saturates, and the duty asymmetry below costs a few
-        // tenths of a dB of RMS, so without this the top of the knob drifts
-        // very slightly *down* — the one direction a drive control must never go.
-        self.out_gain.set_target(out * (1.0 + g * 0.22));
-        self.low_mix.set_target(low);
+        // No inverse compensation for the pre-gain: the diodes are their own
+        // level reference, so subtracting the gain that was added would take
+        // back level the clipper already removed and leave the pedal loudest
+        // with the knob at zero. The small rise with `g` keeps a harder setting
+        // reading a little hotter, which is the one direction Drive may move.
+        self.out_gain.set_target(out * (1.0 + g * 0.18));
         self.mix.set_target(mix_amount);
-        // Bias grows with Drive as well. Past the point where the shaper is
-        // fully saturated, extra pre-gain changes nothing, so the top half of
-        // the knob has to earn its travel with duty-cycle asymmetry — even
-        // harmonics thickening — rather than more clipping that isn't there.
-        self.bias = bias * (0.35 + g * 1.65);
 
-        // Split frequency (lows kept clean below it), pre-clip mid emphasis,
-        // and post tone low-pass per model.
+        // Pre-clip mid emphasis and the post tone low-pass per model. Both are
+        // opened up relative to the waveshaper era: the diode branch rounds its
+        // own top end, so the low-pass no longer has to hide fizz by being dark.
         match model {
             DriveModel::Screamer => {
-                self.low_split.set(250.0, sr);
                 self.mid_boost
                     .set(make_eq_coefficients("bell", 720.0, 6.0, 0.7, sr));
-                let cutoff = 2_400.0 + t * 5_600.0;
+                let cutoff = 3_200.0 + t * 6_800.0;
                 self.tone_lpf.set(make_eq_coefficients(
                     "lowpass",
                     cutoff.min(sr * 0.45),
@@ -234,17 +327,15 @@ impl Drive {
                 ));
             }
             DriveModel::Minotaur => {
-                self.low_split.set(120.0, sr);
                 self.mid_boost.set(None);
-                let cutoff = (4_000.0 + t * 8_000.0).min(sr * 0.45);
+                let cutoff = (5_000.0 + t * 9_000.0).min(sr * 0.45);
                 self.tone_lpf
                     .set(make_eq_coefficients("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Rat => {
-                self.low_split.set(150.0, sr);
                 self.mid_boost
                     .set(make_eq_coefficients("bell", 1_100.0, 5.0, 0.9, sr));
-                let cutoff = 1_200.0 + t * 6_300.0;
+                let cutoff = 1_600.0 + t * 7_400.0;
                 self.tone_lpf.set(make_eq_coefficients(
                     "lowpass",
                     cutoff.min(sr * 0.45),
@@ -254,10 +345,9 @@ impl Drive {
                 ));
             }
             DriveModel::Breaker => {
-                self.low_split.set(110.0, sr);
                 self.mid_boost
                     .set(make_eq_coefficients("bell", 650.0, 2.5, 0.8, sr));
-                let cutoff = 2_800.0 + t * 7_000.0;
+                let cutoff = 3_600.0 + t * 8_000.0;
                 self.tone_lpf.set(make_eq_coefficients(
                     "lowpass",
                     cutoff.min(sr * 0.45),
@@ -267,18 +357,16 @@ impl Drive {
                 ));
             }
             DriveModel::Fuzz => {
-                self.low_split.set(60.0, sr);
                 self.mid_boost
                     .set(make_eq_coefficients("bell", 400.0, 4.0, 0.6, sr));
-                let cutoff = 900.0 + t * 3_500.0;
+                let cutoff = (1_200.0 + t * 4_600.0).min(sr * 0.45);
                 self.tone_lpf
                     .set(make_eq_coefficients("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Centurion => {
-                self.low_split.set(130.0, sr);
                 self.mid_boost
                     .set(make_eq_coefficients("bell", 780.0, 4.5, 0.75, sr));
-                let cutoff = 3_000.0 + t * 7_000.0;
+                let cutoff = 4_000.0 + t * 8_000.0;
                 self.tone_lpf.set(make_eq_coefficients(
                     "lowpass",
                     cutoff.min(sr * 0.45),
@@ -289,36 +377,6 @@ impl Drive {
             }
             // Dedicated-topology models returned above.
             _ => {}
-        }
-    }
-
-    #[inline]
-    fn shape(model: DriveModel, x: f32) -> f32 {
-        match model {
-            DriveModel::Screamer => soft_clip(x + 0.05 * x * x),
-            DriveModel::Minotaur => soft_clip(x * 0.7) / 0.7f32.tanh(),
-            DriveModel::Rat => {
-                // An overdrive stacked in front of the distortion: an
-                // asymmetric soft stage (positive half saturates harder → even
-                // harmonics + grit) feeds a harder cascaded fold, so the pedal
-                // reads thick and filthy instead of thin and fizzy.
-                let od = if x >= 0.0 {
-                    (x * 1.9).tanh()
-                } else {
-                    (x * 1.55).tanh()
-                };
-                let y = soft_clip(od * 1.7);
-                soft_clip(y * 1.15)
-            }
-            DriveModel::Breaker => soft_clip(x * 0.85) / 0.85f32.tanh(),
-            DriveModel::Fuzz => {
-                // Heavy asymmetric square-ish fuzz.
-                let biased = x + 0.18 * x.abs() * x;
-                soft_clip(biased * 1.8)
-            }
-            DriveModel::Centurion => soft_clip(x + 0.02 * x * x),
-            // Dedicated-topology models never reach the generic shaper.
-            _ => x,
         }
     }
 
@@ -333,37 +391,28 @@ impl Drive {
         }
         let pre = self.pre_gain.tick();
         let out = self.out_gain.tick();
-        let low_mix = self.low_mix.tick();
         let mix_amount = self.mix.tick();
-        let model = self.model;
-        let bias = self.bias;
 
-        // Phase-coherent band split: lows stay clean, highs feed the clipper.
-        let (lo_l, lo_r) = self.low_split.run(left, right);
-        let (hi_l, hi_r) = (left - lo_l, right - lo_r);
         // Voicing goes *into* the clipper (pre-emphasis), not after it.
-        let (em_l, em_r) = self.mid_boost.run(hi_l, hi_r);
-        // Envelope-driven bias: pick attack shifts the operating point, so
-        // even harmonics bloom with dynamics instead of a static waveshape.
-        //
-        // Metered and applied *before* the pre-gain, so the offset stays the
-        // same fraction of the waveform at any Drive setting. Metering after it
-        // made the bias a shrinking fraction of an ever-hotter signal, so the
-        // wave grew more symmetric — thinner — the harder it was clipped, which
-        // is backwards.
-        let (env_l, env_r) = self.env.tick(em_l, em_r);
-        let (bias_l, bias_r) = (bias * env_l.min(1.5), bias * env_r.min(1.5));
-        let (dr_l, dr_r) = ((em_l + bias_l) * pre, (em_r + bias_r) * pre);
-        // Waveshape at 2× rate: the shaper is memoryless, so only the
-        // up/down half-band filters carry state across the doubled rate.
-        let (sh_l, sh_r) = self.oversampler.process_stereo(dr_l, dr_r, |a, b| {
-            (Self::shape(model, a), Self::shape(model, b))
-        });
+        let (em_l, em_r) = self.mid_boost.run(left, right);
+        // The gain stage only lifts the band the diodes will see. Below the
+        // corner the signal stays at unity and arrives at the node too small to
+        // turn a diode on, so the low end passes clean without a parallel band
+        // to re-blend and without getting louder as the clipped band compresses.
+        let (hi_l, hi_r) = self.gain_hp.run(em_l, em_r);
+        let dr_l = em_l + (pre - 1.0) * hi_l;
+        let dr_r = em_r + (pre - 1.0) * hi_r;
+        // Solve the diode node at 2× rate — its capacitor state lives there.
+        let clipper = &mut self.clipper;
+        let (sh_l, sh_r) = self
+            .oversampler
+            .process_stereo(dr_l, dr_r, |a, b| clipper.process(a, b));
         let (t_l, t_r) = self.tone_lpf.run(sh_l, sh_r);
-        // The moving bias offset leaves a moving DC component — block it here.
+        // Unequal diodes leave a standing charge on the coupling capacitor —
+        // wanted as duty-cycle asymmetry, not as an offset in the mix.
         let (d_l, d_r) = self.dc.run(t_l, t_r);
-        let wet_l = (d_l + lo_l * low_mix) * out;
-        let wet_r = (d_r + lo_r * low_mix) * out;
+        let wet_l = d_l * out;
+        let wet_r = d_r * out;
         (mix(left, wet_l, mix_amount), mix(right, wet_r, mix_amount))
     }
 }

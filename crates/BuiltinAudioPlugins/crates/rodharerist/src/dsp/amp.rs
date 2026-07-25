@@ -7,10 +7,19 @@
 //! models run the complete nonlinear core at 4×; the two high-gain models run
 //! at 8×.  Model changes use two preallocated lanes and an equal-power
 //! crossfade, so no allocation or coefficient construction occurs here.
+//!
+//! Every nonlinearity is a circuit stage from [`super::nonlinear`], never a
+//! transfer curve. Each preamp stage is a self-biasing triode with a cathode
+//! bypass, Miller pole and grid conduction; the output stage is a real push-pull
+//! pair against a sagging rail. The previous build shaped a low band and a high
+//! band through two static curves and summed them, which both muddied the low
+//! end (bass hit the same ceiling as the pick attack) and produced the flat,
+//! non-guitar break-up of a memoryless clipper.
 
 use builtin_dsp_core::time_constant;
 
 use super::AmpModel;
+use super::nonlinear::{PushPullParams, TriodeParams, TriodeState};
 use super::smooth::{Oversampler4x, Oversampler8x, Smoothed};
 
 const MAX_PREAMP_STAGES: usize = 4;
@@ -430,26 +439,16 @@ impl InputFilter {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct StageState {
-    coupling_x: f32,
-    coupling_y: f32,
-    spectral_low: f32,
-    envelope: f32,
-    bias_memory: f32,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
 struct ToneState {
     low: f32,
     high_lp: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ChannelCore {
-    stages: [StageState; MAX_PREAMP_STAGES],
+    stages: [TriodeState; MAX_PREAMP_STAGES],
+    inverter: TriodeState,
     tone: ToneState,
-    pi_env: f32,
-    pi_bias: f32,
     sag: f32,
     transformer_flux: f32,
     speaker_low: f32,
@@ -457,19 +456,15 @@ struct ChannelCore {
     previous_load: f32,
 }
 
-impl Default for ChannelCore {
-    fn default() -> Self {
-        Self {
-            stages: [StageState::default(); MAX_PREAMP_STAGES],
-            tone: ToneState::default(),
-            pi_env: 0.0,
-            pi_bias: 0.0,
-            sag: 0.0,
-            transformer_flux: 0.0,
-            speaker_low: 0.0,
-            feedback_high_lp: 0.0,
-            previous_load: 0.0,
+impl ChannelCore {
+    /// Start every valve at its own operating point instead of letting the
+    /// cathode RCs charge up audibly over the first few milliseconds.
+    fn prime(&mut self, voicing: &AmpVoicing) {
+        *self = Self::default();
+        for (state, params) in self.stages.iter_mut().zip(voicing.stages.iter()) {
+            state.prime(params);
         }
+        self.inverter.prime(&voicing.inverter);
     }
 }
 
@@ -479,25 +474,75 @@ struct AmpCore {
     right: ChannelCore,
 }
 
+impl AmpCore {
+    fn prime(&mut self, voicing: &AmpVoicing) {
+        self.left.prime(voicing);
+        self.right.prime(voicing);
+    }
+}
+
+/// The valve complement of one amp lane, solved on the control path.
+///
+/// Operating points, plate-load normalization and grid-conduction thresholds
+/// all take iteration to settle, so they are resolved here whenever the model
+/// or a knob changes and only read from the audio callback.
+#[derive(Debug, Clone)]
+struct AmpVoicing {
+    stages: [TriodeParams; MAX_PREAMP_STAGES],
+    inverter: TriodeParams,
+    power: PushPullParams,
+}
+
+impl Default for AmpVoicing {
+    fn default() -> Self {
+        let mut stage = TriodeParams {
+            grid_offset: 1.35,
+            knee: 0.05,
+            headroom: 3.4,
+            sat_knee: 0.06,
+            cathode_r: 0.20,
+            cathode_alpha: 0.01,
+            miller_alpha: 0.5,
+            grid_headroom: 1.2,
+            grid_soft: 0.22,
+            grid_attack: 0.02,
+            grid_release: 0.0002,
+            grid_clamp: 0.0,
+            plate_r: 1.0,
+            quiescent: 0.0,
+        };
+        stage.solve_operating_point();
+        let mut power = PushPullParams {
+            bias: 0.55,
+            knee: 0.05,
+            headroom: 2.4,
+            sat_knee: 0.06,
+            asymmetry: 0.06,
+            scale: 1.0,
+        };
+        power.normalize();
+        Self {
+            stages: [stage; MAX_PREAMP_STAGES],
+            inverter: stage,
+            power,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct HeldControls {
     stage_gain: f32,
     inter_gain: f32,
-    bias: f32,
-    bias_move: f32,
-    pre_compression: f32,
     coupling_pole: f32,
-    spectral_alpha: f32,
     tone_low_alpha: f32,
     tone_high_alpha: f32,
     bass: f32,
     middle: f32,
     treble: f32,
     presence: f32,
+    pi_drive: f32,
     master_drive: f32,
     master_level: f32,
-    pi_attack: f32,
-    pi_release: f32,
     sag_attack: f32,
     sag_release: f32,
     transformer_alpha: f32,
@@ -514,44 +559,6 @@ fn envelope_tick(state: &mut f32, input: f32, attack: f32, release: f32) -> f32 
         *state = 0.0;
     }
     *state
-}
-
-/// Four deliberately different stage transfer curves. Each has a soft knee
-/// and unequal positive/negative behavior; none is reused for adjacent stages.
-///
-/// The curve's own ceiling is the stage's level reference — there is no
-/// drive-dependent makeup. A `1/sqrt(drive)` normalization here (what this
-/// used to do) makes every stage quieter the harder it is driven, so the whole
-/// amp reads *louder with Gain down* and never reaches a saturated wall with
-/// Gain up. A valve stage does the opposite: more drive, more level, until the
-/// plate voltage runs out.
-#[inline]
-fn stage_shape(x: f32, shape: u8, bias: f32, drive: f32) -> f32 {
-    let d = drive.max(0.25);
-    let z = x * d + bias;
-    let zero = match shape & 3 {
-        0 => bias.tanh(),
-        1 => bias.atan() * 0.92,
-        2 => bias / (1.0 + bias.abs() * 0.72),
-        _ => {
-            let b = bias.clamp(-1.0, 1.0);
-            b - b * b * b * 0.18
-        }
-    };
-    let shaped = match shape & 3 {
-        0 => z.tanh(),
-        1 => z.atan() * 0.92,
-        2 => z / (1.0 + z.abs() * 0.72),
-        _ => {
-            let a = z.abs();
-            if a < 1.0 {
-                z - z * z * z * 0.18
-            } else {
-                z.signum() * (0.82 + (a - 1.0).tanh() * 0.18)
-            }
-        }
-    };
-    finite(shaped - zero)
 }
 
 impl AmpCore {
@@ -602,6 +609,7 @@ impl AmpCore {
         channel: &mut ChannelCore,
         input: f32,
         profile: AmpProfile,
+        voicing: &AmpVoicing,
         held: HeldControls,
     ) -> f32 {
         let mut x = input;
@@ -612,52 +620,30 @@ impl AmpCore {
             0.0
         };
 
+        // Cascaded valve stages. Each one carries its own cathode charge, grid
+        // charge and Miller state, so the cascade's break-up depends on what it
+        // has been fed — and the cathode bypass corner keeps the low end from
+        // being amplified into the next stage's cutoff, which is what used to
+        // turn a driven cascade to mud.
         for i in 0..profile.stages {
-            let state = &mut channel.stages[i];
-            let coupled = x - state.coupling_x + held.coupling_pole * state.coupling_y;
-            state.coupling_x = x;
-            state.coupling_y = finite(coupled);
-
-            // Frequency-dependent saturation: a low-passed body and the
-            // upper-frequency residual hit each stage at different levels.
-            state.spectral_low += held.spectral_alpha * (state.coupling_y - state.spectral_low);
-            let low = state.spectral_low;
-            let high = state.coupling_y - low;
-            let env = envelope_tick(&mut state.envelope, state.coupling_y, 0.92, 0.997);
-            let compression = 1.0 / (1.0 + env * held.pre_compression * (1.0 + i as f32 * 0.16));
-            state.bias_memory +=
-                0.0025 * (state.coupling_y.signum() * env * held.bias_move - state.bias_memory);
-            let bias = held.bias * (1.0 - i as f32 * 0.11) + state.bias_memory;
-            let stage_drive = if i == 0 {
+            let gain = if i == 0 {
                 held.stage_gain
             } else {
                 held.inter_gain * (1.0 + i as f32 * 0.08)
             };
-            let shape = profile.shape_seed.wrapping_add(i as u8) & 3;
-            let body = stage_shape(low * compression, shape, bias, stage_drive);
-            let edge = stage_shape(
-                high * compression,
-                shape.wrapping_add(2),
-                bias * 0.65,
-                stage_drive * (0.72 + i as f32 * 0.04),
-            );
-            x = finite(body + edge * (0.76 - i as f32 * 0.04));
+            x = finite(channel.stages[i].process(x, &voicing.stages[i], gain, held.coupling_pole));
         }
 
         x = Self::tone_stack(&mut channel.tone, x, profile.tone, held);
 
-        // The phase inverter compresses dynamically and develops bias shift
-        // independently of the preamp.
-        let pi_env = envelope_tick(&mut channel.pi_env, x, held.pi_attack, held.pi_release);
-        channel.pi_bias +=
-            0.0015 * (x.signum() * pi_env * profile.pi_compression - channel.pi_bias);
-        let pi_gain = 1.0 / (1.0 + pi_env * profile.pi_compression);
-        let pi = stage_shape(
-            x * pi_gain,
-            1,
-            profile.power_asymmetry + channel.pi_bias * 0.18,
-            profile.pi_drive,
-        );
+        // The phase inverter is its own valve: it compresses, shifts bias and
+        // blocks on hard transients independently of the preamp.
+        let pi = finite(channel.inverter.process(
+            x,
+            &voicing.inverter,
+            held.pi_drive,
+            held.coupling_pole,
+        ));
 
         // Reactive speaker/load feedback. Presence changes the high-frequency
         // amount returned around the power stage; resonance changes the
@@ -673,13 +659,11 @@ impl AmpCore {
         let demand = (pi * held.master_drive).abs() + channel.previous_load.abs() * 0.25;
         let sag_env = envelope_tick(&mut channel.sag, demand, held.sag_attack, held.sag_release);
         let supply = (1.0 - profile.sag_amount * sag_env.min(1.4)).max(0.42);
-        let power_in = pi * held.master_drive * supply - feedback;
-        let power = stage_shape(
-            power_in,
-            2,
-            profile.power_asymmetry * (1.0 + sag_env * 0.25),
-            profile.power_drive / profile.power_headroom,
-        );
+        // The sagging rail lowers the pair's *ceiling* rather than scaling the
+        // signal, so quiet passages keep their level and only the peaks give.
+        let power = voicing
+            .power
+            .process(pi * held.master_drive - feedback, supply);
 
         // Transformer flux provides low-frequency memory and demand-dependent
         // compression before the electrical speaker load.
@@ -706,11 +690,12 @@ impl AmpCore {
         left: f32,
         right: f32,
         profile: AmpProfile,
+        voicing: &AmpVoicing,
         held: HeldControls,
     ) -> (f32, f32) {
         (
-            Self::process_channel(&mut self.left, left, profile, held),
-            Self::process_channel(&mut self.right, right, profile, held),
+            Self::process_channel(&mut self.left, left, profile, voicing, held),
+            Self::process_channel(&mut self.right, right, profile, voicing, held),
         )
     }
 }
@@ -723,25 +708,21 @@ struct AmpLane {
     settings: Settings,
     input: InputFilter,
     core: AmpCore,
+    voicing: AmpVoicing,
     os4: Oversampler4x,
     os8: Oversampler8x,
     stage_gain: Smoothed,
     inter_gain: Smoothed,
-    bias: Smoothed,
-    bias_move: Smoothed,
-    pre_compression: Smoothed,
     coupling_pole: Smoothed,
-    spectral_alpha: Smoothed,
     tone_low_alpha: Smoothed,
     tone_high_alpha: Smoothed,
     bass: Smoothed,
     middle: Smoothed,
     treble: Smoothed,
     presence: Smoothed,
+    pi_drive: Smoothed,
     master_drive: Smoothed,
     master_level: Smoothed,
-    pi_attack_coeff: f32,
-    pi_release_coeff: f32,
     sag_attack_coeff: f32,
     sag_release_coeff: f32,
     transformer_alpha_coeff: f32,
@@ -760,25 +741,21 @@ impl AmpLane {
             settings: Settings::default(),
             input: InputFilter::new(),
             core: AmpCore::default(),
+            voicing: AmpVoicing::default(),
             os4: Oversampler4x::new(),
             os8: Oversampler8x::new(),
             stage_gain: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
             inter_gain: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
-            bias: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, p.bias),
-            bias_move: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, p.bias_move),
-            pre_compression: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, p.pre_compression),
             coupling_pole: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.99),
-            spectral_alpha: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.1),
             tone_low_alpha: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.1),
             tone_high_alpha: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.1),
             bass: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
             middle: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
             treble: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
             presence: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
+            pi_drive: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, p.pi_drive),
             master_drive: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
             master_level: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
-            pi_attack_coeff: 0.0,
-            pi_release_coeff: 0.0,
             sag_attack_coeff: 0.0,
             sag_release_coeff: 0.0,
             transformer_alpha_coeff: 0.0,
@@ -795,17 +772,14 @@ impl AmpLane {
         for value in [
             &mut self.stage_gain,
             &mut self.inter_gain,
-            &mut self.bias,
-            &mut self.bias_move,
-            &mut self.pre_compression,
             &mut self.coupling_pole,
-            &mut self.spectral_alpha,
             &mut self.tone_low_alpha,
             &mut self.tone_high_alpha,
             &mut self.bass,
             &mut self.middle,
             &mut self.treble,
             &mut self.presence,
+            &mut self.pi_drive,
             &mut self.master_drive,
             &mut self.master_level,
         ] {
@@ -824,26 +798,18 @@ impl AmpLane {
         let m = (settings.master / 10.0).clamp(0.0, 1.0);
         let osr = self.sample_rate * self.profile.oversample as f32;
 
-        // Gain moves stage gain, interstage drive, bias, compression and the
-        // coupling corner together. It is deliberately not an input multiply.
-        // Wide open every stage is well past its knee, so the cascade reaches a
-        // real saturated wall instead of asymptoting a few dB above clean.
+        // Gain moves stage gain, interstage drive and the coupling corner
+        // together. It is deliberately not an input multiply. Wide open every
+        // valve is well past its knee, so the cascade reaches a real saturated
+        // wall instead of asymptoting a few dB above clean.
         self.stage_gain
             .set_target(self.profile.pre_gain * (0.22 + g * 2.60));
         self.inter_gain
             .set_target(self.profile.inter_gain * (0.30 + g * 1.95));
-        self.bias.set_target(self.profile.bias * (0.65 + g * 0.85));
-        self.bias_move
-            .set_target(self.profile.bias_move * (0.30 + g * 1.05));
-        // Stage compression tracks Gain only loosely: coupled too tightly it
-        // becomes an automatic gain control that spends the drive it was
-        // given, which is how the knob went inert above ~4.
-        self.pre_compression
-            .set_target(self.profile.pre_compression * (0.55 + g * 0.55));
+        self.pi_drive.set_target(self.profile.pi_drive);
         let coupling_hz = self.profile.coupling_hpf * (1.0 + g * self.profile.tightness * 1.45);
         self.coupling_pole.set_target(pole(coupling_hz, osr));
-        self.spectral_alpha
-            .set_target(alpha(self.profile.stage_lpf * (1.0 - g * 0.12), osr));
+        self.resolve_voicing(g, osr);
 
         let b = (settings.bass / 10.0).clamp(0.0, 1.0);
         let mid = (settings.middle / 10.0).clamp(0.0, 1.0);
@@ -871,8 +837,6 @@ impl AmpLane {
 
         // All time constants are prepared on the control path. The audio
         // callback only reads these scalars.
-        self.pi_attack_coeff = time_constant(osr, 0.0015);
-        self.pi_release_coeff = time_constant(osr, 0.055);
         self.sag_attack_coeff = time_constant(osr, self.profile.sag_attack);
         self.sag_release_coeff = time_constant(osr, self.profile.sag_release);
         self.transformer_alpha_coeff = alpha(72.0, osr);
@@ -880,21 +844,105 @@ impl AmpLane {
         self.feedback_high_alpha_coeff = alpha(3_100.0, osr);
     }
 
+    /// Resolve the lane's valve complement: component values, operating points
+    /// and the normalizations that depend on them.
+    ///
+    /// Everything here needs iteration or a square root chain, so it happens
+    /// once per configure and never in the audio callback.
+    fn resolve_voicing(&mut self, g: f32, osr: f32) {
+        let p = self.profile;
+
+        // Cathode bypass corner. Below it the cathode follows the signal and
+        // degenerates the stage's own gain, so the low end reaches the next
+        // grid smaller than the mids do. This is the amp's real tightness
+        // mechanism and the reason a driven cascade stays articulate instead
+        // of turning to mud — no band split required.
+        let cathode_alpha = alpha(70.0 + p.tightness * 320.0 + g * 60.0, osr);
+        // Grid current builds fast and leaks away over tens of milliseconds.
+        let grid_attack = alpha(400.0 + p.bias_move * 2_600.0, osr);
+        let grid_release = alpha(5.0 + g * 12.0, osr);
+        let grid_headroom = (1.95 - p.pre_compression * 3.0).max(0.55);
+        let grid_soft = (0.32 - p.pre_compression * 0.40).clamp(0.10, 0.40);
+        let cathode_r = 0.12 + p.pre_compression * 0.50;
+
+        for i in 0..MAX_PREAMP_STAGES {
+            // Adjacent stages are deliberately not identical valves: the seed
+            // walks the operating point, cutoff softness and plate ceiling.
+            let variant = (p.shape_seed.wrapping_add(i as u8) & 3) as f32;
+            let mut stage = TriodeParams {
+                grid_offset: 1.22 + p.bias * 2.2 + variant * 0.06,
+                knee: 0.030 + variant * 0.008,
+                headroom: 2.45 - variant * 0.14,
+                sat_knee: 0.05 + variant * 0.01,
+                cathode_r,
+                cathode_alpha,
+                // Miller capacitance rolls the plate off inside the stage, so
+                // the next grid never receives a raw clipping edge to re-clip
+                // into fizz. Later stages sit darker, as they do in a real amp.
+                miller_alpha: alpha(
+                    p.stage_lpf * (1.0 - g * 0.12) * (1.0 - i as f32 * 0.12),
+                    osr,
+                ),
+                grid_headroom,
+                grid_soft,
+                grid_attack,
+                grid_release,
+                grid_clamp: 0.0,
+                plate_r: 1.0,
+                quiescent: 0.0,
+            };
+            stage.solve_operating_point();
+            self.voicing.stages[i] = stage;
+        }
+
+        // The phase inverter is a long-tailed pair: a large unbypassed tail
+        // resistor, so it degenerates hard and compresses on its own.
+        let mut inverter = TriodeParams {
+            grid_offset: 1.30 + p.power_asymmetry * 1.4,
+            knee: 0.040,
+            headroom: 2.20 + p.power_headroom * 0.35,
+            sat_knee: 0.05,
+            cathode_r: cathode_r * (1.2 + p.pi_compression * 1.4),
+            cathode_alpha: alpha(22.0, osr),
+            miller_alpha: alpha(p.stage_lpf * 1.15, osr),
+            grid_headroom: grid_headroom + 0.45,
+            grid_soft,
+            grid_attack: grid_attack * 0.6,
+            grid_release,
+            grid_clamp: 0.0,
+            plate_r: 1.0,
+            quiescent: 0.0,
+        };
+        inverter.solve_operating_point();
+        self.voicing.inverter = inverter;
+
+        // Output pair. A low idle current is class B: the halves hand over
+        // through a real crossover region, which is the grind of a cranked
+        // output stage rather than a curve pretending to have one.
+        let mut power = PushPullParams {
+            bias: 0.30 + p.power_headroom * 0.28,
+            knee: 0.045,
+            headroom: 1.60 + p.power_headroom * 1.20,
+            sat_knee: (0.10 / p.power_headroom.max(0.1)).clamp(0.02, 0.20),
+            asymmetry: p.power_asymmetry.clamp(0.0, 0.4),
+            scale: 1.0,
+        };
+        power.normalize();
+        self.voicing.power = power;
+    }
+
     fn snap_controls(&mut self) {
         for value in [
             &mut self.stage_gain,
             &mut self.inter_gain,
-            &mut self.bias,
-            &mut self.bias_move,
-            &mut self.pre_compression,
             &mut self.coupling_pole,
-            &mut self.spectral_alpha,
             &mut self.tone_low_alpha,
             &mut self.tone_high_alpha,
             &mut self.bass,
             &mut self.middle,
             &mut self.treble,
             &mut self.presence,
+            &mut self.pi_drive,
             &mut self.master_drive,
             &mut self.master_level,
         ] {
@@ -904,7 +952,7 @@ impl AmpLane {
 
     fn reset(&mut self) {
         self.input.reset();
-        self.core = AmpCore::default();
+        self.core.prime(&self.voicing);
         self.os4.reset();
         self.os8.reset();
         self.snap_controls();
@@ -915,21 +963,16 @@ impl AmpLane {
         HeldControls {
             stage_gain: self.stage_gain.tick(),
             inter_gain: self.inter_gain.tick(),
-            bias: self.bias.tick(),
-            bias_move: self.bias_move.tick(),
-            pre_compression: self.pre_compression.tick(),
             coupling_pole: self.coupling_pole.tick(),
-            spectral_alpha: self.spectral_alpha.tick(),
             tone_low_alpha: self.tone_low_alpha.tick(),
             tone_high_alpha: self.tone_high_alpha.tick(),
             bass: self.bass.tick(),
             middle: self.middle.tick(),
             treble: self.treble.tick(),
             presence: self.presence.tick(),
+            pi_drive: self.pi_drive.tick(),
             master_drive: self.master_drive.tick(),
             master_level: self.master_level.tick(),
-            pi_attack: self.pi_attack_coeff,
-            pi_release: self.pi_release_coeff,
             sag_attack: self.sag_attack_coeff,
             sag_release: self.sag_release_coeff,
             transformer_alpha: self.transformer_alpha_coeff,
@@ -943,13 +986,16 @@ impl AmpLane {
         let (left, right) = self.input.process(left, right);
         let held = self.held_controls();
         let profile = self.profile;
+        let voicing = &self.voicing;
         let core = &mut self.core;
         if profile.oversample == 8 {
-            self.os8
-                .process_stereo(left, right, |l, r| core.process_stereo(l, r, profile, held))
+            self.os8.process_stereo(left, right, |l, r| {
+                core.process_stereo(l, r, profile, voicing, held)
+            })
         } else {
-            self.os4
-                .process_stereo(left, right, |l, r| core.process_stereo(l, r, profile, held))
+            self.os4.process_stereo(left, right, |l, r| {
+                core.process_stereo(l, r, profile, voicing, held)
+            })
         }
     }
 }

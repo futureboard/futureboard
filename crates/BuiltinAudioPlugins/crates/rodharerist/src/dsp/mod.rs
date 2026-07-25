@@ -37,6 +37,7 @@ mod handoff;
 mod ir;
 mod mod_stage;
 mod nam;
+mod nonlinear;
 mod phaser;
 mod rate;
 mod reverb;
