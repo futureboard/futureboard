@@ -123,3 +123,9 @@ audio-test-bin = []
 # This only compiles the code path — ASIO stays unusable until the edition
 # provider registers a host factory after license verification.
 asio = ["cpal/asio"]
+
+# ── Test dependencies ────────────────────────────────────────────────────────
+[dev-dependencies]
+# `test-support` exposes the synthetic SoundFont the built-in Soundfont Player
+# tests load, so they exercise the real parse/select/render path.
+sphere-soundfont-player = { workspace = true, features = ["test-support"] }

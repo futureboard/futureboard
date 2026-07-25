@@ -787,6 +787,7 @@ mod tests {
                 stretch: AudioClipStretchState::default(),
             }],
             row_height_px: None,
+            soundfont: None,
         });
 
         let project_file = root.join("Portable.fbproj");
@@ -842,6 +843,7 @@ mod tests {
             automation_lanes: Vec::new(),
             clips,
             row_height_px: None,
+            soundfont: None,
         }
     }
 

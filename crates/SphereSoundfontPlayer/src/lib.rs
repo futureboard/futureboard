@@ -2,8 +2,19 @@
 //!
 //! Loading a SoundFont is a control/offline operation. Rendering assumes the
 //! caller owns the output buffers and keeps filesystem I/O out of the audio path.
+//!
+//! A parsed [`SoundFont`] is immutable and large (a General MIDI bank is tens of
+//! megabytes), while a [`Synthesizer`] is cheap by comparison and must be rebuilt
+//! whenever polyphony, reverb/chorus, or the sample rate changes. [`font_cache`]
+//! keeps the parse result shareable so those rebuilds — and runtime graph clones —
+//! never re-read the file.
 
-use rustysynth::{SoundFont, Synthesizer, SynthesizerSettings};
+pub mod font_cache;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_font;
+
+pub use rustysynth::SoundFont;
+use rustysynth::{Synthesizer, SynthesizerSettings};
 use std::ffi::CStr;
 use std::fs::File;
 use std::io::{Cursor, Read};
@@ -15,6 +26,21 @@ use std::slice;
 use std::sync::Arc;
 
 const DEFAULT_SAMPLE_RATE: i32 = 44_100;
+
+/// The MIDI channel rustysynth reserves for percussion (channel 10 in
+/// one-based MIDI numbering). Bank select on this channel is offset into the
+/// SoundFont's drum banks, so it never carries a melodic preset.
+pub const PERCUSSION_CHANNEL: u8 = Synthesizer::PERCUSSION_CHANNEL as u8;
+
+/// SoundFont bank number of the General MIDI drum kits.
+pub const DRUM_BANK: i32 = 128;
+
+/// Controller number the engine uses for pitch bend on a controller lane
+/// (VST3 `kPitchBend`). Not a real MIDI CC — see [`SoundfontPlayer::controller`].
+pub const CONTROLLER_PITCH_BEND: u8 = 129;
+
+/// Controller number the engine uses for channel pressure (VST3 `kAfterTouch`).
+pub const CONTROLLER_CHANNEL_PRESSURE: u8 = 128;
 
 #[derive(Debug)]
 pub enum SoundfontPlayerError {
@@ -28,6 +54,14 @@ pub enum SoundfontPlayerError {
     /// preset list — distinct from `InvalidBank`/`InvalidPatch`, which reject
     /// out-of-range values before ever consulting the font.
     PresetNotFound {
+        bank: i32,
+        patch: i32,
+    },
+    /// `(bank, patch)` exists in the font but MIDI bank select cannot address
+    /// it from `channel` — a drum-bank preset asked for on a melodic channel,
+    /// or a melodic preset asked for on the percussion channel.
+    PresetUnreachableOnChannel {
+        channel: u8,
         bank: i32,
         patch: i32,
     },
@@ -55,6 +89,17 @@ impl std::fmt::Display for SoundfontPlayerError {
                 write!(
                     f,
                     "no preset at bank {bank} patch {patch} in this SoundFont"
+                )
+            }
+            Self::PresetUnreachableOnChannel {
+                channel,
+                bank,
+                patch,
+            } => {
+                write!(
+                    f,
+                    "bank {bank} patch {patch} cannot be selected on MIDI channel {}",
+                    channel + 1
                 )
             }
             Self::Io(error) => write!(f, "SoundFont I/O failed: {error}"),
@@ -126,10 +171,25 @@ impl SoundfontPlayerSettings {
 
 pub struct SoundfontPlayer {
     synthesizer: Synthesizer,
+    /// The same parsed font the synthesizer holds. Kept here because rustysynth
+    /// only hands back a `&SoundFont`, and rebuilding a synthesizer (or cloning
+    /// a runtime graph) must reuse the parse instead of re-reading the file.
+    sound_font: Arc<SoundFont>,
 }
 
 impl SoundfontPlayer {
+    /// Loads `path` through [`font_cache`], so a font already parsed for another
+    /// player (or for the previous settings of this one) is reused.
     pub fn from_path(
+        path: impl AsRef<Path>,
+        settings: SoundfontPlayerSettings,
+    ) -> Result<Self, SoundfontPlayerError> {
+        let sound_font = font_cache::load(path.as_ref())?;
+        Self::from_sound_font(sound_font, settings)
+    }
+
+    /// Reads and parses `path` unconditionally, bypassing [`font_cache`].
+    pub fn from_path_uncached(
         path: impl AsRef<Path>,
         settings: SoundfontPlayerSettings,
     ) -> Result<Self, SoundfontPlayerError> {
@@ -149,10 +209,26 @@ impl SoundfontPlayer {
         reader: &mut R,
         settings: SoundfontPlayerSettings,
     ) -> Result<Self, SoundfontPlayerError> {
-        let sound_font = Arc::new(SoundFont::new(reader)?);
+        Self::from_sound_font(Arc::new(SoundFont::new(reader)?), settings)
+    }
+
+    /// Builds a player over an already-parsed font. Rebuilding for new settings
+    /// costs a voice pool and preset table, not another multi-megabyte parse.
+    pub fn from_sound_font(
+        sound_font: Arc<SoundFont>,
+        settings: SoundfontPlayerSettings,
+    ) -> Result<Self, SoundfontPlayerError> {
         let synth_settings = settings.to_rustysynth()?;
         let synthesizer = Synthesizer::new(&sound_font, &synth_settings)?;
-        Ok(Self { synthesizer })
+        Ok(Self {
+            synthesizer,
+            sound_font,
+        })
+    }
+
+    /// The parsed font backing this player, for reuse by a rebuilt player.
+    pub fn sound_font(&self) -> Arc<SoundFont> {
+        Arc::clone(&self.sound_font)
     }
 
     pub fn note_on(
@@ -246,7 +322,12 @@ impl SoundfontPlayer {
     /// The loaded SoundFont's own bank name (from its INFO chunk), e.g.
     /// "General MIDI" — control-side metadata for a UI title, not audio state.
     pub fn bank_name(&self) -> &str {
-        self.synthesizer.get_sound_font().get_info().get_bank_name()
+        self.sound_font.get_info().get_bank_name()
+    }
+
+    /// How many presets the loaded SoundFont exposes.
+    pub fn preset_count(&self) -> usize {
+        self.sound_font.get_presets().len()
     }
 
     /// Every preset (MIDI bank + patch + display name) in the loaded
@@ -254,8 +335,7 @@ impl SoundfontPlayer {
     /// walks the font's preset table, never touches the render path.
     pub fn list_presets(&self) -> Vec<SoundfontPresetInfo> {
         let mut presets: Vec<SoundfontPresetInfo> = self
-            .synthesizer
-            .get_sound_font()
+            .sound_font
             .get_presets()
             .iter()
             .map(|preset| SoundfontPresetInfo {
@@ -268,13 +348,36 @@ impl SoundfontPlayer {
         presets
     }
 
+    /// Whether `(bank, patch)` exists in the loaded font. Allocation-free, so
+    /// preset selection stays usable from a control command drained on the
+    /// audio thread — unlike [`Self::list_presets`], which builds owned names.
+    pub fn has_preset(&self, bank: i32, patch: i32) -> bool {
+        self.sound_font
+            .get_presets()
+            .iter()
+            .any(|preset| preset.get_bank_number() == bank && preset.get_patch_number() == patch)
+    }
+
+    /// Name of `(bank, patch)` in the loaded font, borrowed from the font's own
+    /// preset table.
+    pub fn preset_name(&self, bank: i32, patch: i32) -> Option<&str> {
+        self.sound_font
+            .get_presets()
+            .iter()
+            .find(|preset| preset.get_bank_number() == bank && preset.get_patch_number() == patch)
+            .map(|preset| preset.get_name())
+    }
+
     /// Selects a preset on `channel` via MIDI Bank Select (CC0 MSB / CC32
     /// LSB) followed by Program Change — the standard way to switch patches
     /// on a General MIDI-style synth, so this also works against any other
-    /// host that only understands MIDI. Rejects `(bank, patch)` pairs that
-    /// only match on `is_empty` (empty rejects "not present"): the caller
-    /// should first check [`Self::list_presets`], but this is control-side
-    /// validation, not silent fallback to whatever program change lands on.
+    /// host that only understands MIDI. Rejects `(bank, patch)` pairs that are
+    /// not in the font instead of silently falling back to whatever the
+    /// program change lands on.
+    ///
+    /// The percussion channel offsets bank select into the drum banks, so a
+    /// drum-bank preset is requested there with the bank the drum kits occupy
+    /// and a melodic preset cannot be selected on it at all.
     pub fn select_preset(
         &mut self,
         channel: u8,
@@ -288,16 +391,19 @@ impl SoundfontPlayer {
         if !(0..=127).contains(&patch) {
             return Err(SoundfontPlayerError::InvalidPatch(patch));
         }
-        if !self
-            .list_presets()
-            .iter()
-            .any(|preset| preset.bank == bank && preset.patch == patch)
-        {
+        if !self.has_preset(bank, patch) {
             return Err(SoundfontPlayerError::PresetNotFound { bank, patch });
         }
+        let Some(selected) = bank_select_value(channel, bank) else {
+            return Err(SoundfontPlayerError::PresetUnreachableOnChannel {
+                channel,
+                bank,
+                patch,
+            });
+        };
 
-        let bank_msb = (bank >> 7) & 0x7F;
-        let bank_lsb = bank & 0x7F;
+        let bank_msb = (selected >> 7) & 0x7F;
+        let bank_lsb = selected & 0x7F;
         self.synthesizer
             .process_midi_message(channel.into(), 0xB0, 0x00, bank_msb);
         self.synthesizer
@@ -305,6 +411,100 @@ impl SoundfontPlayer {
         self.synthesizer
             .process_midi_message(channel.into(), 0xC0, patch, 0);
         Ok(())
+    }
+
+    /// Selects one preset on every melodic channel so a track plays the chosen
+    /// sound no matter which MIDI channel its notes carry (Futureboard tracks
+    /// can put each note on its own channel). The percussion channel keeps the
+    /// font's drum banks.
+    ///
+    /// A drum-bank preset is instead selected on the percussion channel alone,
+    /// which is the only channel that can address it.
+    pub fn select_preset_all_channels(
+        &mut self,
+        bank: i32,
+        patch: i32,
+    ) -> Result<(), SoundfontPlayerError> {
+        if bank >= DRUM_BANK {
+            return self.select_preset(PERCUSSION_CHANNEL, bank, patch);
+        }
+        for channel in 0..Synthesizer::CHANNEL_COUNT as u8 {
+            if channel == PERCUSSION_CHANNEL {
+                continue;
+            }
+            self.select_preset(channel, bank, patch)?;
+        }
+        Ok(())
+    }
+
+    /// Applies one controller-lane value. Plain CC numbers go through as MIDI
+    /// control change; the engine's out-of-band controller numbers for pitch
+    /// bend and channel pressure are translated to their own MIDI status bytes
+    /// instead of being clamped into the CC range.
+    pub fn controller(
+        &mut self,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) -> Result<(), SoundfontPlayerError> {
+        validate_channel(channel)?;
+        match controller {
+            CONTROLLER_PITCH_BEND => {
+                // Lane values are 7-bit; expand to the 14-bit bend range so
+                // centre (64) lands on the unbent 8192 rather than slightly flat.
+                let bend = u16::from(value.min(127)) << 7;
+                self.pitch_bend(channel, bend)
+            }
+            // rustysynth has no channel-pressure handling; dropping it is
+            // honest, and clamping it into CC 127 would be a wrong sound.
+            CONTROLLER_CHANNEL_PRESSURE => Ok(()),
+            _ => {
+                self.synthesizer.process_midi_message(
+                    channel.into(),
+                    0xB0,
+                    controller.min(127).into(),
+                    value.min(127).into(),
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Sets the 14-bit pitch bend for `channel` (`0x2000` is centre).
+    pub fn pitch_bend(&mut self, channel: u8, value: u16) -> Result<(), SoundfontPlayerError> {
+        validate_channel(channel)?;
+        let value = value.min(0x3FFF);
+        self.synthesizer.process_midi_message(
+            channel.into(),
+            0xE0,
+            i32::from(value & 0x7F),
+            i32::from(value >> 7),
+        );
+        Ok(())
+    }
+
+    /// Releases every held note on `channel` without touching other channels.
+    pub fn all_notes_off_channel(
+        &mut self,
+        channel: u8,
+        immediate: bool,
+    ) -> Result<(), SoundfontPlayerError> {
+        validate_channel(channel)?;
+        self.synthesizer
+            .note_off_all_channel(channel.into(), immediate);
+        Ok(())
+    }
+}
+
+/// The bank-select value that makes rustysynth resolve `bank` on `channel`, or
+/// `None` when the channel cannot reach that bank at all. The percussion
+/// channel adds [`DRUM_BANK`] to whatever bank select it receives, so it only
+/// addresses drum banks and every other channel only addresses melodic ones.
+fn bank_select_value(channel: u8, bank: i32) -> Option<i32> {
+    if channel == PERCUSSION_CHANNEL {
+        (bank >= DRUM_BANK).then_some(bank - DRUM_BANK)
+    } else {
+        (bank < DRUM_BANK).then_some(bank)
     }
 }
 
@@ -395,7 +595,8 @@ fn status_from_error(error: &SoundfontPlayerError) -> SphereSoundfontPlayerStatu
         | SoundfontPlayerError::InvalidVelocity(_)
         | SoundfontPlayerError::InvalidBank(_)
         | SoundfontPlayerError::InvalidPatch(_)
-        | SoundfontPlayerError::PresetNotFound { .. } => {
+        | SoundfontPlayerError::PresetNotFound { .. }
+        | SoundfontPlayerError::PresetUnreachableOnChannel { .. } => {
             SphereSoundfontPlayerStatus::InvalidArgument
         }
     }
@@ -685,6 +886,231 @@ pub extern "C" fn sphere_soundfont_player_null() -> *mut SoundfontPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn player() -> SoundfontPlayer {
+        SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings::default(),
+        )
+        .expect("synthetic font loads")
+    }
+
+    fn peak(player: &mut SoundfontPlayer, frames: usize) -> f32 {
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        player.render(&mut left, &mut right).expect("render");
+        left.iter()
+            .chain(right.iter())
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn loads_synthetic_font_metadata() {
+        let player = player();
+        assert_eq!(player.bank_name(), test_font::BANK_NAME);
+        assert_eq!(player.preset_count(), 2);
+        assert!(player.has_preset(test_font::MELODIC_PRESET.0, test_font::MELODIC_PRESET.1));
+        assert!(player.has_preset(test_font::DRUM_PRESET.0, test_font::DRUM_PRESET.1));
+        assert!(!player.has_preset(0, 42));
+        assert_eq!(
+            player.preset_name(test_font::MELODIC_PRESET.0, test_font::MELODIC_PRESET.1),
+            Some("Test Tone")
+        );
+    }
+
+    #[test]
+    fn note_on_renders_audio_and_note_off_releases_it() {
+        let mut player = player();
+        assert_eq!(peak(&mut player, 512), 0.0, "silent before any note");
+
+        player.note_on(0, 60, 100).expect("note on");
+        let held = peak(&mut player, 4_096);
+        assert!(held > 0.01, "held note should render audio");
+
+        // Reverb and chorus are on by default, so the voices stop but their
+        // tail keeps decaying — assert the drop, not instant digital silence.
+        player.all_notes_off(true);
+        let released = peak(&mut player, 4_096);
+        assert!(
+            released < held * 0.5,
+            "immediate all-notes-off should drop the level: held={held} released={released}"
+        );
+    }
+
+    #[test]
+    fn select_preset_all_channels_makes_every_melodic_channel_play() {
+        let mut player = player();
+        player
+            .select_preset_all_channels(test_font::MELODIC_PRESET.0, test_font::MELODIC_PRESET.1)
+            .expect("melodic preset selects");
+
+        for channel in [0u8, 3, 15] {
+            player.note_on(channel, 60, 100).expect("note on");
+            assert!(
+                peak(&mut player, 2_048) > 0.01,
+                "channel {channel} should play the selected preset"
+            );
+            player.all_notes_off(true);
+        }
+    }
+
+    #[test]
+    fn drum_bank_preset_only_selects_on_the_percussion_channel() {
+        let mut player = player();
+        let (bank, patch) = test_font::DRUM_PRESET;
+
+        player
+            .select_preset(PERCUSSION_CHANNEL, bank, patch)
+            .expect("drum preset selects on the percussion channel");
+
+        let error = player.select_preset(0, bank, patch).unwrap_err();
+        assert!(matches!(
+            error,
+            SoundfontPlayerError::PresetUnreachableOnChannel { channel: 0, .. }
+        ));
+
+        // A melodic preset is equally unreachable from the percussion channel.
+        let (bank, patch) = test_font::MELODIC_PRESET;
+        let error = player
+            .select_preset(PERCUSSION_CHANNEL, bank, patch)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SoundfontPlayerError::PresetUnreachableOnChannel { .. }
+        ));
+    }
+
+    #[test]
+    fn select_preset_all_channels_routes_a_drum_bank_to_percussion() {
+        let mut player = player();
+        player
+            .select_preset_all_channels(test_font::DRUM_PRESET.0, test_font::DRUM_PRESET.1)
+            .expect("drum preset routes to the percussion channel");
+
+        player
+            .note_on(PERCUSSION_CHANNEL, 60, 100)
+            .expect("note on");
+        assert!(peak(&mut player, 2_048) > 0.01);
+    }
+
+    #[test]
+    fn missing_preset_is_reported_before_any_program_change() {
+        let mut player = player();
+        let error = player.select_preset(0, 0, 42).unwrap_err();
+        assert!(matches!(
+            error,
+            SoundfontPlayerError::PresetNotFound { bank: 0, patch: 42 }
+        ));
+    }
+
+    #[test]
+    fn pitch_bend_controller_uses_the_bend_status_not_a_cc() {
+        let mut player = player();
+        player.note_on(0, 60, 100).expect("note on");
+        let mut unbent = vec![0.0; 4_096];
+        let mut scratch = vec![0.0; 4_096];
+        player.render(&mut unbent, &mut scratch).expect("render");
+
+        // CC 7 (channel volume) at 0 must silence the note; the pitch-bend
+        // controller number must not be clamped into the CC range and do that.
+        player
+            .controller(0, CONTROLLER_PITCH_BEND, 127)
+            .expect("pitch bend");
+        let bent_peak = peak(&mut player, 4_096);
+        assert!(bent_peak > 0.01, "pitch bend must not silence the note");
+
+        player.controller(0, 7, 0).expect("channel volume");
+        assert!(
+            peak(&mut player, 8_192) < bent_peak,
+            "channel volume 0 should reduce the rendered level"
+        );
+    }
+
+    #[test]
+    fn master_volume_scales_the_rendered_level() {
+        let mut player = player();
+        player.set_master_volume(1.0);
+        player.note_on(0, 60, 100).expect("note on");
+        let loud = peak(&mut player, 4_096);
+
+        player.all_notes_off(true);
+        player.set_master_volume(0.1);
+        player.note_on(0, 60, 100).expect("note on");
+        let quiet = peak(&mut player, 4_096);
+
+        assert!(loud > quiet * 2.0, "loud={loud} quiet={quiet}");
+    }
+
+    #[test]
+    fn mismatched_render_buffers_are_rejected_before_rustysynth_panics() {
+        let mut player = player();
+        let mut left = vec![0.0; 64];
+        let mut right = vec![0.0; 32];
+        let error = player.render(&mut left, &mut right).unwrap_err();
+        assert!(matches!(
+            error,
+            SoundfontPlayerError::BufferLengthMismatch {
+                left: 64,
+                right: 32
+            }
+        ));
+    }
+
+    #[test]
+    fn font_cache_reuses_one_parse_across_players() {
+        let dir = std::env::temp_dir().join(format!(
+            "futureboard-sf2-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("test.sf2");
+        test_font::write_sf2(&path).expect("write font");
+
+        let (_, _, misses_before) = font_cache::stats();
+        let first = SoundfontPlayer::from_path(&path, SoundfontPlayerSettings::default())
+            .expect("first load");
+        let (_, hits_before, misses_after_first) = font_cache::stats();
+        assert_eq!(
+            misses_after_first,
+            misses_before + 1,
+            "first load parses the file"
+        );
+
+        let second = SoundfontPlayer::from_path(&path, SoundfontPlayerSettings::default())
+            .expect("second load");
+        let (_, hits_after, misses_after_second) = font_cache::stats();
+        assert_eq!(
+            misses_after_second, misses_after_first,
+            "second load must not re-parse"
+        );
+        assert_eq!(hits_after, hits_before + 1);
+        assert!(Arc::ptr_eq(&first.sound_font(), &second.sound_font()));
+
+        drop((first, second));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rebuilding_for_new_settings_reuses_the_parsed_font() {
+        let font = test_font::sound_font();
+        let player =
+            SoundfontPlayer::from_sound_font(Arc::clone(&font), SoundfontPlayerSettings::default())
+                .expect("build");
+        let rebuilt = SoundfontPlayer::from_sound_font(
+            player.sound_font(),
+            SoundfontPlayerSettings {
+                maximum_polyphony: 32,
+                enable_reverb_and_chorus: false,
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("rebuild");
+
+        assert!(Arc::ptr_eq(&font, &rebuilt.sound_font()));
+        assert_eq!(rebuilt.maximum_polyphony(), 32);
+        assert!(!rebuilt.enable_reverb_and_chorus());
+    }
 
     #[test]
     fn default_ffi_config_uses_default_settings() {

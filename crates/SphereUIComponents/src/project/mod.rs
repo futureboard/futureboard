@@ -430,6 +430,39 @@ pub struct ProjectTrack {
     pub clips: Vec<ProjectClip>,
     /// Arrangement row height in px (v17+). `None` uses the default height.
     pub row_height_px: Option<f32>,
+    /// Built-in Soundfont Player instrument state (v28+). The player is a track
+    /// instrument rather than an insert, so it has no `ProjectInsert` to carry
+    /// its settings.
+    pub soundfont: Option<ProjectSoundfontPlayer>,
+}
+
+/// Persisted state of a track's built-in Soundfont Player.
+///
+/// The `.sf2` itself is referenced by absolute path, not copied into the
+/// project: General MIDI banks are large, shared between projects, and often
+/// live outside the project folder. A missing file loads as a track with no
+/// audible instrument rather than failing the project open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSoundfontPlayer {
+    pub path: Option<PathBuf>,
+    pub preset_bank: Option<i32>,
+    pub preset_patch: Option<i32>,
+    pub volume: f32,
+    pub reverb_chorus: bool,
+    pub polyphony: u32,
+}
+
+impl Default for ProjectSoundfontPlayer {
+    fn default() -> Self {
+        Self {
+            path: None,
+            preset_bank: None,
+            preset_patch: None,
+            volume: 1.0,
+            reverb_chorus: true,
+            polyphony: 64,
+        }
+    }
 }
 
 // ── Mixer ─────────────────────────────────────────────────────────────────────
@@ -977,6 +1010,14 @@ impl From<&TimelineState> for FutureboardProject {
                             .abs()
                             >= 0.01
                     }),
+                    soundfont: t.builtin_soundfont_player.then(|| ProjectSoundfontPlayer {
+                        path: t.soundfont_path.as_ref().map(PathBuf::from),
+                        preset_bank: t.soundfont_preset.map(|(bank, _)| bank),
+                        preset_patch: t.soundfont_preset.map(|(_, patch)| patch),
+                        volume: t.soundfont_volume,
+                        reverb_chorus: t.soundfont_reverb_chorus,
+                        polyphony: t.soundfont_polyphony as u32,
+                    }),
                 }
             })
             .collect();
@@ -1500,13 +1541,31 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 sends,
                 routing: project_routing_to_timeline(&pt.routing, track_type),
                 instrument_plugin_instance_id,
-                // Session-only marker, not part of the project file format yet.
-                builtin_soundfont_player: false,
-                soundfont_path: None,
-                soundfont_preset: None,
-                soundfont_volume: 1.0,
-                soundfont_reverb_chorus: true,
-                soundfont_polyphony: 64,
+                builtin_soundfont_player: pt.soundfont.is_some(),
+                soundfont_path: pt
+                    .soundfont
+                    .as_ref()
+                    .and_then(|sf| sf.path.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned()),
+                soundfont_preset: pt
+                    .soundfont
+                    .as_ref()
+                    .and_then(|sf| sf.preset_bank.zip(sf.preset_patch)),
+                soundfont_volume: pt
+                    .soundfont
+                    .as_ref()
+                    .map(|sf| sf.volume.clamp(0.0, 1.0))
+                    .unwrap_or(1.0),
+                soundfont_reverb_chorus: pt
+                    .soundfont
+                    .as_ref()
+                    .map(|sf| sf.reverb_chorus)
+                    .unwrap_or(true),
+                soundfont_polyphony: pt
+                    .soundfont
+                    .as_ref()
+                    .map(|sf| sf.polyphony.clamp(1, 256) as usize)
+                    .unwrap_or(64),
             }
         })
         .collect();

@@ -14,7 +14,7 @@ use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
-use sphere_soundfont_player::{SoundfontPlayer, SoundfontPlayerSettings};
+use sphere_soundfont_player::{SoundFont, SoundfontPlayer, SoundfontPlayerSettings};
 use SphereAudioProcessor::{
     create_stretch_processor, effective_pitch_ratio, effective_time_ratio, resolve_backend,
     source_read_rate_for_repitch, stretched_duration_samples, StretchAlgorithm, StretchBackend,
@@ -74,22 +74,40 @@ impl RuntimeSoundfontPlayer {
             polyphony: track.soundfont_polyphony.clamp(1, 256),
             player: None,
         };
-        state.reload(sample_rate);
+        state.rebuild(sample_rate, None);
         Some(state)
     }
 
-    fn reload(&mut self, sample_rate: u32) {
+    /// Rebuilds the synthesizer for the current settings. `sound_font` lets the
+    /// caller hand back an already-parsed font (a graph clone, or the player
+    /// being replaced), so changing polyphony or reverb never re-reads a bank
+    /// that can be tens of megabytes. Control thread only — this can do
+    /// filesystem I/O.
+    fn rebuild(&mut self, sample_rate: u32, sound_font: Option<Arc<SoundFont>>) {
         let settings = SoundfontPlayerSettings {
             sample_rate: sample_rate.max(1) as i32,
             block_size: 0,
             maximum_polyphony: self.polyphony,
             enable_reverb_and_chorus: self.reverb_chorus,
         };
-        match SoundfontPlayer::from_path(&self.path, settings) {
+        let built = match sound_font {
+            Some(font) => SoundfontPlayer::from_sound_font(font, settings),
+            None => SoundfontPlayer::from_path(&self.path, settings),
+        };
+        match built {
             Ok(mut player) => {
                 player.set_master_volume(self.volume);
                 if let Some((bank, patch)) = self.preset {
-                    let _ = player.select_preset(0, bank, patch);
+                    // Every melodic channel gets the track's preset: a
+                    // Futureboard MIDI track can put each note on its own
+                    // channel, and only channel 1 answering the selected sound
+                    // would leave the rest on the SoundFont's default preset.
+                    if let Err(error) = player.select_preset_all_channels(bank, patch) {
+                        eprintln!(
+                            "[soundfont-player] preset {bank}:{patch} not applied for '{}': {error}",
+                            self.path.display()
+                        );
+                    }
                 }
                 self.player = Some(player);
             }
@@ -124,6 +142,10 @@ impl Clone for RuntimeSoundfontPlayer {
             .as_ref()
             .map(|player| player.sample_rate().max(1) as u32)
             .unwrap_or(48_000);
+        // A synthesizer owns per-voice state that must not be shared, but the
+        // parsed font is immutable — hand it to the clone instead of reading
+        // the file again on every graph swap.
+        let sound_font = self.player.as_ref().map(SoundfontPlayer::sound_font);
         let mut cloned = Self {
             path: self.path.clone(),
             preset: self.preset,
@@ -132,7 +154,7 @@ impl Clone for RuntimeSoundfontPlayer {
             polyphony: self.polyphony,
             player: None,
         };
-        cloned.reload(sample_rate);
+        cloned.rebuild(sample_rate, sound_font);
         cloned
     }
 }
@@ -1137,7 +1159,8 @@ impl RuntimeProject {
 
         for track in &mut self.tracks {
             if let Some(soundfont) = track.soundfont_player.as_mut() {
-                soundfont.reload(sample_rate);
+                let font = soundfont.player.as_ref().map(SoundfontPlayer::sound_font);
+                soundfont.rebuild(sample_rate, font);
             }
             track.plugin_latency_samples = 0;
             for insert in &mut track.inserts {
@@ -2453,6 +2476,23 @@ impl RuntimeProject {
             );
         }
         let Some(insert_ix) = track.midi_instrument_insert_ix else {
+            // The built-in Soundfont Player is a track instrument, not an
+            // insert, so it has no instrument insert index. Its events are
+            // consumed by `render_soundfont_instrument_block` straight from
+            // `midi_block_events` — the same queue an instrument insert reads.
+            if track.soundfont_player.is_some() {
+                if verbose {
+                    eprintln!(
+                        "[InstrumentRoute] track={} selected_instrument_plugin=builtin_soundfont_player",
+                        track_id
+                    );
+                    eprintln!(
+                        "[PluginMidiIn] plugin=builtin_soundfont_player {event_type} ch={channel} pitch={pitch} offset=0"
+                    );
+                }
+                self.tracks[ti].midi_block_events.push(event);
+                return true;
+            }
             if verbose {
                 eprintln!(
                     "[InstrumentRoute] track={} selected_instrument_plugin=none no instrument plugin found",

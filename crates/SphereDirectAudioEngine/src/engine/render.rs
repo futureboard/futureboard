@@ -1428,13 +1428,12 @@ fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
                     let _ = player.note_off(event.channel.min(15), event.pitch.min(127));
                 }
                 2 => {
+                    // `pitch` carries the controller number here, including the
+                    // engine's out-of-band numbers for pitch bend and channel
+                    // pressure — clamping it to 127 would turn a bend lane into
+                    // a random CC, so the player does the translation.
                     let value = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
-                    let _ = player.process_midi_message(
-                        event.channel.min(15),
-                        0xB0,
-                        event.pitch.min(127),
-                        value,
-                    );
+                    let _ = player.controller(event.channel.min(15), event.pitch, value);
                 }
                 _ => {}
             }
@@ -2453,6 +2452,248 @@ mod live_input_monitor_tests {
         let (left, right) = render_monitored_block(&mut runtime, 0);
         assert!(left.abs() < 1.0e-6);
         assert!(right.abs() < 1.0e-6);
+    }
+}
+
+/// End-to-end coverage for the built-in Soundfont Player as a track
+/// instrument: a real `.sf2` is loaded through the runtime graph, MIDI reaches
+/// it the same way the piano roll and the Soundfont Player window send it, and
+/// the rendered block is checked for actual audio.
+#[cfg(test)]
+mod soundfont_instrument_tests {
+    use super::render_project_block_interleaved;
+    use crate::runtime::RuntimeProject;
+    use crate::types::{EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackSnapshot};
+    use sphere_soundfont_player::test_font;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    const SAMPLE_RATE: u32 = 48_000;
+    const FRAMES: usize = 512;
+
+    /// A per-test `.sf2` on disk, removed when the guard drops.
+    struct FontFile {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl FontFile {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "futureboard-soundfont-engine-{}-{name}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let path = dir.join("test.sf2");
+            test_font::write_sf2(&path).expect("write test soundfont");
+            Self { dir, path }
+        }
+    }
+
+    impl Drop for FontFile {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    fn soundfont_track(id: &str, font: &FontFile, preset: (i32, i32)) -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: id.to_string(),
+            track_type: "instrument".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: false,
+            input_source: Default::default(),
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            builtin_soundfont_player: true,
+            soundfont_path: Some(font.path.to_string_lossy().into_owned()),
+            soundfont_preset_bank: Some(preset.0),
+            soundfont_preset_patch: Some(preset.1),
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+        }
+    }
+
+    fn master_track() -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: "master".to_string(),
+            track_type: "master".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: false,
+            input_source: Default::default(),
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+        }
+    }
+
+    fn runtime(font: &FontFile, preset: (i32, i32)) -> RuntimeProject {
+        let snapshot = EngineProjectSnapshot {
+            project_id: "soundfont-test".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: SAMPLE_RATE,
+            tracks: vec![soundfont_track("sf-1", font, preset), master_track()],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: SAMPLE_RATE,
+                buffer_size: FRAMES as u32,
+            },
+        };
+        RuntimeProject::build(&snapshot, SAMPLE_RATE, &mut HashMap::new(), None, true)
+            .expect("soundfont runtime builds")
+    }
+
+    /// Renders one stopped-transport block — the state the Soundfont Player
+    /// window's Test button and the piano roll audition run in — and returns
+    /// its peak level.
+    fn render_peak(runtime: &mut RuntimeProject) -> f32 {
+        let mut output = vec![0.0f32; FRAMES * 2];
+        render_project_block_interleaved(runtime, 0, 1.0, &mut output, 2, false, 4, 4, None);
+        output.iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+    }
+
+    #[test]
+    fn snapshot_load_attaches_a_player_with_the_requested_preset() {
+        let font = FontFile::new("load");
+        let runtime = runtime(&font, test_font::MELODIC_PRESET);
+        let soundfont = runtime.tracks[0]
+            .soundfont_player
+            .as_ref()
+            .expect("track carries a soundfont player");
+        let player = soundfont.player.as_ref().expect("font loaded");
+        assert_eq!(player.bank_name(), test_font::BANK_NAME);
+        assert_eq!(soundfont.preset, Some(test_font::MELODIC_PRESET));
+    }
+
+    #[test]
+    fn preview_note_renders_without_an_instrument_insert() {
+        let font = FontFile::new("preview");
+        let mut runtime = runtime(&font, test_font::MELODIC_PRESET);
+        assert!(
+            runtime.tracks[0].midi_instrument_insert_ix.is_none(),
+            "the built-in player is a track instrument, not an insert"
+        );
+        assert_eq!(render_peak(&mut runtime), 0.0, "silent before any note");
+
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(
+            runtime.has_active_midi_preview(),
+            "a soundfont preview note must register so the callback keeps rendering"
+        );
+        assert!(
+            render_peak(&mut runtime) > 0.001,
+            "preview note should be audible"
+        );
+
+        runtime.midi_preview_note_off("sf-1", 0, 60);
+        assert!(!runtime.has_active_midi_preview());
+    }
+
+    #[test]
+    fn preview_note_plays_on_a_channel_other_than_the_first() {
+        // Tracks can put each note on its own MIDI channel, so the selected
+        // preset has to be live on every melodic channel, not only channel 1.
+        let font = FontFile::new("channels");
+        let mut runtime = runtime(&font, test_font::MELODIC_PRESET);
+        runtime.midi_preview_note_on("sf-1", 7, 64, 110);
+        assert!(render_peak(&mut runtime) > 0.001);
+    }
+
+    #[test]
+    fn muted_track_renders_no_soundfont_audio() {
+        let font = FontFile::new("muted");
+        let mut runtime = runtime(&font, test_font::MELODIC_PRESET);
+        runtime.tracks[0].muted = true;
+        runtime.fader_smoothing = false;
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(render_peak(&mut runtime) < 1.0e-6);
+    }
+
+    #[test]
+    fn graph_clone_reuses_the_parsed_font_and_still_plays() {
+        let font = FontFile::new("clone");
+        let runtime = runtime(&font, test_font::MELODIC_PRESET);
+        let original = runtime.tracks[0]
+            .soundfont_player
+            .as_ref()
+            .and_then(|sf| sf.player.as_ref())
+            .expect("font loaded")
+            .sound_font();
+
+        let mut cloned = runtime.clone();
+        let clone_font = cloned.tracks[0]
+            .soundfont_player
+            .as_ref()
+            .and_then(|sf| sf.player.as_ref())
+            .expect("clone keeps a loaded player")
+            .sound_font();
+        assert!(
+            std::sync::Arc::ptr_eq(&original, &clone_font),
+            "a graph swap must not re-parse the SoundFont"
+        );
+
+        cloned.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(render_peak(&mut cloned) > 0.001);
+    }
+
+    #[test]
+    fn missing_font_leaves_the_track_silent_instead_of_failing_the_graph() {
+        let font = FontFile::new("missing");
+        let mut track = soundfont_track("sf-1", &font, test_font::MELODIC_PRESET);
+        track.soundfont_path = Some("/definitely/not/a/soundfont.sf2".to_string());
+        let snapshot = EngineProjectSnapshot {
+            project_id: "soundfont-missing".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: SAMPLE_RATE,
+            tracks: vec![track, master_track()],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: SAMPLE_RATE,
+                buffer_size: FRAMES as u32,
+            },
+        };
+        let mut runtime =
+            RuntimeProject::build(&snapshot, SAMPLE_RATE, &mut HashMap::new(), None, true)
+                .expect("graph still builds without the font");
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert_eq!(render_peak(&mut runtime), 0.0);
     }
 }
 
