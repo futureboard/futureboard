@@ -401,10 +401,33 @@ pub enum ModModel {
     Flanger,
     /// "Opto Tremolo" — amp-style amplitude modulation.
     Tremolo,
+    /// "Molam Swirl" — four stages with the regeneration wide open.
+    MolamSwirl,
+    /// "Phin Vibe" — staggered, feedback-free Univibe-style throb.
+    PhinVibe,
+    /// "Khaen Swirl" — eight stages, four nulls, lush and continuous.
+    KhaenSwirl,
+    /// "Bi-Lam" — a twelve-stage cascade, slow and very wide.
+    BiLam,
+    /// "Isan Jet" — six stages, hard regeneration, fast and narrow up top.
+    IsanJet,
 }
 
 impl ModModel {
-    pub const ALL: &'static [Self] = &[Self::Chorus, Self::Phaser, Self::Flanger, Self::Tremolo];
+    // Appended only. The first four indices are what already-saved projects
+    // carry on the `mod_model` wire, so the phaser voices go on the end even
+    // though the editor groups them next to the original phaser.
+    pub const ALL: &'static [Self] = &[
+        Self::Chorus,
+        Self::Phaser,
+        Self::Flanger,
+        Self::Tremolo,
+        Self::MolamSwirl,
+        Self::PhinVibe,
+        Self::KhaenSwirl,
+        Self::BiLam,
+        Self::IsanJet,
+    ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
         match id {
@@ -412,7 +435,26 @@ impl ModModel {
             "phaser" => Some(Self::Phaser),
             "flanger" => Some(Self::Flanger),
             "tremolo" => Some(Self::Tremolo),
+            "molam_swirl" => Some(Self::MolamSwirl),
+            "phin_vibe" => Some(Self::PhinVibe),
+            "khaen_swirl" => Some(Self::KhaenSwirl),
+            "bi_lam" => Some(Self::BiLam),
+            "isan_jet" => Some(Self::IsanJet),
             _ => None,
+        }
+    }
+
+    /// The voiced phaser circuit this model runs, if it is a phaser at all.
+    pub(in crate::dsp) fn phaser_voice(self) -> Option<phaser::PhaserVoice> {
+        use phaser::PhaserVoice as V;
+        match self {
+            Self::Phaser => Some(V::Phase90),
+            Self::MolamSwirl => Some(V::MolamSwirl),
+            Self::PhinVibe => Some(V::PhinVibe),
+            Self::KhaenSwirl => Some(V::KhaenSwirl),
+            Self::BiLam => Some(V::BiLam),
+            Self::IsanJet => Some(V::IsanJet),
+            Self::Chorus | Self::Flanger | Self::Tremolo => None,
         }
     }
 
@@ -3299,22 +3341,42 @@ mod tests {
     #[test]
     fn mod_model_switching_is_glitch_safe() {
         let mut dsp = mod_only_dsp(ModModel::Chorus);
-        for n in 0..48_000 {
+        let count = ModModel::ALL.len();
+        for n in 0..(8_000 * count) {
             if n % 8_000 == 0 {
-                let next = ModModel::from_index(((n / 8_000) % 4) as u32);
-                assert!(dsp.select_model(
-                    "mod",
-                    match next {
-                        ModModel::Chorus => "chorus",
-                        ModModel::Phaser => "phaser",
-                        ModModel::Flanger => "flanger",
-                        ModModel::Tremolo => "tremolo",
-                    }
-                ));
+                let next = ModModel::from_index(((n / 8_000) % count) as u32);
+                assert!(dsp.select_model("mod", mod_model_id(next)));
             }
             let x = (n as f32 * 0.05).sin() * 0.4;
             let (l, r) = dsp.process_stereo(x, x);
             assert!(l.is_finite() && r.is_finite(), "switch glitch at {n}");
+        }
+    }
+
+    /// Editor id for a mod model — the inverse of
+    /// [`ModModel::from_model_id`], kept here because only the tests need it.
+    fn mod_model_id(model: ModModel) -> &'static str {
+        match model {
+            ModModel::Chorus => "chorus",
+            ModModel::Phaser => "phaser",
+            ModModel::Flanger => "flanger",
+            ModModel::Tremolo => "tremolo",
+            ModModel::MolamSwirl => "molam_swirl",
+            ModModel::PhinVibe => "phin_vibe",
+            ModModel::KhaenSwirl => "khaen_swirl",
+            ModModel::BiLam => "bi_lam",
+            ModModel::IsanJet => "isan_jet",
+        }
+    }
+
+    /// Every mod model must be reachable by the id the editor sends, and land
+    /// on the index the wire carries.
+    #[test]
+    fn every_mod_model_round_trips_through_its_editor_id() {
+        for (i, &model) in ModModel::ALL.iter().enumerate() {
+            let id = mod_model_id(model);
+            assert_eq!(ModModel::from_model_id(id), Some(model), "`{id}`");
+            assert_eq!(ModModel::from_index(i as u32), model, "index {i}");
         }
     }
 

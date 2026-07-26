@@ -14,7 +14,8 @@ import {
   WAH_VARIANT_TO_MODEL,
   snapshotFromRodhareistState,
 } from "./stateMap";
-import { defaultValueFor } from "./data";
+import { defaultValueFor, models, parameterDefaults } from "./data";
+import { MOD_MODEL_INDEX } from "./bridge";
 
 /** A serde-shaped `RodhareistState` fixture (variant-name enum strings). */
 const FIXTURE = {
@@ -97,10 +98,34 @@ describe("snapshotFromRodhareistState", () => {
     expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
     expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(12);
-    expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(4);
+    expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(9);
     expect(Object.keys(WAH_VARIANT_TO_MODEL)).toHaveLength(2);
     expect(Object.keys(REVERB_VARIANT_TO_MODEL)).toHaveLength(4);
     expect(Object.keys(DELAY_VARIANT_TO_MODEL)).toHaveLength(5);
+  });
+
+  // The mod slot's model list lives in four places that must agree: the Rust
+  // `ModModel::ALL` order (pinned on the Rust side), the wire index map, the
+  // variant table above, and the editor's model + parameter lists. Adding a
+  // phaser voice to some but not all of them is silent — the model shows up in
+  // the picker and then selects a different effect, or none.
+  test("every mod model is wired end to end and its indices are contiguous", () => {
+    const listed = models.mod.map((m) => m.id);
+    const byIndex = Object.entries(MOD_MODEL_INDEX).sort((a, b) => a[1] - b[1]);
+
+    expect(byIndex.map(([, i]) => i)).toEqual(listed.map((_, i) => i));
+    expect(byIndex.map(([id]) => id)).toEqual(listed);
+    expect(Object.values(MOD_VARIANT_TO_MODEL).sort()).toEqual([...listed].sort());
+
+    for (const id of listed) {
+      const table = parameterDefaults[id];
+      expect(table, `no parameter table for mod model \`${id}\``).toBeDefined();
+      expect(table?.map((p) => p.id)).toEqual([
+        "chorus_rate",
+        "chorus_depth",
+        "chorus_mix",
+      ]);
+    }
   });
 
   test("maps a serde fixture field-for-field", () => {

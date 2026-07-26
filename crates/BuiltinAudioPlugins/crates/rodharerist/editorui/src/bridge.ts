@@ -218,6 +218,13 @@ export const MOD_MODEL_INDEX: Record<string, number> = {
   phaser: 1,
   flanger: 2,
   tremolo: 3,
+  // Append-only: 0-3 are what already-saved projects carry on the wire, so the
+  // phaser voices go on the end even though the editor lists them together.
+  molam_swirl: 4,
+  phin_vibe: 5,
+  khaen_swirl: 6,
+  bi_lam: 7,
+  isan_jet: 8,
 };
 
 /** `WahModel` indices (mirrors Rust `WahModel::ALL`). */

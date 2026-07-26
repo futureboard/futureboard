@@ -304,7 +304,19 @@ mod tests {
                 "reverb `{id}`"
             );
         }
-        let mod_models = ["chorus", "phaser", "flanger", "tremolo"];
+        // Append-only: the first four are what saved projects already carry on
+        // the `mod_model` wire.
+        let mod_models = [
+            "chorus",
+            "phaser",
+            "flanger",
+            "tremolo",
+            "molam_swirl",
+            "phin_vibe",
+            "khaen_swirl",
+            "bi_lam",
+            "isan_jet",
+        ];
         for (i, id) in mod_models.iter().enumerate() {
             assert_eq!(
                 ModModel::from_model_id(id),
