@@ -24,7 +24,21 @@ pub enum ProcessDispatch {
     SubprocessExit(i32),
 }
 
-/// Bind the CEF API version for this process.
+/// Load platform runtime state and bind the CEF API version for this process.
+///
+/// macOS does not link the Chromium framework into the executable. The
+/// framework must be loaded from the application bundle before even the first
+/// generated CEF wrapper function is called; otherwise that wrapper dispatches
+/// through an unresolved null function pointer. The process-wide loader is
+/// intentionally retained for the lifetime of the process.
+pub fn prepare_process() -> Result<(), CefRuntimeError> {
+    #[cfg(target_os = "macos")]
+    load_macos_framework()?;
+    ensure_api_version();
+    Ok(())
+}
+
+/// Bind the CEF API version after the platform runtime has been loaded.
 ///
 /// cef-rs stamps a version into every wrapper object it creates. Until this has
 /// run that version is `-1`, and the first C→C++ call aborts the process with
@@ -33,8 +47,8 @@ pub enum ProcessDispatch {
 /// [`execute_subprocess`] and [`CefRuntime::initialize`] are handed, which is
 /// constructed by the caller long before either runs.
 ///
-/// Idempotent and safe to call from anywhere; every entry point in this crate
-/// calls it first so a caller cannot get the ordering wrong.
+/// Idempotent. Call [`prepare_process`] at public process entry points so the
+/// macOS framework has been loaded before this function invokes CEF.
 pub fn ensure_api_version() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -77,7 +91,7 @@ fn command_line_switch<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 /// Dispatch CEF subprocess command lines before starting the native UI.
 pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch {
-    ensure_api_version();
+    prepare_process().expect("failed to prepare the CEF process");
     let args = cef::args::Args::new();
     let exit_code =
         cef::execute_process(Some(args.as_main_args()), application, std::ptr::null_mut());
@@ -209,8 +223,6 @@ impl WebViewConfig {
 pub struct CefRuntime {
     owner_thread: ThreadId,
     shutdown: bool,
-    #[cfg(target_os = "macos")]
-    _library: cef::library_loader::LibraryLoader,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -219,10 +231,7 @@ impl CefRuntime {
         config: CefRuntimeConfig,
         application: Option<&mut cef::App>,
     ) -> Result<Self, CefRuntimeError> {
-        #[cfg(target_os = "macos")]
-        let library = load_macos_framework()?;
-
-        ensure_api_version();
+        prepare_process()?;
         let args = cef::args::Args::new();
         let settings = cef::Settings {
             no_sandbox: 1,
@@ -253,8 +262,6 @@ impl CefRuntime {
         Ok(Self {
             owner_thread: thread::current().id(),
             shutdown: false,
-            #[cfg(target_os = "macos")]
-            _library: library,
             _not_send: PhantomData,
         })
     }
@@ -572,15 +579,21 @@ fn cef_string(value: Option<&str>) -> cef::CefString {
 }
 
 #[cfg(target_os = "macos")]
-fn load_macos_framework() -> Result<cef::library_loader::LibraryLoader, CefRuntimeError> {
-    let executable = std::env::current_exe()?;
-    let loader =
-        std::panic::catch_unwind(|| cef::library_loader::LibraryLoader::new(&executable, false))
-            .map_err(|_| CefRuntimeError::MacFrameworkNotFound)?;
-    if !loader.load() {
-        return Err(CefRuntimeError::MacFrameworkNotFound);
+fn load_macos_framework() -> Result<(), CefRuntimeError> {
+    static LIBRARY: std::sync::OnceLock<Result<cef::library_loader::LibraryLoader, ()>> =
+        std::sync::OnceLock::new();
+
+    match LIBRARY.get_or_init(|| {
+        let executable = std::env::current_exe().map_err(|_| ())?;
+        let loader = std::panic::catch_unwind(|| {
+            cef::library_loader::LibraryLoader::new(&executable, false)
+        })
+        .map_err(|_| ())?;
+        loader.load().then_some(loader).ok_or(())
+    }) {
+        Ok(_) => Ok(()),
+        Err(()) => Err(CefRuntimeError::MacFrameworkNotFound),
     }
-    Ok(loader)
 }
 
 #[cfg(windows)]

@@ -634,11 +634,11 @@ pub fn split_plugin_url(url: &str) -> Option<(String, String)> {
 /// Build the [`App`] that declares the plugin scheme. Pass the **same** app to
 /// both `execute_subprocess` and `CefRuntime::initialize`.
 pub fn plugin_scheme_app() -> App {
-    // Constructing a `cef::App` is itself a CEF object creation, so the API
-    // version has to be bound *here* — not by whatever consumes the app later.
-    // Without this the process aborts on the first C→C++ call with
-    // `CefApp_0_CToCpp called with invalid version -1`.
-    crate::runtime::ensure_api_version();
+    // Constructing a `cef::App` is itself a CEF object creation, so macOS must
+    // load the bundled framework and every platform must bind the API version
+    // *here* — not when the app is consumed later. Skipping either step makes
+    // the first generated CEF wrapper call invalid.
+    crate::runtime::prepare_process().expect("failed to prepare the CEF process");
     let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
     let app = PluginSchemeApp::new(ObjectLifetime::new("cef_app_t", object_id));
     if cef_diagnostics_enabled() {
