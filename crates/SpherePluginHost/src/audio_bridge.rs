@@ -1175,6 +1175,47 @@ mod imp {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid IPC name"))
     }
 
+    /// Close-on-exec bit for `shm_open`, where the platform accepts one.
+    ///
+    /// macOS validates `shm_open`'s `oflag` against a small allowed set and
+    /// rejects `O_CLOEXEC` with `EINVAL` — it is not implemented there. Every
+    /// other Unix takes it and closes the window in which a concurrent
+    /// `fork`+`exec` could leak the descriptor, so it is kept where it works and
+    /// replaced by an explicit `FD_CLOEXEC` where it is not.
+    #[cfg(target_vendor = "apple")]
+    const SHM_CLOEXEC: libc::c_int = 0;
+    #[cfg(not(target_vendor = "apple"))]
+    const SHM_CLOEXEC: libc::c_int = libc::O_CLOEXEC;
+
+    /// Marks `fd` close-on-exec when the open could not request it. The Studio
+    /// spawns its plugin host, and neither should inherit the other's bridge
+    /// descriptors. Best-effort: a leaked descriptor is not worth failing the
+    /// bridge over.
+    #[cfg(target_vendor = "apple")]
+    fn set_cloexec(fd: libc::c_int) {
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+
+    /// No-op where `O_CLOEXEC` already did the job at open time.
+    #[cfg(not(target_vendor = "apple"))]
+    fn set_cloexec(_fd: libc::c_int) {}
+
+    /// Names the syscall that produced the current `errno`.
+    ///
+    /// These calls differ per platform in ways that surface as a bare "Invalid
+    /// argument", which says nothing about which of `shm_open`, `ftruncate` or
+    /// `mmap` rejected what. The `ErrorKind` is preserved so callers matching on
+    /// it (`AlreadyExists` for a squatted name) still work.
+    fn last_error(call: &str) -> std::io::Error {
+        let error = std::io::Error::last_os_error();
+        std::io::Error::new(error.kind(), format!("{call}: {error}"))
+    }
+
     pub struct UnixMapping {
         ptr: *mut core::ffi::c_void,
         size: usize,
@@ -1191,15 +1232,16 @@ mod imp {
             let fd = unsafe {
                 libc::shm_open(
                     name.as_ptr(),
-                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | SHM_CLOEXEC,
                     super::IPC_OWNER_RW,
                 )
             };
             if fd < 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(last_error("shm_open (create)"));
             }
+            set_cloexec(fd);
             if unsafe { libc::ftruncate(fd, size as libc::off_t) } != 0 {
-                let error = std::io::Error::last_os_error();
+                let error = last_error("ftruncate");
                 unsafe {
                     libc::close(fd);
                     libc::shm_unlink(name.as_ptr());
@@ -1211,13 +1253,14 @@ mod imp {
 
         pub fn open(name: &str, size: usize) -> std::io::Result<Self> {
             let name = posix_name("audio", name)?;
-            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0) };
+            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR | SHM_CLOEXEC, 0) };
             if fd < 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(last_error("shm_open (open)"));
             }
+            set_cloexec(fd);
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
             if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-                let error = std::io::Error::last_os_error();
+                let error = last_error("fstat");
                 unsafe {
                     libc::close(fd);
                 }
@@ -1251,7 +1294,7 @@ mod imp {
                     0,
                 )
             };
-            let map_error = std::io::Error::last_os_error();
+            let map_error = last_error("mmap");
             unsafe {
                 libc::close(fd);
             }
