@@ -26,6 +26,21 @@ const MAX_PREAMP_STAGES: usize = 4;
 const CONTROL_SMOOTH_SECONDS: f32 = 0.012;
 const MODEL_FADE_SECONDS: f32 = 0.012;
 
+/// Interstage coupling capacitors are not all the same part, and the difference
+/// is the whole low end of the amp. A real cascaded preamp uses one small
+/// "tight" cap immediately before the most driven stage — so the low string
+/// cannot intermodulate the stage that is working hardest — and leaves the rest
+/// wide open. Giving every stage the same corner cascades into a 24 dB/oct
+/// high-pass: at a 118 Hz corner that is −27 dB at 90 Hz, which deletes the
+/// fundamental of the low E and every palm mute with it.
+///
+/// Indexed by preamp stage; `coupling_hpf` is the tight cap's corner.
+const COUPLING_SCALE: [f32; MAX_PREAMP_STAGES] = [0.20, 0.38, 1.00, 0.55];
+
+/// The phase inverter's own coupling cap is a large one in every amp modelled
+/// here — the power stage is where the low end has to survive.
+const INVERTER_COUPLING_SCALE: f32 = 0.42;
+
 #[inline]
 fn finite(x: f32) -> f32 {
     if x.is_finite() {
@@ -96,7 +111,7 @@ impl AmpProfile {
                 stages: 3,
                 oversample: 4,
                 tone: ToneFamily::British,
-                input_hpf: 38.0,
+                input_hpf: 20.0,
                 input_lpf: 17_000.0,
                 coupling_hpf: 82.0,
                 stage_lpf: 7_800.0,
@@ -128,7 +143,7 @@ impl AmpProfile {
                 stages: 3,
                 oversample: 4,
                 tone: ToneFamily::British,
-                input_hpf: 48.0,
+                input_hpf: 24.0,
                 input_lpf: 19_000.0,
                 coupling_hpf: 105.0,
                 stage_lpf: 9_500.0,
@@ -162,7 +177,7 @@ impl AmpProfile {
                 stages: 2,
                 oversample: 4,
                 tone: ToneFamily::American,
-                input_hpf: 28.0,
+                input_hpf: 16.0,
                 input_lpf: 20_000.0,
                 coupling_hpf: 58.0,
                 stage_lpf: 12_500.0,
@@ -194,9 +209,9 @@ impl AmpProfile {
                 stages: 3,
                 oversample: 4,
                 tone: ToneFamily::British,
-                input_hpf: 55.0,
+                input_hpf: 26.0,
                 input_lpf: 20_000.0,
-                coupling_hpf: 125.0,
+                coupling_hpf: 105.0,
                 stage_lpf: 12_000.0,
                 pre_gain: 1.75,
                 inter_gain: 1.42,
@@ -229,9 +244,9 @@ impl AmpProfile {
                 stages: 4,
                 oversample: 8,
                 tone: ToneFamily::Modern,
-                input_hpf: 54.0,
+                input_hpf: 28.0,
                 input_lpf: 18_000.0,
-                coupling_hpf: 145.0,
+                coupling_hpf: 105.0,
                 stage_lpf: 8_600.0,
                 pre_gain: 3.2,
                 inter_gain: 2.05,
@@ -264,7 +279,7 @@ impl AmpProfile {
                 stages: 3,
                 oversample: 4,
                 tone: ToneFamily::British,
-                input_hpf: 62.0,
+                input_hpf: 26.0,
                 input_lpf: 18_000.0,
                 coupling_hpf: 118.0,
                 stage_lpf: 8_800.0,
@@ -296,9 +311,9 @@ impl AmpProfile {
                 stages: 4,
                 oversample: 8,
                 tone: ToneFamily::Modern,
-                input_hpf: 60.0,
+                input_hpf: 30.0,
                 input_lpf: 18_500.0,
-                coupling_hpf: 170.0,
+                coupling_hpf: 100.0,
                 stage_lpf: 9_200.0,
                 pre_gain: 3.55,
                 inter_gain: 2.18,
@@ -330,7 +345,7 @@ impl AmpProfile {
                 stages: 3,
                 oversample: 4,
                 tone: ToneFamily::Bass,
-                input_hpf: 18.0,
+                input_hpf: 12.0,
                 input_lpf: 16_000.0,
                 coupling_hpf: 34.0,
                 stage_lpf: 8_500.0,
@@ -533,7 +548,9 @@ impl Default for AmpVoicing {
 struct HeldControls {
     stage_gain: f32,
     inter_gain: f32,
-    coupling_pole: f32,
+    /// One coupling pole per preamp stage — see [`COUPLING_SCALE`].
+    coupling_poles: [f32; MAX_PREAMP_STAGES],
+    inverter_pole: f32,
     tone_low_alpha: f32,
     tone_high_alpha: f32,
     bass: f32,
@@ -575,32 +592,45 @@ impl AmpCore {
 
         // These are coupled passive-network mappings, not three independent
         // boosts. Turning one control changes the loading/gain of the others.
+        //
+        // The mid term must reach zero — and go slightly past it — at the
+        // bottom of the pot. In a real passive stack the bass and treble paths
+        // are in parallel with the mid pot between them, so backing the mid off
+        // does not merely stop boosting: it removes the only path the midband
+        // has and leaves a notch between the two shelves. A mid coefficient
+        // with a large positive floor is a mid *trim*, not a mid control, and
+        // it is why the scoop and the mid-boost lead voice were both missing.
         let (lg, mg, hg, insertion) = match family {
             ToneFamily::American => (
-                0.50 + b * 1.18 - t * 0.18,
-                0.23 + m * 0.96 - b * 0.28 - t * 0.20,
-                0.45 + t * 1.24 - b * 0.12,
-                0.72,
+                0.35 + b * 1.45 - t * 0.20,
+                -0.08 + m * 1.15 - b * 0.20 - t * 0.18,
+                0.25 + t * 1.40 - b * 0.12,
+                0.74,
             ),
             ToneFamily::British => (
-                0.48 + b * 1.02 - m * 0.10,
-                0.52 + m * 1.08 - t * 0.12,
-                0.42 + t * 1.08 - b * 0.12,
-                0.70,
+                0.30 + b * 1.35 - m * 0.12,
+                -0.05 + m * 1.30 - t * 0.15,
+                0.20 + t * 1.35 - b * 0.15,
+                0.72,
             ),
             ToneFamily::Modern => (
-                0.42 + b * 0.94 - t * 0.10,
-                0.30 + m * 1.02 - b * 0.14 + t * 0.10,
-                0.50 + t * 1.28 - m * 0.10,
-                0.68,
+                0.28 + b * 1.30 - t * 0.12,
+                -0.10 + m * 1.40 - b * 0.15 + t * 0.08,
+                0.26 + t * 1.45 - m * 0.14,
+                0.70,
             ),
             ToneFamily::Bass => (
-                0.62 + b * 1.25 - t * 0.08,
-                0.38 + m * 0.92 - b * 0.12,
-                0.35 + t * 0.90 - b * 0.08,
-                0.76,
+                0.45 + b * 1.55 - t * 0.10,
+                -0.05 + m * 1.10 - b * 0.15,
+                0.22 + t * 1.10 - b * 0.08,
+                0.78,
             ),
         };
+        // The mid path is allowed to go negative — that is the notch — but only
+        // just. Left unbounded it cancels the low band's skirt outright and
+        // produces a narrow null (measured −37 dB over a third of an octave),
+        // which reads as a stuck phaser rather than a scooped amp.
+        let mg = mg.max(-0.10);
         finite((low * lg + mid * mg + high * hg) * insertion)
     }
 
@@ -631,7 +661,12 @@ impl AmpCore {
             } else {
                 held.inter_gain * (1.0 + i as f32 * 0.08)
             };
-            x = finite(channel.stages[i].process(x, &voicing.stages[i], gain, held.coupling_pole));
+            x = finite(channel.stages[i].process(
+                x,
+                &voicing.stages[i],
+                gain,
+                held.coupling_poles[i],
+            ));
         }
 
         x = Self::tone_stack(&mut channel.tone, x, profile.tone, held);
@@ -642,7 +677,7 @@ impl AmpCore {
             x,
             &voicing.inverter,
             held.pi_drive,
-            held.coupling_pole,
+            held.inverter_pole,
         ));
 
         // Reactive speaker/load feedback. Presence changes the high-frequency
@@ -713,7 +748,8 @@ struct AmpLane {
     os8: Oversampler8x,
     stage_gain: Smoothed,
     inter_gain: Smoothed,
-    coupling_pole: Smoothed,
+    coupling_poles: [Smoothed; MAX_PREAMP_STAGES],
+    inverter_pole: Smoothed,
     tone_low_alpha: Smoothed,
     tone_high_alpha: Smoothed,
     bass: Smoothed,
@@ -746,7 +782,10 @@ impl AmpLane {
             os8: Oversampler8x::new(),
             stage_gain: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
             inter_gain: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
-            coupling_pole: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.99),
+            coupling_poles: std::array::from_fn(|_| {
+                Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.99)
+            }),
+            inverter_pole: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.99),
             tone_low_alpha: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.1),
             tone_high_alpha: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.1),
             bass: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
@@ -769,21 +808,9 @@ impl AmpLane {
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate.max(1.0);
-        for value in [
-            &mut self.stage_gain,
-            &mut self.inter_gain,
-            &mut self.coupling_pole,
-            &mut self.tone_low_alpha,
-            &mut self.tone_high_alpha,
-            &mut self.bass,
-            &mut self.middle,
-            &mut self.treble,
-            &mut self.presence,
-            &mut self.pi_drive,
-            &mut self.master_drive,
-            &mut self.master_level,
-        ] {
-            value.set_time(self.sample_rate, CONTROL_SMOOTH_SECONDS);
+        let rate = self.sample_rate;
+        for value in self.controls_mut() {
+            value.set_time(rate, CONTROL_SMOOTH_SECONDS);
         }
         self.configure(self.model, self.settings);
     }
@@ -794,21 +821,48 @@ impl AmpLane {
         self.settings = settings;
         self.input.configure(self.profile, self.sample_rate);
 
-        let g = (settings.gain / 10.0).clamp(0.0, 1.0).powf(1.45);
+        let g = (settings.gain / 10.0).clamp(0.0, 1.0).powf(1.15);
         let m = (settings.master / 10.0).clamp(0.0, 1.0);
         let osr = self.sample_rate * self.profile.oversample as f32;
 
-        // Gain moves stage gain, interstage drive and the coupling corner
-        // together. It is deliberately not an input multiply. Wide open every
-        // valve is well past its knee, so the cascade reaches a real saturated
-        // wall instead of asymptoting a few dB above clean.
+        // Gain is the pot *between* the input valve and the cascade, which is
+        // where every amp modelled here puts it — not a master input multiply.
+        // The input stage therefore keeps a nearly fixed, modest gain and stays
+        // out of grid conduction, so pick attack and a rolled-back guitar
+        // volume still reach the cascade intact. Slamming the first stage as
+        // well is what flattened the dynamic range to a limiter: 38 dB of
+        // playing came out as 8 dB.
         self.stage_gain
-            .set_target(self.profile.pre_gain * (0.22 + g * 2.60));
+            .set_target(self.profile.pre_gain * (0.85 + g * 0.35));
+        // The cascade behind the pot carries the whole range instead, so the
+        // knob spans genuinely clean to genuinely saturated — divided over
+        // however many stages actually sit behind it, because a four-stage
+        // cascade reaches the same saturated wall with far less gain per valve.
+        //
+        // The floor matters as much as the top. A pot at 3 attenuates, but the
+        // valve behind it still amplifies, so the *stage* stays above unity.
+        // Collapsing the pair into one number that dips to 0.4 turned the
+        // cascade into an attenuator at everyday settings: nothing downstream
+        // could reach the output pair's ceiling, which is why 19 dB of Master
+        // produced 1.5 dB of compression and no harmonics at all.
+        let cascade = (self.profile.stages.max(2) - 1) as f32;
         self.inter_gain
-            .set_target(self.profile.inter_gain * (0.30 + g * 1.95));
+            .set_target(self.profile.inter_gain * (0.30 + g * 3.94 / cascade));
         self.pi_drive.set_target(self.profile.pi_drive);
-        let coupling_hz = self.profile.coupling_hpf * (1.0 + g * self.profile.tightness * 1.45);
-        self.coupling_pole.set_target(pole(coupling_hz, osr));
+
+        // Only the tight cap tracks Gain hard; the open ones barely move, so a
+        // boost tightens the low end instead of deleting it.
+        for (i, smoothed) in self.coupling_poles.iter_mut().enumerate() {
+            let scale = COUPLING_SCALE[i];
+            let hz = self.profile.coupling_hpf
+                * scale
+                * (1.0 + g * self.profile.tightness * 1.45 * scale);
+            smoothed.set_target(pole(hz, osr));
+        }
+        self.inverter_pole.set_target(pole(
+            self.profile.coupling_hpf * INVERTER_COUPLING_SCALE,
+            osr,
+        ));
         self.resolve_voicing(g, osr);
 
         let b = (settings.bass / 10.0).clamp(0.0, 1.0);
@@ -829,11 +883,20 @@ impl AmpLane {
         self.tone_low_alpha.set_target(alpha(low_hz, osr));
         self.tone_high_alpha.set_target(alpha(high_hz, osr));
 
-        // Master drives the phase inverter/power stage independently from
-        // preamp Gain; only a modest level taper follows it.
+        // Master feeds the power stage and essentially nothing else. In a real
+        // amp the master sits ahead of the phase inverter: the loudness you get
+        // back is the loudness the output valves make, so the top of the travel
+        // buys grind and compression rather than another 20 dB of clean level.
+        //
+        // Splitting it into a drive and a near-equal output taper made the two
+        // cancel — the signal grew into the pair and then got scaled straight
+        // back down, so 24 dB of Master moved measured distortion by 0.0% and
+        // the knob was a volume control with extra steps.
         self.master_drive
-            .set_target((0.04 + m.powf(1.35) * 2.45) * self.profile.power_drive);
-        self.master_level.set_target(0.10 + m.sqrt() * 0.90);
+            .set_target((0.03 + m * m * 4.00) * self.profile.power_drive);
+        // What follows is a make-up trim only, so low Master is quiet without
+        // being silent — not a second gain law competing with the drive.
+        self.master_level.set_target(0.55 + m * 0.45);
 
         // All time constants are prepared on the control path. The audio
         // callback only reads these scalars.
@@ -860,7 +923,13 @@ impl AmpLane {
         let cathode_alpha = alpha(70.0 + p.tightness * 320.0 + g * 60.0, osr);
         // Grid current builds fast and leaks away over tens of milliseconds.
         let grid_attack = alpha(400.0 + p.bias_move * 2_600.0, osr);
-        let grid_release = alpha(5.0 + g * 12.0, osr);
+        // Grid-leak recovery. This has to be milliseconds, not hundreds of
+        // them: blocking distortion is the *cough* on a hard chord that clears
+        // as the note decays. At a 17 Hz corner the charge never left between
+        // cycles, so the whole cascade drifted toward cutoff and the
+        // fundamental collapsed — turning Gain past 7 made the note quieter and
+        // the fizz louder. 20–130 Hz keeps the effect and loses the collapse.
+        let grid_release = alpha(20.0 + g * 110.0, osr);
         let grid_headroom = (1.95 - p.pre_compression * 3.0).max(0.55);
         let grid_soft = (0.32 - p.pre_compression * 0.40).clamp(0.10, 0.40);
         let cathode_r = 0.12 + p.pre_compression * 0.50;
@@ -883,7 +952,11 @@ impl AmpLane {
                     p.stage_lpf * (1.0 - g * 0.12) * (1.0 - i as f32 * 0.12),
                     osr,
                 ),
-                grid_headroom,
+                // Headroom is staggered down the cascade, as the supply and
+                // plate loads are in a real amp. The input valve has room to
+                // spare so it tracks the pick; the stages behind the Gain pot
+                // are the ones meant to be driven into their grids.
+                grid_headroom: grid_headroom * (1.60 - i as f32 * 0.20),
                 grid_soft,
                 grid_attack,
                 grid_release,
@@ -931,11 +1004,13 @@ impl AmpLane {
         self.voicing.power = power;
     }
 
-    fn snap_controls(&mut self) {
-        for value in [
+    /// Every smoothed control in the lane, so re-timing and snapping can never
+    /// silently miss one that was added later.
+    fn controls_mut(&mut self) -> impl Iterator<Item = &mut Smoothed> {
+        [
             &mut self.stage_gain,
             &mut self.inter_gain,
-            &mut self.coupling_pole,
+            &mut self.inverter_pole,
             &mut self.tone_low_alpha,
             &mut self.tone_high_alpha,
             &mut self.bass,
@@ -945,7 +1020,13 @@ impl AmpLane {
             &mut self.pi_drive,
             &mut self.master_drive,
             &mut self.master_level,
-        ] {
+        ]
+        .into_iter()
+        .chain(self.coupling_poles.iter_mut())
+    }
+
+    fn snap_controls(&mut self) {
+        for value in self.controls_mut() {
             value.snap();
         }
     }
@@ -963,7 +1044,8 @@ impl AmpLane {
         HeldControls {
             stage_gain: self.stage_gain.tick(),
             inter_gain: self.inter_gain.tick(),
-            coupling_pole: self.coupling_pole.tick(),
+            coupling_poles: std::array::from_fn(|i| self.coupling_poles[i].tick()),
+            inverter_pole: self.inverter_pole.tick(),
             tone_low_alpha: self.tone_low_alpha.tick(),
             tone_high_alpha: self.tone_high_alpha.tick(),
             bass: self.bass.tick(),
@@ -1132,6 +1214,177 @@ mod tests {
         };
         let fundamental = magnitude(1).max(1.0e-9);
         (2..=8).map(magnitude).sum::<f32>() / fundamental
+    }
+
+    /// Steady-state magnitude at `freq` for a small sine — the amp's filter
+    /// shape, measured below the point where clipping would colour it.
+    fn magnitude_at(model: AmpModel, tone: [f32; 3], freq: f32) -> f32 {
+        let mut amp = Amp::new(48_000.0);
+        amp.configure(model, 1.0, tone[0], tone[1], tone[2], 5.0, 5.0);
+        amp.reset();
+        let settle = 16_000;
+        for n in 0..settle {
+            let x = (n as f32 * freq * std::f32::consts::TAU / 48_000.0).sin() * 0.02;
+            amp.process(x, x);
+        }
+        let n_win = 16_384;
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for n in 0..n_win {
+            let phase = (settle + n) as f32 * freq * std::f32::consts::TAU / 48_000.0;
+            let y = amp.process(phase.sin() * 0.02, phase.sin() * 0.02).0 as f64;
+            let w = n as f32 * freq * std::f32::consts::TAU / 48_000.0;
+            re += y * w.cos() as f64;
+            im -= y * w.sin() as f64;
+        }
+        ((re * re + im * im).sqrt() * 2.0 / n_win as f64) as f32
+    }
+
+    fn db(x: f32) -> f32 {
+        20.0 * x.max(1.0e-12).log10()
+    }
+
+    /// Harmonic magnitudes of a 220 Hz note, and the note's own level.
+    fn harmonics(model: AmpModel, gain: f32, master: f32, input: f32) -> (f32, [f32; 10]) {
+        let f0 = 220.0;
+        let mut amp = Amp::new(48_000.0);
+        amp.configure(model, gain, 5.0, 5.0, 5.0, 5.0, master);
+        amp.reset();
+        let settle = 19_200;
+        for n in 0..settle {
+            let x = (n as f32 * f0 * std::f32::consts::TAU / 48_000.0).sin() * input;
+            amp.process(x, x);
+        }
+        let n_win = 8_192;
+        let mut buf = Vec::with_capacity(n_win);
+        for n in 0..n_win {
+            let phase = (settle + n) as f32 * f0 * std::f32::consts::TAU / 48_000.0;
+            buf.push(amp.process(phase.sin() * input, phase.sin() * input).0);
+        }
+        let mut hs = [0.0f32; 10];
+        for (i, slot) in hs.iter_mut().enumerate() {
+            let w = std::f32::consts::TAU * f0 * (i + 1) as f32 / 48_000.0;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (n, &v) in buf.iter().enumerate() {
+                let phase = w * n as f32;
+                re += v as f64 * phase.cos() as f64;
+                im -= v as f64 * phase.sin() as f64;
+            }
+            *slot = ((re * re + im * im).sqrt() * 2.0 / n_win as f64) as f32;
+        }
+        let rms = (buf.iter().map(|v| v * v).sum::<f32>() / n_win as f32).sqrt();
+        (rms, hs)
+    }
+
+    fn thd(hs: &[f32; 10]) -> f32 {
+        (hs[1..].iter().map(|h| h * h).sum::<f32>()).sqrt() / hs[0].max(1.0e-12)
+    }
+
+    /// The low E is 82 Hz. Cascading one coupling corner through every stage
+    /// made a 24 dB/oct high-pass that put 90 Hz 27 dB (Jcm) to 40 dB (Recto)
+    /// below the amp's peak — the fundamental of the bottom string, and with it
+    /// every palm mute, simply was not there. See [`COUPLING_SCALE`].
+    #[test]
+    fn the_low_string_survives_the_preamp() {
+        for model in AmpModel::ALL {
+            let reference = magnitude_at(*model, [5.0; 3], 1_000.0);
+            let low = magnitude_at(*model, [5.0; 3], 90.0);
+            let drop = db(reference) - db(low);
+            assert!(
+                drop < 18.0,
+                "{model:?} is {drop:.1} dB down at 90 Hz — the low string is gone"
+            );
+        }
+    }
+
+    /// A mid control that only trims cannot produce the scooped voice or the
+    /// mid-pushed lead voice, which is most of what the knob is for. Backing it
+    /// off has to open a real notch between the bass and treble shelves.
+    #[test]
+    fn the_mid_control_scoops_and_boosts() {
+        for model in [AmpModel::Jcm, AmpModel::Recto, AmpModel::Twin] {
+            let scooped = db(magnitude_at(model, [5.0, 0.0, 5.0], 600.0));
+            let noon = db(magnitude_at(model, [5.0, 5.0, 5.0], 600.0));
+            let pushed = db(magnitude_at(model, [5.0, 10.0, 5.0], 600.0));
+            assert!(
+                noon - scooped > 8.0,
+                "{model:?} will not scoop: mid 0 is only {:.1} dB below noon",
+                noon - scooped
+            );
+            assert!(
+                pushed > noon,
+                "{model:?} will not push mids: {pushed:.1} vs {noon:.1} dB"
+            );
+        }
+    }
+
+    /// Grid charge used to leak away over hundreds of milliseconds, so a driven
+    /// cascade drifted toward cutoff and stayed there: past Gain 7 the note got
+    /// *quieter* while the fizz got louder. Blocking distortion has to be a
+    /// transient, so the fundamental must hold as the knob comes up.
+    #[test]
+    fn gain_never_swallows_the_fundamental() {
+        for model in AmpModel::ALL {
+            let mut previous = f32::NEG_INFINITY;
+            for gain in [2.0, 4.0, 6.0, 8.0, 10.0] {
+                let (_, hs) = harmonics(*model, gain, 5.0, 0.25);
+                let h1 = db(hs[0]);
+                assert!(
+                    h1 > previous - 1.5,
+                    "{model:?} lost the note between the last step and Gain {gain}: \
+                     {previous:.1} -> {h1:.1} dB"
+                );
+                previous = previous.max(h1);
+            }
+        }
+    }
+
+    /// Master has to drive the output pair, not scale around it. Splitting it
+    /// into a drive and a near-equal output taper made the two cancel: 24 dB of
+    /// travel moved measured distortion by 0.0% and h2/h3 not at all.
+    #[test]
+    fn master_saturates_the_output_stage() {
+        let (quiet_rms, quiet) = harmonics(AmpModel::Jcm, 3.0, 2.0, 0.25);
+        let (loud_rms, loud) = harmonics(AmpModel::Jcm, 3.0, 10.0, 0.25);
+        assert!(
+            thd(&loud) > thd(&quiet) * 1.5,
+            "Master is a volume control: THD {:.1}% -> {:.1}%",
+            thd(&quiet) * 100.0,
+            thd(&loud) * 100.0
+        );
+        // Odd-order growth is the signature of a pair clipping symmetrically.
+        let quiet_h3 = db(quiet[2] / quiet[0]);
+        let loud_h3 = db(loud[2] / loud[0]);
+        assert!(
+            loud_h3 > quiet_h3 + 4.0,
+            "the pair is not clipping: h3 {quiet_h3:.1} -> {loud_h3:.1} dB"
+        );
+        // ...and the level must compress well short of the raw drive ratio.
+        assert!(
+            db(loud_rms) - db(quiet_rms) < 26.0,
+            "no power-stage compression at all"
+        );
+    }
+
+    /// Slamming the input valve as hard as the cascade flattened 38 dB of
+    /// playing into 8 dB of output — a limiter, not an amp. With Gain acting as
+    /// the pot it really is, picking harder and rolling the guitar's volume
+    /// back have to reach the other end.
+    #[test]
+    fn picking_dynamics_reach_the_output() {
+        let soft = harmonics(AmpModel::Jcm, 4.0, 6.0, 0.02);
+        let hard = harmonics(AmpModel::Jcm, 4.0, 6.0, 0.25);
+        let swing = db(hard.0) - db(soft.0);
+        assert!(
+            swing > 12.0,
+            "22 dB of picking came out as {swing:.1} dB — the amp is a limiter"
+        );
+        // And it must clean up in character, not only in level.
+        assert!(
+            thd(&hard.1) > thd(&soft.1) * 4.0,
+            "soft picking does not clean up: {:.1}% -> {:.1}%",
+            thd(&soft.1) * 100.0,
+            thd(&hard.1) * 100.0
+        );
     }
 
     #[test]
