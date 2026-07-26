@@ -1,3 +1,5 @@
+import { scaleLinear, scaleLog } from 'd3-scale'
+import { curveMonotoneX, line } from 'd3-shape'
 import type { Band, FilterType } from '../bridge'
 
 export const MIN_FREQ = 20
@@ -9,7 +11,37 @@ export const OUTPUT_MIN_DB = -24
 export const OUTPUT_MAX_DB = 12
 export const SAMPLE_RATE = 48_000
 
-const FREQ_SPAN = Math.log10(MAX_FREQ / MIN_FREQ)
+/// The graph's two axes, as single shared d3 scales.
+///
+/// Everything drawn on the response graph — grid, axis labels, band curves, the
+/// summed curve, the draggable nodes, the cursor readout and the WebGL spectrum
+/// underneath — goes through these. One transform, one place to change it, and
+/// no way for the overlay to drift out of register with the curve it sits under.
+///
+/// d3 scales are mutable, and these are called per point while tracing a curve,
+/// so the range is rewritten only when the measured size actually changes
+/// rather than rebuilding a scale per call.
+const freqScale = scaleLog().domain([MIN_FREQ, MAX_FREQ]).range([0, 1])
+const gainScale = scaleLinear().domain([GAIN_RANGE, -GAIN_RANGE]).range([0, 1])
+
+let freqWidth = -1
+let gainHeight = -1
+
+function xScale(width: number) {
+  if (freqWidth !== width) {
+    freqScale.range([0, width])
+    freqWidth = width
+  }
+  return freqScale
+}
+
+function yScale(height: number) {
+  if (gainHeight !== height) {
+    gainScale.range([0, height])
+    gainHeight = height
+  }
+  return gainScale
+}
 
 export type FilterKind = {
   type: FilterType
@@ -90,36 +122,37 @@ export function clamp(value: number, min: number, max: number) {
 }
 
 export function frequencyToX(frequency: number, width: number) {
-  return (Math.log10(frequency / MIN_FREQ) / FREQ_SPAN) * width
+  return xScale(width)(clamp(frequency, MIN_FREQ, MAX_FREQ))
 }
 
 export function xToFrequency(x: number, width: number) {
-  return MIN_FREQ * Math.pow(MAX_FREQ / MIN_FREQ, clamp(x / width, 0, 1))
+  return xScale(width).invert(clamp(x, 0, width))
 }
 
 export function gainToY(gain: number, height: number) {
-  return ((GAIN_RANGE - gain) / (GAIN_RANGE * 2)) * height
+  return yScale(height)(gain)
 }
 
 export function yToGain(y: number, height: number) {
-  return GAIN_RANGE - clamp(y / height, 0, 1) * GAIN_RANGE * 2
+  return yScale(height).invert(clamp(y, 0, height))
 }
 
+/// Position along the frequency axis as `0..1`, for controls that lay out in
+/// their own space (the frequency knob) but must still land where the graph
+/// puts the same value.
 export function freqToProgress(frequency: number) {
-  return Math.log10(frequency / MIN_FREQ) / FREQ_SPAN
+  return frequencyToX(frequency, 1)
 }
 
 export function progressToFreq(progress: number) {
-  return MIN_FREQ * Math.pow(MAX_FREQ / MIN_FREQ, clamp(progress, 0, 1))
+  return xToFrequency(clamp(progress, 0, 1), 1)
 }
 
-/// Decade ticks with every multiple drawn, so zoomed-out grids still read as
-/// logarithmic instead of evenly spaced.
-export const GRID_FREQUENCIES = [10, 100, 1_000, 10_000].flatMap((decade) =>
-  [1, 2, 3, 4, 5, 6, 7, 8, 9]
-    .map((step) => decade * step)
-    .filter((value) => value >= MIN_FREQ && value <= MAX_FREQ),
-)
+/// Log ticks straight from the scale — every multiple inside each decade, so a
+/// zoomed-out grid still reads as logarithmic instead of evenly spaced.
+export const GRID_FREQUENCIES = freqScale
+  .ticks()
+  .filter((value) => value >= MIN_FREQ && value <= MAX_FREQ)
 
 export const LABELLED_FREQUENCIES = [30, 100, 300, 1_000, 3_000, 10_000]
 export const GRID_GAINS = [12, 6, 0, -6, -12]
@@ -235,19 +268,28 @@ function sampleCount(width: number) {
   return Math.round(clamp(width / 3, 140, 420))
 }
 
+/// Monotone interpolation, not a basis/cardinal spline: those overshoot at a
+/// steep filter edge, which on a response graph would draw resonance the filter
+/// does not have. Monotone never introduces an extremum the samples lack, so
+/// the drawn curve cannot claim more than the maths does.
+const curveBuilder = line<[number, number]>()
+  .x((point) => point[0])
+  .y((point) => point[1])
+  .curve(curveMonotoneX)
+
 function tracePath(
   width: number,
   height: number,
   dbAt: (frequency: number) => number,
 ) {
   const samples = sampleCount(width)
-  let path = ''
+  const points: [number, number][] = new Array(samples + 1)
   for (let index = 0; index <= samples; index += 1) {
     const x = (index / samples) * width
     const db = clamp(dbAt(xToFrequency(x, width)), -GAIN_RANGE - 6, GAIN_RANGE + 6)
-    path += `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${gainToY(db, height).toFixed(1)}`
+    points[index] = [x, gainToY(db, height)]
   }
-  return path
+  return curveBuilder(points) ?? ''
 }
 
 export function sumCurvePath(bands: Band[], width: number, height: number) {

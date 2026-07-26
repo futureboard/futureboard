@@ -169,14 +169,16 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
             }
         };
 
-        // An editor-bearing plugin is not release-ready when its static bundle
-        // is absent: compiling it would silently embed an empty asset table.
+        // A plugin that embeds its editor is not release-ready when the static
+        // bundle is absent: compiling it would silently embed an empty asset
+        // table. A plugin that merely *ships* a bundle nothing consumes yet is
+        // unaffected, so it must not block a release.
         for plugin in &selected {
-            if plugins::has_editor_ui(&plugin.crate_dir)
+            if plugins::embeds_editor_ui(&plugin.crate_dir)
                 && !plugins::editor_ui_built(&plugin.crate_dir)
             {
                 bail!(
-                    "plugin `{}` has an editor bundle but no built dist/index.html; \
+                    "plugin `{}` embeds its editor but has no built dist/index.html; \
                      run its editor build before packaging",
                     plugin.name,
                 );

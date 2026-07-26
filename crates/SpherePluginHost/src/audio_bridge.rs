@@ -36,7 +36,9 @@ pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// project position, playing/recording). v3 added VSTi output-channel metadata.
 /// v5 expands the shared audio buffers to carry up to 32 plugin output channels.
 /// v6 adds the built-in DSP telemetry block (in/out peak+rms, clip flags).
-pub const BRIDGE_LAYOUT_VERSION: u32 = 6;
+/// v7 adds the analyser spectrum block (log-spaced dB bins + publish sequence)
+/// and the `builtin_meters_published` flag that word pair replaced padding for.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 7;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -504,7 +506,22 @@ pub struct SharedAudioBridge {
     pub builtin_out_rms: AtomicU32,
     /// Bit 0: input clip latched; bit 1: output clip latched.
     pub builtin_clip_flags: AtomicU32,
-    pub _pad_builtin_meters: AtomicU32,
+    /// Non-zero once the host has published at least one telemetry frame for
+    /// this instance. Distinguishes "this DSP does not measure anything" (an
+    /// EQ has no meters) from "measured, and the signal is silent" — without
+    /// it a reader cannot tell the two apart, since both read as all zeros.
+    pub builtin_meters_published: AtomicU32,
+
+    // --- Analyser spectrum (host → engine) ---
+    /// Log-spaced magnitude bins in dB, `f32` bits, published by the host at
+    /// the analyser's own rate (~30 Hz) rather than per block. See
+    /// [`crate::spectrum`] for the frequency map and level scale.
+    pub spectrum_bins: [AtomicU32; crate::spectrum::SPECTRUM_BINS],
+    /// Bumped after each published frame; `0` until the first one. A reader
+    /// uses it both to skip republishing a frame it already sent and to tell
+    /// "this insert publishes no spectrum" from "the spectrum is silent".
+    pub spectrum_seq: AtomicU32,
+    pub _pad_spectrum: AtomicU32,
 
     // --- Lock-free rings (engine → host) ---
     pub midi: SpscRing<SharedMidiEvent, MIDI_RING_CAP>,
@@ -612,19 +629,60 @@ impl SharedAudioBridge {
             flags |= 2;
         }
         self.builtin_clip_flags.store(flags, Ordering::Relaxed);
+        // Release: a reader that observes the flag must also see the four
+        // level words stored above.
+        self.builtin_meters_published.store(1, Ordering::Release);
     }
 
-    /// Read the built-in DSP's telemetry frame (engine/UI side).
-    pub fn builtin_meters(&self) -> BuiltinMeterFrame {
+    /// Read the built-in DSP's telemetry frame (engine/UI side). `None` until
+    /// the host has published one — a built-in with no metering never does, and
+    /// its readers must not mistake the zeroed region for a measured silence.
+    pub fn builtin_meters(&self) -> Option<BuiltinMeterFrame> {
+        if self.builtin_meters_published.load(Ordering::Acquire) == 0 {
+            return None;
+        }
         let flags = self.builtin_clip_flags.load(Ordering::Relaxed);
-        BuiltinMeterFrame {
+        Some(BuiltinMeterFrame {
             in_peak: f32::from_bits(self.builtin_in_peak.load(Ordering::Relaxed)),
             in_rms: f32::from_bits(self.builtin_in_rms.load(Ordering::Relaxed)),
             out_peak: f32::from_bits(self.builtin_out_peak.load(Ordering::Relaxed)),
             out_rms: f32::from_bits(self.builtin_out_rms.load(Ordering::Relaxed)),
             in_clip: flags & 1 != 0,
             out_clip: flags & 2 != 0,
+        })
+    }
+
+    /// Publish one analyser frame (host producer, ~30 Hz).
+    ///
+    /// Deliberately **not** a seqlock. A reader that catches this mid-write
+    /// gets a frame whose low bins are one analysis newer than its high bins —
+    /// invisible at 30 Hz, and harmless because these numbers only ever drive a
+    /// visual overlay. Nothing in the audio path, automation, or persisted
+    /// state reads them, so paying for a retry loop on the producer thread
+    /// would buy nothing.
+    pub fn store_spectrum(&self, bins: &[f32; crate::spectrum::SPECTRUM_BINS]) {
+        for (slot, db) in self.spectrum_bins.iter().zip(bins) {
+            slot.store(db.to_bits(), Ordering::Relaxed);
         }
+        // Release: a reader that observes the new sequence also sees the bins.
+        self.spectrum_seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// Read the latest analyser frame with the sequence it was published under.
+    /// `None` until the host has published one — an insert whose DSP feeds no
+    /// analyser never does, and the zeroed region must not be mistaken for a
+    /// measured full-scale spectrum (`0.0` dB bits are the *top* of the scale,
+    /// not the floor).
+    pub fn spectrum(&self) -> Option<(u32, [f32; crate::spectrum::SPECTRUM_BINS])> {
+        let seq = self.spectrum_seq.load(Ordering::Acquire);
+        if seq == 0 {
+            return None;
+        }
+        let mut bins = [0.0f32; crate::spectrum::SPECTRUM_BINS];
+        for (out, slot) in bins.iter_mut().zip(self.spectrum_bins.iter()) {
+            *out = f32::from_bits(slot.load(Ordering::Relaxed));
+        }
+        Some((seq, bins))
     }
 
     /// Publish the transport ProcessContext for the next block (engine side).
@@ -1486,6 +1544,31 @@ mod tests {
         let bridge = region.bridge();
         bridge.store_meters(0.5, 0.25);
         assert_eq!(bridge.meters(), (0.5, 0.25));
+    }
+
+    /// A DSP that publishes no telemetry must be distinguishable from one that
+    /// measured silence — otherwise the editor reads the zeroed region as a
+    /// real, and wrong, meter reading.
+    #[test]
+    fn builtin_meters_are_absent_until_published_even_when_silent() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        assert!(bridge.builtin_meters().is_none());
+
+        let silent = BuiltinMeterFrame::default();
+        bridge.store_builtin_meters(&silent);
+        assert_eq!(bridge.builtin_meters(), Some(silent));
+
+        let loud = BuiltinMeterFrame {
+            in_peak: 0.5,
+            in_rms: 0.25,
+            out_peak: 0.75,
+            out_rms: 0.5,
+            in_clip: false,
+            out_clip: true,
+        };
+        bridge.store_builtin_meters(&loud);
+        assert_eq!(bridge.builtin_meters(), Some(loud));
     }
 
     #[test]

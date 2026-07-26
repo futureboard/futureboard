@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
-import { connectBridge, postParam, type Band, type EqParams } from './bridge'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  connectBridge,
+  postParam,
+  type Band,
+  type EqParams,
+  type SpectrumFrame,
+} from './bridge'
 import { BandChips } from './components/BandChips'
 import { ControlRack } from './components/ControlRack'
 import { Header } from './components/Header'
@@ -19,7 +25,13 @@ function App() {
   const [selected, setSelected] = useState(2)
   const [connected, setConnected] = useState(false)
   const [showBandCurves, setShowBandCurves] = useState(true)
+  const [showSpectrum, setShowSpectrum] = useState(true)
   const [preset, setPreset] = useState<number | null>(0)
+
+  /// Analyser frames land in a ref, never in state: at ~30 Hz a `setState` per
+  /// frame would rerender every curve, node and label in the editor to repaint
+  /// one canvas that reads the value itself.
+  const spectrum = useRef<SpectrumFrame | null>(null)
 
   useEffect(
     () =>
@@ -28,7 +40,15 @@ function App() {
           setParams(nativeParams)
           setPreset(matchingPresetIndex(nativeParams))
         },
-        setConnected,
+        (isConnected) => {
+          setConnected(isConnected)
+          // Nothing is measuring any more — drop the last frame so the overlay
+          // does not sit frozen on a picture of audio that stopped.
+          if (!isConnected) spectrum.current = null
+        },
+        (frame) => {
+          spectrum.current = frame
+        },
       ),
     [],
   )
@@ -91,6 +111,8 @@ function App() {
           selected={selected}
           bypassed={!params.power}
           showBandCurves={showBandCurves}
+          showSpectrum={showSpectrum}
+          spectrumRef={spectrum}
           onSelect={setSelected}
           onBandChange={updateBand}
         />
@@ -104,19 +126,33 @@ function App() {
               updateBand(index, { active: !params.bands[index]?.active })
             }
           />
-          <button
-            type="button"
-            className={`graph-option${showBandCurves ? ' is-on' : ''}`}
-            aria-pressed={showBandCurves}
-            title="Show each band's curve"
-            aria-label="Show each band's curve"
-            onClick={() => setShowBandCurves((value) => !value)}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M2 17c5 0 4-9 9-9s4 6 5 6 3-3 6-3" />
-              <path d="M2 12c5 0 4-6 9-6" opacity=".45" />
-            </svg>
-          </button>
+          <div className="graph-options">
+            <button
+              type="button"
+              className={`graph-option${showSpectrum ? ' is-on' : ''}`}
+              aria-pressed={showSpectrum}
+              title="Show the input spectrum"
+              aria-label="Show the input spectrum"
+              onClick={() => setShowSpectrum((value) => !value)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 20v-5M7 20v-9M11 20V6M15 20v-8M19 20v-4" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className={`graph-option${showBandCurves ? ' is-on' : ''}`}
+              aria-pressed={showBandCurves}
+              title="Show each band's curve"
+              aria-label="Show each band's curve"
+              onClick={() => setShowBandCurves((value) => !value)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 17c5 0 4-9 9-9s4 6 5 6 3-3 6-3" />
+                <path d="M2 12c5 0 4-6 9-6" opacity=".45" />
+              </svg>
+            </button>
+          </div>
         </div>
       </section>
 

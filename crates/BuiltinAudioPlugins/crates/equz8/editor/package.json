@@ -11,11 +11,15 @@
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
+    "d3-scale": "^4.0.2",
+    "d3-shape": "^3.2.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/d3-scale": "^4.0.9",
+    "@types/d3-shape": "^3.1.8",
     "@types/node": "^24.13.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

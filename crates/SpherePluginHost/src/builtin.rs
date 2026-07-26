@@ -142,11 +142,29 @@ pub fn is_builtin_ref(id: &str) -> bool {
     resolve_builtin_stem(id).is_some()
 }
 
+/// Built-ins the plugin-host process can actually instantiate a DSP for.
+///
+/// Keep this narrower than the catalog: an unsupported built-in must retain its
+/// existing path instead of being routed to a host that cannot instantiate it.
+/// Must stay in sync with `BuiltinHostProcessor::new` in the host binary — the
+/// two are covered by [`tests::bridge_supported_builtins_are_catalogued`] here
+/// and by the host's own construction test.
+pub const AUDIO_BRIDGE_STEMS: &[&str] = &["rodharerist", "equz8"];
+
 /// Whether this built-in currently has an out-of-process audio DSP runtime.
-/// Keep this narrower than the catalog: unsupported built-ins must retain their
-/// existing path instead of being routed to a host that cannot instantiate them.
 pub fn builtin_audio_bridge_supported(id: &str) -> bool {
-    resolve_builtin_stem(id) == Some("rodharerist")
+    resolve_builtin_stem(id).is_some_and(|stem| AUDIO_BRIDGE_STEMS.contains(&stem))
+}
+
+/// The catalog display name for a built-in id, in either identifier form.
+/// Used by the plugin host so a load event reports the plugin the user picked
+/// rather than a name hard-coded at the load site.
+pub fn builtin_display_name(id: &str) -> Option<&'static str> {
+    let stem = resolve_builtin_stem(id)?;
+    CATALOG
+        .iter()
+        .find(|entry| entry.stem == stem)
+        .map(|entry| entry.name)
 }
 
 /// The `mikoplugin://<stem>/index.html` editor URL for a built-in id, or `None`
@@ -252,11 +270,35 @@ mod tests {
     }
 
     #[test]
-    fn only_rodhareist_is_audio_bridge_supported() {
+    fn audio_bridge_support_covers_both_id_forms_and_nothing_else() {
         assert!(builtin_audio_bridge_supported("rodharerist"));
         assert!(builtin_audio_bridge_supported("builtin:rodharerist"));
-        assert!(!builtin_audio_bridge_supported("equz8"));
+        assert!(builtin_audio_bridge_supported("equz8"));
+        assert!(builtin_audio_bridge_supported("builtin:equz8"));
+        // Catalogued, but the host has no DSP for it — must keep its old path.
+        assert!(!builtin_audio_bridge_supported("compresser"));
         assert!(!builtin_audio_bridge_supported("vst3:whatever"));
+    }
+
+    /// A typo here would silently route an insert to a host that cannot build
+    /// its DSP, which surfaces as a load failure instead of a compile error.
+    #[test]
+    fn bridge_supported_builtins_are_catalogued() {
+        for stem in AUDIO_BRIDGE_STEMS {
+            assert_eq!(
+                resolve_builtin_stem(stem),
+                Some(*stem),
+                "`{stem}` is bridge-enabled but not in the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn display_names_resolve_from_either_id_form() {
+        assert_eq!(builtin_display_name("builtin:equz8"), Some("EQ-Z8"));
+        assert_eq!(builtin_display_name("equz8"), Some("EQ-Z8"));
+        assert_eq!(builtin_display_name("rodharerist"), Some("Rodhareist"));
+        assert_eq!(builtin_display_name("vst3:whatever"), None);
     }
 
     #[test]

@@ -80,9 +80,21 @@ pub fn editor_ui_dir(crate_dir: &Path) -> Option<PathBuf> {
         .find(|dir| dir.join("package.json").is_file())
 }
 
-/// Whether a plugin crate directory ships an embeddable editor UI.
+/// Whether a plugin crate directory ships an editor UI bundle.
 pub fn has_editor_ui(crate_dir: &Path) -> bool {
     editor_ui_dir(crate_dir).is_some()
+}
+
+/// Whether the crate actually **embeds** that bundle into its library, i.e. has
+/// a `build.rs` running the asset generator over its `dist/`.
+///
+/// Shipping a bundle and embedding it are separate things: meowsyn and
+/// opensampler carry an `editor/` that nothing consumes yet, so an unbuilt
+/// `dist/` there costs the packaged plugin nothing. Only an embedding crate can
+/// compile an empty asset table into a shipped library, which is the failure
+/// [`crate::package`] guards against.
+pub fn embeds_editor_ui(crate_dir: &Path) -> bool {
+    has_editor_ui(crate_dir) && crate_dir.join("build.rs").is_file()
 }
 
 /// Whether a built site is present (`<bundle>/dist/index.html`) — the precondition
@@ -238,7 +250,9 @@ mod tests {
         let with_ui = temp.path().join("rodharerist");
         fs::create_dir_all(with_ui.join("editorui")).unwrap();
         fs::write(with_ui.join("editorui/package.json"), "{}").unwrap();
+        fs::write(with_ui.join("build.rs"), "fn main() {}").unwrap();
         assert!(has_editor_ui(&with_ui));
+        assert!(embeds_editor_ui(&with_ui));
         assert!(!editor_ui_built(&with_ui));
 
         fs::create_dir_all(with_ui.join("editorui/dist")).unwrap();
@@ -249,7 +263,9 @@ mod tests {
         let alt_ui = temp.path().join("equz8");
         fs::create_dir_all(alt_ui.join("editor")).unwrap();
         fs::write(alt_ui.join("editor/package.json"), "{}").unwrap();
+        fs::write(alt_ui.join("build.rs"), "fn main() {}").unwrap();
         assert!(has_editor_ui(&alt_ui));
+        assert!(embeds_editor_ui(&alt_ui));
         assert!(!editor_ui_built(&alt_ui));
         fs::create_dir_all(alt_ui.join("editor/dist")).unwrap();
         fs::write(alt_ui.join("editor/dist/index.html"), "<html>").unwrap();
@@ -258,7 +274,23 @@ mod tests {
         let without_ui = temp.path().join("compresser");
         fs::create_dir_all(&without_ui).unwrap();
         assert!(!has_editor_ui(&without_ui));
+        assert!(!embeds_editor_ui(&without_ui));
         assert!(!editor_ui_built(&without_ui));
+    }
+
+    /// meowsyn and opensampler ship an `editor/` that no `build.rs` consumes.
+    /// Packaging must not demand a built `dist/` from them — that bundle never
+    /// reaches the shipped library, so an empty one cannot be embedded.
+    #[test]
+    fn a_bundle_nothing_embeds_is_not_a_packaging_precondition() {
+        let temp = tempfile::tempdir().unwrap();
+        let unconsumed = temp.path().join("meowsyn");
+        fs::create_dir_all(unconsumed.join("editor")).unwrap();
+        fs::write(unconsumed.join("editor/package.json"), "{}").unwrap();
+
+        assert!(has_editor_ui(&unconsumed));
+        assert!(!embeds_editor_ui(&unconsumed));
+        assert!(!editor_ui_built(&unconsumed));
     }
 
     #[test]
