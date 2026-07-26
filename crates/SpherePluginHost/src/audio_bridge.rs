@@ -885,13 +885,51 @@ unsafe impl Send for BridgeKickEvent {}
 #[cfg(unix)]
 unsafe impl Sync for BridgeKickEvent {}
 
+/// The type an IPC creation mode has to be passed as.
+///
+/// Apple declares `sem_open`/`shm_open` variadic and its `mode_t` is `u16`, so
+/// default argument promotion rejects anything narrower than `c_uint`. Every
+/// other Unix takes a typed `mode_t` parameter.
+#[cfg(all(unix, target_vendor = "apple"))]
+type IpcMode = libc::c_uint;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+type IpcMode = libc::mode_t;
+
+/// Owner read/write — the only access an IPC object shared between the Studio
+/// and its own helper process needs.
+#[cfg(unix)]
+const IPC_OWNER_RW: IpcMode = (libc::S_IRUSR | libc::S_IWUSR) as IpcMode;
+
+/// How long the Unix kick event sleeps between polls of its semaphore.
+///
+/// macOS implements POSIX named semaphores only partially: `sem_timedwait` and
+/// `sem_getvalue` are absent, so there is no blocking wait with a deadline to
+/// call. Polling `sem_trywait` on this interval is what the host's producer
+/// thread already falls back to when no kick event exists at all
+/// (`futureboard_plugin_host`'s `None` arm), so the pacing is not a new one.
+/// At the 1 ms timeout that thread uses this costs at most a handful of polls
+/// per block.
+#[cfg(unix)]
+const KICK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
+
+/// Upper bound on posts drained in one wait. The count is kept at one by
+/// [`BridgeKickEvent::set`]; this only stops a burst of concurrent setters from
+/// turning the drain into an unbounded spin.
+#[cfg(unix)]
+const KICK_MAX_DRAIN: u32 = 1_024;
+
 #[cfg(unix)]
 impl BridgeKickEvent {
     pub fn create_named(name: &str) -> std::io::Result<Self> {
         let name = imp::posix_name("kick", name)?;
-        let mode = libc::S_IRUSR | libc::S_IWUSR;
-        let created =
-            unsafe { libc::sem_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL, mode, 0u32) };
+        let created = unsafe {
+            libc::sem_open(
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL,
+                IPC_OWNER_RW,
+                0 as libc::c_uint,
+            )
+        };
         if created != libc::SEM_FAILED {
             return Ok(Self {
                 semaphore: created,
@@ -914,41 +952,61 @@ impl BridgeKickEvent {
         })
     }
 
+    /// Signal the producer. Wait-free enough for the engine's audio callback:
+    /// two non-blocking semaphore operations, no allocation and no lock.
+    ///
+    /// Coalesces repeated requests like a Windows auto-reset event, but without
+    /// `sem_getvalue` (absent on macOS) to ask how many posts are outstanding.
+    /// Taking one back before posting leaves the count at "one pending" whether
+    /// or not a kick was already queued, so a burst of requests between two
+    /// waits is one wakeup rather than a backlog that grows until the semaphore
+    /// saturates. The sequence counters in the shared region remain the source
+    /// of truth for *what* changed.
     pub fn set(&self) {
-        // Coalesce repeated requests like a Windows auto-reset event. The
-        // sequence counters in the shared region remain the source of truth.
-        let mut value = 0;
-        if unsafe { libc::sem_getvalue(self.semaphore, &mut value) } == 0 && value > 0 {
-            return;
-        }
         unsafe {
+            let _ = libc::sem_trywait(self.semaphore);
             let _ = libc::sem_post(self.semaphore);
         }
     }
 
-    pub fn wait(&self, timeout_ms: u32) -> bool {
-        if timeout_ms == 0 {
-            return unsafe { libc::sem_trywait(self.semaphore) } == 0;
-        }
-        let mut deadline = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut deadline) } != 0 {
+    /// Take a pending kick if there is one, draining anything queued behind it.
+    /// Draining is what gives this the auto-reset semantics of the Windows
+    /// event: one wakeup consumes every request made since the last wait.
+    fn try_acquire(&self) -> bool {
+        if unsafe { libc::sem_trywait(self.semaphore) } != 0 {
             return false;
         }
-        deadline.tv_sec += (timeout_ms / 1_000) as libc::time_t;
-        deadline.tv_nsec += ((timeout_ms % 1_000) * 1_000_000) as libc::c_long;
-        if deadline.tv_nsec >= 1_000_000_000 {
-            deadline.tv_sec += 1;
-            deadline.tv_nsec -= 1_000_000_000;
+        let mut drained = 0;
+        while drained < KICK_MAX_DRAIN && unsafe { libc::sem_trywait(self.semaphore) } == 0 {
+            drained += 1;
         }
+        true
+    }
+
+    /// Block until signaled or `timeout_ms` elapses.
+    ///
+    /// Polls rather than blocking on a deadline because macOS has no
+    /// `sem_timedwait` — see [`KICK_POLL_INTERVAL`]. The final sleep is clamped
+    /// to the remaining time so the call never overruns its timeout.
+    pub fn wait(&self, timeout_ms: u32) -> bool {
+        if self.try_acquire() {
+            return true;
+        }
+        if timeout_ms == 0 {
+            return false;
+        }
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
         loop {
-            if unsafe { libc::sem_timedwait(self.semaphore, &deadline) } == 0 {
-                return true;
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                // One last look, so a kick that landed during the final sleep is
+                // not deferred to the next call.
+                return self.try_acquire();
             }
-            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                return false;
+            std::thread::sleep(KICK_POLL_INTERVAL.min(deadline - now));
+            if self.try_acquire() {
+                return true;
             }
         }
     }
@@ -1116,7 +1174,7 @@ mod imp {
                 libc::shm_open(
                     name.as_ptr(),
                     libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
-                    libc::S_IRUSR | libc::S_IWUSR,
+                    super::IPC_OWNER_RW,
                 )
             };
             if fd < 0 {
