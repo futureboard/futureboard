@@ -1,30 +1,21 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Window,
+    div, px, App, AppContext, DragMoveEvent, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::components::combo_box::combo_box_trigger;
 use crate::components::controls::fb_checkbox;
+use crate::components::spin_drag::SpinDrag;
 use crate::theme::Colors;
+
+pub type InspectorNumericChangeCb = std::sync::Arc<dyn Fn(f64, &mut Window, &mut App) + 'static>;
+pub type InspectorNumericGestureCb = std::sync::Arc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 #[derive(Clone, Copy)]
 pub struct InspectorSelectOption<T: Copy + PartialEq + 'static> {
     pub label: &'static str,
     pub value: T,
-}
-
-/// Short-lived payload for an Inspector value scrub. The display owns the
-/// gesture; the parent still owns the actual setting and undo transaction.
-#[derive(Clone, Debug)]
-struct InspectorNumericDrag {
-    start_value: f64,
-}
-
-impl Render for InspectorNumericDrag {
-    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        Empty
-    }
 }
 
 pub fn inspector_section(
@@ -161,10 +152,36 @@ pub fn inspector_numeric_stepper(
     disabled: bool,
     on_change: impl Fn(f64, &mut Window, &mut App) + Clone + 'static,
 ) -> impl IntoElement {
+    inspector_numeric_stepper_with_drag_callbacks(
+        id,
+        value,
+        display,
+        min,
+        max,
+        step,
+        disabled,
+        None,
+        std::sync::Arc::new(on_change),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn inspector_numeric_stepper_with_drag_callbacks(
+    id: &'static str,
+    value: f64,
+    display: impl Into<String>,
+    min: f64,
+    max: f64,
+    step: f64,
+    disabled: bool,
+    on_drag_start: Option<InspectorNumericGestureCb>,
+    on_drag_preview: InspectorNumericChangeCb,
+    on_drag_commit: Option<InspectorNumericGestureCb>,
+) -> impl IntoElement {
     const SCRUB_PIXELS_PER_STEP: f32 = 5.0;
-    let drag_start_y = std::sync::Arc::new(std::sync::Mutex::new(None::<f32>));
-    let drag_start_y_move = drag_start_y.clone();
-    let drag_change = on_change.clone();
+    let drag_id = id.to_string();
+    let drag_id_move = drag_id.clone();
     div()
         .flex()
         .flex_row()
@@ -192,7 +209,6 @@ pub fn inspector_numeric_stepper(
             if disabled {
                 field.into_any_element()
             } else {
-                let start_y = drag_start_y.clone();
                 field
                     .cursor(gpui::CursorStyle::ResizeUpDown)
                     .hover(|style| {
@@ -201,28 +217,40 @@ pub fn inspector_numeric_stepper(
                             .border_color(Colors::border_strong())
                     })
                     .on_drag(
-                        InspectorNumericDrag { start_value: value },
-                        move |drag, _offset, _window, cx| {
-                            *start_y.lock().expect("inspector scrub mutex poisoned") = None;
-                            cx.new(|_| InspectorNumericDrag {
-                                start_value: drag.start_value,
+                        SpinDrag::new(drag_id, value),
+                        move |drag, _offset, window, cx| {
+                            drag.begin();
+                            if let Some(start) = on_drag_start.as_ref() {
+                                start(window, cx);
+                            }
+                            cx.new(|_| drag.clone())
+                        },
+                    )
+                    .on_drag_move::<SpinDrag>(move |event: &DragMoveEvent<SpinDrag>, window, cx| {
+                        let drag = event.drag(cx);
+                        if !drag.matches(&drag_id_move) {
+                            return;
+                        }
+                        let current_y: f32 = event.event.position.y.into();
+                        let next = drag.value_at(
+                            current_y,
+                            step / f64::from(SCRUB_PIXELS_PER_STEP),
+                            min,
+                            max,
+                            Some(step),
+                        );
+                        on_drag_preview(next, window, cx);
+                    })
+                    .when_some(on_drag_commit, |field, commit| {
+                        let commit_out = commit.clone();
+                        field
+                            .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
+                                commit(window, cx)
                             })
-                        },
-                    )
-                    .on_drag_move::<InspectorNumericDrag>(
-                        move |event: &DragMoveEvent<InspectorNumericDrag>, window, cx| {
-                            let current_y: f32 = event.event.position.y.into();
-                            let mut anchor = drag_start_y_move
-                                .lock()
-                                .expect("inspector scrub mutex poisoned");
-                            let start_y = *anchor.get_or_insert(current_y);
-                            let steps =
-                                ((start_y - current_y) / SCRUB_PIXELS_PER_STEP).round() as f64;
-                            let next = (event.drag(cx).start_value + steps * step).clamp(min, max);
-                            drop(anchor);
-                            drag_change(next, window, cx);
-                        },
-                    )
+                            .on_mouse_up_out(gpui::MouseButton::Left, move |_, window, cx| {
+                                commit_out(window, cx)
+                            })
+                    })
                     .into_any_element()
             }
         })

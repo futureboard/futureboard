@@ -89,6 +89,7 @@ pub struct PanelChromeState {
 pub struct TransportChromeState {
     pub playing: bool,
     pub recording: bool,
+    pub count_in_bars: u32,
     pub loop_enabled: bool,
     pub metronome_enabled: bool,
     pub follow_playhead: bool,
@@ -119,6 +120,7 @@ pub struct TransportChromeState {
     pub on_play_toggle: ChromeActionCb,
     pub on_stop: ChromeActionCb,
     pub on_record: ChromeActionCb,
+    pub on_count_in_cycle: ChromeActionCb,
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
     pub on_follow_toggle: ChromeActionCb,
@@ -415,6 +417,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
     let on_record = state.on_record.clone();
+    let on_count_in_cycle = state.on_count_in_cycle.clone();
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
     let on_follow = state.on_follow_toggle.clone();
@@ -497,6 +500,34 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 on_record(&(), window, cx);
             })
             .occlude(),
+        )
+        // Record count-in. This edits the persisted recording setting and the
+        // recording path consumes the same value before capture starts.
+        .child(
+            div()
+                .h(px(20.0))
+                .min_w(px(34.0))
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .text_size(px(8.0))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(if state.count_in_bars > 0 {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_muted()
+                })
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    on_count_in_cycle(&(), window, cx);
+                })
+                .child(format!("COUNT {}", state.count_in_bars))
+                .occlude(),
         )
         // Loop
         .child(

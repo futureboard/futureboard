@@ -1,6 +1,6 @@
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::audio_clip::{
-    audio_clip, AudioClipProcessCommitCb, AudioClipProcessPreviewCb,
+    audio_clip, audio_clip_timeline_geometry, AudioClipProcessCommitCb, AudioClipProcessPreviewCb,
 };
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
@@ -69,10 +69,16 @@ pub fn track_lane(
         .clips
         .iter()
         .filter_map(|clip| {
-            let seconds_per_beat = state.seconds_per_beat();
-            let pixels_per_second = state.viewport.pixels_per_second;
-            let clip_left = state.beats_to_x(clip.start_beat);
-            let clip_width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
+            let (clip_left, clip_width) = if matches!(clip.clip_type, ClipType::Audio { .. }) {
+                audio_clip_timeline_geometry(clip, state)
+            } else {
+                let seconds_per_beat = state.seconds_per_beat();
+                let pixels_per_second = state.viewport.pixels_per_second;
+                (
+                    state.beats_to_x(clip.start_beat),
+                    (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0),
+                )
+            };
             if clip_left + clip_width < 0.0 || clip_left > viewport_w {
                 return None;
             }

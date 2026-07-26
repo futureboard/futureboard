@@ -25,12 +25,12 @@ use crate::components::controls::{
 };
 use crate::components::inspector::{
     inspector_checkbox as shared_inspector_checkbox, inspector_hint_text, inspector_mini_button,
-    inspector_numeric_stepper, inspector_row as shared_inspector_row,
-    inspector_section as shared_inspector_section, inspector_select, inspector_value,
-    InspectorSelectOption,
+    inspector_numeric_stepper, inspector_numeric_stepper_with_drag_callbacks,
+    inspector_row as shared_inspector_row, inspector_section as shared_inspector_section,
+    inspector_select, inspector_value, InspectorSelectOption,
 };
 use crate::components::reorder::{drag_handle, drop_over_highlight};
-use crate::components::slider::slider;
+use crate::components::slider::slider_with_drag_callbacks;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
@@ -128,10 +128,16 @@ const ROUTING_COMBO_MENU_HEIGHT: f32 = 220.0;
 #[derive(Clone)]
 pub struct InspectorCallbacks {
     pub on_volume: StrF32Cb,
+    pub on_volume_drag_start: StrF32Cb,
+    pub on_volume_drag_preview: StrF32Cb,
+    pub on_volume_drag_commit: StrCb,
     /// Toggle whether Track Volume automation drives this track's effective
     /// volume (the `[A]` button beside the volume readout).
     pub on_toggle_volume_automation_read: StrCb,
     pub on_pan: StrF32Cb,
+    pub on_pan_drag_start: StrCb,
+    pub on_pan_drag_preview: StrF32Cb,
+    pub on_pan_drag_commit: StrCb,
     pub on_toggle_mute: StrCb,
     pub on_toggle_solo: StrCb,
     pub on_toggle_arm: StrCb,
@@ -157,6 +163,12 @@ pub struct InspectorCallbacks {
     pub on_set_clip_muted: ClipBoolCb,
     /// Apply a new stretch/pitch state to an audio clip (one undo entry).
     pub on_set_clip_stretch: ClipStretchCb,
+    pub on_preview_clip_stretch: ClipStretchCb,
+    pub on_begin_clip_property_drag: StrCb,
+    pub on_commit_clip_property_drag: StrCb,
+    pub on_preview_clip_start: ClipF32Cb,
+    pub on_preview_clip_length: ClipF32Cb,
+    pub on_preview_clip_gain: ClipF32Cb,
     /// Analyze source audio and set `bpm_source` asynchronously.
     pub on_clip_stretch_auto_find_bpm: StrCb,
     /// Fit clip tempo to project BPM (auto-finds source BPM first if needed).
@@ -280,6 +292,7 @@ fn track_type_badge(t: TrackType) -> &'static str {
         TrackType::Instrument => "Instrument Track",
         TrackType::Bus => "Bus",
         TrackType::Return => "Return",
+        TrackType::Group => "Group",
         TrackType::Master => "Master",
     }
 }
@@ -294,6 +307,7 @@ fn track_type_color(t: TrackType) -> gpui::Rgba {
         TrackType::Midi => Colors::track_midi(),
         TrackType::Bus => Colors::track_bus(),
         TrackType::Return => Colors::track_return(),
+        TrackType::Group => Colors::accent_primary(),
         TrackType::Master => Colors::track_master(),
     }
 }
@@ -1399,7 +1413,7 @@ fn routing_section(
                     midi_output_selector(track, instrument_targets, callbacks),
                 ));
         }
-        TrackType::Bus | TrackType::Return | TrackType::Master => {
+        TrackType::Bus | TrackType::Return | TrackType::Group | TrackType::Master => {
             section = section.child(fb_form_row("Output", output_selector(track, callbacks)));
         }
     }
@@ -1791,8 +1805,12 @@ fn track_inspector(
     // effective (automation) value and an `[A]` marker plus a separate base
     // readout make the manual value clear. Otherwise it shows the base only.
     let volume_row = {
-        let cb = callbacks.on_volume.clone();
-        let tid_v = tid.clone();
+        let start = callbacks.on_volume_drag_start.clone();
+        let preview = callbacks.on_volume_drag_preview.clone();
+        let commit = callbacks.on_volume_drag_commit.clone();
+        let tid_start = tid.clone();
+        let tid_preview = tid.clone();
+        let tid_commit = tid.clone();
         let has_volume_automation = track.has_active_volume_automation();
         let automation_active = track.volume_automation_read && has_volume_automation;
         let display_vol = track.display_volume();
@@ -1840,11 +1858,18 @@ fn track_inspector(
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(slider(
+            .child(slider_with_drag_callbacks(
                 "inspector-volume",
                 display_vol,
                 track.color,
-                move |v, w, cx| cb(&(tid_v.clone(), *v), w, cx),
+                Some(move |v: &f32, w: &mut Window, cx: &mut App| {
+                    start(&(tid_start.clone(), *v), w, cx)
+                }),
+                Some(move |v: &f32, w: &mut Window, cx: &mut App| {
+                    preview(&(tid_preview.clone(), *v), w, cx)
+                }),
+                Some(move |w: &mut Window, cx: &mut App| commit(&tid_commit, w, cx)),
+                None::<fn(&mut Window, &mut App)>,
             ))
             .child(
                 div()
@@ -1874,22 +1899,29 @@ fn track_inspector(
 
     // ── Pan slider (mapped -1..1 ↔ 0..1) + readout ──────────────────────
     let pan_row = {
-        let cb = callbacks.on_pan.clone();
-        let tid_p = tid.clone();
+        let start = callbacks.on_pan_drag_start.clone();
+        let preview = callbacks.on_pan_drag_preview.clone();
+        let commit = callbacks.on_pan_drag_commit.clone();
+        let tid_start = tid.clone();
+        let tid_preview = tid.clone();
+        let tid_commit = tid.clone();
         let pan_norm = (track.pan + 1.0) / 2.0;
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(slider(
+            .child(slider_with_drag_callbacks(
                 "inspector-pan",
                 pan_norm,
                 track.color,
-                move |v, w, cx| {
+                Some(move |_: &f32, w: &mut Window, cx: &mut App| start(&tid_start, w, cx)),
+                Some(move |v: &f32, w: &mut Window, cx: &mut App| {
                     let pan = (*v * 2.0 - 1.0).clamp(-1.0, 1.0);
-                    cb(&(tid_p.clone(), pan), w, cx);
-                },
+                    preview(&(tid_preview.clone(), pan), w, cx);
+                }),
+                Some(move |w: &mut Window, cx: &mut App| commit(&tid_commit, w, cx)),
+                None::<fn(&mut Window, &mut App)>,
             ))
             .child(
                 div()
@@ -2039,11 +2071,17 @@ fn beat_stepper(
     id: &'static str,
     clip_id: &str,
     value: f32,
-    callback: ClipF32Cb,
+    preview_callback: ClipF32Cb,
+    callbacks: &InspectorCallbacks,
     min_value: f32,
 ) -> impl IntoElement {
     let clip_id = clip_id.to_string();
-    inspector_numeric_stepper(
+    let start_id = clip_id.clone();
+    let preview_id = clip_id.clone();
+    let commit_id = clip_id.clone();
+    let begin = callbacks.on_begin_clip_property_drag.clone();
+    let commit = callbacks.on_commit_clip_property_drag.clone();
+    inspector_numeric_stepper_with_drag_callbacks(
         id,
         value as f64,
         format!("{value:.2} bt"),
@@ -2051,7 +2089,9 @@ fn beat_stepper(
         99_999.0,
         0.25,
         false,
-        move |next, w, cx| callback(&(clip_id.clone(), next as f32), w, cx),
+        Some(Arc::new(move |w, cx| begin(&start_id, w, cx))),
+        Arc::new(move |next, w, cx| preview_callback(&(preview_id.clone(), next as f32), w, cx)),
+        Some(Arc::new(move |w, cx| commit(&commit_id, w, cx))),
     )
 }
 
@@ -2067,10 +2107,20 @@ fn db_to_linear_gain(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 
-fn gain_stepper(clip_id: &str, gain: f32, callback: ClipF32Cb) -> impl IntoElement {
+fn gain_stepper(
+    clip_id: &str,
+    gain: f32,
+    preview_callback: ClipF32Cb,
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
     let db = linear_gain_to_db(gain);
     let clip_id = clip_id.to_string();
-    inspector_numeric_stepper(
+    let start_id = clip_id.clone();
+    let preview_id = clip_id.clone();
+    let commit_id = clip_id.clone();
+    let begin = callbacks.on_begin_clip_property_drag.clone();
+    let commit = callbacks.on_commit_clip_property_drag.clone();
+    inspector_numeric_stepper_with_drag_callbacks(
         "clip-gain",
         db as f64,
         format!("{db:.1} dB"),
@@ -2078,7 +2128,44 @@ fn gain_stepper(clip_id: &str, gain: f32, callback: ClipF32Cb) -> impl IntoEleme
         12.0,
         1.0,
         false,
-        move |next, w, cx| callback(&(clip_id.clone(), db_to_linear_gain(next as f32)), w, cx),
+        Some(Arc::new(move |w, cx| begin(&start_id, w, cx))),
+        Arc::new(move |next, w, cx| {
+            preview_callback(&(preview_id.clone(), db_to_linear_gain(next as f32)), w, cx)
+        }),
+        Some(Arc::new(move |w, cx| commit(&commit_id, w, cx))),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clip_stretch_stepper(
+    id: &'static str,
+    clip_id: &str,
+    value: f64,
+    display: impl Into<String>,
+    min: f64,
+    max: f64,
+    step: f64,
+    disabled: bool,
+    callbacks: &InspectorCallbacks,
+    build_next: impl Fn(f64) -> AudioClipStretchState + 'static,
+) -> impl IntoElement {
+    let start_id = clip_id.to_string();
+    let preview_id = start_id.clone();
+    let commit_id = start_id.clone();
+    let begin = callbacks.on_begin_clip_property_drag.clone();
+    let preview = callbacks.on_preview_clip_stretch.clone();
+    let commit = callbacks.on_commit_clip_property_drag.clone();
+    inspector_numeric_stepper_with_drag_callbacks(
+        id,
+        value,
+        display,
+        min,
+        max,
+        step,
+        disabled,
+        Some(Arc::new(move |w, cx| begin(&start_id, w, cx))),
+        Arc::new(move |next, w, cx| preview(&(preview_id.clone(), build_next(next)), w, cx)),
+        Some(Arc::new(move |w, cx| commit(&commit_id, w, cx))),
     )
 }
 
@@ -2368,24 +2455,24 @@ fn stretch_section_body(
                             !finding,
                             move |_, w, cx| auto_find(&auto_find_id, w, cx),
                         ))
-                        .child(inspector_numeric_stepper(
+                        .child(clip_stretch_stepper(
                             "clip-stretch-srcbpm",
+                            &clip_id,
                             cur_src_bpm,
                             src_bpm_label,
                             1.0,
                             999.0,
                             1.0,
                             !stretch_enabled,
+                            callbacks,
                             {
                                 let s = s.clone();
-                                let cb = cb.clone();
-                                let clip_id = clip_id.clone();
-                                move |bpm, w, cx| {
+                                move |bpm| {
                                     let mut next = s.clone();
                                     next.bpm_source = Some(bpm);
                                     next.clip_timeline_duration_beats = 0.0;
                                     next.dirty = true;
-                                    cb(&(clip_id.clone(), next), w, cx);
+                                    next
                                 }
                             },
                         )),
@@ -2571,46 +2658,46 @@ fn stretch_section_body(
         )
         .child(stretch_field_block(
             "Semi",
-            inspector_numeric_stepper(
+            clip_stretch_stepper(
                 "clip-pitch-semi",
+                &clip_id,
                 semi as f64,
                 format!("{:+.2}", semi),
                 -48.0,
                 48.0,
                 1.0,
                 !stretch_enabled || !preserve_mode,
+                callbacks,
                 {
                     let s = s.clone();
-                    let cb = cb.clone();
-                    let clip_id = clip_id.clone();
-                    move |semi, w, cx| {
+                    move |semi| {
                         let (_, fine) = s.pitch_semi_and_cents();
                         let mut next = s.clone();
                         next.set_pitch_semi_and_cents(semi as f32, fine);
-                        cb(&(clip_id.clone(), next), w, cx);
+                        next
                     }
                 },
             ),
         ))
         .child(stretch_field_block(
             "Fine",
-            inspector_numeric_stepper(
+            clip_stretch_stepper(
                 "clip-pitch-fine",
+                &clip_id,
                 fine as f64,
                 format!("{fine:+.0} ct"),
                 -99.0,
                 99.0,
                 50.0,
                 !stretch_enabled || !preserve_mode,
+                callbacks,
                 {
                     let s = s.clone();
-                    let cb = cb.clone();
-                    let clip_id = clip_id.clone();
-                    move |fine, w, cx| {
+                    move |fine| {
                         let (semi, _) = s.pitch_semi_and_cents();
                         let mut next = s.clone();
                         next.set_pitch_semi_and_cents(semi, fine as f32);
-                        cb(&(clip_id.clone(), next), w, cx);
+                        next
                     }
                 },
             ),
@@ -3015,7 +3102,8 @@ fn clip_inspector(
                             "clip-start",
                             clip.clip_id,
                             clip.start_beat,
-                            callbacks.on_set_clip_start.clone(),
+                            callbacks.on_preview_clip_start.clone(),
+                            callbacks,
                             0.0,
                         ),
                     ))
@@ -3025,7 +3113,8 @@ fn clip_inspector(
                             "clip-length",
                             clip.clip_id,
                             clip.duration_beats,
-                            callbacks.on_set_clip_length.clone(),
+                            callbacks.on_preview_clip_length.clone(),
+                            callbacks,
                             0.25,
                         ),
                     ))
@@ -3048,7 +3137,12 @@ fn clip_inspector(
                     ))
                     .child(compact_property_row(
                         "Gain",
-                        gain_stepper(clip.clip_id, clip.gain, callbacks.on_set_clip_gain.clone()),
+                        gain_stepper(
+                            clip.clip_id,
+                            clip.gain,
+                            callbacks.on_preview_clip_gain.clone(),
+                            callbacks,
+                        ),
                     ))
                     .child(compact_property_row(
                         "Reverse",
@@ -3078,46 +3172,46 @@ fn clip_inspector(
                     ))
                     .child(compact_property_row(
                         "Fade In",
-                        inspector_numeric_stepper(
+                        clip_stretch_stepper(
                             "clip-fade-in",
+                            clip.clip_id,
                             s.fade_in_ms as f64,
                             format!("{:.0} ms", s.fade_in_ms),
                             0.0,
                             60_000.0,
                             5.0,
                             false,
+                            callbacks,
                             {
                                 let s = s.clone();
-                                let stretch_cb = stretch_cb.clone();
-                                let clip_id = clip.clip_id.to_string();
-                                move |value, w, cx| {
+                                move |value| {
                                     let mut next = s.clone();
                                     next.fade_in_ms = value as f32;
                                     next.dirty = true;
-                                    stretch_cb(&(clip_id.clone(), next), w, cx);
+                                    next
                                 }
                             },
                         ),
                     ))
                     .child(compact_property_row(
                         "Fade Out",
-                        inspector_numeric_stepper(
+                        clip_stretch_stepper(
                             "clip-fade-out",
+                            clip.clip_id,
                             s.fade_out_ms as f64,
                             format!("{:.0} ms", s.fade_out_ms),
                             0.0,
                             60_000.0,
                             5.0,
                             false,
+                            callbacks,
                             {
                                 let s = s.clone();
-                                let stretch_cb = stretch_cb.clone();
-                                let clip_id = clip.clip_id.to_string();
-                                move |value, w, cx| {
+                                move |value| {
                                     let mut next = s.clone();
                                     next.fade_out_ms = value as f32;
                                     next.dirty = true;
-                                    stretch_cb(&(clip_id.clone(), next), w, cx);
+                                    next
                                 }
                             },
                         ),
@@ -3216,7 +3310,8 @@ fn clip_inspector(
                         "clip-start",
                         clip.clip_id,
                         clip.start_beat,
-                        callbacks.on_set_clip_start.clone(),
+                        callbacks.on_preview_clip_start.clone(),
+                        callbacks,
                         0.0,
                     ),
                 ))
@@ -3226,7 +3321,8 @@ fn clip_inspector(
                         "clip-length",
                         clip.clip_id,
                         clip.duration_beats,
-                        callbacks.on_set_clip_length.clone(),
+                        callbacks.on_preview_clip_length.clone(),
+                        callbacks,
                         0.25,
                     ),
                 ))

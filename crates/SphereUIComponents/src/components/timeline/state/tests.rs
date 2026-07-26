@@ -1715,7 +1715,11 @@ mod audio_clip_split_tests {
     #[test]
     fn split_divides_length_and_carries_offset() {
         let state = TimelineState::default();
-        let clip = audio_clip("clip-5", 4.0, 8.0, 2.0);
+        let mut clip = audio_clip("clip-5", 4.0, 8.0, 2.0);
+        clip.stretch.original_sample_rate = 48_000;
+        clip.stretch.project_sample_rate = 48_000;
+        clip.stretch.original_duration_samples = 192_000;
+        clip.stretch.source_end_samples = 192_000;
         let (left, right) = state
             .plan_audio_clip_split(&clip, 8.0)
             .expect("split inside the clip should produce two clips");
@@ -1733,6 +1737,10 @@ mod audio_clip_split_tests {
         // Right's source continues from where the left ended (offset + left len).
         assert_eq!(right.offset_beats, 6.0);
         assert_eq!(left.offset_beats, 2.0);
+        assert_eq!(left.stretch.source_start_samples, 0);
+        assert_eq!(left.stretch.source_end_samples, 96_000);
+        assert_eq!(right.stretch.source_start_samples, 96_000);
+        assert_eq!(right.stretch.source_end_samples, 192_000);
         // Fresh, distinct ids for both halves.
         assert_ne!(left.id, right.id);
         assert_ne!(left.id, clip.id);

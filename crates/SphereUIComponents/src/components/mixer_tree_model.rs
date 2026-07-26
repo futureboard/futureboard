@@ -138,6 +138,7 @@ impl MixerTreeModel {
                     midi_children.push(track_node(track, track.track_type));
                 }
                 TrackType::Bus => bus_children.push(track_node(track, TrackType::Bus)),
+                TrackType::Group => bus_children.push(track_node(track, TrackType::Group)),
                 TrackType::Return => return_children.push(track_node(track, TrackType::Return)),
                 TrackType::Master => {}
             }
@@ -343,6 +344,7 @@ fn group_id_for_channel(tracks: &[TrackState], channel_id: &str) -> Option<&'sta
             TrackType::Instrument => MIXER_TREE_GROUP_INSTRUMENT,
             TrackType::Midi => MIXER_TREE_GROUP_MIDI,
             TrackType::Bus => MIXER_TREE_GROUP_BUS,
+            TrackType::Group => MIXER_TREE_GROUP_BUS,
             TrackType::Return => MIXER_TREE_GROUP_RETURN,
             TrackType::Master => MIXER_TREE_GROUP_OUTPUT,
         })
@@ -354,6 +356,7 @@ fn track_kind_for_type(ty: TrackType) -> MixerTreeNodeKind {
         TrackType::Instrument => MixerTreeNodeKind::InstrumentTrack,
         TrackType::Midi => MixerTreeNodeKind::MidiTrack,
         TrackType::Bus => MixerTreeNodeKind::Bus,
+        TrackType::Group => MixerTreeNodeKind::Group,
         TrackType::Return => MixerTreeNodeKind::FxReturn,
         TrackType::Master => MixerTreeNodeKind::Group,
     }

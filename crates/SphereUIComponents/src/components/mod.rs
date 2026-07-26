@@ -69,6 +69,7 @@ pub mod slider;
 pub mod song_text_panel;
 pub mod soundfont_player_mdi;
 pub mod soundfont_player_window;
+pub(crate) mod spin_drag;
 mod status_bar;
 mod status_bar_view;
 pub mod stem_extractor_dialog;
@@ -118,7 +119,9 @@ pub use icon::icon;
 pub use icon_button::icon_button;
 pub use inspector::{
     inspector_checkbox, inspector_hint_text, inspector_mini_button, inspector_numeric_stepper,
-    inspector_row, inspector_section, inspector_select, inspector_value, InspectorSelectOption,
+    inspector_numeric_stepper_with_drag_callbacks, inspector_row, inspector_section,
+    inspector_select, inspector_value, InspectorNumericChangeCb, InspectorNumericGestureCb,
+    InspectorSelectOption,
 };
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};

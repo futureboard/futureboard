@@ -236,7 +236,8 @@ impl AddTrackKind {
             Self::Midi => Some(TrackType::Midi),
             Self::Bus => Some(TrackType::Bus),
             Self::Return => Some(TrackType::Return),
-            Self::Automation | Self::Folder | Self::Plugin | Self::Group | Self::Master => None,
+            Self::Folder | Self::Group => Some(TrackType::Group),
+            Self::Automation | Self::Plugin | Self::Master => None,
         }
     }
 
@@ -1464,25 +1465,19 @@ fn type_fields(
                 "Automation lanes on existing tracks. Dedicated automation tracks are coming soon.",
             ))
             .into_any_element(),
-        AddTrackKind::Folder => {
-            let pack = callbacks.on_pack_folder.clone();
-            let pack_on = state.pack_folder;
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(fb_checkbox(
-                    "add-track-pack-folder",
-                    "Pack Folder",
-                    pack_on,
-                    true,
-                    move |_, w, cx| pack(&!pack_on, w, cx),
-                ))
-                .child(disabled_hint(
-                    "Folder track creation is not available in Native yet.",
-                ))
-                .into_any_element()
-        }
+        AddTrackKind::Folder => div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_secondary())
+                    .child(
+                        "Creates an arrangement folder. Drag track headers onto it to group them.",
+                    ),
+            )
+            .into_any_element(),
         AddTrackKind::Bus | AddTrackKind::Return => div()
             .flex()
             .flex_col()
@@ -2609,5 +2604,17 @@ mod tests {
 
         assert_eq!(state.audio_format, AudioFormat::Mono);
         assert_eq!(state.input_label, "Input 1");
+    }
+
+    #[test]
+    fn folder_tab_creates_a_native_group_container() {
+        let mut state = AddTrackDialogState::open_for(0, false);
+        state.set_kind(AddTrackKind::Folder);
+
+        assert_eq!(
+            AddTrackKind::Folder.native_track_type(),
+            Some(TrackType::Group)
+        );
+        assert!(state.is_valid());
     }
 }

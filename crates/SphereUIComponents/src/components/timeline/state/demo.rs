@@ -9,6 +9,8 @@ impl TimelineState {
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
             track_type: TrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
             color: crate::theme::Colors::track_color_for_index(0),
             volume: volume::db_to_norm(-3.0),
             volume_effective: volume::db_to_norm(-3.0),
@@ -89,6 +91,8 @@ impl TimelineState {
             id: "track-2".to_string(),
             name: "Audio 2".to_string(),
             track_type: TrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
             color: crate::theme::Colors::track_color_for_index(1),
             volume: volume::db_to_norm(-6.0),
             volume_effective: volume::db_to_norm(-6.0),
@@ -140,6 +144,8 @@ impl TimelineState {
             id: "track-3".to_string(),
             name: "Synth 3".to_string(),
             track_type: TrackType::Midi,
+            parent_group_id: None,
+            group_collapsed: false,
             color: crate::theme::Colors::track_color_for_index(2),
             volume: volume::db_to_norm(-1.5),
             volume_effective: volume::db_to_norm(-1.5),
@@ -241,6 +247,8 @@ impl TimelineState {
             },
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),
+                selected_track_ids: vec!["track-1".to_string()],
+                track_selection_anchor_id: Some("track-1".to_string()),
                 selected_clip_ids: vec![],
                 selected_song_text_event_ids: Vec::new(),
             },
@@ -270,6 +278,7 @@ impl TimelineState {
             track_volume_gesture_origin: std::collections::HashMap::new(),
             master_volume_preview: None,
             master_volume_gesture_origin: None,
+            track_pan_gesture_origin: std::collections::HashMap::new(),
         }
     }
 

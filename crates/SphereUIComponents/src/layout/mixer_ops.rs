@@ -1760,6 +1760,36 @@ impl StudioLayout {
                 });
             })
         };
+        let on_send_gain_change: std::sync::Arc<
+            dyn Fn(&(String, String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(
+                move |(track_id, send_id, gain_db): &(String, String, f32), _w, cx| {
+                    let track_id = track_id.clone();
+                    let send_id = send_id.clone();
+                    let gain_db = *gain_db;
+                    StudioLayout::defer_update(&this, cx, move |this, cx| {
+                        let changed = this.timeline.update(cx, |timeline, cx| {
+                            let changed = timeline
+                                .state
+                                .set_send_gain_db(&track_id, &send_id, gain_db);
+                            if changed {
+                                cx.notify();
+                            }
+                            changed
+                        });
+                        if changed {
+                            this.mark_dirty();
+                            this.audio_bridge.project_dirty = true;
+                            this.schedule_audio_project_sync(cx, true, "mixer_send_gain");
+                            this.push_mixer_snapshot_to_window(cx);
+                            cx.notify();
+                        }
+                    });
+                },
+            )
+        };
         let on_reorder_send: std::sync::Arc<
             dyn Fn(&(String, String, usize), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -1830,6 +1860,7 @@ impl StudioLayout {
             on_open_insert_editor,
             on_add_send,
             on_remove_send,
+            on_send_gain_change,
             on_reorder_send,
         }
     }
@@ -1944,6 +1975,8 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         id,
         name,
         track_type,
+        parent_group_id,
+        group_collapsed,
         color,
         volume,
         volume_effective,
@@ -1979,6 +2012,8 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         id: id.clone(),
         name: name.clone(),
         track_type: *track_type,
+        parent_group_id: parent_group_id.clone(),
+        group_collapsed: *group_collapsed,
         color: *color,
         volume: *volume,
         volume_effective: *volume_effective,

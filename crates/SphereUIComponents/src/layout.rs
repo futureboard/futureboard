@@ -196,6 +196,7 @@ impl RendererWarmup {
 pub enum RecordingUiState {
     Idle,
     Preparing,
+    CountingIn { bars: u32 },
     Recording,
     Finalizing,
     Failed { reason: String },
@@ -206,6 +207,7 @@ impl RecordingUiState {
         match self {
             Self::Idle => None,
             Self::Preparing => Some("Recording: preparing...".to_string()),
+            Self::CountingIn { bars } => Some(format!("Recording: count-in {bars} bars")),
             Self::Recording => Some("Recording".to_string()),
             Self::Finalizing => Some("Recording: finalizing...".to_string()),
             Self::Failed { reason } => Some(format!("Recording failed: {reason}")),

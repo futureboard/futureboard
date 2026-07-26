@@ -96,6 +96,7 @@ fn track_type_label(ty: TrackType) -> &'static str {
         TrackType::Instrument => "instrument",
         TrackType::Bus => "bus",
         TrackType::Return => "return",
+        TrackType::Group => "group",
         TrackType::Master => "master",
     }
 }

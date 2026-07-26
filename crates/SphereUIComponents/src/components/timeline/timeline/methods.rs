@@ -161,6 +161,7 @@ impl Timeline {
         Self {
             state: TimelineState::default(),
             edit_history: EditHistory::new(100),
+            inspector_clip_gesture_origin: None,
             on_seek_beats: None,
             on_track_param_change: None,
             on_track_input_state_change: None,
@@ -211,6 +212,7 @@ impl Timeline {
         Self {
             state: TimelineState::demo_project(),
             edit_history: EditHistory::new(100),
+            inspector_clip_gesture_origin: None,
             on_seek_beats: None,
             on_track_param_change: None,
             on_track_input_state_change: None,
@@ -278,6 +280,31 @@ impl Timeline {
         self.edit_history.push(cmd);
         self.mark_project_changed(cx);
         cx.notify();
+    }
+
+    pub fn begin_inspector_clip_gesture(&mut self, clip_id: &str) {
+        self.inspector_clip_gesture_origin = ClipSnapshot::capture(&self.state, clip_id);
+    }
+
+    pub fn commit_inspector_clip_gesture(
+        &mut self,
+        clip_id: &str,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let Some(previous) = self.inspector_clip_gesture_origin.take() else {
+            return false;
+        };
+        if previous.clip.id != clip_id {
+            return false;
+        }
+        let Some(next) = ClipSnapshot::capture(&self.state, clip_id) else {
+            return false;
+        };
+        if previous.clip == next.clip && previous.track_id == next.track_id {
+            return false;
+        }
+        self.record_executed_command(EditCommand::UpdateClip { previous, next }, cx);
+        true
     }
 
     pub fn undo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {

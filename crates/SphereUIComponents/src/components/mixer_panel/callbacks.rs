@@ -57,6 +57,9 @@ pub struct MixerCallbacks {
     pub on_add_send: std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>,
     /// Remove the named send `(track_id, send_id)`.
     pub on_remove_send: std::sync::Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'static>,
+    /// Set the send gain `(track_id, send_id, gain_db)`.
+    pub on_send_gain_change:
+        std::sync::Arc<dyn Fn(&(String, String, f32), &mut Window, &mut App) + 'static>,
     /// Drag-reorder commit for a send slot. `(track_id, dragged_send_id,
     /// insertion_index)` where `insertion_index` is the visual gap.
     pub on_reorder_send:
@@ -81,6 +84,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         Arc::new(|_: &(std::path::PathBuf, String, usize), _: &mut Window, _: &mut App| {});
     let noop_add_send = Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {});
     let noop_send_reorder = Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
+    let noop_send_gain = Arc::new(|_: &(String, String, f32), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
         on_volume_change: noop_vol.clone(),
@@ -106,6 +110,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_open_insert_editor: noop_insert_open.clone(),
         on_add_send: noop_add_send,
         on_remove_send: noop_insert_pair,
+        on_send_gain_change: noop_send_gain,
         on_reorder_send: noop_send_reorder,
     }
 }

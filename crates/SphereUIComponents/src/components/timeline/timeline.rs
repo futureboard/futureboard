@@ -127,6 +127,9 @@ use std::collections::HashSet;
 pub struct Timeline {
     pub state: TimelineState,
     edit_history: EditHistory,
+    /// Exact clip snapshot captured at Inspector scrub start. Preview changes
+    /// stay out of history; release records one `UpdateClip` command.
+    inspector_clip_gesture_origin: Option<ClipSnapshot>,
     on_seek_beats:
         Option<std::sync::Arc<dyn Fn(f32, f32, crate::layout::SeekReason) + Send + Sync + 'static>>,
     on_track_param_change:

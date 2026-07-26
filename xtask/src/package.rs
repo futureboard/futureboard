@@ -129,11 +129,20 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
                 );
                 cef_staged = true;
             }
-            None => bail!(
-                "CEF distribution not found at build/cef; run \
-                 `cargo run -p SphereWebView --example install_cef --features installer`, \
-                 or pass --no-cef for an intentional CEF-free developer package"
-            ),
+            None => {
+                let checked = cef::cef_dist_candidates(&workspace_root(), &target_triple)
+                    .into_iter()
+                    .map(|path| format!("  - {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                bail!(
+                    "CEF distribution not found or invalid for {target_triple}.\n\
+                     Checked:\n{checked}\n\
+                     Install it with `cargo run -p SphereWebView --example install_cef \
+                     --features installer`, or pass --no-cef for an intentional \
+                     CEF-free developer package"
+                )
+            }
         }
     }
 

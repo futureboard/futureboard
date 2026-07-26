@@ -762,6 +762,8 @@ mod tests {
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
             color_hex: "#56C7C9".to_string(),
             volume_norm: 1.0,
             pan: 0.0,
@@ -788,6 +790,7 @@ mod tests {
             }],
             row_height_px: None,
             soundfont: None,
+            volume_automation_read: true,
         });
 
         let project_file = root.join("Portable.fbproj");
@@ -831,6 +834,8 @@ mod tests {
             id: id.to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
             color_hex: "#56C7C9".to_string(),
             volume_norm: 1.0,
             pan: 0.0,
@@ -844,6 +849,7 @@ mod tests {
             clips,
             row_height_px: None,
             soundfont: None,
+            volume_automation_read: true,
         }
     }
 

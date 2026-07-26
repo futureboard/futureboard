@@ -195,8 +195,8 @@ impl TimelineState {
     /// the undoable edit. `None` when `clip` is not audio or `split_beat` lands
     /// within [`MIN_CLIP_SPLIT_BEATS`] of either edge.
     ///
-    /// The right clip inherits `offset_beats + left_len` so its source content
-    /// continues seamlessly from where the left clip ends.
+    /// The two clips receive abutting source windows so playback, waveform
+    /// rendering, and later edge trims all agree on the actual cut point.
     pub fn plan_audio_clip_split(
         &self,
         clip: &ClipState,
@@ -225,6 +225,27 @@ impl TimelineState {
             self.clone_clip_for_insert(clip, right_id, format!("{} Split", clip.name), split_beat);
         right.duration_beats = right_len;
         right.offset_beats = clip.offset_beats + left_len;
+        if matches!(clip.stretch.mode, StretchMode::Off) {
+            let source_rate = clip
+                .stretch
+                .original_sample_rate
+                .max(clip.stretch.project_sample_rate)
+                .max(1) as f64;
+            let split_samples = ((left_len as f64 * self.seconds_per_beat() as f64) * source_rate)
+                .round()
+                .max(0.0) as u64;
+            let source_start = clip.stretch.source_start_samples;
+            let source_end = if clip.stretch.source_end_samples > source_start {
+                clip.stretch.source_end_samples
+            } else {
+                clip.stretch.original_duration_samples
+            };
+            if source_end > source_start {
+                let source_split = source_start.saturating_add(split_samples).min(source_end);
+                left.stretch.apply_trim(source_start, source_split);
+                right.stretch.apply_trim(source_split, source_end);
+            }
+        }
 
         Some((left, right))
     }

@@ -226,7 +226,7 @@ impl TrackRoutingState {
                 midi_input_filter: MidiInputChannelFilter::All,
                 midi_output_per_note: false,
             },
-            TrackType::Bus | TrackType::Return => Self {
+            TrackType::Bus | TrackType::Return | TrackType::Group => Self {
                 input: TrackInputRouting::None,
                 output: TrackOutputRouting::Main,
                 audio_format: TrackAudioFormat::Stereo,
@@ -484,6 +484,23 @@ impl TimelineState {
         }
     }
 
+    pub fn set_send_gain_db(&mut self, track_id: &str, send_id: &str, gain_db: f32) -> bool {
+        let Some(send) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.sends.iter_mut().find(|send| send.id == send_id))
+        else {
+            return false;
+        };
+        let next = gain_db.clamp(-60.0, 6.0);
+        if (send.gain_db - next).abs() <= 1.0e-4 {
+            return false;
+        }
+        send.gain_db = next;
+        true
+    }
+
     pub fn send_order(&self, track_id: &str) -> Vec<String> {
         self.tracks
             .iter()
@@ -658,5 +675,25 @@ mod tests {
         assert!(child.sends.iter().any(|send| {
             send.id == created_send_id && send.target_track_id == created_return_id
         }));
+    }
+
+    #[test]
+    fn send_gain_updates_and_clamps_in_db() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let source_id = create_track(&mut state, TrackType::Audio, "Audio");
+        let return_id = create_track(&mut state, TrackType::Return, "Return");
+        let send_id = state
+            .add_send_to_target(&source_id, &return_id)
+            .expect("send");
+
+        assert!(state.set_send_gain_db(&source_id, &send_id, -12.5));
+        assert_eq!(
+            state.find_track(&source_id).unwrap().sends[0].gain_db,
+            -12.5
+        );
+        assert!(state.set_send_gain_db(&source_id, &send_id, 30.0));
+        assert_eq!(state.find_track(&source_id).unwrap().sends[0].gain_db, 6.0);
+        assert!(!state.set_send_gain_db(&source_id, &send_id, 6.0));
     }
 }

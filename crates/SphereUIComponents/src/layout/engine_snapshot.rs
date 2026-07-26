@@ -116,6 +116,21 @@ fn is_renderable_audio_clip(clip: &ClipState) -> bool {
     )
 }
 
+fn clip_source_offset_seconds(state: &TimelineState, clip: &ClipState) -> f64 {
+    let stretch = &clip.stretch;
+    if stretch.source_start_samples > 0 {
+        let source_rate = stretch
+            .original_sample_rate
+            .max(stretch.project_sample_rate)
+            .max(1) as f64;
+        stretch.source_start_samples as f64 / source_rate
+    } else {
+        // Keep legacy projects whose trims were stored only as beat offsets
+        // audible at the same source position.
+        state.beats_to_seconds(clip.offset_beats.max(0.0)) as f64
+    }
+}
+
 fn apply_auto_crossfades(state: &TimelineState, clips: &mut [EngineClipSnapshot]) {
     for track in &state.tracks {
         let mut track_audio: Vec<&ClipState> = track
@@ -744,7 +759,7 @@ fn build_engine_project_snapshot_inner(
                     media_path: Some(source_path.clone()),
                     start_beat: clip.start_beat.max(0.0) as f64,
                     duration_beats: clip.duration_beats.max(0.0) as f64,
-                    offset_seconds: state.beats_to_seconds(clip.offset_beats.max(0.0)) as f64,
+                    offset_seconds: clip_source_offset_seconds(state, clip),
                     gain: clip.gain.clamp(0.0, 4.0),
                     muted: clip.muted,
                     fades,
@@ -968,6 +983,7 @@ fn track_type_name(track_type: TrackType) -> &'static str {
         TrackType::Instrument => "instrument",
         TrackType::Bus => "bus",
         TrackType::Return => "return",
+        TrackType::Group => "group",
         TrackType::Master => "master",
     }
 }
@@ -1093,6 +1109,66 @@ mod tests {
             Some(2.0),
         );
         (state, clip_id)
+    }
+
+    #[test]
+    fn trimmed_clip_snapshot_reads_from_source_window_not_track_fader_or_legacy_offset() {
+        let (mut state, clip_id) = audio_state_with_clip();
+        let (_, clip) = state.find_clip(&clip_id).expect("audio clip");
+        let mut stretch = clip.stretch.clone();
+        stretch.original_sample_rate = 48_000;
+        stretch.project_sample_rate = 48_000;
+        stretch.original_duration_samples = 96_000;
+        stretch.source_start_samples = 24_000;
+        stretch.source_end_samples = 72_000;
+        assert!(state.set_clip_stretch(&clip_id, stretch));
+        assert!(state.set_clip_gain(&clip_id, 0.5));
+        state.tracks[0].volume = 0.2;
+
+        let snapshot = build_engine_project_snapshot(&state, 48_000, None, None);
+        let clip = snapshot
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
+        assert!((clip.offset_seconds - 0.5).abs() < 1.0e-9);
+        assert!((clip.gain - 0.5).abs() < 1.0e-6);
+        assert!(
+            (snapshot.tracks[0].volume - clip.gain).abs() > 0.01,
+            "clip gain must remain independent from the track volume fader"
+        );
+    }
+
+    #[test]
+    fn overlapping_audio_clips_publish_equal_power_crossfade_durations() {
+        let (mut state, first_id) = audio_state_with_clip();
+        let track_id = state.tracks[0].id.clone();
+        let second_id = state.insert_audio_clip_with_duration(
+            track_id,
+            "C:/audio/second.wav".to_string(),
+            "second".to_string(),
+            3.0,
+            4.0,
+            Some(2.0),
+        );
+
+        let snapshot = build_engine_project_snapshot(&state, 48_000, None, None);
+        let first = snapshot
+            .clips
+            .iter()
+            .find(|clip| clip.id == first_id)
+            .unwrap();
+        let second = snapshot
+            .clips
+            .iter()
+            .find(|clip| clip.id == second_id)
+            .unwrap();
+        let first_fades = first.fades.as_ref().expect("first fade");
+        let second_fades = second.fades.as_ref().expect("second fade");
+        assert!((first_fades.out_duration - 0.5).abs() < 1.0e-9);
+        assert!((second_fades.in_duration - 0.5).abs() < 1.0e-9);
+        assert_eq!(first_fades.out_curve, "equal_power");
+        assert_eq!(second_fades.in_curve, "equal_power");
     }
 
     #[test]

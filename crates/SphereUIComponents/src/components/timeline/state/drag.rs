@@ -26,6 +26,7 @@ pub struct TrackDragItem {
     pub origin_index: usize,
     pub name: String,
     pub color: gpui::Rgba,
+    pub is_group: bool,
 }
 
 /// In-flight track row height resize. Heights are resolved live from

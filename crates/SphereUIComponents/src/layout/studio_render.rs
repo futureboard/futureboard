@@ -78,7 +78,13 @@ impl Render for StudioLayout {
                 .state
                 .tracks
                 .iter()
-                .map(super::mixer_ops::clone_track_for_mixer)
+                .map(|track| {
+                    let mut cloned = super::mixer_ops::clone_track_for_mixer(track);
+                    let display_volume = t.state.display_track_volume(track);
+                    cloned.volume = display_volume;
+                    cloned.volume_effective = display_volume;
+                    cloned
+                })
                 .collect();
             if let Some((track_id, clip)) = selected_clip {
                 if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {

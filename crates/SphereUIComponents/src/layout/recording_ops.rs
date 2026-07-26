@@ -1,7 +1,7 @@
 use gpui::{App, Context};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::components::panel::{InspectorAudioInputChannel, InspectorAudioInputDevice};
 use crate::components::timeline::timeline_state::{
@@ -29,6 +29,10 @@ pub(crate) struct RecordingSessionState {
     /// hardware/virtual-keyboard events already arrive on the control router, so
     /// no realtime audio callback work is required.
     pub midi: Option<MidiRecordingTake>,
+    /// Invalidates an outstanding count-in timer when the user cancels/restarts.
+    pub count_in_token: u64,
+    /// Metronome state to restore after the temporary audible count-in.
+    pub count_in_restore_metronome: Option<bool>,
 }
 
 impl Default for RecordingSessionState {
@@ -38,6 +42,8 @@ impl Default for RecordingSessionState {
             ui_state: RecordingUiState::Idle,
             preview: None,
             midi: None,
+            count_in_token: 0,
+            count_in_restore_metronome: None,
         }
     }
 }
@@ -78,6 +84,10 @@ pub(crate) struct MidiRecordingResult {
 
 impl StudioLayout {
     pub(super) fn toggle_native_recording(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.recording.ui_state, RecordingUiState::CountingIn { .. }) {
+            self.cancel_record_count_in(cx);
+            return;
+        }
         let recording = self.is_recording_active(cx);
         if recording {
             self.stop_native_recording(cx);
@@ -87,6 +97,95 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
+        let (count_in_bars, playing, bpm, beats_per_bar, target_beat) = {
+            let timeline = self.timeline.read(cx);
+            (
+                self.settings
+                    .read(cx)
+                    .current
+                    .recording
+                    .metronome
+                    .count_in_bars
+                    .min(4),
+                timeline.state.transport.playing,
+                timeline.state.effective_bpm_at_playhead().max(1.0) as f32,
+                timeline.state.time_signature_at_playhead().numerator.max(1) as f32,
+                timeline.state.transport.playhead_beats.max(0.0),
+            )
+        };
+        if count_in_bars > 0 && !playing {
+            self.begin_record_count_in(count_in_bars, bpm, beats_per_bar, target_beat, cx);
+            return;
+        }
+        self.start_native_recording_now(cx);
+    }
+
+    fn begin_record_count_in(
+        &mut self,
+        bars: u32,
+        bpm: f32,
+        beats_per_bar: f32,
+        target_beat: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.recording.count_in_token = self.recording.count_in_token.wrapping_add(1);
+        let token = self.recording.count_in_token;
+        let restore_metronome = self.timeline.update(cx, |timeline, cx| {
+            let previous = timeline.state.transport.metronome_enabled;
+            timeline.state.transport.metronome_enabled = true;
+            cx.notify();
+            previous
+        });
+        self.recording.count_in_restore_metronome = Some(restore_metronome);
+        self.recording.ui_state = RecordingUiState::CountingIn { bars };
+        self.sync_metronome_controls(cx);
+
+        let count_beats = bars as f32 * beats_per_bar;
+        self.seek_native_playhead(cx, (target_beat - count_beats).max(0.0));
+        self.start_native_playback(cx);
+        cx.notify();
+
+        let seconds = (count_beats * 60.0 / bpm.max(1.0)).max(0.01);
+        let owner = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs_f32(seconds))
+                .await;
+            let _ = owner.update(cx, |this, cx| {
+                if this.recording.count_in_token != token
+                    || !matches!(this.recording.ui_state, RecordingUiState::CountingIn { .. })
+                {
+                    return;
+                }
+                this.stop_native_playback(cx);
+                this.seek_native_playhead(cx, target_beat);
+                this.restore_record_count_in_metronome(cx);
+                this.start_native_recording_now(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn restore_record_count_in_metronome(&mut self, cx: &mut Context<Self>) {
+        let Some(enabled) = self.recording.count_in_restore_metronome.take() else {
+            return;
+        };
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.state.transport.metronome_enabled = enabled;
+            cx.notify();
+        });
+        self.sync_metronome_controls(cx);
+    }
+
+    fn cancel_record_count_in(&mut self, cx: &mut Context<Self>) {
+        self.recording.count_in_token = self.recording.count_in_token.wrapping_add(1);
+        self.stop_native_playback(cx);
+        self.restore_record_count_in_metronome(cx);
+        self.recording.ui_state = RecordingUiState::Idle;
+        cx.notify();
+    }
+
+    fn start_native_recording_now(&mut self, cx: &mut Context<Self>) {
         self.recording.ui_state = RecordingUiState::Preparing;
         cx.notify();
 
@@ -373,6 +472,10 @@ impl StudioLayout {
     }
 
     pub(super) fn stop_native_recording(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.recording.ui_state, RecordingUiState::CountingIn { .. }) {
+            self.cancel_record_count_in(cx);
+            return;
+        }
         self.stop_recording_transport_ui(cx);
         self.recording.ui_state = RecordingUiState::Finalizing;
         cx.notify();

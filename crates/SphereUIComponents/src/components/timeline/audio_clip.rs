@@ -28,6 +28,42 @@ pub type AudioClipProcessCommitCb =
 pub type AudioClipCutCb =
     std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>;
 
+/// Authoritative horizontal geometry for an audio clip. Off-mode audio is
+/// time-locked to its resolved source trim window, while stretched audio
+/// follows its authored musical duration. Track culling and clip rendering
+/// must share this result so cut/trim clips cannot be culled at one width and
+/// painted at another until a later resize gesture reconciles them.
+fn audio_clip_timeline_duration_seconds(clip: &ClipState, state: &TimelineState) -> f32 {
+    let seconds_per_beat = state.seconds_per_beat();
+    if clip.stretch.mode == StretchMode::Off {
+        let sample_rate = clip
+            .stretch
+            .original_sample_rate
+            .max(clip.stretch.project_sample_rate);
+        let trimmed_frames = clip
+            .stretch
+            .source_end_samples
+            .saturating_sub(clip.stretch.source_start_samples);
+        if sample_rate > 0 && trimmed_frames > 0 {
+            return (trimmed_frames as f32 / sample_rate as f32).max(0.001);
+        }
+    }
+    // Pending and legacy clips may not have decoded source bounds yet.
+    (clip.duration_beats * seconds_per_beat).max(0.001)
+}
+
+pub(crate) fn audio_clip_timeline_geometry(clip: &ClipState, state: &TimelineState) -> (f32, f32) {
+    let pixels_per_second = state.viewport.pixels_per_second;
+    let time_locked = clip.stretch.mode == StretchMode::Off;
+    let duration_seconds = audio_clip_timeline_duration_seconds(clip, state);
+    let left = if time_locked {
+        state.time_to_content_x(state.beats_to_seconds(clip.start_beat))
+    } else {
+        state.beats_to_x(clip.start_beat)
+    };
+    (left, (duration_seconds * pixels_per_second).max(10.0))
+}
+
 #[derive(Clone, Debug)]
 struct AudioClipProcessDrag {
     id: String,
@@ -52,11 +88,22 @@ fn db_to_gain(db: f32) -> f32 {
 }
 
 fn gain_to_norm(gain: f32) -> f32 {
-    (gain_to_db(gain) + 60.0) / 72.0
+    let db = gain_to_db(gain);
+    if db <= 0.0 {
+        ((db + 60.0) / 60.0) * 0.5
+    } else {
+        0.5 + (db / 12.0) * 0.5
+    }
 }
 
 fn norm_to_gain(norm: f32) -> f32 {
-    db_to_gain(norm.clamp(0.0, 1.0) * 72.0 - 60.0)
+    let norm = norm.clamp(0.0, 1.0);
+    let db = if norm <= 0.5 {
+        norm * 120.0 - 60.0
+    } else {
+        (norm - 0.5) * 24.0
+    };
+    db_to_gain(db)
 }
 
 fn compact_gain_control(
@@ -73,6 +120,8 @@ fn compact_gain_control(
     let original = clip.clone();
     let original_out = clip.clone();
     let on_commit_out = on_commit.clone();
+    let reset_id = clip.id.clone();
+    let reset_preview = on_preview.clone();
 
     div()
         .id(gpui::ElementId::Name(id.into()))
@@ -115,7 +164,21 @@ fn compact_gain_control(
                         .bg(Colors::accent_primary()),
                 ),
         )
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+            cx.stop_propagation();
+            if event.click_count >= 2 {
+                // Clip gain is a bipolar dB control, independent of the track
+                // volume fader. Its neutral/reset value is always 0 dB.
+                reset_preview(
+                    &(
+                        reset_id.clone(),
+                        AudioClipProcessUpdate::Gain(db_to_gain(0.0)),
+                    ),
+                    window,
+                    cx,
+                );
+            }
+        })
         .on_drag(
             AudioClipProcessDrag {
                 id: move_id.clone(),
@@ -335,25 +398,8 @@ pub fn audio_clip(
     let pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
     let stretch_badge = stretch_badge_label(clip, state);
-    // An ordinary recorded/imported audio file is time-based material. Keep it
-    // positioned and sized in source seconds until the user explicitly enables
-    // Tempo Sync/Warp; otherwise changing project BPM makes a fixed waveform
-    // look glued to musical grid lines and falsely implies it was stretched.
-    let time_locked = clip.stretch.mode == StretchMode::Off;
-    let clip_duration_seconds = if time_locked {
-        clip.source_duration_seconds
-            .map(|seconds| seconds as f32)
-            .unwrap_or(clip.duration_beats * seconds_per_beat)
-            .max(0.001)
-    } else {
-        (clip.duration_beats * seconds_per_beat).max(0.001)
-    };
-    let left = if time_locked {
-        state.time_to_content_x(state.beats_to_seconds(clip.start_beat))
-    } else {
-        state.beats_to_x(clip.start_beat)
-    };
-    let width = (clip_duration_seconds * pixels_per_second).max(10.0);
+    let (left, width) = audio_clip_timeline_geometry(clip, state);
+    let clip_duration_seconds = audio_clip_timeline_duration_seconds(clip, state);
     let fade_in_seconds = (clip.stretch.fade_in_ms.max(0.0) / 1000.0)
         .max(auto_crossfade_in_beats.max(0.0) * seconds_per_beat)
         .min(clip_duration_seconds);
@@ -660,14 +706,49 @@ pub fn audio_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{db_to_gain, gain_to_db, gain_to_norm, norm_to_gain};
+    use super::{audio_clip_timeline_geometry, db_to_gain, gain_to_db, gain_to_norm, norm_to_gain};
+    use crate::components::timeline::timeline_state::{
+        AudioClipStretchState, AudioImportState, ClipState, ClipType, TimelineState,
+    };
 
     #[test]
     fn clip_gain_mapping_roundtrips_unity_and_limits() {
         assert!((gain_to_db(1.0) - 0.0).abs() < 1.0e-6);
-        assert!((gain_to_norm(1.0) - (60.0 / 72.0)).abs() < 1.0e-6);
+        assert!((gain_to_norm(1.0) - 0.5).abs() < 1.0e-6);
         assert!((norm_to_gain(gain_to_norm(1.0)) - 1.0).abs() < 1.0e-5);
         assert!((db_to_gain(12.0) - 10.0_f32.powf(12.0 / 20.0)).abs() < 1.0e-5);
         assert_eq!(gain_to_db(0.0), -60.0);
+    }
+
+    #[test]
+    fn timeline_geometry_uses_trimmed_source_window_not_full_asset_duration() {
+        let state = TimelineState::default();
+        let mut clip = ClipState {
+            id: "clip-trimmed".to_string(),
+            name: "Trimmed".to_string(),
+            start_beat: 2.0,
+            duration_beats: 4.0,
+            source_duration_seconds: Some(30.0),
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: "asset".to_string(),
+                source_path: Some("take.wav".to_string()),
+            },
+            muted: false,
+            audio_import: AudioImportState::Ready,
+            stretch: AudioClipStretchState::default(),
+        };
+        clip.stretch.original_sample_rate = 48_000;
+        clip.stretch.source_start_samples = 48_000;
+        clip.stretch.source_end_samples = 144_000;
+
+        let (left, width) = audio_clip_timeline_geometry(&clip, &state);
+        assert!((left - 150.0).abs() < 0.001);
+        assert!((width - 300.0).abs() < 0.001);
+
+        clip.stretch.source_end_samples = 96_000;
+        let (_, trimmed_width) = audio_clip_timeline_geometry(&clip, &state);
+        assert!((trimmed_width - 150.0).abs() < 0.001);
     }
 }

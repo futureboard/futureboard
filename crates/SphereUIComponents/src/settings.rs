@@ -749,6 +749,8 @@ impl SettingsSchema {
             self.appearance.ui_scale = 2.5;
         }
 
+        self.recording.metronome.count_in_bars = self.recording.metronome.count_in_bars.min(4);
+
         // Exclusive → Community (or entitlement lost): remap unavailable audio
         // backends before the engine/UI read the schema. Clearing device picks
         // mirrors Settings' own driver-change behavior so an ASIO driver name

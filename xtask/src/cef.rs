@@ -5,9 +5,10 @@
 //! macOS keeps `Chromium Embedded Framework.framework` intact so the app
 //! bundler can place it under `Contents/Frameworks`.
 //!
-//! The file list is taken from the CEF distribution the repository already uses
-//! (`<workspace>/build/cef`, populated by `SphereWebView`'s `install_cef`). We do
-//! not download another runtime.
+//! The file list is taken from the CEF distribution the repository already uses.
+//! The installer uses the versioned layout, while the previous flat
+//! `<workspace>/build/cef` layout remains supported for existing workspaces. We
+//! do not download another runtime.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,25 +40,41 @@ pub struct CefStageReport {
     pub locale_count: usize,
 }
 
-/// Locate the repository's prepared CEF distribution, if present.
+/// Candidate locations, in preference order, for the target CEF distribution.
 ///
-/// Returns `<workspace>/build/cef` only when it actually contains the runtime
-/// (`Release/`), so a workspace without CEF installed simply reports `None` and
-/// packaging can warn instead of failing a developer build.
-pub fn locate_cef_dist(workspace_root: &Path, triple: &str) -> Option<PathBuf> {
-    let platform_dir = match triple {
-        "x86_64-pc-windows-msvc" => "cef_windows_x86_64",
-        "x86_64-unknown-linux-gnu" => "cef_linux_x86_64",
-        "x86_64-apple-darwin" => "cef_macos_x86_64",
-        "aarch64-apple-darwin" => "cef_macos_aarch64",
-        _ => return None,
+/// Keeping this in one place makes package diagnostics report the exact
+/// absolute paths that were checked.
+pub fn cef_dist_candidates(workspace_root: &Path, triple: &str) -> Vec<PathBuf> {
+    let Some(platform_dir) = platform_dir(triple) else {
+        return Vec::new();
     };
-    let dist = workspace_root
-        .join("build")
-        .join("cef")
-        .join(PINNED_CEF_VERSION)
-        .join(platform_dir);
-    validate_pinned_distribution(&dist).ok().map(|()| dist)
+    let cef_root = workspace_root.join("build").join("cef");
+    vec![
+        cef_root.join(PINNED_CEF_VERSION).join(platform_dir),
+        // Compatibility with the original installer and existing developer
+        // workspaces. This can be removed after those installations migrate.
+        cef_root,
+    ]
+}
+
+/// Locate a complete, pinned CEF distribution for `triple`.
+///
+/// The versioned installer layout is preferred. A valid flat `build/cef`
+/// distribution is accepted as a compatibility fallback.
+pub fn locate_cef_dist(workspace_root: &Path, triple: &str) -> Option<PathBuf> {
+    cef_dist_candidates(workspace_root, triple)
+        .into_iter()
+        .find(|dist| validate_pinned_distribution(dist).is_ok())
+}
+
+fn platform_dir(triple: &str) -> Option<&'static str> {
+    match triple {
+        "x86_64-pc-windows-msvc" => Some("cef_windows_x86_64"),
+        "x86_64-unknown-linux-gnu" => Some("cef_linux_x86_64"),
+        "x86_64-apple-darwin" => Some("cef_macos_x86_64"),
+        "aarch64-apple-darwin" => Some("cef_macos_aarch64"),
+        _ => None,
+    }
 }
 
 fn validate_pinned_distribution(dist: &Path) -> Result<()> {
@@ -341,11 +358,53 @@ mod tests {
         dist
     }
 
+    fn copy_test_distribution(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if source_path.is_dir() {
+                copy_test_distribution(&source_path, &destination_path);
+            } else {
+                fs::copy(source_path, destination_path).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn locate_returns_none_without_release() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join("build/cef")).unwrap();
         assert!(locate_cef_dist(temp.path(), "x86_64-pc-windows-msvc").is_none());
+    }
+
+    #[test]
+    fn locate_accepts_existing_flat_distribution() {
+        let temp = tempfile::tempdir().unwrap();
+        let dist = fake_windows_dist(temp.path());
+        assert_eq!(
+            locate_cef_dist(temp.path(), "x86_64-pc-windows-msvc"),
+            Some(dist)
+        );
+    }
+
+    #[test]
+    fn locate_prefers_versioned_distribution() {
+        let temp = tempfile::tempdir().unwrap();
+        fake_windows_dist(temp.path());
+        let source = fake_windows_dist(&temp.path().join("versioned-source"));
+        let versioned = temp
+            .path()
+            .join("build/cef")
+            .join(PINNED_CEF_VERSION)
+            .join("cef_windows_x86_64");
+        fs::create_dir_all(versioned.parent().unwrap()).unwrap();
+        copy_test_distribution(&source, &versioned);
+        assert_eq!(
+            locate_cef_dist(temp.path(), "x86_64-pc-windows-msvc"),
+            Some(versioned)
+        );
     }
 
     #[test]

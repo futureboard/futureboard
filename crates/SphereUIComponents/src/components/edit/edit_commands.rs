@@ -63,7 +63,8 @@ pub enum EditCommand {
         snapshot: ClipSnapshot,
     },
     /// Replaces one existing clip with an exact post-gesture snapshot. Used by
-    /// trim so every mouse gesture is one reversible history entry.
+    /// trim and Inspector property gestures so each gesture is one reversible
+    /// history entry.
     UpdateClip {
         previous: ClipSnapshot,
         next: ClipSnapshot,
@@ -177,6 +178,11 @@ pub enum EditCommand {
         prev: f32,
         next: f32,
     },
+    SetTrackVolumeAutomationRead {
+        track_id: String,
+        prev: bool,
+        next: bool,
+    },
     /// Replace only the affected Song Text events. Empty `previous` creates,
     /// empty `next` deletes, and populated snapshots edit/move atomically.
     SetSongTextEvents {
@@ -196,7 +202,7 @@ impl EditCommand {
             EditCommand::CreateClip { .. } => "Create Clip",
             EditCommand::BatchCreateClips { .. } => "Create Clips",
             EditCommand::DeleteClip { .. } => "Delete Clip",
-            EditCommand::UpdateClip { .. } => "Trim Clip",
+            EditCommand::UpdateClip { .. } => "Edit Clip",
             EditCommand::BatchDeleteClips { .. } => "Delete Clips",
             EditCommand::ReplaceClipWithClips { .. } => "Split Clip",
             EditCommand::DeleteTrack { .. } => "Delete Track",
@@ -220,6 +226,7 @@ impl EditCommand {
             EditCommand::SetTrackHeights { .. } => "Resize Track Height",
             EditCommand::SetTrackVolume { .. } => "Set Volume",
             EditCommand::SetTrackPan { .. } => "Set Pan",
+            EditCommand::SetTrackVolumeAutomationRead { .. } => "Set Volume Automation Read",
             EditCommand::SetSongTextEvents { label, .. } => label,
         }
     }
@@ -369,6 +376,11 @@ impl EditCommand {
             EditCommand::SetTrackPan { track_id, next, .. } => {
                 state.set_track_pan(track_id, *next);
             }
+            EditCommand::SetTrackVolumeAutomationRead { track_id, next, .. } => {
+                let beat = state.transport.playhead_beats;
+                state.set_track_volume_automation_read(track_id, *next);
+                state.recompute_effective_volumes(beat, "automation_read_edit");
+            }
             EditCommand::SetSongTextEvents { previous, next, .. } => {
                 apply_song_text_snapshot(state, previous, next);
             }
@@ -493,6 +505,11 @@ impl EditCommand {
             EditCommand::SetTrackPan { track_id, prev, .. } => {
                 state.set_track_pan(track_id, *prev);
             }
+            EditCommand::SetTrackVolumeAutomationRead { track_id, prev, .. } => {
+                let beat = state.transport.playhead_beats;
+                state.set_track_volume_automation_read(track_id, *prev);
+                state.recompute_effective_volumes(beat, "automation_read_edit");
+            }
             EditCommand::SetSongTextEvents { previous, next, .. } => {
                 apply_song_text_snapshot(state, next, previous);
             }
@@ -586,6 +603,57 @@ mod song_text_command_tests {
         assert_eq!(state.song_text_event(&previous.id), Some(&next));
         command.undo(&mut state);
         assert_eq!(state.song_text_event(&previous.id), Some(&previous));
+    }
+}
+
+#[cfg(test)]
+mod inspector_gesture_command_tests {
+    use super::*;
+
+    #[test]
+    fn pan_preview_commits_as_one_undoable_command() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_audio_track();
+        state.begin_track_pan_preview(&track_id);
+        assert!(state.set_track_pan_preview(&track_id, 0.25));
+        assert!(state.set_track_pan_preview(&track_id, 0.6));
+        let (prev, next) = state
+            .commit_track_pan_preview(&track_id)
+            .expect("pan gesture");
+
+        let mut history = EditHistory::new(8);
+        history.push(EditCommand::SetTrackPan {
+            track_id: track_id.clone(),
+            prev,
+            next,
+        });
+        assert!((state.find_track(&track_id).unwrap().pan - 0.6).abs() < 1.0e-6);
+        assert!(history.undo(&mut state));
+        assert!((state.find_track(&track_id).unwrap().pan - prev).abs() < 1.0e-6);
+        assert!(!history.undo(&mut state), "one drag must create one entry");
+        assert!(history.redo(&mut state));
+        assert!((state.find_track(&track_id).unwrap().pan - 0.6).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn volume_automation_read_is_undoable() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_audio_track();
+        let command = EditCommand::SetTrackVolumeAutomationRead {
+            track_id: track_id.clone(),
+            prev: true,
+            next: false,
+        };
+        let mut history = EditHistory::new(8);
+        command.execute(&mut state);
+        history.push(command);
+        assert!(!state.find_track(&track_id).unwrap().volume_automation_read);
+        assert!(history.undo(&mut state));
+        assert!(state.find_track(&track_id).unwrap().volume_automation_read);
+        assert!(history.redo(&mut state));
+        assert!(!state.find_track(&track_id).unwrap().volume_automation_read);
     }
 }
 

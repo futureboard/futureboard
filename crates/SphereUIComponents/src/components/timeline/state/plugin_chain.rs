@@ -1129,6 +1129,8 @@ impl TimelineState {
                     id: child_id,
                     name,
                     track_type: TrackType::Bus,
+                    parent_group_id: None,
+                    group_collapsed: false,
                     color: parent_color,
                     volume: volume::db_to_norm(0.0),
                     volume_effective: volume::db_to_norm(0.0),

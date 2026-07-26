@@ -116,11 +116,6 @@ fn section_header(
     _accent: gpui::Rgba,
     plus: Option<HeaderPlus>,
 ) -> impl IntoElement {
-    let icon_path = match label {
-        "INSERTS" => Some(assets::ICON_PLUG_PATH),
-        "SENDS" => Some(assets::ICON_ROUTE_PATH),
-        _ => None,
-    };
     let section_accent = Colors::accent_primary();
     let soft_accent = Colors::with_alpha(section_accent, 0.55); // Approved: dynamic accent decoration alpha
 
@@ -183,13 +178,6 @@ fn section_header(
                 .items_center()
                 .gap(px(4.0))
                 .child(div().w(px(2.0)).h(px(8.0)).rounded_full().bg(soft_accent))
-                .children(icon_path.map(|path| {
-                    svg()
-                        .path(path)
-                        .w(px(9.0))
-                        .h(px(9.0))
-                        .text_color(Colors::text_secondary())
-                }))
                 .child(
                     div()
                         .text_size(px(7.5))
@@ -336,6 +324,7 @@ fn strip_header(
         TrackType::Instrument => "INST",
         TrackType::Bus => "BUS",
         TrackType::Return => "RTN",
+        TrackType::Group => "GRP",
         TrackType::Master => "MST",
     };
 
@@ -961,6 +950,16 @@ fn send_chip(
     let can_drop_track = track_id.to_string();
     let drop_track = track_id.to_string();
     let reorder = callbacks.on_reorder_send.clone();
+    let gain_pair = (track_id.to_string(), send.id.clone());
+    let gain_change = callbacks.on_send_gain_change.clone();
+    let gain_reset_pair = gain_pair.clone();
+    let gain_reset = callbacks.on_send_gain_change.clone();
+    let gain_norm = ((send.gain_db.clamp(-60.0, 6.0) + 60.0) / 66.0).clamp(0.0, 1.0);
+    let gain_label = if send.gain_db <= -59.95 {
+        "-∞".to_string()
+    } else {
+        format!("{:+.1} dB", send.gain_db)
+    };
     div()
         .id(gpui::SharedString::from(format!("send-chip-{}", send.id)))
         .can_drop(move |dragged, _window, _cx| {
@@ -985,7 +984,7 @@ fn send_chip(
         .gap(px(3.0))
         .mx(px(2.0))
         .px(px(4.0))
-        .h(px(18.0))
+        .h(px(36.0))
         .rounded_sm()
         .bg(bg)
         .text_size(px(9.0))
@@ -996,7 +995,48 @@ fn send_chip(
             cx.new(|_| drag.clone())
         })
         .child(handle)
-        .child(div().truncate().flex_1().child(format!("→ {target_name}")))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().truncate().child(format!("→ {target_name}")))
+                        .child(
+                            div()
+                                .ml(px(3.0))
+                                .text_size(px(7.5))
+                                .text_color(Colors::text_secondary())
+                                .child(gain_label),
+                        ),
+                )
+                .child(crate::components::slider::slider_with_reset(
+                    format!("mixer-send-gain-{}-{}", track_id, send.id),
+                    gain_norm,
+                    Colors::accent_primary(),
+                    move |value, window, cx| {
+                        let gain_db = (*value * 66.0 - 60.0).clamp(-60.0, 6.0);
+                        gain_change(
+                            &(gain_pair.0.clone(), gain_pair.1.clone(), gain_db),
+                            window,
+                            cx,
+                        );
+                    },
+                    Some(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+                        gain_reset(
+                            &(gain_reset_pair.0.clone(), gain_reset_pair.1.clone(), 0.0),
+                            window,
+                            cx,
+                        );
+                    }),
+                )),
+        )
         .child(
             div()
                 .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))

@@ -310,6 +310,7 @@ impl StudioLayout {
             self.recording.ui_state,
             RecordingUiState::Recording
                 | RecordingUiState::Preparing
+                | RecordingUiState::CountingIn { .. }
                 | RecordingUiState::Finalizing
         ) {
             self.stop_native_recording(cx);
@@ -613,6 +614,7 @@ impl StudioLayout {
             self.recording.ui_state,
             super::RecordingUiState::Recording
                 | super::RecordingUiState::Preparing
+                | super::RecordingUiState::CountingIn { .. }
                 | super::RecordingUiState::Finalizing
         ) {
             self.stop_native_recording(cx);

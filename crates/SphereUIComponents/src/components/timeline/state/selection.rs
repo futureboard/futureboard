@@ -3,6 +3,11 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineSelection {
     pub selected_track_id: Option<String>,
+    /// Ordered multi-track selection. `selected_track_id` remains the primary
+    /// track used by the Inspector and single-target commands.
+    pub selected_track_ids: Vec<String>,
+    /// Stable anchor used by Shift-click range selection.
+    pub track_selection_anchor_id: Option<String>,
     pub selected_clip_ids: Vec<String>,
     /// Shared Song Text selection used by the ruler and all panel/window views.
     pub selected_song_text_event_ids: Vec<SongTextEventId>,
@@ -36,11 +41,16 @@ impl TimelineRangeSelection {
 
 impl TimelineState {
     pub fn selected_range_track_ids(&self) -> Vec<String> {
-        self.selection
-            .selected_track_id
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
+        match self.selection.selected_track_id.as_ref() {
+            Some(primary)
+                if self.selection.selected_track_ids.is_empty()
+                    || !self.selection.selected_track_ids.contains(primary) =>
+            {
+                vec![primary.clone()]
+            }
+            Some(_) => self.selection.selected_track_ids.clone(),
+            None => Vec::new(),
+        }
     }
 
     pub fn track_ids_between(&self, a: &str, b: &str) -> Vec<String> {
@@ -63,9 +73,83 @@ impl TimelineState {
 
     pub fn select_track(&mut self, track_id: &str) {
         self.selection.selected_track_id = Some(track_id.to_string());
+        self.selection.selected_track_ids = vec![track_id.to_string()];
+        self.selection.track_selection_anchor_id = Some(track_id.to_string());
         self.selection.selected_clip_ids.clear();
         self.selection.selected_song_text_event_ids.clear();
         self.arrangement_range = None;
+    }
+
+    pub fn select_track_with_modifiers(&mut self, track_id: &str, additive: bool, range: bool) {
+        match self.selection.selected_track_id.clone() {
+            Some(primary) if !self.selection.selected_track_ids.contains(&primary) => {
+                self.selection.selected_track_ids = vec![primary];
+            }
+            None => self.selection.selected_track_ids.clear(),
+            _ => {}
+        }
+        if range {
+            let anchor = self
+                .selection
+                .track_selection_anchor_id
+                .as_deref()
+                .or(self.selection.selected_track_id.as_deref())
+                .unwrap_or(track_id)
+                .to_string();
+            let range_ids = self.track_ids_between(&anchor, track_id);
+            if additive {
+                for id in range_ids {
+                    if !self.selection.selected_track_ids.contains(&id) {
+                        self.selection.selected_track_ids.push(id);
+                    }
+                }
+            } else {
+                self.selection.selected_track_ids = range_ids;
+            }
+            self.selection.selected_track_id = Some(track_id.to_string());
+            self.selection.track_selection_anchor_id = Some(anchor);
+        } else if additive {
+            if let Some(index) = self
+                .selection
+                .selected_track_ids
+                .iter()
+                .position(|id| id == track_id)
+            {
+                self.selection.selected_track_ids.remove(index);
+                if self.selection.selected_track_id.as_deref() == Some(track_id) {
+                    self.selection.selected_track_id =
+                        self.selection.selected_track_ids.last().cloned();
+                }
+            } else {
+                self.selection.selected_track_ids.push(track_id.to_string());
+                self.selection.selected_track_id = Some(track_id.to_string());
+            }
+            self.selection.track_selection_anchor_id = self.selection.selected_track_id.clone();
+        } else {
+            self.selection.selected_track_id = Some(track_id.to_string());
+            self.selection.selected_track_ids = vec![track_id.to_string()];
+            self.selection.track_selection_anchor_id = Some(track_id.to_string());
+        }
+        self.selection.selected_clip_ids.clear();
+        self.selection.selected_song_text_event_ids.clear();
+        self.arrangement_range = None;
+    }
+
+    pub fn is_track_selected(&self, track_id: &str) -> bool {
+        match self.selection.selected_track_id.as_ref() {
+            Some(primary)
+                if self.selection.selected_track_ids.is_empty()
+                    || !self.selection.selected_track_ids.contains(primary) =>
+            {
+                primary == track_id
+            }
+            Some(_) => self
+                .selection
+                .selected_track_ids
+                .iter()
+                .any(|id| id == track_id),
+            None => false,
+        }
     }
 
     pub fn select_clip(&mut self, clip_id: &str) {
@@ -78,6 +162,8 @@ impl TimelineState {
             .find(|t| t.clips.iter().any(|c| c.id == clip_id))
         {
             self.selection.selected_track_id = Some(track.id.clone());
+            self.selection.selected_track_ids = vec![track.id.clone()];
+            self.selection.track_selection_anchor_id = Some(track.id.clone());
         }
     }
 
@@ -100,6 +186,8 @@ impl TimelineState {
             .find(|t| t.clips.iter().any(|c| c.id == clip_id))
         {
             self.selection.selected_track_id = Some(track.id.clone());
+            self.selection.selected_track_ids = vec![track.id.clone()];
+            self.selection.track_selection_anchor_id = Some(track.id.clone());
         }
     }
 
@@ -131,5 +219,36 @@ impl TimelineState {
 
     pub fn clear_song_text_selection(&mut self) {
         self.selection.selected_song_text_event_ids.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_toggles_tracks_and_shift_selects_anchor_range() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first = state.create_audio_track();
+        let second = state.create_audio_track();
+        let third = state.create_audio_track();
+
+        state.select_track(&first);
+        state.select_track_with_modifiers(&third, true, false);
+        assert_eq!(
+            state.selection.selected_track_ids,
+            vec![first.clone(), third.clone()]
+        );
+
+        state.select_track_with_modifiers(&first, true, false);
+        assert_eq!(state.selection.selected_track_ids, vec![third.clone()]);
+
+        state.select_track(&first);
+        state.select_track_with_modifiers(&third, false, true);
+        assert_eq!(
+            state.selection.selected_track_ids,
+            vec![first, second, third]
+        );
     }
 }

@@ -102,6 +102,9 @@ pub struct TimelineState {
     pub master_volume_preview: Option<f32>,
     /// Base master volume captured at fader pointer-down for one undo entry.
     pub master_volume_gesture_origin: Option<f32>,
+    /// Base pan captured at pointer-down so one completed scrub becomes one
+    /// undo entry. Preview updates remain transient until release.
+    pub track_pan_gesture_origin: std::collections::HashMap<TrackId, f32>,
 }
 
 impl Default for TimelineState {
@@ -153,6 +156,8 @@ impl Default for TimelineState {
             },
             selection: TimelineSelection {
                 selected_track_id: None,
+                selected_track_ids: Vec::new(),
+                track_selection_anchor_id: None,
                 selected_clip_ids: Vec::new(),
                 selected_song_text_event_ids: Vec::new(),
             },
@@ -182,6 +187,7 @@ impl Default for TimelineState {
             track_volume_gesture_origin: std::collections::HashMap::new(),
             master_volume_preview: None,
             master_volume_gesture_origin: None,
+            track_pan_gesture_origin: std::collections::HashMap::new(),
         }
     }
 }

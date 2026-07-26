@@ -55,6 +55,9 @@ pub enum TrackType {
     /// FX return — receives sends from other tracks (aux/reverb returns).
     /// Phase 3.
     Return,
+    /// Arrangement group container. Child membership is visual/project state
+    /// and does not implicitly change the child's audio routing.
+    Group,
     Master,
 }
 
@@ -62,7 +65,7 @@ impl TrackType {
     /// `true` for routing tracks (Bus/Return) that receive audio from other
     /// tracks rather than hosting clips directly.
     pub fn is_routing(self) -> bool {
-        matches!(self, TrackType::Bus | TrackType::Return)
+        matches!(self, TrackType::Bus | TrackType::Return | TrackType::Group)
     }
 }
 
@@ -87,6 +90,10 @@ pub struct TrackState {
     pub id: String,
     pub name: String,
     pub track_type: TrackType,
+    /// Parent arrangement group, if any. Only `TrackType::Group` ids are valid.
+    pub parent_group_id: Option<String>,
+    /// Folder presentation state. Meaningful only for `TrackType::Group`.
+    pub group_collapsed: bool,
     pub color: gpui::Rgba,
     /// Manual/base normalized fader position in `0.0..=1.0`. `1.0` is the top of
     /// the fader (≈ +6 dB) and `0.0` is the bottom (≈ -60 dB). See
@@ -272,6 +279,46 @@ impl TimelineState {
             self.clear_track_drag();
             return false;
         };
+        if self.tracks[origin_index].track_type == TrackType::Group {
+            let before: Vec<_> = self.tracks.iter().map(|track| track.id.clone()).collect();
+            let target_index = target_index.clamp(0, self.tracks.len());
+            let member_indices: Vec<_> = self
+                .tracks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, track)| {
+                    (track.id == track_id || track.parent_group_id.as_deref() == Some(track_id))
+                        .then_some(index)
+                })
+                .collect();
+            let removed_before_target = member_indices
+                .iter()
+                .filter(|index| **index < target_index)
+                .count();
+            let mut block = Vec::with_capacity(member_indices.len());
+            let mut remaining = Vec::with_capacity(self.tracks.len() - member_indices.len());
+            for track in std::mem::take(&mut self.tracks) {
+                let belongs =
+                    track.id == track_id || track.parent_group_id.as_deref() == Some(track_id);
+                if belongs {
+                    block.push(track);
+                } else {
+                    remaining.push(track);
+                }
+            }
+            self.tracks = remaining;
+            let insert_index = target_index
+                .saturating_sub(removed_before_target)
+                .min(self.tracks.len());
+            self.tracks.splice(insert_index..insert_index, block);
+            self.clear_track_drag();
+            return before
+                != self
+                    .tracks
+                    .iter()
+                    .map(|track| track.id.clone())
+                    .collect::<Vec<_>>();
+        }
         let target_index = target_index.clamp(0, self.tracks.len());
         let insert_index = if origin_index < target_index {
             target_index.saturating_sub(1)
@@ -337,6 +384,8 @@ impl TimelineState {
             id: id.clone(),
             name: options.name,
             track_type,
+            parent_group_id: None,
+            group_collapsed: false,
             color: options.color,
             volume: options.volume.clamp(0.0, 1.0),
             volume_effective: options.volume.clamp(0.0, 1.0),
@@ -369,6 +418,71 @@ impl TimelineState {
             soundfont_quality: SoundfontRenderQuality::default(),
         });
         id
+    }
+
+    pub fn assign_track_to_group(&mut self, track_id: &str, group_id: &str) -> bool {
+        if track_id == group_id {
+            return false;
+        }
+        let Some(group_index) = self
+            .tracks
+            .iter()
+            .position(|track| track.id == group_id && track.track_type == TrackType::Group)
+        else {
+            return false;
+        };
+        let Some(track_index) = self.tracks.iter().position(|track| track.id == track_id) else {
+            return false;
+        };
+        if self.tracks[track_index].track_type == TrackType::Group {
+            return false;
+        }
+
+        let already_grouped = self.tracks[track_index].parent_group_id.as_deref() == Some(group_id);
+        let mut track = self.tracks.remove(track_index);
+        track.parent_group_id = Some(group_id.to_string());
+
+        let group_index = if track_index < group_index {
+            group_index.saturating_sub(1)
+        } else {
+            group_index
+        };
+        let mut insert_index = group_index + 1;
+        while insert_index < self.tracks.len()
+            && self.tracks[insert_index].parent_group_id.as_deref() == Some(group_id)
+        {
+            insert_index += 1;
+        }
+        self.tracks.insert(insert_index, track);
+        self.clear_track_drag();
+        !already_grouped || track_index != insert_index
+    }
+
+    pub fn remove_track_from_group(&mut self, track_id: &str) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) else {
+            return false;
+        };
+        track.parent_group_id.take().is_some()
+    }
+
+    pub fn toggle_group_collapsed(&mut self, group_id: &str) -> Option<bool> {
+        let group_index = self
+            .tracks
+            .iter()
+            .position(|track| track.id == group_id && track.track_type == TrackType::Group)?;
+        let collapsed = !self.tracks[group_index].group_collapsed;
+        self.tracks[group_index].group_collapsed = collapsed;
+        if collapsed {
+            let selected_child_is_hidden = self.selected_range_track_ids().iter().any(|selected| {
+                self.tracks.iter().any(|track| {
+                    track.id == *selected && track.parent_group_id.as_deref() == Some(group_id)
+                })
+            });
+            if selected_child_is_hidden {
+                self.select_track(group_id);
+            }
+        }
+        Some(collapsed)
     }
 
     /// Mark/unmark a track's instrument as the built-in Soundfont Player.
@@ -464,13 +578,38 @@ impl TimelineState {
 
     pub fn delete_track(&mut self, track_id: &str) {
         if let Some(index) = self.tracks.iter().position(|track| track.id == track_id) {
+            let deleting_group = self.tracks[index].track_type == TrackType::Group;
             self.tracks.remove(index);
+            if deleting_group {
+                for track in &mut self.tracks {
+                    if track.parent_group_id.as_deref() == Some(track_id) {
+                        track.parent_group_id = None;
+                    }
+                }
+            }
             self.track_view_layout.remove_track(track_id);
+            self.selection
+                .selected_track_ids
+                .retain(|selected| selected != track_id);
             if self.selection.selected_track_id.as_deref() == Some(track_id) {
                 self.selection.selected_track_id = self
-                    .tracks
-                    .get(index.saturating_sub(1))
-                    .map(|t| t.id.clone());
+                    .selection
+                    .selected_track_ids
+                    .last()
+                    .cloned()
+                    .or_else(|| {
+                        self.tracks
+                            .get(index.saturating_sub(1))
+                            .map(|t| t.id.clone())
+                    });
+                if self.selection.selected_track_ids.is_empty() {
+                    if let Some(primary) = self.selection.selected_track_id.clone() {
+                        self.selection.selected_track_ids.push(primary);
+                    }
+                }
+            }
+            if self.selection.track_selection_anchor_id.as_deref() == Some(track_id) {
+                self.selection.track_selection_anchor_id = self.selection.selected_track_id.clone();
             }
             self.selection.selected_clip_ids.clear();
         }

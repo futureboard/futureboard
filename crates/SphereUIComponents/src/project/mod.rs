@@ -418,6 +418,10 @@ pub struct ProjectTrack {
     pub id: String,
     pub name: String,
     pub track_type: ProjectTrackType,
+    /// Arrangement group membership (v30+). Independent from audio routing.
+    pub parent_group_id: Option<String>,
+    /// Arrangement folder collapse state (v31+).
+    pub group_collapsed: bool,
     /// RGBA hex string e.g. "#56C7C9". Chosen to be human-readable in the file.
     pub color_hex: String,
     pub volume_norm: f32,
@@ -436,6 +440,9 @@ pub struct ProjectTrack {
     /// instrument rather than an insert, so it has no `ProjectInsert` to carry
     /// its settings.
     pub soundfont: Option<ProjectSoundfontPlayer>,
+    /// Whether the persisted Track Volume automation lane drives the effective
+    /// fader value (v32+). Older projects default to enabled.
+    pub volume_automation_read: bool,
 }
 
 /// Persisted state of a track's built-in Soundfont Player.
@@ -835,6 +842,7 @@ impl From<&TimelineState> for FutureboardProject {
                     TlTrackType::Instrument => ProjectTrackType::Instrument,
                     TlTrackType::Bus => ProjectTrackType::Bus,
                     TlTrackType::Return => ProjectTrackType::Return,
+                    TlTrackType::Group => ProjectTrackType::Group,
                     TlTrackType::Master => ProjectTrackType::Master,
                 };
                 let clips = t
@@ -979,6 +987,8 @@ impl From<&TimelineState> for FutureboardProject {
                     id: t.id.clone(),
                     name: t.name.clone(),
                     track_type,
+                    parent_group_id: t.parent_group_id.clone(),
+                    group_collapsed: t.group_collapsed,
                     color_hex: rgba_to_hex(t.color),
                     volume_norm: t.volume,
                     pan: t.pan,
@@ -1028,6 +1038,7 @@ impl From<&TimelineState> for FutureboardProject {
                         envelope: t.soundfont_envelope,
                         quality: t.soundfont_quality,
                     }),
+                    volume_automation_read: t.volume_automation_read,
                 }
             })
             .collect();
@@ -1339,9 +1350,8 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 ProjectTrackType::Instrument => TlTrackType::Instrument,
                 ProjectTrackType::Bus => TlTrackType::Bus,
                 ProjectTrackType::Return => TlTrackType::Return,
+                ProjectTrackType::Group => TlTrackType::Group,
                 ProjectTrackType::Master => TlTrackType::Master,
-                // Group has no timeline equivalent yet — treat as a bus.
-                ProjectTrackType::Group => TlTrackType::Bus,
             };
             let clips = pt
                 .clips
@@ -1526,13 +1536,15 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 id: pt.id.clone(),
                 name: pt.name.clone(),
                 track_type,
+                parent_group_id: pt.parent_group_id.clone(),
+                group_collapsed: pt.group_collapsed,
                 color: hex_to_rgba(&pt.color_hex),
                 volume: pt.volume_norm,
                 // Effective volume is derived (recomputed from automation at the
                 // playhead after load); seed it from the persisted base so the
                 // first frame before any recompute shows the saved value.
                 volume_effective: pt.volume_norm,
-                volume_automation_read: true,
+                volume_automation_read: pt.volume_automation_read,
                 pan: pt.pan,
                 muted: pt.muted,
                 solo: pt.solo,
@@ -1589,6 +1601,22 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             }
         })
         .collect();
+
+    let valid_group_ids: std::collections::HashSet<String> = tl
+        .tracks
+        .iter()
+        .filter(|track| track.track_type == TlTrackType::Group)
+        .map(|track| track.id.clone())
+        .collect();
+    for track in &mut tl.tracks {
+        if track
+            .parent_group_id
+            .as_ref()
+            .is_some_and(|group_id| !valid_group_ids.contains(group_id))
+        {
+            track.parent_group_id = None;
+        }
+    }
 
     tl.track_view_layout.clear();
     tl.track_height_resize = None;
@@ -1849,6 +1877,110 @@ mod audio_routing_persistence_tests {
                 channel: 1,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod group_track_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
+    };
+
+    fn add_track(state: &mut TimelineState, track_type: TrackType, name: &str) -> String {
+        state.create_track(CreateTrackOptions {
+            track_type,
+            name: name.to_string(),
+            color: crate::theme::Colors::accent_primary(),
+            volume: crate::components::timeline::timeline_state::volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    #[test]
+    fn group_membership_survives_binary_roundtrip() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let group_id = add_track(&mut state, TrackType::Group, "Drums");
+        let child_id = add_track(&mut state, TrackType::Audio, "Kick");
+        assert!(state.assign_track_to_group(&child_id, &group_id));
+        assert_eq!(state.toggle_group_collapsed(&group_id), Some(true));
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        assert_eq!(
+            restored
+                .find_track(&child_id)
+                .unwrap()
+                .parent_group_id
+                .as_deref(),
+            Some(group_id.as_str())
+        );
+        assert_eq!(
+            restored.find_track(&group_id).unwrap().track_type,
+            TrackType::Group
+        );
+        assert!(restored.find_track(&group_id).unwrap().group_collapsed);
+        assert!(restored.remove_track_from_group(&child_id));
+        assert!(restored
+            .find_track(&child_id)
+            .unwrap()
+            .parent_group_id
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod inspector_property_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{StretchMode, TimelineState};
+
+    #[test]
+    fn pan_and_audio_inspector_properties_survive_project_roundtrip() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_audio_track();
+        state.set_track_pan(&track_id, -0.42);
+        assert!(state.set_track_volume_automation_read(&track_id, false));
+        let clip_id = state.insert_audio_clip_with_duration(
+            track_id.clone(),
+            "C:/Audio/source.wav".to_string(),
+            "Source".to_string(),
+            2.5,
+            8.0,
+            Some(4.0),
+        );
+        assert!(state.set_clip_gain(&clip_id, 0.63));
+        assert!(state.set_clip_muted(&clip_id, true));
+        let mut stretch = state.clip_stretch(&clip_id).cloned().expect("stretch");
+        stretch.mode = StretchMode::Manual;
+        stretch.pitch_shift_semitones = 3.25;
+        stretch.transient_sensitivity = 0.7;
+        stretch.fade_in_ms = 125.0;
+        stretch.fade_out_ms = 250.0;
+        stretch.gain_db = -1.5;
+        stretch.pan = 0.2;
+        assert!(state.set_clip_stretch(&clip_id, stretch.clone()));
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let track = restored.find_track(&track_id).expect("track");
+        assert!((track.pan - -0.42).abs() < 1.0e-6);
+        assert!(!track.volume_automation_read);
+        let (_, clip) = restored.find_clip(&clip_id).expect("clip");
+        assert!((clip.start_beat - 2.5).abs() < 1.0e-6);
+        assert!((clip.duration_beats - 8.0).abs() < 1.0e-6);
+        assert!((clip.gain - 0.63).abs() < 1.0e-6);
+        assert!(clip.muted);
+        assert_eq!(clip.stretch, stretch);
     }
 }
 

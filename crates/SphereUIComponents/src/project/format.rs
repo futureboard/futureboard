@@ -58,7 +58,9 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v28 soundfonts load with the bypassed envelope and Standard quality, which is
 /// exactly the signal path they had; an unknown quality key from a newer file
 /// degrades to Standard rather than failing the load.
-pub const PROJECT_VERSION: u32 = 29;
+/// v30 adds arrangement group membership; v31 persists folder collapse state;
+/// v32 persists each track's volume-automation read/bypass state.
+pub const PROJECT_VERSION: u32 = 32;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -751,6 +753,8 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_str(&t.id);
     w.write_str(&t.name);
     encode_track_type(w, t.track_type);
+    w.write_opt_str(&t.parent_group_id); // v30
+    w.write_bool(t.group_collapsed); // v31
     w.write_str(&t.color_hex);
     w.write_f32(t.volume_norm);
     w.write_f32(t.pan);
@@ -792,6 +796,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     }
     w.write_opt_f32(&t.row_height_px);
     encode_soundfont_player(w, t.soundfont.as_ref()); // v28
+    w.write_bool(t.volume_automation_read); // v32
 }
 
 /// v28: built-in Soundfont Player instrument state. A leading flag keeps the
@@ -1671,6 +1676,12 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     let id = r.read_str()?;
     let name = r.read_str()?;
     let track_type = decode_track_type(r)?;
+    let parent_group_id = if version >= 30 {
+        r.read_opt_str()?
+    } else {
+        None
+    };
+    let group_collapsed = if version >= 31 { r.read_bool()? } else { false };
     let color_hex = r.read_str()?;
     let volume_norm = r.read_f32()?;
     let pan = r.read_f32()?;
@@ -1753,11 +1764,14 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     } else {
         None
     };
+    let volume_automation_read = if version >= 32 { r.read_bool()? } else { true };
 
     Ok(ProjectTrack {
         id,
         name,
         track_type,
+        parent_group_id,
+        group_collapsed,
         color_hex,
         volume_norm,
         pan,
@@ -1771,6 +1785,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         clips,
         row_height_px,
         soundfont,
+        volume_automation_read,
     })
 }
 
@@ -2954,6 +2969,8 @@ mod tests {
             id: "t1".to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
             color_hex: "#56C7C9".to_string(),
             volume_norm: 1.0,
             pan: 0.0,
@@ -2967,6 +2984,7 @@ mod tests {
             clips: vec![clip],
             row_height_px: None,
             soundfont: None,
+            volume_automation_read: true,
         }
     }
 

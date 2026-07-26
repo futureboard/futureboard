@@ -123,7 +123,9 @@ pub fn track_list(
         // VSTi multi-out child channels are mixer-only — never render them as
         // arrangement rows (no header, no lane, no resize handle). They have a
         // zero-height entry in the row layout, so spacers/indices stay aligned.
-        if is_vsti_output_child_track_id(&track.id) {
+        if is_vsti_output_child_track_id(&track.id)
+            || state.is_track_hidden_by_collapsed_group(track)
+        {
             continue;
         }
         let index = row_layout

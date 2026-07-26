@@ -109,6 +109,12 @@ impl TrackRowLayout {
         let scroll_y = state.viewport.scroll_y;
         let mut y = 0.0_f32;
         let mut rows = Vec::with_capacity(state.tracks.len());
+        let collapsed_group_ids: std::collections::HashSet<&str> = state
+            .tracks
+            .iter()
+            .filter(|track| track.track_type == TrackType::Group && track.group_collapsed)
+            .map(|track| track.id.as_str())
+            .collect();
         for (index, track) in state.tracks.iter().enumerate() {
             // VSTi multi-out child channels are mixer-only. They live in `state.tracks`
             // so the engine snapshot and
@@ -117,14 +123,19 @@ impl TrackRowLayout {
             // `row.index == state.tracks position` invariant the timeline relies
             // on stays intact) but collapse them to zero height: they emit no lane,
             // no clip, no header, and never match `track_at_content_y`.
-            let (height, automation_height) = if is_vsti_output_child_track_id(&track.id) {
-                (0.0, 0.0)
-            } else {
-                (
-                    state.track_row_height(track),
-                    state.track_automation_height(track),
-                )
-            };
+            let hidden_by_group = track
+                .parent_group_id
+                .as_deref()
+                .is_some_and(|group_id| collapsed_group_ids.contains(group_id));
+            let (height, automation_height) =
+                if is_vsti_output_child_track_id(&track.id) || hidden_by_group {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        state.track_row_height(track),
+                        state.track_automation_height(track),
+                    )
+                };
             rows.push(TrackRowLayoutEntry {
                 track_id: track.id.clone(),
                 index,
@@ -214,6 +225,16 @@ pub enum TrackHeightPreset {
 }
 
 impl TimelineState {
+    pub fn is_track_hidden_by_collapsed_group(&self, track: &TrackState) -> bool {
+        track.parent_group_id.as_deref().is_some_and(|group_id| {
+            self.tracks.iter().any(|group| {
+                group.id == group_id
+                    && group.track_type == TrackType::Group
+                    && group.group_collapsed
+            })
+        })
+    }
+
     pub fn track_row_height(&self, track: &TrackState) -> f32 {
         let raw = self
             .track_view_layout
@@ -556,6 +577,7 @@ mod tests {
             TrackType::Instrument,
             TrackType::Bus,
             TrackType::Return,
+            TrackType::Group,
             TrackType::Master,
         ] {
             assert_eq!(clamp_track_row_height(ty, 10.0), MIN_TRACK_ROW_HEIGHT);
@@ -595,5 +617,45 @@ mod tests {
         let anchor = state.tracks[0].id.clone();
         let ids = state.track_height_resize_targets(&anchor, true, false);
         assert_eq!(ids, vec![state.tracks[1].id.clone()]);
+    }
+
+    #[test]
+    fn collapsed_group_hides_children_and_restores_them() {
+        let mut state = sample_state(&[
+            TrackType::Group,
+            TrackType::Audio,
+            TrackType::Audio,
+            TrackType::Midi,
+        ]);
+        let group_id = state.tracks[0].id.clone();
+        let first_child_id = state.tracks[1].id.clone();
+        let second_child_id = state.tracks[2].id.clone();
+        assert!(state.assign_track_to_group(&first_child_id, &group_id));
+        assert!(state.assign_track_to_group(&second_child_id, &group_id));
+
+        let expanded_height = state.total_track_rows_height();
+        state.select_track(&first_child_id);
+        assert_eq!(state.toggle_group_collapsed(&group_id), Some(true));
+        let collapsed = state.track_row_layout();
+
+        assert_eq!(
+            collapsed.row_for_track(&first_child_id).unwrap().height,
+            0.0
+        );
+        assert_eq!(
+            collapsed.row_for_track(&second_child_id).unwrap().height,
+            0.0
+        );
+        assert_eq!(
+            collapsed.total_height,
+            expanded_height - DEFAULT_TRACK_HEIGHT * 2.0
+        );
+        assert_eq!(
+            state.selection.selected_track_id.as_deref(),
+            Some(group_id.as_str())
+        );
+
+        assert_eq!(state.toggle_group_collapsed(&group_id), Some(false));
+        assert_eq!(state.total_track_rows_height(), expanded_height);
     }
 }

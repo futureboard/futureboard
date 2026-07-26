@@ -52,6 +52,13 @@ impl Render for Timeline {
             this.state.select_track(track_id);
             cx.notify();
         });
+        let on_select_track_header = cx.listener(
+            |this, (track_id, additive, range): &(String, bool, bool), _window, cx| {
+                this.state
+                    .select_track_with_modifiers(track_id, *additive, *range);
+                cx.notify();
+            },
+        );
 
         let on_select_clip = cx.listener(
             |this, (clip_id, additive, clone_drag): &(String, bool, bool), _window, cx| {
@@ -200,10 +207,7 @@ impl Render for Timeline {
         });
 
         let on_delete_track = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.tracks.retain(|t| t.id != *track_id);
-            if this.state.selection.selected_track_id.as_ref() == Some(track_id) {
-                this.state.selection.selected_track_id = None;
-            }
+            this.state.delete_track(track_id);
             this.mark_project_changed(cx);
             cx.notify();
         });
@@ -257,12 +261,55 @@ impl Render for Timeline {
         });
 
         let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
-            this.state.set_track_pan(track_id, *pan);
-            this.mark_project_changed(cx);
-            if let Some(cb) = this.on_track_param_change.as_ref() {
-                cb(track_id.clone(), "pan".to_string(), *pan);
+            let Some(prev) = this.state.find_track(track_id).map(|track| track.pan) else {
+                return;
+            };
+            let next = pan.clamp(-1.0, 1.0);
+            if (prev - next).abs() <= 1.0e-5 {
+                return;
             }
+            this.run_edit_command(
+                EditCommand::SetTrackPan {
+                    track_id: track_id.clone(),
+                    prev,
+                    next,
+                },
+                cx,
+            );
+            if let Some(cb) = this.on_track_param_change.as_ref() {
+                cb(track_id.clone(), "pan".to_string(), next);
+            }
+        });
+        let on_pan_drag_start = cx.listener(|this, track_id: &String, _window, cx| {
+            this.state.begin_track_pan_preview(track_id);
             cx.notify();
+        });
+        let on_pan_drag_preview =
+            cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
+                if this.state.set_track_pan_preview(track_id, *pan) {
+                    if let Some(cb) = this.on_track_param_change.as_ref() {
+                        cb(track_id.clone(), "pan".to_string(), *pan);
+                    }
+                    cx.notify();
+                }
+            });
+        let on_pan_drag_commit = cx.listener(|this, track_id: &String, _window, cx| {
+            if let Some((prev, next)) = this.state.commit_track_pan_preview(track_id) {
+                if (prev - next).abs() > 1.0e-5 {
+                    this.record_executed_command(
+                        EditCommand::SetTrackPan {
+                            track_id: track_id.clone(),
+                            prev,
+                            next,
+                        },
+                        cx,
+                    );
+                }
+                if let Some(cb) = this.on_track_param_change.as_ref() {
+                    cb(track_id.clone(), "pan".to_string(), next);
+                }
+                cx.notify();
+            }
         });
 
         let on_add_clip = cx.listener(
@@ -320,7 +367,10 @@ impl Render for Timeline {
                             });
                         }
                     }
-                    Some(TrackType::Bus | TrackType::Return | TrackType::Master) | None => {}
+                    Some(
+                        TrackType::Bus | TrackType::Return | TrackType::Group | TrackType::Master,
+                    )
+                    | None => {}
                 }
                 cx.notify();
             },
@@ -759,6 +809,15 @@ impl Render for Timeline {
         let on_pan_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_pan_change);
+        let on_pan_drag_start: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_pan_drag_start);
+        let on_pan_drag_preview: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_pan_drag_preview);
+        let on_pan_drag_commit: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_pan_drag_commit);
         let on_add_clip: std::sync::Arc<
             dyn Fn(&(String, f32, u32, bool), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_add_clip);
@@ -1155,8 +1214,35 @@ impl Render for Timeline {
         let on_ts_toggle_collapsed: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
             std::sync::Arc::new(on_ts_toggle_collapsed);
 
+        let on_assign_to_group: std::sync::Arc<
+            dyn Fn(&(String, String), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(track_id, group_id), _window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.state.assign_track_to_group(track_id, group_id) {
+                        this.mark_project_changed(cx);
+                        cx.notify();
+                    }
+                });
+            })
+        };
+        let on_toggle_group_collapsed: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |group_id, _window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.state.toggle_group_collapsed(group_id).is_some() {
+                        this.mark_project_changed(cx);
+                        cx.notify();
+                    }
+                });
+            })
+        };
+
         let header_callbacks = crate::components::timeline::track_header::TrackHeaderCallbacks {
-            on_select_track: on_select_track.clone(),
+            on_select_track: std::sync::Arc::new(on_select_track_header),
             on_toggle_mute: on_toggle_mute.clone(),
             on_toggle_solo: on_toggle_solo.clone(),
             on_toggle_arm: on_toggle_arm.clone(),
@@ -1168,6 +1254,11 @@ impl Render for Timeline {
             on_volume_drag_preview: on_volume_drag_preview.clone(),
             on_volume_drag_commit: on_volume_drag_commit.clone(),
             on_pan_change: on_pan_change.clone(),
+            on_pan_drag_start: on_pan_drag_start.clone(),
+            on_pan_drag_preview: on_pan_drag_preview.clone(),
+            on_pan_drag_commit: on_pan_drag_commit.clone(),
+            on_assign_to_group,
+            on_toggle_group_collapsed,
             on_context_menu: on_track_context_menu.clone(),
         };
 
@@ -1555,11 +1646,49 @@ impl Render for Timeline {
         );
 
         let on_track_dropped = cx.listener(|this, drag: &TrackDragItem, _window, cx| {
+            let dragged_parent_group = this
+                .state
+                .find_track(&drag.track_id)
+                .and_then(|track| track.parent_group_id.clone());
+            let hovered_track = this
+                .state
+                .track_index_at_y(this.state.drag_current_y)
+                .and_then(|index| this.state.tracks.get(index))
+                .map(|track| (track.id.clone(), track.parent_group_id.clone()));
+            let hovered_group = (!drag.is_group)
+                .then(|| {
+                    hovered_track.as_ref().and_then(|(hovered_id, _)| {
+                        this.state
+                            .find_track(hovered_id)
+                            .filter(|track| {
+                                track.track_type == TrackType::Group && track.id != drag.track_id
+                            })
+                            .map(|track| track.id.clone())
+                    })
+                })
+                .flatten();
+            if let Some(group_id) = hovered_group {
+                if this.state.assign_track_to_group(&drag.track_id, &group_id) {
+                    this.mark_project_changed(cx);
+                    cx.notify();
+                }
+                return;
+            }
             let target_index = this
                 .state
                 .drag_target_index
                 .unwrap_or(drag.origin_index)
                 .clamp(0, this.state.tracks.len());
+            let remains_inside_group = dragged_parent_group.as_ref().is_some_and(|group_id| {
+                hovered_track
+                    .as_ref()
+                    .is_some_and(|(hovered_id, parent_id)| {
+                        hovered_id == group_id || parent_id.as_ref() == Some(group_id)
+                    })
+            });
+            if !remains_inside_group {
+                this.state.remove_track_from_group(&drag.track_id);
+            }
             this.state.reorder_track(&drag.track_id, target_index);
             this.mark_project_changed(cx);
             cx.notify();

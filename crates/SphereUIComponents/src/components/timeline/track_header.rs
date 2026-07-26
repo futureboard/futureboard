@@ -6,28 +6,33 @@ use gpui::{
 
 use crate::assets;
 use crate::components::fader::{db_value_pill, horizontal_fader_with_drag_callbacks};
-use crate::components::knob::{format_pan_label, KnobDrag};
+use crate::components::knob::format_pan_label;
+use crate::components::spin_drag::SpinDrag;
 use crate::components::timeline::timeline_state::{
-    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
-    TRACK_HEADER_CONTROLS_MIN_HEIGHT,
+    is_vsti_output_child_track_id, volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState,
+    TrackType, HEADER_WIDTH, TRACK_HEADER_CONTROLS_MIN_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
 
 type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
+type TrackSelectCallback =
+    std::sync::Arc<dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static>;
 type VolumeCallback =
     std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 type VolumeCommitCallback =
     std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
 type TrackContextCallback =
     std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+type TrackGroupCallback =
+    std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 /// Bundle of callbacks the TrackHeader can fire. Keeping them in one struct
 /// keeps the function signature manageable and lets new actions land without
 /// re-threading every call site.
 #[derive(Clone)]
 pub struct TrackHeaderCallbacks {
-    pub on_select_track: TrackCallback,
+    pub on_select_track: TrackSelectCallback,
     pub on_toggle_mute: TrackCallback,
     pub on_toggle_solo: TrackCallback,
     pub on_toggle_arm: TrackCallback,
@@ -39,7 +44,13 @@ pub struct TrackHeaderCallbacks {
     pub on_volume_drag_start: VolumeCallback,
     pub on_volume_drag_preview: VolumeCallback,
     pub on_volume_drag_commit: VolumeCommitCallback,
+    /// Discrete pan changes such as double-click reset.
     pub on_pan_change: VolumeCallback,
+    pub on_pan_drag_start: TrackCallback,
+    pub on_pan_drag_preview: VolumeCallback,
+    pub on_pan_drag_commit: VolumeCommitCallback,
+    pub on_assign_to_group: TrackGroupCallback,
+    pub on_toggle_group_collapsed: TrackCallback,
     pub on_context_menu: Option<TrackContextCallback>,
 }
 
@@ -86,6 +97,7 @@ fn track_type_color(kind: TrackType) -> gpui::Rgba {
         TrackType::Midi => Colors::track_midi(),
         TrackType::Bus => Colors::track_bus(),
         TrackType::Return => Colors::track_return(),
+        TrackType::Group => Colors::accent_primary(),
         TrackType::Master => Colors::track_master(),
     }
 }
@@ -97,6 +109,7 @@ fn type_badge(kind: TrackType) -> impl IntoElement {
         TrackType::Instrument => "INS",
         TrackType::Bus => "BUS",
         TrackType::Return => "RTN",
+        TrackType::Group => "GRP",
         TrackType::Master => "MAS",
     };
     let color = track_type_color(kind);
@@ -169,8 +182,28 @@ pub fn track_header(
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackHeader");
     let track_id = track.id.clone();
-    let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
+    let is_selected = state.is_track_selected(&track.id);
     let is_automation = track.lane_mode == TrackLaneMode::Automation;
+    let is_group = track.track_type == TrackType::Group;
+    let is_group_child = track.parent_group_id.is_some();
+    let is_first_group_child = track.parent_group_id.as_deref().is_some_and(|group_id| {
+        state
+            .tracks
+            .get(..index)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find(|candidate| !is_vsti_output_child_track_id(&candidate.id))
+            .is_none_or(|previous| previous.parent_group_id.as_deref() != Some(group_id))
+    });
+    let is_last_group_child = track.parent_group_id.as_deref().is_some_and(|group_id| {
+        state
+            .tracks
+            .iter()
+            .skip(index + 1)
+            .find(|candidate| !is_vsti_output_child_track_id(&candidate.id))
+            .is_none_or(|next| next.parent_group_id.as_deref() != Some(group_id))
+    });
     // Adaptive header: the volume/pan/meter/dB control row only fits at the
     // default row height or taller. Below that we show the compact single-row
     // header so controls never overlap, clip, or float outside the row.
@@ -191,10 +224,22 @@ pub fn track_header(
     } else {
         Colors::surface_panel()
     };
+    let group_frame_bg = if is_dragging || is_selected || is_automation {
+        header_bg
+    } else {
+        Colors::with_alpha(Colors::surface_canvas(), 0.22)
+    };
     // The parent header stays clean: it never names a single automation target.
     // When the automation section is expanded it shows only a compact lane count
     // indicator; the lane names live on the sub-lane headers below the track.
-    let sub_label = if is_automation {
+    let sub_label = if is_group {
+        let child_count = state
+            .tracks
+            .iter()
+            .filter(|child| child.parent_group_id.as_deref() == Some(track.id.as_str()))
+            .count();
+        format!("{child_count} grouped tracks")
+    } else if is_automation {
         let lane_count = track.automation_lanes.iter().filter(|l| l.visible).count();
         if lane_count == 1 {
             "1 automation lane".to_string()
@@ -216,8 +261,16 @@ pub fn track_header(
     let select_id = track_id.clone();
     let on_select_root = {
         let cb = callbacks.on_select_track.clone();
-        move |_: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
-            cb(&select_id, window, cx);
+        move |event: &gpui::MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(
+                &(
+                    select_id.clone(),
+                    event.modifiers.control || event.modifiers.platform,
+                    event.modifiers.shift,
+                ),
+                window,
+                cx,
+            );
         }
     };
 
@@ -307,13 +360,19 @@ pub fn track_header(
     };
     let pan_id = track_id.clone();
     let pan_drag_key = format!("track-pan-{}", track.id);
-    let pan_drag_anchor = std::sync::Arc::new(std::sync::Mutex::new(None::<f32>));
     let on_pan_change = callbacks.on_pan_change.clone();
+    let on_pan_drag_start = callbacks.on_pan_drag_start.clone();
+    let on_pan_drag_preview = callbacks.on_pan_drag_preview.clone();
+    let on_pan_drag_commit = callbacks.on_pan_drag_commit.clone();
     let context_id = track_id.clone();
     let on_context = callbacks.on_context_menu.clone();
     let drag_track_id = track_id.clone();
     let drag_name = track.name.clone();
     let drag_color = track.color;
+    let drop_group_id = track_id.clone();
+    let assign_to_group = callbacks.on_assign_to_group.clone();
+    let collapse_group_id = track_id.clone();
+    let toggle_group_collapsed = callbacks.on_toggle_group_collapsed.clone();
 
     div()
         .flex()
@@ -323,15 +382,37 @@ pub fn track_header(
         // Clip to the row so a mid-resize frame can never paint controls
         // outside the row bounds; the adaptive layout keeps content within.
         .overflow_hidden()
-        .bg(header_bg)
+        .relative()
+        .bg(if is_group_child {
+            Colors::surface_panel()
+        } else {
+            header_bg
+        })
         .opacity(if is_dragging { 0.62 } else { 1.0 })
         // Stronger right border so the header column reads as a distinct
         // pane rather than blending into the lane area. The inner accent
         // strip on the right keeps the overall feel subtle.
         .border_r(px(1.0))
-        .border_b(px(1.0))
         .border_color(Colors::border_strong())
+        .when(!is_group_child, |header| header.border_b(px(1.0)))
         .id(("track-header", id_num))
+        .when(is_group, |header| {
+            let group_id_for_can_drop = drop_group_id.clone();
+            header
+                .can_drop(move |dragged, _window, _cx| {
+                    dragged.downcast_ref::<TrackDragItem>().is_some_and(|drag| {
+                        !drag.is_group && drag.track_id != group_id_for_can_drop
+                    })
+                })
+                .drag_over::<TrackDragItem>(|style, _drag, _window, _cx| {
+                    style
+                        .bg(Colors::surface_selected())
+                        .border_color(Colors::accent_primary())
+                })
+                .on_drop::<TrackDragItem>(move |drag, window, cx| {
+                    assign_to_group(&(drag.track_id.clone(), drop_group_id.clone()), window, cx);
+                })
+        })
         .on_mouse_down(gpui::MouseButton::Left, on_select_root)
         .when_some(on_context, |this, cb| {
             this.on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
@@ -340,8 +421,43 @@ pub fn track_header(
                 cb(&(context_id.clone(), x, y), window, cx);
             })
         })
+        // Child rows share one continuous inset surface. The Folder header
+        // itself keeps the standard full-row Track Header geometry.
+        .when(is_group_child, |header| {
+            header.child(
+                div()
+                    .absolute()
+                    .left(px(6.0))
+                    .right(px(6.0))
+                    .top(px(if is_first_group_child { 4.0 } else { 0.0 }))
+                    .bottom(px(if is_last_group_child { 4.0 } else { 0.0 }))
+                    .bg(group_frame_bg)
+                    .border_l(px(1.0))
+                    .border_r(px(1.0))
+                    .border_color(Colors::border_strong())
+                    .when(is_first_group_child, |frame| {
+                        frame.border_t(px(1.0)).rounded_t_md()
+                    })
+                    .when(is_last_group_child, |frame| {
+                        frame.border_b(px(1.0)).rounded_b_md()
+                    }),
+            )
+        })
         // Left accent strip — same column as the track lane stripe
-        .child(div().w(px(3.0)).h_full().bg(track.color))
+        .when(!is_group_child, |header| {
+            header.child(div().w(px(3.0)).h_full().bg(track.color))
+        })
+        .when(is_group_child, |header| {
+            header.child(
+                div()
+                    .absolute()
+                    .left(px(7.0))
+                    .top(px(if is_first_group_child { 5.0 } else { 0.0 }))
+                    .bottom(px(if is_last_group_child { 5.0 } else { 0.0 }))
+                    .w(px(3.0))
+                    .bg(track.color),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -351,7 +467,12 @@ pub fn track_header(
                 .when(!show_controls, |c| c.justify_center())
                 .flex_1()
                 .min_w_0()
-                .px(px(8.0))
+                .pl(px(if is_group_child {
+                    30.0
+                } else {
+                    8.0
+                }))
+                .pr(px(if is_group_child { 14.0 } else { 8.0 }))
                 .py(px(7.0))
                 // Row 1: name + type badge + per-track buttons
                 .child(
@@ -367,36 +488,39 @@ pub fn track_header(
                                 .flex_row()
                                 .items_center()
                                 .gap(px(6.0))
+                                .id(("track-drag-zone", id_num))
+                                .cursor(gpui::CursorStyle::PointingHand)
+                                .on_drag(
+                                    TrackDragItem {
+                                        track_id: drag_track_id,
+                                        origin_index: index,
+                                        name: drag_name.clone(),
+                                        color: drag_color,
+                                        is_group,
+                                    },
+                                    move |drag, _offset, _window, cx| {
+                                        cx.new(|_| TrackDragPreview {
+                                            name: drag.name.clone(),
+                                            color: drag.color,
+                                        })
+                                    },
+                                )
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .w(px(15.0))
+                                        .w(px(22.0))
                                         .h(px(30.0))
                                         .rounded_sm()
                                         .id(("track-drag-handle", id_num))
                                         .cursor(gpui::CursorStyle::PointingHand)
                                         .hover(|s| s.bg(Colors::surface_hover()))
-                                        .on_drag(
-                                            TrackDragItem {
-                                                track_id: drag_track_id,
-                                                origin_index: index,
-                                                name: drag_name.clone(),
-                                                color: drag_color,
-                                            },
-                                            move |drag, _offset, _window, cx| {
-                                                cx.new(|_| TrackDragPreview {
-                                                    name: drag.name.clone(),
-                                                    color: drag.color,
-                                                })
-                                            },
-                                        )
                                         .child(
                                             svg()
                                                 .path(assets::ICON_GRIP_VERTICAL_PATH)
-                                                .w(px(9.0))
-                                                .h(px(9.0))
+                                                .w(px(11.0))
+                                                .h(px(11.0))
                                                 .text_color(Colors::text_faint()),
                                         ),
                                 )
@@ -411,6 +535,53 @@ pub fn track_header(
                                                 .flex_row()
                                                 .items_center()
                                                 .gap(px(4.0))
+                                                .when(is_group, |row| {
+                                                    row.child(
+                                                        div()
+                                                            .id(("folder-collapse", id_num))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .w(px(16.0))
+                                                            .h(px(16.0))
+                                                            .rounded_sm()
+                                                            .hover(|style| {
+                                                                style.bg(Colors::surface_hover())
+                                                            })
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                move |_event, window, cx| {
+                                                                    toggle_group_collapsed(
+                                                                        &collapse_group_id,
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            )
+                                                            .occlude()
+                                                            .child(
+                                                                svg()
+                                                                    .path(if track.group_collapsed {
+                                                                        assets::ICON_CHEVRON_RIGHT_PATH
+                                                                    } else {
+                                                                        assets::ICON_CHEVRON_DOWN_PATH
+                                                                    })
+                                                                    .w(px(9.0))
+                                                                    .h(px(9.0))
+                                                                    .text_color(
+                                                                        Colors::text_secondary(),
+                                                                    ),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        svg()
+                                                            .path(assets::ICON_FOLDER_PATH)
+                                                            .w(px(11.0))
+                                                            .h(px(11.0))
+                                                            .text_color(Colors::accent_primary()),
+                                                    )
+                                                })
                                                 .child(
                                                     div()
                                                         .min_w(px(0.0))
@@ -551,10 +722,13 @@ pub fn track_header(
                                     Colors::border_default()
                                 };
                                 let drag_key = pan_drag_key.clone();
-                                let drag_anchor = pan_drag_anchor.clone();
-                                let drag_anchor_move = pan_drag_anchor.clone();
-                                let drag_cb = on_pan_change.clone();
+                                let drag_start_cb = on_pan_drag_start.clone();
+                                let drag_preview_cb = on_pan_drag_preview.clone();
+                                let drag_commit_cb = on_pan_drag_commit.clone();
                                 let drag_track_id = pan_id.clone();
+                                let start_track_id = pan_id.clone();
+                                let commit_track_id = pan_id.clone();
+                                let commit_track_id_out = pan_id.clone();
                                 let reset_cb = on_pan_change.clone();
                                 let reset_track_id = pan_id.clone();
                                 let start_pan = track.pan;
@@ -581,40 +755,53 @@ pub fn track_header(
                                     })
                                     .child(format_pan_label(track.pan))
                                     .on_drag(
-                                        KnobDrag {
-                                            id: drag_key.clone(),
-                                            start_y: 0.0,
-                                            start_value: start_pan,
-                                        },
-                                        move |drag, _offset, _window, cx| {
-                                            *drag_anchor
-                                                .lock()
-                                                .expect("track pan drag mutex poisoned") = None;
+                                        SpinDrag::new(drag_key.clone(), f64::from(start_pan)),
+                                        move |drag, _offset, window, cx| {
+                                            drag.begin();
+                                            drag_start_cb(&start_track_id, window, cx);
                                             cx.new(|_| drag.clone())
                                         },
                                     )
-                                    .on_drag_move::<KnobDrag>(
-                                        move |event: &DragMoveEvent<KnobDrag>, window, cx| {
+                                    .on_drag_move::<SpinDrag>(
+                                        move |event: &DragMoveEvent<SpinDrag>, window, cx| {
                                             let drag = event.drag(cx);
-                                            if drag.id != drag_key {
+                                            if !drag.matches(&drag_key) {
                                                 return;
                                             }
                                             let current_y: f32 = event.event.position.y.into();
-                                            let mut anchor = drag_anchor_move
-                                                .lock()
-                                                .expect("track pan drag mutex poisoned");
-                                            let start_y = *anchor.get_or_insert(current_y);
                                             let sensitivity = if event.event.modifiers.shift {
                                                 0.002
                                             } else {
                                                 2.0 / 150.0
                                             };
-                                            let next = (drag.start_value
-                                                + (start_y - current_y) * sensitivity)
-                                                .clamp(-1.0, 1.0);
-                                            let next = (next * 1000.0).round() / 1000.0;
-                                            drop(anchor);
-                                            drag_cb(&(drag_track_id.clone(), next), window, cx);
+                                            let next = drag.value_at(
+                                                current_y,
+                                                sensitivity,
+                                                -1.0,
+                                                1.0,
+                                                Some(0.001),
+                                            ) as f32;
+                                            drag_preview_cb(
+                                                &(drag_track_id.clone(), next),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )
+                                    .on_mouse_up(
+                                        gpui::MouseButton::Left,
+                                        move |_, window, cx| {
+                                            drag_commit_cb(&commit_track_id, window, cx)
+                                        },
+                                    )
+                                    .on_mouse_up_out(
+                                        gpui::MouseButton::Left,
+                                        move |_, window, cx| {
+                                            on_pan_drag_commit(
+                                                &commit_track_id_out,
+                                                window,
+                                                cx,
+                                            )
                                         },
                                     )
                                     .on_click(move |event, window, cx| {

@@ -10,7 +10,10 @@ use crate::components::text_input::{
 };
 use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 
-use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, StudioLayout, TransportCommand};
+use super::{
+    ContextMenuRequest, ContextMenuTarget, ContextTarget, RecordingUiState, StudioLayout,
+    TransportCommand,
+};
 
 fn tap_tempo_now_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -223,7 +226,13 @@ impl StudioLayout {
     }
 
     pub(super) fn is_recording_active(&self, cx: &mut Context<Self>) -> bool {
-        self.timeline.read(cx).state.transport.recording
+        matches!(
+            self.recording.ui_state,
+            RecordingUiState::Preparing
+                | RecordingUiState::CountingIn { .. }
+                | RecordingUiState::Recording
+                | RecordingUiState::Finalizing
+        ) || self.timeline.read(cx).state.transport.recording
             || self.recording.preview.is_some()
             || self.recording.midi.is_some()
             || self
@@ -265,6 +274,7 @@ impl StudioLayout {
             metronome_enabled,
             follow_playhead,
             auto_scroll_continuous,
+            count_in_bars,
         ) = {
             let timeline = self.timeline.read(cx);
             // The transport always shows the *effective* BPM at the playhead so
@@ -300,6 +310,12 @@ impl StudioLayout {
                 timeline.state.follow_playhead,
                 timeline.state.auto_scroll_mode
                     == components::timeline::timeline_state::AutoScrollMode::Continuous,
+                self.settings
+                    .read(cx)
+                    .current
+                    .recording
+                    .metronome
+                    .count_in_bars,
             )
         };
         let playing = self
@@ -326,6 +342,28 @@ impl StudioLayout {
         let on_follow_toggle = make_command_handler("transport:toggle-follow-playhead");
         let on_follow_mode_toggle = make_command_handler("transport:toggle-autoscroll-mode");
         let on_record = make_command_handler("transport:record");
+        let on_count_in_cycle: components::ChromeActionCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    let current = this
+                        .settings
+                        .read(cx)
+                        .current
+                        .recording
+                        .metronome
+                        .count_in_bars;
+                    let next = (current + 1) % 5;
+                    this.settings.update(cx, |settings, cx| {
+                        settings.update_setting(
+                            move |schema| schema.recording.metronome.count_in_bars = next,
+                            cx,
+                        );
+                    });
+                    cx.notify();
+                });
+            })
+        };
 
         let on_set_bpm: components::BpmChangeCb = {
             let this = cx.entity().clone();
@@ -425,6 +463,7 @@ impl StudioLayout {
         components::TransportChromeState {
             playing,
             recording,
+            count_in_bars,
             loop_enabled,
             metronome_enabled,
             follow_playhead,
@@ -454,6 +493,7 @@ impl StudioLayout {
             on_play_toggle,
             on_stop,
             on_record,
+            on_count_in_cycle,
             on_loop_toggle,
             on_metronome_toggle,
             on_follow_toggle,

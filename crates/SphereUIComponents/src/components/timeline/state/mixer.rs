@@ -255,6 +255,43 @@ impl TimelineState {
         }
     }
 
+    pub fn begin_track_pan_preview(&mut self, track_id: &str) {
+        if self.track_pan_gesture_origin.contains_key(track_id) {
+            return;
+        }
+        if let Some(pan) = self
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.pan)
+        {
+            self.track_pan_gesture_origin
+                .insert(track_id.to_string(), pan);
+        }
+    }
+
+    pub fn set_track_pan_preview(&mut self, track_id: &str, pan: f32) -> bool {
+        let next = pan.clamp(-1.0, 1.0);
+        let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) else {
+            return false;
+        };
+        if (track.pan - next).abs() <= 1.0e-5 {
+            return false;
+        }
+        track.pan = next;
+        true
+    }
+
+    pub fn commit_track_pan_preview(&mut self, track_id: &str) -> Option<(f32, f32)> {
+        let prev = self.track_pan_gesture_origin.remove(track_id)?;
+        let next = self
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.pan)?;
+        Some((prev, next))
+    }
+
     pub fn toggle_track_mute(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.muted = !t.muted;
