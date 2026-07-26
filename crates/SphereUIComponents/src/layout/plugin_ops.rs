@@ -1997,13 +1997,14 @@ impl StudioLayout {
                 // defaults).
                 if let Some(persisted) = slot.vst3_state.as_deref() {
                     crate::components::builtin_plugin_editor::builtin_state_seed(
-                        &slot.id, persisted,
+                        plugin_id, &slot.id, persisted,
                     );
                 }
-                let state_bytes =
-                    crate::components::builtin_plugin_editor::builtin_state_bytes(&slot.id)
-                        .map(std::sync::Arc::new)
-                        .or_else(|| slot.vst3_state.clone());
+                let state_bytes = crate::components::builtin_plugin_editor::builtin_state_bytes(
+                    plugin_id, &slot.id,
+                )
+                .map(std::sync::Arc::new)
+                .or_else(|| slot.vst3_state.clone());
                 instances.push(PluginInstanceDescriptor {
                     instance_key: PluginInstanceKey {
                         track_id: track.id.clone(),
@@ -2054,6 +2055,7 @@ impl StudioLayout {
         // still warming up — the focus path re-installs a live one later.
         let forward_param: Option<BuiltinParamForwarder> =
             self.audio_bridge.engine.clone().map(|engine| {
+                let mirror_plugin_id = plugin_id.to_string();
                 std::sync::Arc::new(
                     move |key: &PluginInstanceKey, index: u32, value: f32| {
                         // UI thread, non-realtime: string alloc + command send.
@@ -2072,6 +2074,7 @@ impl StudioLayout {
                         // the source for selectInstance state, project save,
                         // and host-restore replay.
                         crate::components::builtin_plugin_editor::builtin_state_apply(
+                            &mirror_plugin_id,
                             &key.insert_id,
                             index,
                             value,
@@ -2929,6 +2932,7 @@ impl StudioLayout {
                                     // still alive (e.g. host respawn): restore it.
                                     let state_json =
                                         crate::components::builtin_plugin_editor::builtin_state_bytes(
+                                            &bridge_class_id,
                                             &slot_id,
                                         )
                                         .and_then(|bytes| String::from_utf8(bytes).ok());
@@ -3544,7 +3548,9 @@ impl StudioLayout {
                         return;
                     }
                     if let Some(bytes) =
-                        crate::components::builtin_plugin_editor::builtin_state_bytes(&slot.id)
+                        crate::components::builtin_plugin_editor::builtin_state_bytes(
+                            plugin_id, &slot.id,
+                        )
                     {
                         slot.vst3_state = Some(std::sync::Arc::new(bytes));
                     }
@@ -3758,9 +3764,9 @@ impl StudioLayout {
                     return;
                 }
                 if let Some(blob) = slot.vst3_state.as_deref() {
-                    host::builtin_state_seed(&slot.id, blob);
+                    host::builtin_state_seed(plugin_id, &slot.id, blob);
                 }
-                let values = host::builtin_state_replay(&slot.id);
+                let values = host::builtin_state_replay(plugin_id, &slot.id);
                 if values.is_empty() {
                     return;
                 }

@@ -26,6 +26,7 @@ stem-coreml = ["sphere-audio-processor/stem-coreml"]
 builtin-plugin-editor = [
     "dep:sphere-webview",
     "dep:rodharerist",
+    "dep:equz8",
     "dep:builtin-ui-embed",
 ]
 
@@ -52,9 +53,11 @@ sphere-audio-processor.workspace = true
 sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
 # Built-in plugin editor hosting (feature `builtin-plugin-editor`).
-# `rodharerist` is needed for its embedded editor asset table.
+# Each plugin crate listed here is needed for its embedded editor asset table
+# and its string-id -> wire-index parameter table.
 sphere-webview = { workspace = true, optional = true, features = ["cef-runtime"] }
 rodharerist = { workspace = true, optional = true }
+equz8 = { workspace = true, optional = true }
 builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true

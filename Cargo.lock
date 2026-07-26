@@ -2507,6 +2507,7 @@ version = "0.1.0"
 dependencies = [
  "biquad",
  "builtin_dsp_core",
+ "builtin_ui_embed",
  "serde",
  "serde_json",
 ]
@@ -7467,6 +7468,7 @@ dependencies = [
  "builtin_ui_embed",
  "crc32fast",
  "dirs 5.0.1",
+ "equz8",
  "gpui",
  "image",
  "midir",

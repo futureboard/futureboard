@@ -65,21 +65,30 @@ pub struct PluginArtifact {
     pub library: PathBuf,
 }
 
-/// Whether a plugin crate directory ships an embeddable editor UI, i.e. a
-/// `editorui/package.json` exists. Plugins without one build normally and expose
-/// no embedded UI — the whole workspace must not fail because a plugin has no UI.
-pub fn has_editor_ui(crate_dir: &Path) -> bool {
-    crate_dir.join("editorui").join("package.json").is_file()
+/// Bundle directory names a plugin's editor UI may live under. Both spellings
+/// are in use (`rodharerist/editorui`, `equz8/editor`), and each plugin's
+/// `build.rs` points the asset generator at its own one.
+const EDITOR_UI_DIRS: &[&str] = &["editorui", "editor"];
+
+/// The plugin's editor-UI bundle directory, i.e. the one holding a
+/// `package.json`. `None` when the plugin ships no editor — those build normally
+/// and expose no embedded UI, so the workspace must not fail because of it.
+pub fn editor_ui_dir(crate_dir: &Path) -> Option<PathBuf> {
+    EDITOR_UI_DIRS
+        .iter()
+        .map(|name| crate_dir.join(name))
+        .find(|dir| dir.join("package.json").is_file())
 }
 
-/// Whether a built site is present (`editorui/dist/index.html`) — the precondition
+/// Whether a plugin crate directory ships an embeddable editor UI.
+pub fn has_editor_ui(crate_dir: &Path) -> bool {
+    editor_ui_dir(crate_dir).is_some()
+}
+
+/// Whether a built site is present (`<bundle>/dist/index.html`) — the precondition
 /// for embedding. Missing dist before the UI build is a normal, recoverable state.
 pub fn editor_ui_built(crate_dir: &Path) -> bool {
-    crate_dir
-        .join("editorui")
-        .join("dist")
-        .join("index.html")
-        .is_file()
+    editor_ui_dir(crate_dir).is_some_and(|dir| dir.join("dist").join("index.html").is_file())
 }
 
 /// Classify a Cargo artifact: returns `(name, path)` when it is a plugin dynamic
@@ -236,9 +245,20 @@ mod tests {
         fs::write(with_ui.join("editorui/dist/index.html"), "<html>").unwrap();
         assert!(editor_ui_built(&with_ui));
 
-        let without_ui = temp.path().join("equz8");
+        // The other spelling in use — equz8 and friends bundle under `editor/`.
+        let alt_ui = temp.path().join("equz8");
+        fs::create_dir_all(alt_ui.join("editor")).unwrap();
+        fs::write(alt_ui.join("editor/package.json"), "{}").unwrap();
+        assert!(has_editor_ui(&alt_ui));
+        assert!(!editor_ui_built(&alt_ui));
+        fs::create_dir_all(alt_ui.join("editor/dist")).unwrap();
+        fs::write(alt_ui.join("editor/dist/index.html"), "<html>").unwrap();
+        assert!(editor_ui_built(&alt_ui));
+
+        let without_ui = temp.path().join("compresser");
         fs::create_dir_all(&without_ui).unwrap();
         assert!(!has_editor_ui(&without_ui));
+        assert!(!editor_ui_built(&without_ui));
     }
 
     #[test]

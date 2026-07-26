@@ -30,7 +30,7 @@ pub enum HostAvailability {
     NotCompiledIn,
     /// The plugin id is not a built-in that ships an editor.
     NoEditorForPlugin(String),
-    /// The plugin's `editorui/dist` was not built when the library was compiled.
+    /// The plugin's editor `dist/` was not built when the library was compiled.
     UiNotEmbedded(String),
     /// CEF failed to start.
     RuntimeFailed(String),
@@ -48,7 +48,7 @@ impl fmt::Display for HostAvailability {
             Self::NoEditorForPlugin(id) => write!(f, "{id} does not ship an editor UI"),
             Self::UiNotEmbedded(id) => write!(
                 f,
-                "{id} was compiled without its editor UI (run `bun run build` in its editorui/)"
+                "{id} was compiled without its editor UI (run `bun run build` in its editor bundle)"
             ),
             Self::RuntimeFailed(err) => write!(f, "CEF failed to start: {err}"),
         }
@@ -72,6 +72,7 @@ pub fn origin_for_plugin_id(plugin_id: &str) -> Option<&'static str> {
 pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
     match origin_for_plugin_id(plugin_id)? {
         rodharerist::ui::UI_ORIGIN => rodharerist::ui_param_index(param_id),
+        equz8::ui::UI_ORIGIN => equz8::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -95,69 +96,179 @@ mod state_mirror {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    static BUILTIN_STATE: OnceLock<Mutex<HashMap<String, rodharerist::Params>>> = OnceLock::new();
+    use super::origin_for_plugin_id;
 
-    fn map() -> &'static Mutex<HashMap<String, rodharerist::Params>> {
+    /// One insert's mirrored params, tagged with the built-in that owns them.
+    ///
+    /// The map is keyed by insert slot id alone, and a slot can be re-pointed at
+    /// a different plugin, so the tag is what proves a stored blob belongs to
+    /// the plugin asking for it. Untagged, an EQ-Z8 edit would fold into
+    /// rodharerist's parameter table and be written to the project as such.
+    /// Boxed so a slot of the map stays small regardless of which DSP core has
+    /// the largest `Params`.
+    enum BuiltinParams {
+        Rodhareist(Box<rodharerist::Params>),
+        Equz8(Box<equz8::Params>),
+    }
+
+    impl BuiltinParams {
+        fn origin(&self) -> &'static str {
+            match self {
+                Self::Rodhareist(_) => rodharerist::ui::UI_ORIGIN,
+                Self::Equz8(_) => equz8::ui::UI_ORIGIN,
+            }
+        }
+
+        /// The plugin's own defaults, or `None` for a built-in with no mirror.
+        fn defaults(origin: &str) -> Option<Self> {
+            match origin {
+                rodharerist::ui::UI_ORIGIN => {
+                    Some(Self::Rodhareist(Box::new(rodharerist::default_params())))
+                }
+                equz8::ui::UI_ORIGIN => Some(Self::Equz8(Box::new(equz8::default_params()))),
+                _ => None,
+            }
+        }
+    }
+
+    static BUILTIN_STATE: OnceLock<Mutex<HashMap<String, BuiltinParams>>> = OnceLock::new();
+
+    fn map() -> &'static Mutex<HashMap<String, BuiltinParams>> {
         BUILTIN_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// The entry for `insert_id`, created at `origin`'s defaults when absent —
+    /// or when a *different* built-in left state behind in this slot.
+    fn entry_for<'a>(
+        states: &'a mut HashMap<String, BuiltinParams>,
+        insert_id: &str,
+        origin: &str,
+    ) -> Option<&'a mut BuiltinParams> {
+        if states.get(insert_id).map(BuiltinParams::origin) != Some(origin) {
+            states.insert(insert_id.to_string(), BuiltinParams::defaults(origin)?);
+        }
+        states.get_mut(insert_id)
     }
 
     /// Fold one forwarded editor edit (wire index + raw value) into the
     /// insert's mirrored params. Creates the entry at defaults on first edit.
     /// `clear_clip` (an action, not state) is ignored.
-    pub fn builtin_state_apply(insert_id: &str, wire_index: u32, value: f32) {
-        let Some(id) = rodharerist::ui_param_id(wire_index) else {
+    pub fn builtin_state_apply(plugin_id: &str, insert_id: &str, wire_index: u32, value: f32) {
+        let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return;
         };
-        if let Ok(mut states) = map().lock() {
-            let params = states
-                .entry(insert_id.to_string())
-                .or_insert_with(rodharerist::default_params);
-            let _ = rodharerist::apply_to_params(params, id, value);
+        // Resolve the index *before* touching the map, so an unknown one never
+        // materializes default state for an insert that had none.
+        let known = match origin {
+            rodharerist::ui::UI_ORIGIN => rodharerist::ui_param_id(wire_index).is_some(),
+            equz8::ui::UI_ORIGIN => equz8::ui_param_id(wire_index).is_some(),
+            _ => false,
+        };
+        if !known {
+            return;
+        }
+        let Ok(mut states) = map().lock() else {
+            return;
+        };
+        match entry_for(&mut states, insert_id, origin) {
+            Some(BuiltinParams::Rodhareist(params)) => {
+                if let Some(id) = rodharerist::ui_param_id(wire_index) {
+                    let _ = rodharerist::apply_to_params(params, id, value);
+                }
+            }
+            Some(BuiltinParams::Equz8(params)) => {
+                let _ = equz8::ipc::apply_wire_param(params, wire_index, value);
+            }
+            None => {}
         }
     }
 
-    /// Seed the mirror from a persisted `RodhareistState` blob — only when no
-    /// entry exists yet, so live edits always win over stale disk state.
-    pub fn builtin_state_seed(insert_id: &str, state_bytes: &[u8]) {
+    /// Seed the mirror from `plugin_id`'s persisted state blob — only when this
+    /// plugin has no entry yet, so live edits always win over stale disk state.
+    pub fn builtin_state_seed(plugin_id: &str, insert_id: &str, state_bytes: &[u8]) {
+        let Some(origin) = origin_for_plugin_id(plugin_id) else {
+            return;
+        };
         let Ok(text) = std::str::from_utf8(state_bytes) else {
             return;
         };
-        let Ok(state) = rodharerist::RodhareistState::from_json(text) else {
+        let parsed = match origin {
+            rodharerist::ui::UI_ORIGIN => rodharerist::RodhareistState::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Rodhareist(Box::new(state.params))),
+            equz8::ui::UI_ORIGIN => equz8::ipc::Equz8State::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Equz8(Box::new(state.params))),
+            _ => None,
+        };
+        let Some(parsed) = parsed else {
             return;
         };
         if let Ok(mut states) = map().lock() {
-            states.entry(insert_id.to_string()).or_insert(state.params);
+            match states.get(insert_id) {
+                // This plugin's live state is authoritative — leave it alone.
+                Some(existing) if existing.origin() == origin => {}
+                // Absent, or another plugin's leftovers in the same slot.
+                _ => {
+                    states.insert(insert_id.to_string(), parsed);
+                }
+            }
         }
     }
 
-    /// Serialized `RodhareistState` blob for persistence / `selectInstance`.
-    pub fn builtin_state_bytes(insert_id: &str) -> Option<Vec<u8>> {
+    /// Serialized state blob for persistence / `selectInstance`. `None` when the
+    /// slot holds no state, or holds a *different* built-in's state — that is
+    /// never handed to the asking plugin.
+    pub fn builtin_state_bytes(plugin_id: &str, insert_id: &str) -> Option<Vec<u8>> {
+        let origin = origin_for_plugin_id(plugin_id)?;
         let states = map().lock().ok()?;
-        let params = states.get(insert_id)?;
-        rodharerist::RodhareistState::new(params.clone())
-            .to_json()
-            .ok()
-            .map(String::into_bytes)
+        let json = match states.get(insert_id)? {
+            BuiltinParams::Rodhareist(params) if origin == rodharerist::ui::UI_ORIGIN => {
+                rodharerist::RodhareistState::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            BuiltinParams::Equz8(params) if origin == equz8::ui::UI_ORIGIN => {
+                equz8::ipc::Equz8State::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            _ => return None,
+        };
+        Some(json.into_bytes())
     }
 
     /// The mirrored state as `(wire index, raw value)` pairs, in replay-safe
     /// order — pushed through the live param channel to rebuild a host DSP
     /// after project open or host respawn. Empty when the insert has no
-    /// mirrored state (fresh insert: host defaults already match).
-    pub fn builtin_state_replay(insert_id: &str) -> Vec<(u32, f32)> {
+    /// mirrored state for this plugin (fresh insert: host defaults already
+    /// match).
+    pub fn builtin_state_replay(plugin_id: &str, insert_id: &str) -> Vec<(u32, f32)> {
+        let Some(origin) = origin_for_plugin_id(plugin_id) else {
+            return Vec::new();
+        };
         let Ok(states) = map().lock() else {
             return Vec::new();
         };
-        let Some(params) = states.get(insert_id) else {
-            return Vec::new();
-        };
-        rodharerist::ui_values(params)
-            .into_iter()
-            .filter_map(|(id, value)| rodharerist::ui_param_index(id).map(|i| (i, value)))
-            .collect()
+        match states.get(insert_id) {
+            Some(BuiltinParams::Rodhareist(params)) if origin == rodharerist::ui::UI_ORIGIN => {
+                rodharerist::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| rodharerist::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::Equz8(params)) if origin == equz8::ui::UI_ORIGIN => {
+                equz8::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| equz8::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
-    /// Drop one insert's mirrored state (insert removed/unloaded).
+    /// Drop one insert's mirrored state (insert removed/unloaded). Not keyed by
+    /// plugin: the slot is going away whoever owned it.
     pub fn builtin_state_remove(insert_id: &str) {
         if let Ok(mut states) = map().lock() {
             states.remove(insert_id);
@@ -182,12 +293,12 @@ pub use state_mirror::{
 /// no state to mirror.
 #[cfg(not(feature = "builtin-plugin-editor"))]
 mod state_mirror_stubs {
-    pub fn builtin_state_apply(_insert_id: &str, _wire_index: u32, _value: f32) {}
-    pub fn builtin_state_seed(_insert_id: &str, _state_bytes: &[u8]) {}
-    pub fn builtin_state_bytes(_insert_id: &str) -> Option<Vec<u8>> {
+    pub fn builtin_state_apply(_plugin_id: &str, _insert_id: &str, _wire_index: u32, _value: f32) {}
+    pub fn builtin_state_seed(_plugin_id: &str, _insert_id: &str, _state_bytes: &[u8]) {}
+    pub fn builtin_state_bytes(_plugin_id: &str, _insert_id: &str) -> Option<Vec<u8>> {
         None
     }
-    pub fn builtin_state_replay(_insert_id: &str) -> Vec<(u32, f32)> {
+    pub fn builtin_state_replay(_plugin_id: &str, _insert_id: &str) -> Vec<(u32, f32)> {
         Vec::new()
     }
     pub fn builtin_state_remove(_insert_id: &str) {}
@@ -520,11 +631,10 @@ mod imp {
     /// returns `None`, so one plugin's editor can never read another's assets.
     /// Runs on CEF's IO thread — it only indexes static tables.
     fn resolve_asset(origin: &str, path: &str) -> Option<SchemeAsset> {
+        use builtin_ui_embed::EmbeddedPluginUi;
         let asset = match origin {
-            rodharerist::ui::UI_ORIGIN => {
-                use builtin_ui_embed::EmbeddedPluginUi;
-                rodharerist::ui::RodhareistUi::resolve_ui_asset(path)?
-            }
+            rodharerist::ui::UI_ORIGIN => rodharerist::ui::RodhareistUi::resolve_ui_asset(path)?,
+            equz8::ui::UI_ORIGIN => equz8::ui::Equz8Ui::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -533,10 +643,19 @@ mod imp {
         })
     }
 
+    /// Whether this build links a built-in's editor at all. Distinct from
+    /// [`has_embedded_ui`]: an origin can be hosted here yet carry an empty
+    /// asset table when its bundle was never built, and the two cases get
+    /// different `HostAvailability` errors.
+    fn hosts_editor(origin: &str) -> bool {
+        matches!(origin, rodharerist::ui::UI_ORIGIN | equz8::ui::UI_ORIGIN)
+    }
+
     /// Whether a built-in plugin has embedded editor assets to serve.
     fn has_embedded_ui(origin: &str) -> bool {
         match origin {
             rodharerist::ui::UI_ORIGIN => rodharerist::ui::RodhareistUi::is_embedded(),
+            equz8::ui::UI_ORIGIN => equz8::ui::Equz8Ui::is_embedded(),
             _ => false,
         }
     }
@@ -615,7 +734,7 @@ mod imp {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return HostAvailability::NoEditorForPlugin(plugin_id.to_string());
         };
-        if origin != rodharerist::ui::UI_ORIGIN {
+        if !hosts_editor(origin) {
             return HostAvailability::NoEditorForPlugin(plugin_id.to_string());
         }
         if !has_embedded_ui(origin) {
@@ -1418,16 +1537,54 @@ mod tests {
 
     #[cfg(feature = "builtin-plugin-editor")]
     #[test]
-    fn rodhareist_is_hostable_and_unknown_builtins_are_not() {
-        // rodharerist embeds a UI in any build that ran its build script with a
-        // built dist; either way it must never be `NotCompiledIn` here.
-        assert_ne!(
-            availability("builtin:rodharerist"),
-            HostAvailability::NotCompiledIn
-        );
+    fn builtins_with_an_editor_are_hostable_and_the_rest_are_not() {
+        // These embed a UI in any build that ran their build script against a
+        // built dist; either way they must never be `NotCompiledIn` here.
+        for id in ["builtin:rodharerist", "builtin:equz8"] {
+            assert_ne!(availability(id), HostAvailability::NotCompiledIn);
+        }
+        // A catalogued built-in that ships no editor bundle is refused by name,
+        // not reported as an empty asset table.
         assert_eq!(
-            availability("builtin:equz8"),
-            HostAvailability::NoEditorForPlugin("builtin:equz8".to_string())
+            availability("builtin:compresser"),
+            HostAvailability::NoEditorForPlugin("builtin:compresser".to_string())
         );
+    }
+
+    /// The mirror is keyed by insert slot id, which is not unique across
+    /// plugins — one built-in must never read, replay, or persist another's
+    /// state out of the same slot.
+    #[cfg(feature = "builtin-plugin-editor")]
+    #[test]
+    fn the_state_mirror_never_hands_one_builtin_another_plugins_state() {
+        let insert = "test-insert-state-mirror-isolation";
+        let freq = builtin_param_index("equz8", "band1_freq").expect("band1_freq is an EQ-Z8 id");
+        builtin_state_apply("equz8", insert, freq, 137.0);
+
+        let bytes = builtin_state_bytes("equz8", insert).expect("EQ-Z8 owns this slot's state");
+        let json = String::from_utf8(bytes).expect("state blobs are UTF-8 JSON");
+        assert!(json.contains("137"), "the edit is missing from {json}");
+        assert!(!builtin_state_replay("equz8", insert).is_empty());
+
+        // Same slot id, different plugin: nothing to hand over.
+        assert!(builtin_state_bytes("rodharerist", insert).is_none());
+        assert!(builtin_state_replay("rodharerist", insert).is_empty());
+
+        // Re-pointing the slot replaces the state rather than folding into it.
+        builtin_state_apply("rodharerist", insert, 0, 0.5);
+        assert!(builtin_state_bytes("equz8", insert).is_none());
+
+        builtin_state_remove(insert);
+        assert!(builtin_state_bytes("rodharerist", insert).is_none());
+    }
+
+    #[cfg(feature = "builtin-plugin-editor")]
+    #[test]
+    fn param_ids_resolve_per_plugin_and_never_cross_over() {
+        // `outputDb` exists in EQ-Z8's table; asking rodharerist for it must not
+        // silently resolve against the wrong plugin's indices.
+        assert!(builtin_param_index("builtin:equz8", "band3_freq").is_some());
+        assert!(builtin_param_index("builtin:equz8", "not-a-param").is_none());
+        assert!(builtin_param_index("builtin:compresser", "band3_freq").is_none());
     }
 }
