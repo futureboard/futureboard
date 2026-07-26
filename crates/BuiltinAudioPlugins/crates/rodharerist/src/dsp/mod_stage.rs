@@ -53,19 +53,26 @@ impl ModStage {
         if self.model != model {
             self.model = model;
             // Stale delay-line/LFO state from the previous selection would
-            // bleed into the first samples of the new sound.
+            // bleed into the first samples of the new sound. Moving between
+            // two phaser voices is the exception: `Phaser::configure` swaps
+            // the cascade itself and clears only what the new one cannot use.
             match model {
                 ModModel::Chorus => self.chorus.reset(),
-                ModModel::Phaser => self.phaser.reset(),
                 ModModel::Flanger => self.flanger.reset(),
                 ModModel::Tremolo => self.tremolo.reset(),
+                _ => {}
             }
         }
         match self.model {
             ModModel::Chorus => self.chorus.configure(rate, depth, mix),
-            ModModel::Phaser => self.phaser.configure(rate, depth, mix),
             ModModel::Flanger => self.flanger.configure(rate, depth, mix),
             ModModel::Tremolo => self.tremolo.configure(rate, depth, mix),
+            other => {
+                // Every remaining model is a voiced phaser.
+                if let Some(voice) = other.phaser_voice() {
+                    self.phaser.configure(voice, rate, depth, mix);
+                }
+            }
         }
     }
 
@@ -73,9 +80,9 @@ impl ModStage {
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         match self.model {
             ModModel::Chorus => self.chorus.process(left, right),
-            ModModel::Phaser => self.phaser.process(left, right),
             ModModel::Flanger => self.flanger.process(left, right),
             ModModel::Tremolo => self.tremolo.process(left, right),
+            _ => self.phaser.process(left, right),
         }
     }
 }

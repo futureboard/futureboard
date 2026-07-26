@@ -88,6 +88,11 @@ export const MOD_VARIANT_TO_MODEL: Record<string, string> = {
   Phaser: "phaser",
   Flanger: "flanger",
   Tremolo: "tremolo",
+  MolamSwirl: "molam_swirl",
+  PhinVibe: "phin_vibe",
+  KhaenSwirl: "khaen_swirl",
+  BiLam: "bi_lam",
+  IsanJet: "isan_jet",
 };
 
 /** Rust `DelayModel` variant → editor model id. */
