@@ -223,6 +223,10 @@ mod tests {
             m.editor_url(ROD).as_deref(),
             Some("mikoplugin://rodharerist/index.html")
         );
-        assert!(m.editor_url("builtin:equz8").is_none());
+        assert_eq!(
+            m.editor_url("builtin:equz8").as_deref(),
+            Some("mikoplugin://equz8/index.html")
+        );
+        assert!(m.editor_url("builtin:compresser").is_none());
     }
 }

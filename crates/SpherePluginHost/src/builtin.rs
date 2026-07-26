@@ -30,7 +30,8 @@ struct BuiltinEntry {
     name: &'static str,
     category: &'static str,
     kind: PluginKind,
-    /// Whether the plugin ships an embeddable React editor (`editorui/`).
+    /// Whether the plugin ships an embeddable React editor (`editor/` or
+    /// `editorui/` — both bundle layouts are in use).
     has_editor: bool,
 }
 
@@ -49,7 +50,7 @@ const CATALOG: &[BuiltinEntry] = &[
         name: "EQ-Z8",
         category: "EQ",
         kind: PluginKind::Effect,
-        has_editor: false,
+        has_editor: true,
     },
     BuiltinEntry {
         stem: "compresser",
@@ -231,12 +232,16 @@ mod tests {
     }
 
     #[test]
-    fn only_rodhareist_has_editor_today() {
+    fn editors_are_limited_to_builtins_that_ship_one() {
         assert_eq!(
             builtin_editor_url(&builtin_id("rodharerist")).as_deref(),
             Some("mikoplugin://rodharerist/index.html")
         );
-        assert!(builtin_editor_url(&builtin_id("equz8")).is_none());
+        assert_eq!(
+            builtin_editor_url(&builtin_id("equz8")).as_deref(),
+            Some("mikoplugin://equz8/index.html")
+        );
+        assert!(builtin_editor_url(&builtin_id("compresser")).is_none());
         assert!(builtin_editor_url("vst3:whatever").is_none());
     }
 

@@ -38,6 +38,35 @@ mod tests {
         assert_eq!(unique, ids.len(), "duplicate parameter id in descriptor");
     }
 
+    /// The descriptor is what a host shows in its own parameter list and what
+    /// its "reset to default" writes back, so a default that disagrees with
+    /// [`dsp::default_params`] means the DAW displays one value while the
+    /// plugin loads another. Retuning the amp left five of these behind and
+    /// nothing caught it.
+    #[test]
+    fn descriptor_defaults_match_the_plugin_defaults() {
+        let defaults = dsp::ui_values(&dsp::default_params());
+        for param in descriptor().params {
+            let Some(&(_, actual)) = defaults.iter().find(|(id, _)| *id == param.id) else {
+                continue;
+            };
+            assert!(
+                (param.default_value - actual).abs() < 1.0e-6,
+                "`{}`: descriptor says {}, default_params() says {actual}",
+                param.id,
+                param.default_value,
+            );
+            assert!(
+                param.default_value >= param.min && param.default_value <= param.max,
+                "`{}`: default {} is outside {}..{}",
+                param.id,
+                param.default_value,
+                param.min,
+                param.max,
+            );
+        }
+    }
+
     #[test]
     fn processes_finite_at_multiple_rates() {
         for &sr in &[44_100.0f32, 48_000.0, 96_000.0] {

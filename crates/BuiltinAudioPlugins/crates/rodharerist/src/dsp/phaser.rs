@@ -37,6 +37,16 @@ const MAX_STAGES: usize = 12;
 /// Deepest useful wet blend: an equal dry/wet sum, where the nulls are total.
 const MAX_BLEND: f32 = 0.5;
 
+/// Where the resonant peak is allowed to land, as a linear gain (+1 dB).
+///
+/// Regeneration does not only sharpen the peaks between the nulls, it raises
+/// them: at the frequency where the loop comes back in phase the cascade sees
+/// a gain of `1 / (1 - feedback)`, so a voice sitting at 0.8 handed the rest
+/// of the chain a 9.5 dB lift. Into an already-driven amp that is not
+/// "resonant", it is clipping. A pedal's output stage does not do this, and
+/// neither should these — a slight lift at the peak, never a shove.
+const PEAK_TARGET: f32 = 1.122;
+
 #[inline]
 fn finite(x: f32) -> f32 {
     if x.is_finite() {
@@ -97,9 +107,9 @@ impl PhaserVoice {
             // wobble instead of a phaser.
             Self::Phase90 => Profile {
                 stages: 4,
-                feedback: 0.55,
-                sweep_lo: 200.0,
-                sweep_hi: 3_000.0,
+                feedback: 0.50,
+                sweep_lo: 220.0,
+                sweep_hi: 2_600.0,
                 stagger: 1.0,
                 skew: 1.0,
                 spread: 0.25,
@@ -108,9 +118,9 @@ impl PhaserVoice {
             },
             Self::MolamSwirl => Profile {
                 stages: 4,
-                feedback: 0.78,
-                sweep_lo: 160.0,
-                sweep_hi: 2_800.0,
+                feedback: 0.62,
+                sweep_lo: 190.0,
+                sweep_hi: 2_400.0,
                 stagger: 1.0,
                 skew: 1.0,
                 spread: 0.25,
@@ -122,45 +132,45 @@ impl PhaserVoice {
             Self::PhinVibe => Profile {
                 stages: 4,
                 feedback: 0.0,
-                sweep_lo: 300.0,
-                sweep_hi: 1_800.0,
-                stagger: 2.05,
-                skew: 1.9,
-                spread: 0.33,
+                sweep_lo: 320.0,
+                sweep_hi: 1_700.0,
+                stagger: 1.80,
+                skew: 1.40,
+                spread: 0.28,
                 rate_scale: 1.15,
                 max_blend: 0.44,
             },
             Self::KhaenSwirl => Profile {
                 stages: 8,
-                feedback: 0.58,
-                sweep_lo: 200.0,
-                sweep_hi: 3_600.0,
+                feedback: 0.52,
+                sweep_lo: 230.0,
+                sweep_hi: 3_000.0,
                 stagger: 1.0,
                 skew: 1.0,
-                spread: 0.30,
+                spread: 0.28,
                 rate_scale: 0.75,
                 max_blend: MAX_BLEND,
             },
             Self::BiLam => Profile {
                 stages: 12,
-                feedback: 0.42,
-                sweep_lo: 140.0,
-                sweep_hi: 4_200.0,
+                feedback: 0.38,
+                sweep_lo: 210.0,
+                sweep_hi: 2_800.0,
                 stagger: 1.0,
                 skew: 1.0,
-                spread: 0.50,
-                rate_scale: 0.45,
+                spread: 0.33,
+                rate_scale: 0.50,
                 max_blend: MAX_BLEND,
             },
             Self::IsanJet => Profile {
                 stages: 6,
-                feedback: 0.80,
-                sweep_lo: 420.0,
-                sweep_hi: 5_000.0,
+                feedback: 0.62,
+                sweep_lo: 450.0,
+                sweep_hi: 4_000.0,
                 stagger: 1.0,
                 skew: 1.0,
                 spread: 0.20,
-                rate_scale: 1.85,
+                rate_scale: 1.70,
                 max_blend: MAX_BLEND,
             },
         }
@@ -231,6 +241,9 @@ pub(super) struct Phaser {
     right: Channel,
     depth: Smoothed,
     blend: Smoothed,
+    /// Compensates the regeneration's peak gain. Derived from the blend, so
+    /// the effect never adds level at any Mix setting.
+    makeup: Smoothed,
     /// Geometric centre of the sweep — depth widens around it rather than
     /// dragging the whole sweep up off the floor.
     centre_hz: f32,
@@ -252,6 +265,7 @@ impl Phaser {
             right: Channel::default(),
             depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.7),
             blend: Smoothed::new(sr, SMOOTH_SECONDS, 0.5),
+            makeup: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             centre_hz: 800.0,
             span: 1.0,
         };
@@ -264,6 +278,7 @@ impl Phaser {
         self.sample_rate = sr;
         self.depth.set_time(sr, SMOOTH_SECONDS);
         self.blend.set_time(sr, SMOOTH_SECONDS);
+        self.makeup.set_time(sr, SMOOTH_SECONDS);
     }
 
     pub(super) fn reset(&mut self) {
@@ -274,6 +289,7 @@ impl Phaser {
         self.lfo_r.set_phase(self.profile.spread);
         self.depth.snap();
         self.blend.snap();
+        self.makeup.snap();
     }
 
     /// Resolve everything about a voice that does not change per sample.
@@ -315,8 +331,15 @@ impl Phaser {
         // Mix reaches the deepest sum and stops. Past an equal blend the nulls
         // fill back in, so letting the knob run to bare wet would make the
         // effect quietly disappear at the top of its travel.
-        self.blend
-            .set_target((mix / 100.0).clamp(0.0, 1.0) * self.profile.max_blend);
+        let blend = (mix / 100.0).clamp(0.0, 1.0) * self.profile.max_blend;
+        self.blend.set_target(blend);
+        // Where the loop returns in phase the cascade reaches 1/(1 - feedback),
+        // so the summed path peaks at (1 - blend) + blend/(1 - feedback). Undo
+        // all but a decibel of that. Never above unity: at Mix 0 the dry signal
+        // has to pass through untouched.
+        let peak = (1.0 - blend) + blend / (1.0 - self.profile.feedback).max(0.05);
+        self.makeup
+            .set_target((PEAK_TARGET / peak.max(1.0e-3)).min(1.0));
     }
 
     /// Allpass coefficient for a corner at `freq`.
@@ -343,6 +366,7 @@ impl Phaser {
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         let depth = self.depth.tick();
         let blend = self.blend.tick();
+        let makeup = self.makeup.tick();
         let p = self.profile;
 
         // Sweep symmetrically about the voice's centre, so turning Depth down
@@ -366,8 +390,8 @@ impl Phaser {
         let wet_r = self.right.run(right, &coeffs, p.stages, p.feedback);
 
         (
-            finite(mix(left, wet_l, blend)),
-            finite(mix(right, wet_r, blend)),
+            finite(mix(left, wet_l, blend) * makeup),
+            finite(mix(right, wet_r, blend) * makeup),
         )
     }
 }
@@ -443,6 +467,58 @@ mod tests {
                 "{voice:?}: only {full:.1} dB peak-to-null — that is a wobble, not a phaser"
             );
         }
+    }
+
+    /// Regeneration raises the peaks between the nulls as well as sharpening
+    /// them, and the first cut of these voices shipped that raw: at feedback
+    /// 0.8 the resonance handed everything downstream a 9.5 dB lift, which
+    /// into a driven amp is not resonance, it is clipping. No voice may make
+    /// the signal louder than a hair over unity, at any Mix setting.
+    #[test]
+    fn no_voice_boosts_the_signal() {
+        for voice in ALL {
+            for mix_pct in [0.0, 25.0, 50.0, 75.0, 100.0] {
+                let peak = peak_gain(voice, mix_pct);
+                assert!(
+                    peak < 1.6,
+                    "{voice:?} at mix {mix_pct}%: peaks {:.1} dB above the input",
+                    20.0 * peak.log10()
+                );
+            }
+        }
+        // ...and Mix at zero has to be a true bypass, not a quiet one.
+        for voice in ALL {
+            let unity = peak_gain(voice, 0.0);
+            assert!(
+                (unity - 1.0).abs() < 0.02,
+                "{voice:?} at mix 0% is not unity: {unity:.3}"
+            );
+        }
+    }
+
+    /// Largest steady-state gain the parked cascade applies to any tone.
+    fn peak_gain(voice: PhaserVoice, mix_pct: f32) -> f32 {
+        let mut hi = 0.0f32;
+        for step in 0..80 {
+            let freq = 90.0 * (9_000.0f32 / 90.0).powf(step as f32 / 79.0);
+            let mut p = Phaser::new(48_000.0);
+            p.configure(voice, 0.0, 0.0, mix_pct);
+            p.reset();
+            let tone = |n: usize| (n as f32 * freq * std::f32::consts::TAU / 48_000.0).sin();
+            for n in 0..4_800 {
+                p.process(tone(n), tone(n));
+            }
+            let n_win = 4_096;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for k in 0..n_win {
+                let y = p.process(tone(4_800 + k), tone(4_800 + k)).0 as f64;
+                let w = k as f32 * freq * std::f32::consts::TAU / 48_000.0;
+                re += y * w.cos() as f64;
+                im -= y * w.sin() as f64;
+            }
+            hi = hi.max(((re * re + im * im).sqrt() * 2.0 / n_win as f64) as f32);
+        }
+        hi
     }
 
     /// Six voices that measure the same are one voice with six names.

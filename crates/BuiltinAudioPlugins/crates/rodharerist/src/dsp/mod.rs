@@ -890,7 +890,7 @@ pub fn descriptor() -> PluginDescriptor {
             ParamDescriptor {
                 id: "amp_gain",
                 name: "Amp Drive",
-                default_value: 6.0,
+                default_value: 5.0,
                 min: 0.0,
                 max: 10.0,
                 unit: "",
@@ -898,7 +898,7 @@ pub fn descriptor() -> PluginDescriptor {
             ParamDescriptor {
                 id: "amp_bass",
                 name: "Bass",
-                default_value: 5.1,
+                default_value: 5.0,
                 min: 0.0,
                 max: 10.0,
                 unit: "",
@@ -906,7 +906,7 @@ pub fn descriptor() -> PluginDescriptor {
             ParamDescriptor {
                 id: "amp_middle",
                 name: "Middle",
-                default_value: 4.8,
+                default_value: 5.5,
                 min: 0.0,
                 max: 10.0,
                 unit: "",
@@ -914,7 +914,7 @@ pub fn descriptor() -> PluginDescriptor {
             ParamDescriptor {
                 id: "amp_treble",
                 name: "Treble",
-                default_value: 4.8,
+                default_value: 5.0,
                 min: 0.0,
                 max: 10.0,
                 unit: "",
@@ -930,7 +930,7 @@ pub fn descriptor() -> PluginDescriptor {
             ParamDescriptor {
                 id: "amp_master",
                 name: "Master",
-                default_value: 3.5,
+                default_value: 5.0,
                 min: 0.0,
                 max: 10.0,
                 unit: "",

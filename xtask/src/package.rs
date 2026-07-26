@@ -176,8 +176,8 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
                 && !plugins::editor_ui_built(&plugin.crate_dir)
             {
                 bail!(
-                    "plugin `{}` has editorui/ but no built dist/index.html; \
-                     run its editorui build before packaging",
+                    "plugin `{}` has an editor bundle but no built dist/index.html; \
+                     run its editor build before packaging",
                     plugin.name,
                 );
             }
