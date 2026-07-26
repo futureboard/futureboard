@@ -682,7 +682,11 @@ mod tests {
         for _ in 0..3 {
             decimator.process(&mut left, &mut right, |l, r| {
                 for i in 0..l.len() {
-                    let sample = if (phase + i) % 2 == 0 { 1.0 } else { -1.0 };
+                    let sample = if (phase + i).is_multiple_of(2) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
                     l[i] = sample;
                     r[i] = sample;
                 }

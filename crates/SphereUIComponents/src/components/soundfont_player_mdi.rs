@@ -1208,7 +1208,10 @@ mod tests {
 
     #[test]
     fn the_knob_sweep_stays_inside_the_range_the_engine_accepts() {
-        assert!(ENVELOPE_KNOB_MAX_MS <= crate::soundfont_player::ENVELOPE_MAX_TIME_MS);
+        // Both sides are constants, so this is settled at compile time rather
+        // than waiting for the test to run.
+        const _: () =
+            assert!(ENVELOPE_KNOB_MAX_MS <= crate::soundfont_player::ENVELOPE_MAX_TIME_MS);
         let clamped = SoundfontEnvelope {
             attack_ms: ENVELOPE_KNOB_MAX_MS,
             decay_ms: ENVELOPE_KNOB_MAX_MS,
