@@ -1145,15 +1145,33 @@ mod imp {
 mod imp {
     use std::ffi::CString;
 
+    /// Longest POSIX IPC name that works on every platform we ship.
+    ///
+    /// macOS caps `shm_open`/`sem_open` names at 31 bytes including the leading
+    /// slash (`PSHMNAMLEN`) and fails the call with `ENAMETOOLONG` past it.
+    /// Linux allows `NAME_MAX`, so macOS is the binding constraint and the only
+    /// one worth encoding here.
+    pub(super) const POSIX_NAME_MAX: usize = 31;
+
+    /// Fixed part of a generated name: `/fb_` + `_` + 16 hex digits of hash.
+    const POSIX_NAME_OVERHEAD: usize = "/fb__".len() + 16;
+
     /// Convert the platform-neutral bridge name to a short POSIX IPC name.
-    /// FNV-1a is fixed across processes and avoids `/` and platform name limits.
+    ///
+    /// FNV-1a is fixed across processes, so both sides of the bridge derive the
+    /// same name from the same source, and it keeps `/` and any platform-illegal
+    /// bytes out of the result. The prefix is kept terse and the namespace is
+    /// truncated if it ever grows, because the whole thing has to fit in
+    /// [`POSIX_NAME_MAX`] — a longer name does not degrade, it fails the call.
     pub(super) fn posix_name(namespace: &str, source: &str) -> std::io::Result<CString> {
         let mut hash = 0xcbf29ce484222325u64;
         for byte in source.as_bytes() {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        CString::new(format!("/futureboard_{namespace}_{hash:016x}"))
+        let budget = POSIX_NAME_MAX - POSIX_NAME_OVERHEAD;
+        let namespace: String = namespace.chars().take(budget).collect();
+        CString::new(format!("/fb_{namespace}_{hash:016x}"))
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid IPC name"))
     }
 
@@ -1450,6 +1468,49 @@ mod tests {
         };
         bridge.store_transport(&pushed);
         assert_eq!(bridge.load_transport(), pushed);
+    }
+
+    /// Every generated POSIX IPC name has to fit macOS's 31-byte cap, including
+    /// the leading slash. Past it `shm_open`/`sem_open` fail outright with
+    /// `ENAMETOOLONG` — there is no graceful truncation — so the whole bridge
+    /// stops working on macOS while Linux and Windows stay green. Sources here
+    /// are the real ones: a Windows-style section name and a kick-event name.
+    #[cfg(unix)]
+    #[test]
+    fn posix_ipc_names_fit_the_platform_limit() {
+        let sources = [
+            format!("Local\\FutureboardBridge-{}-insert-track-1-1", u32::MAX),
+            bridge_kick_event_name(u32::MAX, u32::MAX),
+            String::new(),
+        ];
+        for namespace in ["audio", "kick"] {
+            for source in &sources {
+                let name = imp::posix_name(namespace, source).expect("name builds");
+                let len = name.as_bytes().len();
+                assert!(
+                    len <= imp::POSIX_NAME_MAX,
+                    "{namespace}/{source} produced {len} bytes: {name:?}"
+                );
+                assert!(
+                    name.to_str().expect("ascii").starts_with('/'),
+                    "a POSIX IPC name must be rooted: {name:?}"
+                );
+            }
+        }
+    }
+
+    /// The same source must always resolve to the same name — both sides of the
+    /// bridge derive it independently — and different sources must not collide.
+    #[cfg(unix)]
+    #[test]
+    fn posix_ipc_names_are_stable_and_distinct() {
+        let a = imp::posix_name("audio", "bridge-one").expect("name builds");
+        let b = imp::posix_name("audio", "bridge-one").expect("name builds");
+        let c = imp::posix_name("audio", "bridge-two").expect("name builds");
+        let d = imp::posix_name("kick", "bridge-one").expect("name builds");
+        assert_eq!(a, b);
+        assert_ne!(a, c, "different bridges must not share a region");
+        assert_ne!(a, d, "the kick event must not collide with the region");
     }
 
     /// A second creator on an already-taken section name must be rejected rather
