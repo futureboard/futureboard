@@ -36,6 +36,7 @@ use SpherePluginHost::native_editor::{self, EmbedRegion};
 use SpherePluginHost::plugin_host_preview::{
     try_start_preview_output, BridgeAudioShared, PluginHostPreviewEngine, SharedPluginHostPreview,
 };
+use SpherePluginHost::spectrum::{SpectrumAnalyzer, SPECTRUM_BINS};
 
 fn debug_enabled() -> bool {
     // Cached: this is checked on the audio producer's per-block path, which
@@ -235,6 +236,16 @@ struct LoadedPlugin {
 
 type LoadedRegistry = HashMap<String, LoadedPlugin>;
 
+/// The DSP core behind a built-in insert, one variant per bridge-enabled
+/// built-in. The variants deliberately do not share a trait: they differ in
+/// what they *have* (block-boundary hand-off, meters, latency), and a
+/// lowest-common-denominator trait would force every core to pretend it has all
+/// three. Keep in sync with `SpherePluginHost::builtin::AUDIO_BRIDGE_STEMS`.
+enum BuiltinDsp {
+    Rodhareist(rodharerist::Dsp),
+    Equz8(equz8::Dsp),
+}
+
 /// A built-in processor is created on the IPC thread and then owned exclusively
 /// by the audio producer thread. The map only publishes/removes `Arc` handles;
 /// no other thread accesses the DSP inside the cell. The one sanctioned
@@ -243,11 +254,19 @@ type LoadedRegistry = HashMap<String, LoadedPlugin>;
 /// impulse responses (adopted by the producer at `begin_block`) — neither ever
 /// touches the `Dsp` itself.
 struct BuiltinHostProcessor {
-    dsp: UnsafeCell<rodharerist::Dsp>,
-    /// Control-side NAM capture loader (safe from the IPC thread).
-    nam_loader: rodharerist::NamLoader,
-    /// Control-side impulse-response loader (safe from the IPC thread).
-    ir_loader: rodharerist::IrLoader,
+    dsp: UnsafeCell<BuiltinDsp>,
+    /// Analyser over the insert's **pre-DSP** input, for the editor's spectrum
+    /// overlay. Pre rather than post on purpose: the editor draws the response
+    /// curve on top of it, so an input spectrum shows cause and effect in one
+    /// picture, where a post-DSP one would double-count the same processing.
+    /// Producer-thread owned, same exclusivity contract as `dsp`.
+    spectrum: UnsafeCell<SpectrumAnalyzer>,
+    /// Control-side NAM capture loader (safe from the IPC thread). `None` for a
+    /// built-in with no capture stage.
+    nam_loader: Option<rodharerist::NamLoader>,
+    /// Control-side impulse-response loader (safe from the IPC thread). `None`
+    /// for a built-in with no cabinet stage.
+    ir_loader: Option<rodharerist::IrLoader>,
     /// Engine sample rate the DSP was built at — needed to validate a `.nam`
     /// capture's declared rate on the IPC thread.
     sample_rate: f32,
@@ -260,6 +279,17 @@ unsafe impl Send for BuiltinHostProcessor {}
 unsafe impl Sync for BuiltinHostProcessor {}
 
 impl BuiltinHostProcessor {
+    /// Build the DSP for a built-in catalog stem, or `None` when the host has
+    /// no core for it. The caller turns `None` into a load failure rather than
+    /// publishing a silent instance.
+    fn new(stem: &str, sample_rate: u32, state_json: Option<&str>) -> Option<Self> {
+        match stem {
+            "rodharerist" => Some(Self::rodhareist(sample_rate, state_json)),
+            "equz8" => Some(Self::equz8(sample_rate, state_json)),
+            _ => None,
+        }
+    }
+
     fn rodhareist(sample_rate: u32, state_json: Option<&str>) -> Self {
         let sr = sample_rate.max(1) as f32;
         let mut dsp = rodharerist::Dsp::new(sr);
@@ -280,63 +310,133 @@ impl BuiltinHostProcessor {
                 }
             }
         }
-        let nam_loader = dsp.nam_loader();
-        let ir_loader = dsp.ir_loader();
+        let nam_loader = Some(dsp.nam_loader());
+        let ir_loader = Some(dsp.ir_loader());
         Self {
-            dsp: UnsafeCell::new(dsp),
+            dsp: UnsafeCell::new(BuiltinDsp::Rodhareist(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
             nam_loader,
             ir_loader,
             sample_rate: sr,
         }
     }
 
+    fn equz8(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = equz8::Dsp::new(sr);
+        // Same pre-publish window as above: the IPC thread still owns the DSP.
+        if let Some(json) = state_json {
+            match equz8::ipc::Equz8State::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Equz8(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            // An EQ has no capture or cabinet stage to hand off into.
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
-        let dsp = unsafe { &mut *self.dsp.get() };
-        // Block boundary: adopt any pending NAM/IR swap (never mid-block).
-        dsp.begin_block();
-        for i in 0..frames {
-            let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
-            interleaved[i * 2] = l;
-            interleaved[i * 2 + 1] = r;
+        match unsafe { &mut *self.dsp.get() } {
+            BuiltinDsp::Rodhareist(dsp) => {
+                // Block boundary: adopt any pending NAM/IR swap (never mid-block).
+                dsp.begin_block();
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
+            BuiltinDsp::Equz8(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
         }
     }
 
-    /// Latest telemetry frame. Producer thread only (same contract as
-    /// `process_block`).
-    fn meter_frame(&self) -> SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+    /// Capture one block into the analyser. Producer thread only. Cheap by
+    /// construction — a mono sum into a preallocated ring, no transform.
+    fn capture_spectrum(&self, left: &[f32], right: &[f32]) {
+        // SAFETY: the dedicated producer thread is the sole accessor.
+        unsafe { &mut *self.spectrum.get() }.push_block(left, right);
+    }
+
+    /// Run an analysis if one is due, returning the frame to publish. `None`
+    /// most blocks: the analyser transforms at its own ~30 Hz rate, not per
+    /// block. Producer thread only.
+    fn analyze_spectrum(&self) -> Option<[f32; SPECTRUM_BINS]> {
+        // SAFETY: the dedicated producer thread is the sole accessor.
+        unsafe { &mut *self.spectrum.get() }.analyze().copied()
+    }
+
+    /// Latest telemetry frame, or `None` for a built-in that measures nothing.
+    /// A core without meters publishes no frame rather than a zeroed one, so
+    /// the editor cannot mistake "not measured" for "silence". Producer thread
+    /// only (same contract as `process_block`).
+    fn meter_frame(&self) -> Option<SpherePluginHost::audio_bridge::BuiltinMeterFrame> {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
-        let dsp = unsafe { &*self.dsp.get() };
-        let f = dsp.meter_frame();
-        SpherePluginHost::audio_bridge::BuiltinMeterFrame {
-            in_peak: f.in_peak,
-            in_rms: f.in_rms,
-            out_peak: f.out_peak,
-            out_rms: f.out_rms,
-            in_clip: f.in_clip,
-            out_clip: f.out_clip,
+        match unsafe { &*self.dsp.get() } {
+            BuiltinDsp::Rodhareist(dsp) => {
+                let f = dsp.meter_frame();
+                Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+                    in_peak: f.in_peak,
+                    in_rms: f.in_rms,
+                    out_peak: f.out_peak,
+                    out_rms: f.out_rms,
+                    in_clip: f.in_clip,
+                    out_clip: f.out_clip,
+                })
+            }
+            BuiltinDsp::Equz8(_) => None,
         }
     }
 
-    /// Reported latency in samples: the NAM capture's receptive field plus the
-    /// cabinet IR's convolution partition, each counted only while the stage
-    /// carrying it is actually in the path. Producer thread only.
+    /// Reported latency in samples. For Rodhareist: the NAM capture's receptive
+    /// field plus the cabinet IR's convolution partition, each counted only
+    /// while the stage carrying it is actually in the path. EQ-Z8 is a cascade
+    /// of direct-form biquads and adds none. Producer thread only.
     fn latency_samples(&self) -> usize {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
-        let dsp = unsafe { &*self.dsp.get() };
-        dsp.latency_samples()
+        match unsafe { &*self.dsp.get() } {
+            BuiltinDsp::Rodhareist(dsp) => dsp.latency_samples(),
+            BuiltinDsp::Equz8(_) => 0,
+        }
     }
 
     /// Control-rate parameter apply from the shared param ring. Runs only on
     /// the audio producer thread (same exclusivity contract as
-    /// [`Self::process_block`]); `apply_ui_param` is allocation-free (plain-
-    /// data `Params` clone + coefficient math). Unknown wire indices are
-    /// dropped silently — hot path, no logging.
+    /// [`Self::process_block`]) and is allocation-free in both arms: a
+    /// plain-data `Params` write plus coefficient math. Unknown wire indices
+    /// are dropped silently — hot path, no logging.
     fn apply_param(&self, param_id: u32, value: f32) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
-        let dsp = unsafe { &mut *self.dsp.get() };
-        if let Some(id) = rodharerist::ui_param_id(param_id) {
-            let _ = dsp.apply_ui_param(id, value);
+        match unsafe { &mut *self.dsp.get() } {
+            BuiltinDsp::Rodhareist(dsp) => {
+                if let Some(id) = rodharerist::ui_param_id(param_id) {
+                    let _ = dsp.apply_ui_param(id, value);
+                }
+            }
+            // Already the compact wire form the DSP consumes — no id lookup.
+            BuiltinDsp::Equz8(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
         }
     }
 }
@@ -403,6 +503,79 @@ mod builtin_processor_tests {
 
         // A corrupt blob must fall back to defaults, not panic.
         let fallback = BuiltinHostProcessor::rodhareist(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// Every stem the catalog advertises as bridge-enabled must actually build
+    /// here — the two lists are what route an insert into this process.
+    #[test]
+    fn every_bridge_enabled_stem_constructs() {
+        for stem in SpherePluginHost::builtin::AUDIO_BRIDGE_STEMS {
+            assert!(
+                BuiltinHostProcessor::new(stem, 48_000, None).is_some(),
+                "`{stem}` is bridge-enabled but has no DSP in the host"
+            );
+        }
+        assert!(BuiltinHostProcessor::new("compresser", 48_000, None).is_none());
+    }
+
+    /// EQ-Z8 shapes the signal rather than passing it: a band with real gain
+    /// must change the output, and every wire index must survive the trip.
+    #[test]
+    fn equz8_processes_and_takes_wire_params() {
+        let processor = BuiltinHostProcessor::equz8(48_000, None);
+        let in_l = [0.3f32; 64];
+        let in_r = [-0.3f32; 64];
+        let mut output = [0.0f32; 128];
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().any(|sample| sample.abs() > 1.0e-6));
+
+        // Power off is a pure bypass — the clearest observable param effect.
+        let power = equz8::ui_param_index("power").expect("power in wire table");
+        processor.apply_param(power, 0.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        for i in 0..64 {
+            assert_eq!(output[i * 2], in_l[i], "power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "power-off must bypass");
+        }
+
+        // Out-of-range indices are silent no-ops, not panics.
+        processor.apply_param(u32::MAX, 1.0);
+        processor.apply_param(equz8::UI_PARAM_IDS.len() as u32, 1.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn equz8_restores_state_and_reports_no_latency_or_meters() {
+        let mut params = equz8::default_params();
+        params.power = false;
+        let json = equz8::ipc::Equz8State::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::equz8(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        }
+
+        // A biquad cascade is zero-latency, and an EQ measures nothing — the
+        // frame is absent rather than a zeroed one the editor would read as
+        // real silence.
+        assert_eq!(restored.latency_samples(), 0);
+        assert!(restored.meter_frame().is_none());
+        assert!(restored.nam_loader.is_none());
+        assert!(restored.ir_loader.is_none());
+
+        // A corrupt blob falls back to defaults instead of panicking.
+        let fallback = BuiltinHostProcessor::equz8(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
@@ -596,6 +769,11 @@ fn service_audio_bridge(
             .audio_in
             .read_deinterleaved(&mut in_l[..frames], &mut in_r[..frames], frames);
     }
+    // Analyser capture, before the DSP touches anything: the editor's spectrum
+    // overlay shows the signal arriving at the insert.
+    if let Some(b) = builtin {
+        b.capture_spectrum(&in_l[..frames], &in_r[..frames]);
+    }
     let output_channels = builtin.map_or_else(
         || {
             dsp.main_audio_output_channel_count_for_instance(plugin_instance_id)
@@ -665,8 +843,14 @@ fn service_audio_bridge(
     // Built-in DSP telemetry: publish the DSP's own post-trim meter frame so
     // the editor's meters show what the chain actually saw (producer thread —
     // the sole legal DSP accessor).
-    if let Some(b) = builtin {
-        bridge.store_builtin_meters(&b.meter_frame());
+    if let Some(frame) = builtin.and_then(BuiltinHostProcessor::meter_frame) {
+        bridge.store_builtin_meters(&frame);
+    }
+    // Analyser frame, at the analyser's own rate — `analyze_spectrum` returns
+    // `None` on the blocks in between, so this publishes ~30 times a second
+    // rather than once per block.
+    if let Some(bins) = builtin.and_then(BuiltinHostProcessor::analyze_spectrum) {
+        bridge.store_spectrum(&bins);
     }
     bridge.set_dsp_output_ready(dsp_ready);
     // Publish the plugin's reported latency so the engine can surface it (and,
@@ -1503,7 +1687,24 @@ fn dispatch(
                 );
                 return;
             };
-            if stem != "rodharerist" {
+            let name = SpherePluginHost::builtin_display_name(stem)
+                .unwrap_or(stem)
+                .to_string();
+            if loaded.contains_key(&plugin_instance_id) {
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginAlreadyLoaded {
+                        plugin_instance_id,
+                        name,
+                    },
+                );
+                return;
+            }
+            // The catalog can list a built-in the host has no DSP for; fail the
+            // load rather than publishing an instance that produces nothing.
+            let Some(processor) =
+                BuiltinHostProcessor::new(stem, sample_rate, state_json.as_deref())
+            else {
                 let _ = ipc::write_frame(
                     out,
                     &HostEvent::PluginLoadFailed {
@@ -1512,30 +1713,17 @@ fn dispatch(
                     },
                 );
                 return;
-            }
-            if loaded.contains_key(&plugin_instance_id) {
-                let _ = ipc::write_frame(
-                    out,
-                    &HostEvent::PluginAlreadyLoaded {
-                        plugin_instance_id,
-                        name: "Rodhareist".to_string(),
-                    },
-                );
-                return;
-            }
-            let processor = Arc::new(BuiltinHostProcessor::rodhareist(
-                sample_rate,
-                state_json.as_deref(),
-            ));
+            };
             if let Ok(mut processors) = builtin_processors.lock() {
-                Arc::make_mut(&mut processors).insert(plugin_instance_id.clone(), processor);
+                Arc::make_mut(&mut processors)
+                    .insert(plugin_instance_id.clone(), Arc::new(processor));
             }
             loaded.insert(
                 plugin_instance_id.clone(),
                 LoadedPlugin {
                     plugin_path: String::new(),
                     class_id: stem.to_string(),
-                    name: "Rodhareist".to_string(),
+                    name: name.clone(),
                     sample_rate,
                     max_block_size,
                     processing_ready: true,
@@ -1548,7 +1736,7 @@ fn dispatch(
                 out,
                 &HostEvent::PluginLoaded {
                     plugin_instance_id,
-                    name: "Rodhareist".to_string(),
+                    name,
                 },
             );
         }
@@ -1567,10 +1755,14 @@ fn dispatch(
                 .ok()
                 .and_then(|processors| processors.get(&plugin_instance_id).cloned());
             let result = match processor {
-                Some(p) => p
-                    .nam_loader
-                    .load_json(&json, name.clone(), p.sample_rate as f64, stereo, full_rig)
-                    .map_err(|e| e.to_string()),
+                Some(p) => match p.nam_loader.as_ref() {
+                    Some(loader) => loader
+                        .load_json(&json, name.clone(), p.sample_rate as f64, stereo, full_rig)
+                        .map_err(|e| e.to_string()),
+                    None => Err(format!(
+                        "built-in DSP for {plugin_instance_id} has no capture stage"
+                    )),
+                },
                 None => Err(format!(
                     "no built-in DSP instance loaded for {plugin_instance_id}"
                 )),
@@ -1623,10 +1815,14 @@ fn dispatch(
                 .decode(wav_b64.as_bytes())
                 .map_err(|e| format!("IR payload is not valid base64: {e}"))
                 .and_then(|bytes| match processor {
-                    Some(p) => p
-                        .ir_loader
-                        .load_wav(&bytes, name.clone(), p.sample_rate as f64)
-                        .map_err(|e| e.to_string()),
+                    Some(p) => match p.ir_loader.as_ref() {
+                        Some(loader) => loader
+                            .load_wav(&bytes, name.clone(), p.sample_rate as f64)
+                            .map_err(|e| e.to_string()),
+                        None => Err(format!(
+                            "built-in DSP for {plugin_instance_id} has no cabinet stage"
+                        )),
+                    },
                     None => Err(format!(
                         "no built-in DSP instance loaded for {plugin_instance_id}"
                     )),

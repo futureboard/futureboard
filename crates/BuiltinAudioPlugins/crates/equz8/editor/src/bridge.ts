@@ -46,6 +46,24 @@ type InstanceRemovedMessage = {
   instanceId: string
 }
 
+/// One analyser frame from the plugin host, measured on the audio arriving at
+/// this insert. `bins` are log-spaced across `minHz..maxHz` and quantised to
+/// bytes: `0` is `floorDb`, `255` is `ceilDb`. The scale travels with the frame
+/// rather than being duplicated as constants on this side.
+export type SpectrumFrame = {
+  minHz: number
+  maxHz: number
+  floorDb: number
+  ceilDb: number
+  bins: number[]
+}
+
+type SpectrumMessage = SpectrumFrame & {
+  type: 'futureboard.spectrum'
+  protocolVersion: number
+  instanceId: string
+}
+
 let binding: Binding | null = null
 const pending = new Map<string, number>()
 let scheduled = false
@@ -105,6 +123,7 @@ function parseParams(state: unknown): EqParams | null {
 export function connectBridge(
   onParams: (params: EqParams) => void,
   onConnection: (connected: boolean) => void,
+  onSpectrum?: (frame: SpectrumFrame) => void,
 ) {
   post({
     type: 'futureboard.bridgeReady',
@@ -117,8 +136,24 @@ export function connectBridge(
     const message = event.data as
       | SelectInstanceMessage
       | InstanceRemovedMessage
+      | SpectrumMessage
       | undefined
     if (!message || typeof message !== 'object') return
+
+    // Highest-rate message by far (~30 Hz), so it is matched before the rest
+    // and never reaches the binding bookkeeping below.
+    if (message.type === 'futureboard.spectrum') {
+      if (!onSpectrum || binding?.instanceId !== message.instanceId) return
+      if (!Array.isArray(message.bins)) return
+      onSpectrum({
+        minHz: message.minHz,
+        maxHz: message.maxHz,
+        floorDb: message.floorDb,
+        ceilDb: message.ceilDb,
+        bins: message.bins,
+      })
+      return
+    }
 
     if (message.type === 'futureboard.selectInstance') {
       binding = {

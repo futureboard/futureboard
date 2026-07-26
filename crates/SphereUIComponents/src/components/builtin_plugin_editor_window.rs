@@ -189,6 +189,29 @@ struct MetersMsg {
     out_clip: bool,
 }
 
+/// Native -> React: one analyser frame for the bound instance.
+///
+/// `bins` are quantised to bytes rather than sent as floats: the payload
+/// crosses into the page as a JSON literal inside an `execute_javascript` call,
+/// where 128 floats cost about a kilobyte per frame and 128 bytes cost a
+/// quarter of that. The scale is fixed and shared —
+/// [`SpherePluginHost::spectrum::quantize_db`] defines it, `0` being
+/// `FLOOR_DB` and `255` being `CEIL_DB`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpectrumMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    instance_id: String,
+    /// Lowest frequency bin 0 covers, and the highest bin `len - 1` covers, so
+    /// the page maps bins to its axis without duplicating the constants.
+    min_hz: f32,
+    max_hz: f32,
+    floor_db: f32,
+    ceil_db: f32,
+    bins: Vec<u8>,
+}
+
 /// Native -> React: low-rate footer status from the shared-region header.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -422,6 +445,12 @@ pub type BuiltinMeterSource = std::sync::Arc<
 pub type BuiltinHostStatusSource =
     std::sync::Arc<dyn Fn(&PluginInstanceKey) -> Option<(u32, u32, u32)>>;
 
+/// Polls the latest analyser frame for an instance's shared region, as
+/// `(publish sequence, dB bins)`. UI thread, ~30 Hz.
+pub type BuiltinSpectrumSource = std::sync::Arc<
+    dyn Fn(&PluginInstanceKey) -> Option<(u32, [f32; SpherePluginHost::spectrum::SPECTRUM_BINS])>,
+>;
+
 /// Everything the shared editor window can do against the live host, injected
 /// by `plugin_ops.rs` (the owner of the engine handle and bridge runtime this
 /// window deliberately does not hold). Any member may be `None` while the
@@ -433,6 +462,7 @@ pub struct BuiltinEditorHostOps {
     pub load_ir: Option<BuiltinIrLoadForwarder>,
     pub meter_source: Option<BuiltinMeterSource>,
     pub host_status_source: Option<BuiltinHostStatusSource>,
+    pub spectrum_source: Option<BuiltinSpectrumSource>,
 }
 
 impl BuiltinEditorHostOps {
@@ -442,6 +472,7 @@ impl BuiltinEditorHostOps {
             && self.load_ir.is_none()
             && self.meter_source.is_none()
             && self.host_status_source.is_none()
+            && self.spectrum_source.is_none()
     }
 }
 
@@ -548,6 +579,11 @@ pub struct BuiltinPluginEditorWindow {
     /// Pump-tick counter driving the telemetry push cadence (every 4th 8 ms
     /// tick ≈ 30 Hz meters; every 128th ≈ 1 Hz host status).
     telemetry_tick: u32,
+    /// Publish sequence of the last analyser frame forwarded to the page. The
+    /// host publishes at its own rate, so most telemetry ticks find the same
+    /// frame; re-sending it would cost a `execute_javascript` round trip for a
+    /// picture that has not changed.
+    spectrum_seq: u32,
     /// Cached `Documents/Futureboard Studio/<plugin>/` root, resolved and
     /// created lazily on the first file message from the page.
     files_root: Option<std::path::PathBuf>,
@@ -600,6 +636,7 @@ impl BuiltinPluginEditorWindow {
             pointer_left: true,
             host_ops,
             telemetry_tick: 0,
+            spectrum_seq: 0,
             files_root: None,
         }
     }
@@ -707,6 +744,9 @@ impl BuiltinPluginEditorWindow {
         self.binding_generation += 1;
         self.editor_id = wire_instance_id(&key);
         self.active_instance = Some(key);
+        // Sequences are per-region, so the new instance's current frame could
+        // collide with the old one's and be suppressed as "unchanged".
+        self.spectrum_seq = 0;
         self.push_selected_instance();
         cx.notify();
     }
@@ -1149,6 +1189,27 @@ impl BuiltinPluginEditorWindow {
                         in_clip: frame.in_clip,
                         out_clip: frame.out_clip,
                     });
+                }
+            }
+            if let Some(source) = self.host_ops.spectrum_source.as_ref() {
+                if let Some((seq, bins)) = source(active) {
+                    // Only when the host has actually analysed again.
+                    if seq != self.spectrum_seq {
+                        self.spectrum_seq = seq;
+                        self.post_to_view(&SpectrumMsg {
+                            r#type: "futureboard.spectrum",
+                            protocol_version: BRIDGE_PROTOCOL_VERSION,
+                            instance_id: wire_instance_id(active),
+                            min_hz: SpherePluginHost::spectrum::MIN_HZ,
+                            max_hz: SpherePluginHost::spectrum::MAX_HZ,
+                            floor_db: SpherePluginHost::spectrum::FLOOR_DB,
+                            ceil_db: SpherePluginHost::spectrum::CEIL_DB,
+                            bins: bins
+                                .iter()
+                                .map(|db| SpherePluginHost::spectrum::quantize_db(*db))
+                                .collect(),
+                        });
+                    }
                 }
             }
         }

@@ -6,9 +6,11 @@ import {
   useState,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
   type WheelEvent as ReactWheelEvent,
 } from 'react'
-import type { Band } from '../bridge'
+import type { Band, SpectrumFrame } from '../bridge'
+import { SpectrumLayer } from './SpectrumLayer'
 import {
   BAND_COLORS,
   GAIN_RANGE,
@@ -44,6 +46,10 @@ export type ResponseGraphProps = {
   selected: number
   bypassed: boolean
   showBandCurves: boolean
+  showSpectrum: boolean
+  /// Live handle on the analyser frame — see [`SpectrumLayer`] for why this is
+  /// a ref rather than a value.
+  spectrumRef: RefObject<SpectrumFrame | null>
   onSelect: (index: number) => void
   onBandChange: (index: number, patch: Partial<Band>) => void
 }
@@ -53,6 +59,8 @@ export function ResponseGraph({
   selected,
   bypassed,
   showBandCurves,
+  showSpectrum,
+  spectrumRef,
   onSelect,
   onBandChange,
 }: ResponseGraphProps) {
@@ -147,7 +155,9 @@ export function ResponseGraph({
   const zeroY = gainToY(0, height)
 
   return (
-    <svg
+    <div className="response-stack">
+      <SpectrumLayer frameRef={spectrumRef} visible={showSpectrum && !bypassed} />
+      <svg
       ref={svgRef}
       className={`response${bypassed ? ' is-bypassed' : ''}`}
       viewBox={`0 0 ${width} ${height}`}
@@ -365,6 +375,7 @@ export function ResponseGraph({
           </g>
         )
       })}
-    </svg>
+      </svg>
+    </div>
   )
 }

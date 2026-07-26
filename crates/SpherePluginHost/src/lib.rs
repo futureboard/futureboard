@@ -48,11 +48,13 @@ pub mod process_manager;
 pub mod registry;
 pub mod scan;
 mod scanner;
+pub mod spectrum;
 mod types;
 
 pub use builtin::{
-    builtin_audio_bridge_supported, builtin_catalog, builtin_editor_url, builtin_id, is_builtin_id,
-    is_builtin_ref, resolve_builtin_stem, with_builtins, BUILTIN_ID_PREFIX,
+    builtin_audio_bridge_supported, builtin_catalog, builtin_display_name, builtin_editor_url,
+    builtin_id, is_builtin_id, is_builtin_ref, resolve_builtin_stem, with_builtins,
+    BUILTIN_ID_PREFIX,
 };
 pub use editor_quirk::{
     detect_plugin_editor_runtime, match_quirk, PluginEditorHostMode, PluginEditorQuirk,

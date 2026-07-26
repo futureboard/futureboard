@@ -689,14 +689,28 @@ impl PluginBridgeRuntime {
 
     /// Latest built-in DSP telemetry for `instance_id`'s shared region, plus
     /// footer status straight from the region header. `None` when no region is
-    /// mapped for the instance. Pure atomic loads — cheap enough for a ~30 Hz
-    /// UI poll.
+    /// mapped for the instance, or when its DSP publishes no telemetry at all
+    /// (an EQ has nothing to meter). Pure atomic loads — cheap enough for a
+    /// ~30 Hz UI poll.
     pub fn builtin_meter_frame(
         &self,
         instance_id: &str,
     ) -> Option<SpherePluginHost::audio_bridge::BuiltinMeterFrame> {
-        let region = self.shared_audio.get(instance_id)?;
-        Some(region.bridge().builtin_meters())
+        self.shared_audio
+            .get(instance_id)?
+            .bridge()
+            .builtin_meters()
+    }
+
+    /// Latest analyser frame for `instance_id`, as `(sequence, dB bins)`.
+    /// `None` when no region is mapped or the host has published nothing yet.
+    /// The caller compares the sequence against the last one it forwarded so an
+    /// unchanged frame is never re-sent to the page.
+    pub fn builtin_spectrum_frame(
+        &self,
+        instance_id: &str,
+    ) -> Option<(u32, [f32; SpherePluginHost::spectrum::SPECTRUM_BINS])> {
+        self.shared_audio.get(instance_id)?.bridge().spectrum()
     }
 
     /// Region-header status for the footer: (sample_rate, block_frames,

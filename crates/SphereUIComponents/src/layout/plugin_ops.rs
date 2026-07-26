@@ -2040,7 +2040,7 @@ impl StudioLayout {
         use crate::components::builtin_plugin_editor_window::{
             BuiltinEditorHostOps, BuiltinHostStatusSource, BuiltinIrLoadForwarder,
             BuiltinIrLoadRequest, BuiltinMeterSource, BuiltinNamLoadForwarder,
-            BuiltinNamLoadRequest, BuiltinParamForwarder, PluginInstanceKey,
+            BuiltinNamLoadRequest, BuiltinParamForwarder, BuiltinSpectrumSource, PluginInstanceKey,
         };
 
         let target = PluginInstanceKey {
@@ -2148,6 +2148,15 @@ impl StudioLayout {
                     .and_then(|bridge| bridge.builtin_meter_frame(&key.insert_id))
             }) as BuiltinMeterSource
         });
+        let spectrum_source: Option<BuiltinSpectrumSource> =
+            bridge_runtime.clone().map(|runtime| {
+                std::sync::Arc::new(move |key: &PluginInstanceKey| {
+                    runtime
+                        .lock()
+                        .ok()
+                        .and_then(|bridge| bridge.builtin_spectrum_frame(&key.insert_id))
+                }) as BuiltinSpectrumSource
+            });
         let host_status_source: Option<BuiltinHostStatusSource> = bridge_runtime.map(|runtime| {
             std::sync::Arc::new(move |key: &PluginInstanceKey| {
                 runtime
@@ -2162,6 +2171,7 @@ impl StudioLayout {
             load_ir,
             meter_source,
             host_status_source,
+            spectrum_source,
         };
 
         // Focus the existing shared window and rebind it to this instance,
