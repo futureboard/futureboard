@@ -1970,6 +1970,8 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         soundfont_volume,
         soundfont_reverb_chorus,
         soundfont_polyphony,
+        soundfont_envelope,
+        soundfont_quality,
         sends,
         routing,
     } = track;
@@ -2003,6 +2005,8 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         soundfont_volume: *soundfont_volume,
         soundfont_reverb_chorus: *soundfont_reverb_chorus,
         soundfont_polyphony: *soundfont_polyphony,
+        soundfont_envelope: *soundfont_envelope,
+        soundfont_quality: *soundfont_quality,
         sends: sends.clone(),
         routing: routing.clone(),
     }

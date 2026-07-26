@@ -594,6 +594,8 @@ pub(crate) fn make_track_snapshot(id: &str) -> crate::types::EngineTrackSnapshot
         soundfont_volume: 1.0,
         soundfont_reverb_chorus: true,
         soundfont_polyphony: 64,
+        soundfont_envelope: Default::default(),
+        soundfont_quality: Default::default(),
     }
 }
 

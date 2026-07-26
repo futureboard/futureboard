@@ -81,6 +81,8 @@ impl TimelineState {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         };
 
         let track2 = TrackState {
@@ -130,6 +132,8 @@ impl TimelineState {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         };
 
         let track3 = TrackState {
@@ -189,6 +193,8 @@ impl TimelineState {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         };
 
         Self {

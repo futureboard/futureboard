@@ -18,6 +18,8 @@ pub use template::{ProjectCreateOptions, ProjectTemplate};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use sphere_soundfont_player::{SoundfontEnvelope, SoundfontRenderQuality};
+
 // ── Identifiers ───────────────────────────────────────────────────────────────
 
 fn new_id() -> String {
@@ -450,6 +452,10 @@ pub struct ProjectSoundfontPlayer {
     pub volume: f32,
     pub reverb_chorus: bool,
     pub polyphony: u32,
+    /// v29: amp envelope over the player's output.
+    pub envelope: SoundfontEnvelope,
+    /// v29: internal synthesis oversampling.
+    pub quality: SoundfontRenderQuality,
 }
 
 impl Default for ProjectSoundfontPlayer {
@@ -461,6 +467,8 @@ impl Default for ProjectSoundfontPlayer {
             volume: 1.0,
             reverb_chorus: true,
             polyphony: 64,
+            envelope: SoundfontEnvelope::default(),
+            quality: SoundfontRenderQuality::default(),
         }
     }
 }
@@ -1017,6 +1025,8 @@ impl From<&TimelineState> for FutureboardProject {
                         volume: t.soundfont_volume,
                         reverb_chorus: t.soundfont_reverb_chorus,
                         polyphony: t.soundfont_polyphony as u32,
+                        envelope: t.soundfont_envelope,
+                        quality: t.soundfont_quality,
                     }),
                 }
             })
@@ -1566,6 +1576,16 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                     .as_ref()
                     .map(|sf| sf.polyphony.clamp(1, 256) as usize)
                     .unwrap_or(64),
+                soundfont_envelope: pt
+                    .soundfont
+                    .as_ref()
+                    .map(|sf| sf.envelope.sanitized())
+                    .unwrap_or_default(),
+                soundfont_quality: pt
+                    .soundfont
+                    .as_ref()
+                    .map(|sf| sf.quality)
+                    .unwrap_or_default(),
             }
         })
         .collect();

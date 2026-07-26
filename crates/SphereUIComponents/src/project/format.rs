@@ -6,7 +6,8 @@ use super::{
     ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongSectionType, ProjectSongTextEvent,
     ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTempoPoint, ProjectTimelineMarker,
     ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
-    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
+    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, SoundfontEnvelope,
+    SoundfontRenderQuality, TrackRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -53,7 +54,11 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v28 persists the built-in Soundfont Player instrument per track (`.sf2`
 /// path, preset bank/patch, volume, reverb/chorus, polyphony). Pre-v28 tracks
 /// load with no soundfont, which is what they had before the field existed.
-pub const PROJECT_VERSION: u32 = 28;
+/// v29 adds the Soundfont Player's amp envelope (A/D/S/R) and render quality.
+/// v28 soundfonts load with the bypassed envelope and Standard quality, which is
+/// exactly the signal path they had; an unknown quality key from a newer file
+/// degrades to Standard rather than failing the load.
+pub const PROJECT_VERSION: u32 = 29;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -809,10 +814,20 @@ fn encode_soundfont_player(w: &mut FbWriter, soundfont: Option<&ProjectSoundfont
     w.write_f32(soundfont.volume);
     w.write_bool(soundfont.reverb_chorus);
     w.write_u32(soundfont.polyphony);
+    // v29: amp envelope + render quality. The quality is written as its stable
+    // key rather than an ordinal so adding a setting later cannot renumber the
+    // ones already on disk.
+    let envelope = soundfont.envelope.sanitized();
+    w.write_f32(envelope.attack_ms);
+    w.write_f32(envelope.decay_ms);
+    w.write_f32(envelope.sustain);
+    w.write_f32(envelope.release_ms);
+    w.write_str(soundfont.quality.key());
 }
 
 fn decode_soundfont_player(
     r: &mut FbReader,
+    version: u32,
 ) -> Result<Option<ProjectSoundfontPlayer>, ProjectError> {
     if !r.read_bool()? {
         return Ok(None);
@@ -821,13 +836,34 @@ fn decode_soundfont_player(
     let has_preset = r.read_bool()?;
     let bank = r.read_u32()? as i32;
     let patch = r.read_u32()? as i32;
+    let volume = r.read_f32()?.clamp(0.0, 1.0);
+    let reverb_chorus = r.read_bool()?;
+    let polyphony = r.read_u32()?.clamp(1, 256);
+    let (envelope, quality) = if version >= 29 {
+        let envelope = SoundfontEnvelope {
+            attack_ms: r.read_f32()?,
+            decay_ms: r.read_f32()?,
+            sustain: r.read_f32()?,
+            release_ms: r.read_f32()?,
+        }
+        .sanitized();
+        (envelope, SoundfontRenderQuality::from_key(&r.read_str()?))
+    } else {
+        // A v28 soundfont played through neither, so the defaults reproduce it.
+        (
+            SoundfontEnvelope::default(),
+            SoundfontRenderQuality::default(),
+        )
+    };
     Ok(Some(ProjectSoundfontPlayer {
         path,
         preset_bank: has_preset.then_some(bank),
         preset_patch: has_preset.then_some(patch),
-        volume: r.read_f32()?.clamp(0.0, 1.0),
-        reverb_chorus: r.read_bool()?,
-        polyphony: r.read_u32()?.clamp(1, 256),
+        volume,
+        reverb_chorus,
+        polyphony,
+        envelope,
+        quality,
     }))
 }
 
@@ -1713,7 +1749,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     };
 
     let soundfont = if version >= 28 {
-        decode_soundfont_player(r)?
+        decode_soundfont_player(r, version)?
     } else {
         None
     };
@@ -2792,6 +2828,13 @@ mod tests {
             volume: 0.65,
             reverb_chorus: false,
             polyphony: 96,
+            envelope: SoundfontEnvelope {
+                attack_ms: 120.0,
+                decay_ms: 340.0,
+                sustain: 0.4,
+                release_ms: 900.0,
+            },
+            quality: SoundfontRenderQuality::Ultra,
         });
 
         let mut project = FutureboardProject::new("Soundfont");
@@ -2812,6 +2855,38 @@ mod tests {
         assert!((soundfont.volume - 0.65).abs() < 1.0e-6);
         assert!(!soundfont.reverb_chorus);
         assert_eq!(soundfont.polyphony, 96);
+        assert!((soundfont.envelope.attack_ms - 120.0).abs() < 1.0e-3);
+        assert!((soundfont.envelope.decay_ms - 340.0).abs() < 1.0e-3);
+        assert!((soundfont.envelope.sustain - 0.4).abs() < 1.0e-6);
+        assert!((soundfont.envelope.release_ms - 900.0).abs() < 1.0e-3);
+        assert_eq!(soundfont.quality, SoundfontRenderQuality::Ultra);
+    }
+
+    #[test]
+    fn a_v28_soundfont_loads_with_no_envelope_and_standard_quality() {
+        // A v28 soundfont block ends at the polyphony, so decoding it must not
+        // read the following bytes as an envelope.
+        let mut w = FbWriter::new();
+        w.write_bool(true);
+        w.write_opt_path(&Some(PathBuf::from("/fonts/GM.sf2")));
+        w.write_bool(true);
+        w.write_u32(0);
+        w.write_u32(3);
+        w.write_f32(0.8);
+        w.write_bool(true);
+        w.write_u32(48);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let soundfont = decode_soundfont_player(&mut r, 28)
+            .expect("v28 soundfont decodes")
+            .expect("present");
+        assert_eq!(soundfont.polyphony, 48);
+        assert!(
+            soundfont.envelope.is_bypassed(),
+            "a pre-v29 soundfont must keep its original signal path"
+        );
+        assert_eq!(soundfont.quality, SoundfontRenderQuality::Standard);
     }
 
     #[test]

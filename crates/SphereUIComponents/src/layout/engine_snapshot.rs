@@ -640,6 +640,8 @@ fn build_engine_project_snapshot_inner(
             soundfont_volume: track.soundfont_volume,
             soundfont_reverb_chorus: track.soundfont_reverb_chorus,
             soundfont_polyphony: track.soundfont_polyphony,
+            soundfont_envelope: track.soundfont_envelope,
+            soundfont_quality: track.soundfont_quality,
         })
         .collect();
 
@@ -676,6 +678,8 @@ fn build_engine_project_snapshot_inner(
         soundfont_volume: 1.0,
         soundfont_reverb_chorus: true,
         soundfont_polyphony: 64,
+        soundfont_envelope: Default::default(),
+        soundfont_quality: Default::default(),
     });
 
     let mut clips: Vec<EngineClipSnapshot> = state
@@ -1008,6 +1012,59 @@ mod tests {
         let clip_id = clip.id.clone();
         EditCommand::CreateClip { track_id, clip }.execute(&mut state);
         (state, clip_id)
+    }
+
+    #[test]
+    fn soundfont_envelope_and_quality_reach_the_engine_snapshot() {
+        use crate::components::timeline::timeline_state::{
+            SoundfontEnvelope, SoundfontPlayerSettingsState, SoundfontRenderQuality,
+        };
+
+        let (mut state, _clip) = instrument_state_with_clip();
+        let track_id = state.tracks[0].id.clone();
+        let envelope = SoundfontEnvelope {
+            attack_ms: 250.0,
+            decay_ms: 500.0,
+            sustain: 0.3,
+            release_ms: 800.0,
+        };
+        assert!(state.set_track_soundfont_player_state(
+            &track_id,
+            SoundfontPlayerSettingsState {
+                path: Some("/fonts/GM.sf2".to_string()),
+                preset: Some((0, 0)),
+                envelope,
+                quality: SoundfontRenderQuality::High,
+                ..SoundfontPlayerSettingsState::default()
+            },
+        ));
+
+        let snapshot = build_engine_project_snapshot(&state, 48_000, None, None);
+        let track = snapshot
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("track in snapshot");
+        assert!(track.builtin_soundfont_player);
+        assert_eq!(track.soundfont_envelope, envelope);
+        assert_eq!(track.soundfont_quality, SoundfontRenderQuality::High);
+    }
+
+    #[test]
+    fn an_unchanged_soundfont_envelope_reports_no_edit() {
+        use crate::components::timeline::timeline_state::SoundfontPlayerSettingsState;
+
+        let (mut state, _clip) = instrument_state_with_clip();
+        let track_id = state.tracks[0].id.clone();
+        let settings = SoundfontPlayerSettingsState {
+            path: Some("/fonts/GM.sf2".to_string()),
+            ..SoundfontPlayerSettingsState::default()
+        };
+        assert!(state.set_track_soundfont_player_state(&track_id, settings.clone()));
+        assert!(
+            !state.set_track_soundfont_player_state(&track_id, settings),
+            "republishing identical settings must not mark the project dirty"
+        );
     }
 
     fn audio_state_with_clip() -> (TimelineState, String) {

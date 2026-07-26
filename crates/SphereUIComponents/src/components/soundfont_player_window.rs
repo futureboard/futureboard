@@ -30,17 +30,23 @@ use crate::components::soundfont_player_mdi::{
     soundfont_player_panel, SoundfontPlayerCallbacks, SoundfontPlayerPanelState,
     SOUNDFONT_PLAYER_MDI_TITLE,
 };
+use crate::components::timeline::timeline_state::SoundfontPlayerSettingsState;
 use crate::components::title_bar::external_window_titlebar;
 use crate::soundfont_player::{
-    default_soundfont_player_settings, SoundfontPlayer, SoundfontPlayerError,
-    SoundfontPlayerSettings,
+    SoundfontEnvelope, SoundfontPlayer, SoundfontPlayerError, SoundfontPlayerSettings,
+    SoundfontRenderQuality,
 };
 use crate::theme::Colors;
 
 pub const SOUNDFONT_PLAYER_WINDOW_WIDTH: f32 = 640.0;
-pub const SOUNDFONT_PLAYER_WINDOW_HEIGHT: f32 = 520.0;
+/// Tall enough to open with Source, Amp Envelope and Output all visible above
+/// the keyboard. Shorter than this the instrument body scrolls; the header and
+/// keyboard stay pinned.
+pub const SOUNDFONT_PLAYER_WINDOW_HEIGHT: f32 = 680.0;
+/// The envelope knob row is the widest fixed content: four 52 px knobs, their
+/// gaps, the Reset button, and the section padding.
 pub const SOUNDFONT_PLAYER_WINDOW_MIN_WIDTH: f32 = 480.0;
-pub const SOUNDFONT_PLAYER_WINDOW_MIN_HEIGHT: f32 = 420.0;
+pub const SOUNDFONT_PLAYER_WINDOW_MIN_HEIGHT: f32 = 380.0;
 
 const PREVIEW_MIDI_CHANNEL: u8 = 0;
 const PREVIEW_VELOCITY: u8 = 100;
@@ -71,36 +77,16 @@ pub enum SoundfontPlayerPreview {
 #[derive(Debug, Clone)]
 pub struct SoundfontPlayerTrackUpdate {
     pub track_id: String,
-    pub path: Option<String>,
-    pub preset: Option<(i32, i32)>,
-    pub volume: f32,
-    pub reverb_chorus: bool,
-    pub polyphony: usize,
+    pub settings: SoundfontPlayerSettingsState,
 }
 
 /// A track's saved Soundfont Player settings, used to restore the window when
 /// it is opened on a track that already has a `.sf2` (a reopened project, or a
 /// window closed and reopened in the same session).
-#[derive(Debug, Clone, PartialEq)]
-pub struct SoundfontPlayerTrackState {
-    pub path: Option<String>,
-    pub preset: Option<(i32, i32)>,
-    pub volume: f32,
-    pub reverb_chorus: bool,
-    pub polyphony: usize,
-}
-
-impl Default for SoundfontPlayerTrackState {
-    fn default() -> Self {
-        Self {
-            path: None,
-            preset: None,
-            volume: 1.0,
-            reverb_chorus: true,
-            polyphony: 64,
-        }
-    }
-}
+///
+/// The same shape the timeline stores and the window publishes back, so the
+/// panel cannot drift out of step with what a track actually holds.
+pub type SoundfontPlayerTrackState = SoundfontPlayerSettingsState;
 
 type PreviewCb = Arc<dyn Fn(&str, SoundfontPlayerPreview, &mut App) + Send + Sync>;
 
@@ -147,9 +133,12 @@ impl SoundfontPlayerWindow {
     /// had loaded since the project opened, and the first gesture would publish
     /// that empty state back over the saved one.
     fn restore_track_state(&mut self, state: SoundfontPlayerTrackState, cx: &mut Context<Self>) {
-        self.panel.master_volume = state.volume.clamp(0.0, 1.0);
+        let state = state.sanitized();
+        self.panel.master_volume = state.volume;
         self.panel.reverb_chorus = state.reverb_chorus;
-        self.panel.polyphony = state.polyphony.clamp(1, 256);
+        self.panel.polyphony = state.polyphony;
+        self.panel.envelope = state.envelope;
+        self.panel.quality = state.quality;
 
         let Some(path) = state
             .path
@@ -173,12 +162,7 @@ impl SoundfontPlayerWindow {
         // the panel showing its loading state until it lands.
         self.panel.loading = true;
         self.panel.status = None;
-        let settings = SoundfontPlayerSettings {
-            sample_rate: 44_100,
-            block_size: 0,
-            maximum_polyphony: self.panel.polyphony,
-            enable_reverb_and_chorus: self.panel.reverb_chorus,
-        };
+        let settings = self.player_settings(44_100);
         let entity = cx.entity().clone();
         let preset = state.preset;
         cx.spawn(async move |_this, cx| {
@@ -200,20 +184,35 @@ impl SoundfontPlayerWindow {
         .detach();
     }
 
+    /// Player settings for the panel's current controls. The window's own
+    /// instance only reads bank/preset metadata and validates a preset choice,
+    /// but it is built from the same settings the engine will use so a rejected
+    /// combination surfaces here rather than silently on the audio thread.
+    fn player_settings(&self, sample_rate: i32) -> SoundfontPlayerSettings {
+        SoundfontPlayerSettings {
+            sample_rate,
+            block_size: 0,
+            maximum_polyphony: self.panel.polyphony,
+            enable_reverb_and_chorus: self.panel.reverb_chorus,
+            envelope: self.panel.envelope,
+            quality: self.panel.quality,
+            max_render_frames: 0,
+        }
+    }
+
     fn preview(&self, event: SoundfontPlayerPreview, app: &mut App) {
         (self.on_preview)(&self.track_id, event, app);
     }
 
-    /// The channel this window must preview on. A drum-bank preset only exists
-    /// on the percussion channel — auditioning it on channel 1 would play
-    /// whatever melodic preset that channel happens to hold.
+    /// The channel this window previews on.
+    ///
+    /// Always the plain preview channel: the engine's player routes a note to
+    /// the channel its selected preset actually lives on (a drum kit only exists
+    /// on channel 10), so this window must not second-guess it. Duplicating the
+    /// rule here is what let the panel keyboard audition a kit that the track's
+    /// own notes could not reach.
     fn preview_channel(&self) -> u8 {
-        match self.panel.selected_preset {
-            Some((bank, _)) if bank >= sphere_soundfont_player::DRUM_BANK => {
-                sphere_soundfont_player::PERCUSSION_CHANNEL
-            }
-            _ => PREVIEW_MIDI_CHANNEL,
-        }
+        PREVIEW_MIDI_CHANNEL
     }
 
     /// Presses one panel key. Held until [`Self::note_off`] so a sustained
@@ -323,14 +322,18 @@ impl SoundfontPlayerWindow {
         (self.on_update_track)(
             SoundfontPlayerTrackUpdate {
                 track_id: self.track_id.clone(),
-                path: self
-                    .loaded_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned()),
-                preset: self.panel.selected_preset,
-                volume: self.panel.master_volume,
-                reverb_chorus: self.panel.reverb_chorus,
-                polyphony: self.panel.polyphony,
+                settings: SoundfontPlayerSettingsState {
+                    path: self
+                        .loaded_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    preset: self.panel.selected_preset,
+                    volume: self.panel.master_volume,
+                    reverb_chorus: self.panel.reverb_chorus,
+                    polyphony: self.panel.polyphony,
+                    envelope: self.panel.envelope,
+                    quality: self.panel.quality,
+                },
             },
             app,
         );
@@ -342,6 +345,7 @@ impl SoundfontPlayerWindow {
         cx.notify();
         #[cfg(feature = "native-dialogs")]
         {
+            let settings = self.player_settings(44_100);
             let entity = cx.entity().clone();
             cx.spawn(async move |_this, cx| {
                 let result = rfd::AsyncFileDialog::new()
@@ -358,7 +362,6 @@ impl SoundfontPlayerWindow {
                     return;
                 };
                 let path = handle.path().to_path_buf();
-                let settings = default_soundfont_player_settings(44_100);
                 let load_result = SoundfontPlayer::from_path(&path, settings);
                 let _ = entity.update(cx, |this, cx| {
                     this.apply_loaded_player(path, load_result);
@@ -407,6 +410,8 @@ impl SoundfontPlayerWindow {
                 player.set_master_volume(self.panel.master_volume);
                 self.panel.reverb_chorus = player.enable_reverb_and_chorus();
                 self.panel.polyphony = player.maximum_polyphony();
+                self.panel.envelope = player.envelope();
+                self.panel.quality = player.quality();
                 self.player = Some(player);
                 self.loaded_path = Some(path);
             }
@@ -445,10 +450,12 @@ impl SoundfontPlayerWindow {
         }
     }
 
-    /// Reverb/chorus and polyphony are `SynthesizerSettings` fixed at
-    /// creation in RustySynth — no live setter exists, so applying either
-    /// reloads the same file (a control/offline operation, same as the
-    /// initial load) and reapplies volume + the selected preset.
+    /// Reverb/chorus, polyphony and render quality are all fixed at synthesizer
+    /// creation in RustySynth — no live setter exists — so applying any of them
+    /// reloads the same file (a control/offline operation, same as the initial
+    /// load) and reapplies volume + the selected preset. The amp envelope is
+    /// ours rather than RustySynth's and needs no reload; see
+    /// [`Self::set_envelope`].
     fn reload_with_settings(&mut self) {
         let Some(path) = self.loaded_path.clone() else {
             return;
@@ -458,12 +465,7 @@ impl SoundfontPlayerWindow {
             .as_ref()
             .map(SoundfontPlayer::sample_rate)
             .unwrap_or(44_100);
-        let settings = SoundfontPlayerSettings {
-            sample_rate,
-            block_size: 0,
-            maximum_polyphony: self.panel.polyphony,
-            enable_reverb_and_chorus: self.panel.reverb_chorus,
-        };
+        let settings = self.player_settings(sample_rate);
         match SoundfontPlayer::from_path(&path, settings) {
             Ok(mut player) => {
                 player.set_master_volume(self.panel.master_volume);
@@ -486,7 +488,24 @@ impl SoundfontPlayerWindow {
     }
 
     fn set_polyphony(&mut self, value: usize) {
-        self.panel.polyphony = value;
+        self.panel.polyphony = value.clamp(1, 256);
+        self.reload_with_settings();
+    }
+
+    /// Amp envelope edits apply live — no synthesizer rebuild — so dragging a
+    /// knob does not restart the voices under the user's fingers.
+    fn set_envelope(&mut self, envelope: SoundfontEnvelope) {
+        self.panel.envelope = envelope.sanitized();
+        if let Some(player) = self.player.as_mut() {
+            player.set_envelope(self.panel.envelope);
+        }
+    }
+
+    fn set_quality(&mut self, quality: SoundfontRenderQuality) {
+        if self.panel.quality == quality {
+            return;
+        }
+        self.panel.quality = quality;
         self.reload_with_settings();
     }
 }
@@ -556,6 +575,28 @@ impl Render for SoundfontPlayerWindow {
                     let value = *value;
                     let _ = entity.update(app, |this, cx| {
                         this.set_polyphony(value);
+                        this.notify_track_update(cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_set_envelope: Arc::new({
+                let entity = entity.clone();
+                move |envelope: &SoundfontEnvelope, _window, app: &mut App| {
+                    let envelope = *envelope;
+                    let _ = entity.update(app, |this, cx| {
+                        this.set_envelope(envelope);
+                        this.notify_track_update(cx);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_set_quality: Arc::new({
+                let entity = entity.clone();
+                move |quality: &SoundfontRenderQuality, _window, app: &mut App| {
+                    let quality = *quality;
+                    let _ = entity.update(app, |this, cx| {
+                        this.set_quality(quality);
                         this.notify_track_update(cx);
                         cx.notify();
                     });

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sphere_soundfont_player::{SoundfontEnvelope, SoundfontRenderQuality};
 use SphereAudioProcessor::StretchParams;
 
 // ── DAUx backend selection types ──────────────────────────────────────────────
@@ -353,6 +354,13 @@ pub struct EngineTrackSnapshot {
     pub soundfont_reverb_chorus: bool,
     #[serde(default = "default_soundfont_polyphony")]
     pub soundfont_polyphony: usize,
+    /// Amp envelope over the built-in player's output. Defaults to the bypassed
+    /// envelope, which is what every project written before it existed had.
+    #[serde(default)]
+    pub soundfont_envelope: SoundfontEnvelope,
+    /// Internal synthesis oversampling for the built-in player.
+    #[serde(default)]
+    pub soundfont_quality: SoundfontRenderQuality,
 }
 
 fn default_soundfont_volume() -> f32 {

@@ -14,7 +14,9 @@ use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
-use sphere_soundfont_player::{SoundFont, SoundfontPlayer, SoundfontPlayerSettings};
+use sphere_soundfont_player::{
+    SoundFont, SoundfontEnvelope, SoundfontPlayer, SoundfontPlayerSettings, SoundfontRenderQuality,
+};
 use SphereAudioProcessor::{
     create_stretch_processor, effective_pitch_ratio, effective_time_ratio, resolve_backend,
     source_read_rate_for_repitch, stretched_duration_samples, StretchAlgorithm, StretchBackend,
@@ -54,6 +56,8 @@ pub struct RuntimeSoundfontPlayer {
     pub volume: f32,
     pub reverb_chorus: bool,
     pub polyphony: usize,
+    pub envelope: SoundfontEnvelope,
+    pub quality: SoundfontRenderQuality,
     pub player: Option<SoundfontPlayer>,
 }
 
@@ -72,10 +76,22 @@ impl RuntimeSoundfontPlayer {
             volume: track.soundfont_volume.clamp(0.0, 1.0),
             reverb_chorus: track.soundfont_reverb_chorus,
             polyphony: track.soundfont_polyphony.clamp(1, 256),
+            envelope: track.soundfont_envelope.sanitized(),
+            quality: track.soundfont_quality,
             player: None,
         };
         state.rebuild(sample_rate, None);
         Some(state)
+    }
+
+    /// Output samples of delay this instrument adds — the decimation filter at
+    /// an oversampled render quality, zero otherwise. Folded into the track's
+    /// plugin latency so delay compensation sees it.
+    pub fn latency_samples(&self) -> u32 {
+        self.player
+            .as_ref()
+            .map(SoundfontPlayer::latency_samples)
+            .unwrap_or(0)
     }
 
     /// Rebuilds the synthesizer for the current settings. `sound_font` lets the
@@ -89,6 +105,11 @@ impl RuntimeSoundfontPlayer {
             block_size: 0,
             maximum_polyphony: self.polyphony,
             enable_reverb_and_chorus: self.reverb_chorus,
+            envelope: self.envelope,
+            quality: self.quality,
+            // Sized for the callback block so an oversampled render never grows
+            // a buffer on the audio thread.
+            max_render_frames: DEFAULT_AUDIO_BLOCK_CAPACITY,
         };
         let built = match sound_font {
             Some(font) => SoundfontPlayer::from_sound_font(font, settings),
@@ -130,6 +151,8 @@ impl std::fmt::Debug for RuntimeSoundfontPlayer {
             .field("volume", &self.volume)
             .field("reverb_chorus", &self.reverb_chorus)
             .field("polyphony", &self.polyphony)
+            .field("envelope", &self.envelope)
+            .field("quality", &self.quality)
             .field("loaded", &self.player.is_some())
             .finish()
     }
@@ -152,6 +175,8 @@ impl Clone for RuntimeSoundfontPlayer {
             volume: self.volume,
             reverb_chorus: self.reverb_chorus,
             polyphony: self.polyphony,
+            envelope: self.envelope,
+            quality: self.quality,
             player: None,
         };
         cloned.rebuild(sample_rate, sound_font);
@@ -1162,7 +1187,14 @@ impl RuntimeProject {
                 let font = soundfont.player.as_ref().map(SoundfontPlayer::sound_font);
                 soundfont.rebuild(sample_rate, font);
             }
-            track.plugin_latency_samples = 0;
+            // The built-in Soundfont Player is a track instrument rather than an
+            // insert, so its decimation delay has to be seeded here before the
+            // insert latencies accumulate on top.
+            track.plugin_latency_samples = track
+                .soundfont_player
+                .as_ref()
+                .map(RuntimeSoundfontPlayer::latency_samples)
+                .unwrap_or(0);
             for insert in &mut track.inserts {
                 insert.dsp.rebuild(
                     canonical_plugin_id(&insert.kind),
@@ -1199,10 +1231,17 @@ impl RuntimeProject {
 
     #[inline]
     fn track_insert_latency_samples(&self, track: &RuntimeTrack, bridge_block_frames: u32) -> u32 {
+        // The built-in Soundfont Player sits ahead of the inserts, so its
+        // decimation delay is part of the track's path either way.
+        let instrument = track
+            .soundfont_player
+            .as_ref()
+            .map(RuntimeSoundfontPlayer::latency_samples)
+            .unwrap_or(0);
         if track.inserts.is_empty() {
-            return track.plugin_latency_samples;
+            return track.plugin_latency_samples.max(instrument);
         }
-        let mut samples = 0u32;
+        let mut samples = instrument;
         for insert in &track.inserts {
             if !insert.enabled {
                 continue;
@@ -1554,6 +1593,14 @@ impl RuntimeProject {
 
             let midi_instrument_insert_ix = find_midi_instrument_insert_ix(&inserts, &t.track_type);
             let soundfont_player = RuntimeSoundfontPlayer::from_snapshot(t, output_sample_rate);
+            // The built-in player's decimation delay at an oversampled render
+            // quality is real path latency, so it has to be in the track's
+            // reported figure from the first graph build — not only after a
+            // later sample-rate rebuild or latency refresh.
+            let soundfont_latency_samples = soundfont_player
+                .as_ref()
+                .map(RuntimeSoundfontPlayer::latency_samples)
+                .unwrap_or(0);
 
             // Seed the fader smoother at the build-time target so the first
             // realtime block plays at the correct level (no startup ramp).
@@ -1613,7 +1660,7 @@ impl RuntimeProject {
                 midi_block_events: Vec::with_capacity(256),
                 midi_instrument_insert_ix,
                 soundfont_player,
-                plugin_latency_samples: 0,
+                plugin_latency_samples: soundfont_latency_samples,
                 pdc_delay_l: Vec::new(),
                 pdc_delay_r: Vec::new(),
                 pdc_write_pos: 0,
@@ -3566,6 +3613,8 @@ mod pdc_reset_tests {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         }
     }
 

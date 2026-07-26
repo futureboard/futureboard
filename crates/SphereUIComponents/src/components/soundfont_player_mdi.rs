@@ -17,12 +17,17 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::controls::{fb_button, fb_checkbox, fb_stepper_button, FbButtonKind};
+use crate::components::controls::{
+    fb_button, fb_checkbox, fb_segmented_button, fb_stepper_button, FbButtonKind,
+};
+use crate::components::knob::knob;
 use crate::components::mdi::{
     mdi_workspace, MdiDocumentKind, MdiWorkspaceCallbacks, MdiWorkspaceState,
 };
 use crate::components::slider::slider;
-use crate::soundfont_player::SoundfontPresetInfo;
+use crate::soundfont_player::{
+    SoundfontEnvelope, SoundfontPresetInfo, SoundfontRenderQuality, DRUM_BANK, PERCUSSION_CHANNEL,
+};
 use crate::theme::Colors;
 
 pub const SOUNDFONT_PLAYER_MDI_TITLE: &str = "Soundfont Player";
@@ -39,6 +44,11 @@ pub struct SoundfontPlayerPanelState {
     pub master_volume: f32,
     pub reverb_chorus: bool,
     pub polyphony: usize,
+    /// Amp envelope over the player's output. Default is bypassed — the panel
+    /// says so rather than implying the SoundFont is being reshaped.
+    pub envelope: SoundfontEnvelope,
+    /// Internal synthesis oversampling.
+    pub quality: SoundfontRenderQuality,
     pub preset_list_open: bool,
     pub loading: bool,
     pub status: Option<String>,
@@ -69,6 +79,8 @@ impl Default for SoundfontPlayerPanelState {
             master_volume: 1.0,
             reverb_chorus: true,
             polyphony: 64,
+            envelope: SoundfontEnvelope::default(),
+            quality: SoundfontRenderQuality::default(),
             preset_list_open: false,
             loading: false,
             status: None,
@@ -99,6 +111,8 @@ type SoundfontF32Cb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
 type SoundfontUsizeCb = Arc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 type SoundfontNoteCb = Arc<dyn Fn(&u8, &mut Window, &mut App) + 'static>;
 type SoundfontI32Cb = Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>;
+type SoundfontEnvelopeCb = Arc<dyn Fn(&SoundfontEnvelope, &mut Window, &mut App) + 'static>;
+type SoundfontQualityCb = Arc<dyn Fn(&SoundfontRenderQuality, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone)]
 pub struct SoundfontPlayerCallbacks {
@@ -108,6 +122,10 @@ pub struct SoundfontPlayerCallbacks {
     pub on_set_volume: SoundfontF32Cb,
     pub on_toggle_reverb_chorus: SoundfontVoidCb,
     pub on_set_polyphony: SoundfontUsizeCb,
+    /// One complete envelope — the panel sends the whole struct so a knob drag
+    /// cannot land a partial edit.
+    pub on_set_envelope: SoundfontEnvelopeCb,
+    pub on_set_quality: SoundfontQualityCb,
     /// Press and release of one panel key — routed to the engine so the note
     /// sounds through the track it belongs to.
     pub on_note_on: SoundfontNoteCb,
@@ -166,71 +184,170 @@ pub fn soundfont_player_panel(
             .unwrap_or_else(|| "No SoundFont loaded".to_string())
     };
 
-    let mut column = div()
+    // One scroll owner for the whole instrument body. The header and the
+    // keyboard footer are pinned outside it, so the two things a player needs
+    // at all times — which patch is loaded, and something to press — never
+    // scroll away when the window is short.
+    let mut body = div()
+        .id("soundfont-player-body")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h(px(0.0))
+        .overflow_y_scroll()
+        .p(px(SECTION_PAD))
+        .gap(px(10.0));
+
+    let mut source = section("Source")
+        .child(soundfont_row(panel, &cb))
+        .child(preset_row(panel, &cb));
+    if panel.preset_list_open {
+        source = source.child(preset_list(panel, &cb));
+    }
+    if let Some(hint) = preset_routing_hint(panel) {
+        source = source.child(hint);
+    }
+    body = body
+        .child(source)
+        .child(
+            section("Amp Envelope")
+                .child(envelope_row(panel, &cb))
+                .child(envelope_hint(panel)),
+        )
+        .child(
+            section("Output")
+                .child(volume_row(panel, &cb))
+                .child(engine_row(panel, &cb))
+                .child(quality_row(panel, &cb))
+                .child(quality_hint(panel)),
+        );
+
+    if let Some(status) = panel.status.clone() {
+        body = body.child(status_banner(status));
+    }
+
+    div()
         .flex()
         .flex_col()
         .size_full()
         .bg(Colors::surface_window())
-        .p(px(20.0))
-        .gap(px(8.0))
-        .child(header_row(&title, &subtitle))
-        .child(soundfont_row(panel, &cb))
-        .child(preset_row(panel, &cb));
-
-    if panel.preset_list_open {
-        column = column.child(preset_list(panel, &cb));
-    }
-
-    column = column
-        .child(volume_row(panel, &cb))
-        .child(engine_row(panel, &cb));
-
-    if let Some(status) = panel.status.clone() {
-        column = column.child(status_banner(status));
-    }
-
-    column
-        .child(
-            div()
-                .mt(px(2.0))
-                .h(px(1.0))
-                .w_full()
-                .bg(Colors::border_subtle()),
-        )
+        .child(header_row(&title, &subtitle, panel))
+        .child(body)
         .child(
             div()
                 .flex()
                 .flex_col()
+                .flex_shrink_0()
                 .gap(px(5.0))
+                .px(px(SECTION_PAD))
+                .pb(px(SECTION_PAD))
+                .pt(px(8.0))
+                .border_t(px(1.0))
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_base())
                 .child(keyboard_header(panel, &cb))
                 .child(keyboard(panel, &cb)),
         )
         .into_any_element()
 }
 
-fn header_row(title: &str, subtitle: &str) -> AnyElement {
+/// Padding shared by the header, the scrolling body, and the keyboard footer so
+/// their content stays on one vertical alignment.
+const SECTION_PAD: f32 = 16.0;
+
+/// A titled group inside the instrument body — the raised control-group plane
+/// from `DESIGN.md`'s surface order, one step above the window surface.
+fn section(title: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        // The body is the scroll owner; a section must keep its own height so a
+        // short window scrolls rather than crushing the knob row.
+        .flex_shrink_0()
+        .gap(px(6.0))
+        .p(px(10.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_card())
+        .child(
+            div()
+                .text_size(px(9.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child(title),
+        )
+}
+
+/// Small trailing note under a control group. Explains a real behavior; never
+/// used for decoration.
+fn section_hint(text: String, accented: bool) -> AnyElement {
+    div()
+        .text_size(px(9.5))
+        .text_color(if accented {
+            Colors::accent_primary()
+        } else {
+            Colors::text_faint()
+        })
+        .child(text)
+        .into_any_element()
+}
+
+/// The instrument nameplate: bank name, source file, and a badge for the state
+/// a player checks at a glance — how many voices, and whether the panel is
+/// sounding right now.
+fn header_row(title: &str, subtitle: &str, panel: &SoundfontPlayerPanelState) -> AnyElement {
+    let playing = panel.testing || !panel.active_notes.is_empty();
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .flex_shrink_0()
+        .gap(px(10.0))
+        .px(px(SECTION_PAD))
+        .py(px(12.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_base())
         .child(
-            svg()
-                .path(assets::ICON_MUSIC_PATH)
-                .w(px(16.0))
-                .h(px(16.0))
-                .text_color(Colors::accent_primary()),
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(if playing {
+                    Colors::border_accent()
+                } else {
+                    Colors::border_subtle()
+                })
+                .bg(Colors::surface_card())
+                .child(
+                    svg()
+                        .path(assets::ICON_MUSIC_PATH)
+                        .w(px(15.0))
+                        .h(px(15.0))
+                        .text_color(if playing {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_muted()
+                        }),
+                ),
         )
         .child(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
                 .min_w(px(0.0))
                 .gap(px(2.0))
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child(title.to_string()),
@@ -238,11 +355,48 @@ fn header_row(title: &str, subtitle: &str) -> AnyElement {
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(px(10.0))
                         .text_color(Colors::text_muted())
                         .child(subtitle.to_string()),
                 ),
         )
+        .child(header_badge(panel))
+        .into_any_element()
+}
+
+fn header_badge(panel: &SoundfontPlayerPanelState) -> AnyElement {
+    let (label, accented) = if panel.loading {
+        ("Loading".to_string(), false)
+    } else if !panel.is_playable() {
+        ("No instrument".to_string(), false)
+    } else if panel.testing || !panel.active_notes.is_empty() {
+        (format!("{} voices", panel.active_notes.len()), true)
+    } else {
+        (format!("{} voice limit", panel.polyphony), false)
+    };
+    div()
+        .flex_shrink_0()
+        .px(px(7.0))
+        .py(px(3.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if accented {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if accented {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_card()
+        })
+        .text_size(px(9.5))
+        .text_color(if accented {
+            Colors::accent_primary()
+        } else {
+            Colors::text_muted()
+        })
+        .child(label)
         .into_any_element()
 }
 
@@ -521,8 +675,234 @@ fn engine_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) 
         .into_any_element()
 }
 
+/// Says where a drum-bank preset's notes actually go.
+///
+/// Bank select on MIDI channel 10 is offset into a SoundFont's drum banks, so a
+/// kit exists on that channel and nowhere else. The player therefore routes this
+/// track's notes there whatever channel the piano roll wrote — real behavior the
+/// panel has to state rather than leave the user to discover.
+fn preset_routing_hint(panel: &SoundfontPlayerPanelState) -> Option<AnyElement> {
+    let (bank, _) = panel.selected_preset?;
+    (bank >= DRUM_BANK).then(|| {
+        section_hint(
+            format!(
+                "Drum bank {bank} — this track's notes play on MIDI channel {}.",
+                PERCUSSION_CHANNEL + 1
+            ),
+            true,
+        )
+    })
+}
+
+/// The A/D/S/R knob row. Four knobs on one baseline with their values read out
+/// underneath, which is the layout a sampler player's envelope is scanned in.
+fn envelope_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
+    let envelope = panel.envelope.sanitized();
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(14.0))
+        .child(envelope_knob(
+            "soundfont-env-attack",
+            "Attack",
+            envelope,
+            envelope.attack_ms,
+            0.0,
+            ENVELOPE_KNOB_MAX_MS,
+            format_ms(envelope.attack_ms),
+            cb.on_set_envelope.clone(),
+            |envelope, value| envelope.attack_ms = value,
+        ))
+        .child(envelope_knob(
+            "soundfont-env-decay",
+            "Decay",
+            envelope,
+            envelope.decay_ms,
+            0.0,
+            ENVELOPE_KNOB_MAX_MS,
+            format_ms(envelope.decay_ms),
+            cb.on_set_envelope.clone(),
+            |envelope, value| envelope.decay_ms = value,
+        ))
+        .child(envelope_knob(
+            "soundfont-env-sustain",
+            "Sustain",
+            envelope,
+            envelope.sustain,
+            0.0,
+            1.0,
+            format!("{:.0}%", envelope.sustain * 100.0),
+            cb.on_set_envelope.clone(),
+            |envelope, value| envelope.sustain = value,
+        ))
+        .child(envelope_knob(
+            "soundfont-env-release",
+            "Release",
+            envelope,
+            envelope.release_ms,
+            0.0,
+            ENVELOPE_KNOB_MAX_MS,
+            format_ms(envelope.release_ms),
+            cb.on_set_envelope.clone(),
+            |envelope, value| envelope.release_ms = value,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .justify_end()
+                .child(envelope_reset(panel, cb)),
+        )
+        .into_any_element()
+}
+
+/// Widest time the knobs sweep to. The engine accepts up to
+/// [`ENVELOPE_MAX_TIME_MS`], but a 4-second sweep keeps the useful part of the
+/// range under the pointer instead of compressing it into the first few degrees.
+const ENVELOPE_KNOB_MAX_MS: f32 = 4_000.0;
+
+fn format_ms(ms: f32) -> String {
+    if ms <= 0.0 {
+        "Off".to_string()
+    } else if ms < 1_000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.2} s", ms / 1_000.0)
+    }
+}
+
+/// One envelope knob plus its label and readout. The knob reports an absolute
+/// value for its own parameter only, so `base` — the envelope as it stands —
+/// travels with it and `apply` writes the dragged value into a copy. The
+/// callback therefore always carries a complete, consistent struct.
+#[allow(clippy::too_many_arguments)]
+fn envelope_knob(
+    id: &'static str,
+    label: &'static str,
+    base: SoundfontEnvelope,
+    value: f32,
+    min: f32,
+    max: f32,
+    readout: String,
+    on_change: SoundfontEnvelopeCb,
+    apply: impl Fn(&mut SoundfontEnvelope, f32) + 'static,
+) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .w(px(52.0))
+        .gap(px(3.0))
+        .child(knob(
+            id,
+            value,
+            min,
+            max,
+            Colors::accent_primary(),
+            None,
+            move |new_value, w, cx| {
+                let mut envelope = base;
+                apply(&mut envelope, *new_value);
+                on_change(&envelope, w, cx);
+            },
+        ))
+        .child(
+            div()
+                .text_size(px(9.5))
+                .text_color(Colors::text_muted())
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(9.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_secondary())
+                .child(readout),
+        )
+        .into_any_element()
+}
+
+fn envelope_reset(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
+    let on_change = cb.on_set_envelope.clone();
+    let bypassed = panel.envelope.is_bypassed();
+    fb_button(
+        "soundfont-env-reset",
+        "Reset",
+        FbButtonKind::Default,
+        !bypassed,
+        move |_, w, cx| on_change(&SoundfontEnvelope::default(), w, cx),
+    )
+    .into_any_element()
+}
+
+/// Says what the envelope is actually doing. `DESIGN.md`: a control that looks
+/// active must connect to real behavior, and an inactive one must say so.
+fn envelope_hint(panel: &SoundfontPlayerPanelState) -> AnyElement {
+    if panel.envelope.is_bypassed() {
+        return section_hint(
+            "Bypassed — the SoundFont's own envelopes play unchanged.".to_string(),
+            false,
+        );
+    }
+    let mut hint = String::from("Shapes the instrument's output: attack and decay run from silence, release when the last note ends.");
+    if panel.envelope.sanitized().release_ms <= 0.0 {
+        hint.push_str(" Release Off keeps the SoundFont tail.");
+    }
+    section_hint(hint, true)
+}
+
+fn quality_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_h(px(28.0))
+        .gap(px(8.0))
+        .child(
+            div()
+                .w(px(64.0))
+                .flex_shrink_0()
+                .text_size(px(10.5))
+                .text_color(Colors::text_muted())
+                .child("Quality"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(4.0))
+                .children(SoundfontRenderQuality::ALL.into_iter().map(|quality| {
+                    let on_change = cb.on_set_quality.clone();
+                    fb_segmented_button(
+                        ("soundfont-quality", quality.oversample()),
+                        quality.label(),
+                        panel.quality == quality,
+                        move |_, w, cx| on_change(&quality, w, cx),
+                    )
+                })),
+        )
+        .into_any_element()
+}
+
+fn quality_hint(panel: &SoundfontPlayerPanelState) -> AnyElement {
+    let factor = panel.quality.oversample();
+    let hint = if factor == 1 {
+        "Renders at the project rate. Raise this if transposed samples sound harsh.".to_string()
+    } else {
+        format!(
+            "Renders at {factor}x internally and filters back down — less sampler aliasing, about {factor}x the CPU."
+        )
+    };
+    section_hint(hint, factor > 1)
+}
+
 fn status_banner(message: String) -> AnyElement {
     div()
+        .flex_shrink_0()
         .px(px(8.0))
         .py(px(5.0))
         .rounded_md()
@@ -807,6 +1187,37 @@ mod tests {
         // track), so it must not start at RustySynth's own internal default.
         let panel = SoundfontPlayerPanelState::default();
         assert_eq!(panel.master_volume, 1.0);
+    }
+
+    #[test]
+    fn a_fresh_panel_reports_an_unshaped_instrument() {
+        // The defaults must be the pass-through state, so opening the window on
+        // an existing track cannot change how it already sounds.
+        let panel = SoundfontPlayerPanelState::default();
+        assert!(panel.envelope.is_bypassed());
+        assert_eq!(panel.quality, SoundfontRenderQuality::Standard);
+        assert_eq!(panel.quality.oversample(), 1);
+    }
+
+    #[test]
+    fn envelope_times_read_out_with_their_unit_and_name_zero_as_off() {
+        assert_eq!(format_ms(0.0), "Off");
+        assert_eq!(format_ms(250.0), "250 ms");
+        assert_eq!(format_ms(1_500.0), "1.50 s");
+    }
+
+    #[test]
+    fn the_knob_sweep_stays_inside_the_range_the_engine_accepts() {
+        assert!(ENVELOPE_KNOB_MAX_MS <= crate::soundfont_player::ENVELOPE_MAX_TIME_MS);
+        let clamped = SoundfontEnvelope {
+            attack_ms: ENVELOPE_KNOB_MAX_MS,
+            decay_ms: ENVELOPE_KNOB_MAX_MS,
+            sustain: 1.0,
+            release_ms: ENVELOPE_KNOB_MAX_MS,
+        }
+        .sanitized();
+        assert_eq!(clamped.attack_ms, ENVELOPE_KNOB_MAX_MS);
+        assert_eq!(clamped.release_ms, ENVELOPE_KNOB_MAX_MS);
     }
 
     #[test]

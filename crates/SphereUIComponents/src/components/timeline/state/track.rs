@@ -1,5 +1,49 @@
 use super::*;
 
+pub use sphere_soundfont_player::{SoundfontEnvelope, SoundfontRenderQuality};
+
+/// One complete set of built-in Soundfont Player settings for a track, as
+/// published by the player window. Grouped rather than passed positionally so
+/// adding a control to the panel cannot silently transpose two arguments at the
+/// one call site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundfontPlayerSettingsState {
+    pub path: Option<String>,
+    pub preset: Option<(i32, i32)>,
+    pub volume: f32,
+    pub reverb_chorus: bool,
+    pub polyphony: usize,
+    pub envelope: SoundfontEnvelope,
+    pub quality: SoundfontRenderQuality,
+}
+
+impl Default for SoundfontPlayerSettingsState {
+    fn default() -> Self {
+        Self {
+            path: None,
+            preset: None,
+            volume: 1.0,
+            reverb_chorus: true,
+            polyphony: 64,
+            envelope: SoundfontEnvelope::default(),
+            quality: SoundfontRenderQuality::default(),
+        }
+    }
+}
+
+impl SoundfontPlayerSettingsState {
+    /// Clamps every value into the range the engine and the `.sf2` player
+    /// accept, so a stored track can never hold something playback would reject.
+    pub fn sanitized(self) -> Self {
+        Self {
+            volume: self.volume.clamp(0.0, 1.0),
+            polyphony: self.polyphony.clamp(1, 256),
+            envelope: self.envelope.sanitized(),
+            ..self
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackType {
     Audio,
@@ -107,6 +151,11 @@ pub struct TrackState {
     pub soundfont_volume: f32,
     pub soundfont_reverb_chorus: bool,
     pub soundfont_polyphony: usize,
+    /// Amp envelope applied to the built-in player's output. Default is the
+    /// bypassed envelope — see `SoundfontEnvelope`.
+    pub soundfont_envelope: SoundfontEnvelope,
+    /// Internal synthesis oversampling for the built-in player.
+    pub soundfont_quality: SoundfontRenderQuality,
     /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
     pub sends: Vec<SendSlotState>,
     /// Persisted routing choices. Device discovery is not wired yet, so device
@@ -316,6 +365,8 @@ impl TimelineState {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: SoundfontEnvelope::default(),
+            soundfont_quality: SoundfontRenderQuality::default(),
         });
         id
     }
@@ -341,11 +392,7 @@ impl TimelineState {
     pub fn set_track_soundfont_player_state(
         &mut self,
         track_id: &str,
-        path: Option<String>,
-        preset: Option<(i32, i32)>,
-        volume: f32,
-        reverb_chorus: bool,
-        polyphony: usize,
+        settings: SoundfontPlayerSettingsState,
     ) -> bool {
         let Some(track) = self
             .tracks
@@ -354,20 +401,23 @@ impl TimelineState {
         else {
             return false;
         };
-        let volume = volume.clamp(0.0, 1.0);
-        let polyphony = polyphony.clamp(1, 256);
-        let changed = track.soundfont_path != path
-            || track.soundfont_preset != preset
-            || (track.soundfont_volume - volume).abs() > f32::EPSILON
-            || track.soundfont_reverb_chorus != reverb_chorus
-            || track.soundfont_polyphony != polyphony;
+        let settings = settings.sanitized();
+        let changed = track.soundfont_path != settings.path
+            || track.soundfont_preset != settings.preset
+            || (track.soundfont_volume - settings.volume).abs() > f32::EPSILON
+            || track.soundfont_reverb_chorus != settings.reverb_chorus
+            || track.soundfont_polyphony != settings.polyphony
+            || track.soundfont_envelope != settings.envelope
+            || track.soundfont_quality != settings.quality;
         if changed {
             track.builtin_soundfont_player = true;
-            track.soundfont_path = path;
-            track.soundfont_preset = preset;
-            track.soundfont_volume = volume;
-            track.soundfont_reverb_chorus = reverb_chorus;
-            track.soundfont_polyphony = polyphony;
+            track.soundfont_path = settings.path;
+            track.soundfont_preset = settings.preset;
+            track.soundfont_volume = settings.volume;
+            track.soundfont_reverb_chorus = settings.reverb_chorus;
+            track.soundfont_polyphony = settings.polyphony;
+            track.soundfont_envelope = settings.envelope;
+            track.soundfont_quality = settings.quality;
         }
         changed
     }

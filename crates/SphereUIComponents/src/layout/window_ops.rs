@@ -899,6 +899,8 @@ impl StudioLayout {
             volume: track.soundfont_volume,
             reverb_chorus: track.soundfont_reverb_chorus,
             polyphony: track.soundfont_polyphony,
+            envelope: track.soundfont_envelope,
+            quality: track.soundfont_quality,
         }
     }
 
@@ -945,11 +947,7 @@ impl StudioLayout {
                 let changed = layout.timeline.update(cx, |timeline, cx| {
                     let changed = timeline.state.set_track_soundfont_player_state(
                         &update.track_id,
-                        update.path.clone(),
-                        update.preset,
-                        update.volume,
-                        update.reverb_chorus,
-                        update.polyphony,
+                        update.settings.clone(),
                     );
                     if changed {
                         cx.notify();

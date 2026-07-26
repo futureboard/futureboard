@@ -10,8 +10,14 @@
 //! never re-read the file.
 
 pub mod font_cache;
+pub mod shaping;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_font;
+
+pub use shaping::{
+    DECIMATOR_LATENCY_SAMPLES, ENVELOPE_MAX_TIME_MS, SoundfontEnvelope, SoundfontRenderQuality,
+};
+use shaping::{Decimator, GateEnvelope};
 
 pub use rustysynth::SoundFont;
 use rustysynth::{Synthesizer, SynthesizerSettings};
@@ -34,6 +40,12 @@ pub const PERCUSSION_CHANNEL: u8 = Synthesizer::PERCUSSION_CHANNEL as u8;
 
 /// SoundFont bank number of the General MIDI drum kits.
 pub const DRUM_BANK: i32 = 128;
+
+/// Where a note lands when the player holds a melodic preset but the note
+/// arrived on the percussion channel. [`SoundfontPlayer::select_preset_all_channels`]
+/// deliberately leaves channel 10 on the font's drum banks, so without this the
+/// note would play a drum kit instead of the selected instrument.
+const MELODIC_FALLBACK_CHANNEL: u8 = 0;
 
 /// Controller number the engine uses for pitch bend on a controller lane
 /// (VST3 `kPitchBend`). Not a real MIDI CC — see [`SoundfontPlayer::controller`].
@@ -132,12 +144,25 @@ impl From<rustysynth::SynthesizerError> for SoundfontPlayerError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Output frames the render scratch is sized for when a caller does not say.
+/// Larger requests are rendered as repeated passes, never by reallocating.
+const DEFAULT_MAX_RENDER_FRAMES: usize = 2_048;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SoundfontPlayerSettings {
+    /// The rate this player *outputs*. At an oversampled
+    /// [`SoundfontPlayerSettings::quality`] the synthesizer inside runs faster
+    /// than this; [`SoundfontPlayer::internal_sample_rate`] reports that.
     pub sample_rate: i32,
     pub block_size: usize,
     pub maximum_polyphony: usize,
     pub enable_reverb_and_chorus: bool,
+    pub envelope: SoundfontEnvelope,
+    pub quality: SoundfontRenderQuality,
+    /// Longest render this player is expected to be asked for in one call.
+    /// Sizes the oversampling scratch at build time so the audio path never
+    /// allocates. `0` uses [`DEFAULT_MAX_RENDER_FRAMES`].
+    pub max_render_frames: usize,
 }
 
 impl Default for SoundfontPlayerSettings {
@@ -147,17 +172,26 @@ impl Default for SoundfontPlayerSettings {
             block_size: 0,
             maximum_polyphony: 0,
             enable_reverb_and_chorus: true,
+            envelope: SoundfontEnvelope::default(),
+            quality: SoundfontRenderQuality::default(),
+            max_render_frames: 0,
         }
     }
 }
 
 impl SoundfontPlayerSettings {
-    fn to_rustysynth(self) -> Result<SynthesizerSettings, SoundfontPlayerError> {
+    /// The rate the wrapped synthesizer runs at.
+    fn internal_sample_rate(self) -> Result<i32, SoundfontPlayerError> {
         if self.sample_rate <= 0 {
             return Err(SoundfontPlayerError::InvalidSampleRate(self.sample_rate));
         }
+        self.sample_rate
+            .checked_mul(self.quality.oversample() as i32)
+            .ok_or(SoundfontPlayerError::InvalidSampleRate(self.sample_rate))
+    }
 
-        let mut settings = SynthesizerSettings::new(self.sample_rate);
+    fn to_rustysynth(self) -> Result<SynthesizerSettings, SoundfontPlayerError> {
+        let mut settings = SynthesizerSettings::new(self.internal_sample_rate()?);
         if self.block_size > 0 {
             settings.block_size = self.block_size;
         }
@@ -175,6 +209,25 @@ pub struct SoundfontPlayer {
     /// only hands back a `&SoundFont`, and rebuilding a synthesizer (or cloning
     /// a runtime graph) must reuse the parse instead of re-reading the file.
     sound_font: Arc<SoundFont>,
+    /// The rate this player hands back from [`Self::render`], which is the
+    /// synthesizer's own rate divided by the oversampling factor.
+    output_sample_rate: i32,
+    quality: SoundfontRenderQuality,
+    envelope: SoundfontEnvelope,
+    gate: GateEnvelope,
+    /// `None` at [`SoundfontRenderQuality::Standard`], where the synthesizer
+    /// already runs at the output rate and nothing is filtered.
+    decimator: Option<Decimator>,
+    /// Keys physically down, one bit per MIDI note, per channel.
+    held: [u128; 16],
+    /// Keys released while the sustain pedal was down. They still sound, so the
+    /// amp envelope must count them as active.
+    sustained: [u128; 16],
+    /// Sustain pedal (CC 64) state, one bit per channel.
+    hold_pedal: u16,
+    /// The preset last applied by [`Self::select_preset_all_channels`] — the
+    /// one preset this player as a whole is playing. Drives [`Self::routed_channel`].
+    selected_preset: Option<(i32, i32)>,
 }
 
 impl SoundfontPlayer {
@@ -220,10 +273,167 @@ impl SoundfontPlayer {
     ) -> Result<Self, SoundfontPlayerError> {
         let synth_settings = settings.to_rustysynth()?;
         let synthesizer = Synthesizer::new(&sound_font, &synth_settings)?;
+        let envelope = settings.envelope.sanitized();
+        let factor = settings.quality.oversample();
+        let max_render_frames = if settings.max_render_frames == 0 {
+            DEFAULT_MAX_RENDER_FRAMES
+        } else {
+            settings.max_render_frames
+        };
         Ok(Self {
             synthesizer,
             sound_font,
+            output_sample_rate: settings.sample_rate,
+            quality: settings.quality,
+            envelope,
+            gate: GateEnvelope::new(envelope, settings.sample_rate),
+            decimator: (factor > 1).then(|| Decimator::new(factor, max_render_frames)),
+            held: [0; 16],
+            sustained: [0; 16],
+            hold_pedal: 0,
+            selected_preset: None,
         })
+    }
+
+    /// The MIDI channel a note has to be sent on to actually reach this player's
+    /// selected preset.
+    ///
+    /// Bank select on the percussion channel is offset into the font's drum
+    /// banks, so a preset can only be addressed from one side of that line:
+    ///
+    /// - a **drum-bank** preset exists *only* on channel 10, so every note is
+    ///   routed there. Without this a track whose notes carry channel 1 — which
+    ///   is what the piano roll writes — would play whatever melodic preset
+    ///   channel 1 happens to hold, and the chosen kit would never sound.
+    /// - a **melodic** preset was applied to every channel *except* 10, so a
+    ///   note that arrives on channel 10 is moved to
+    ///   [`MELODIC_FALLBACK_CHANNEL`]. Other channels are left alone, which
+    ///   keeps per-channel pitch bend and CC working for tracks that put each
+    ///   note on its own channel.
+    ///
+    /// With no preset selected the channel passes through untouched.
+    pub fn routed_channel(&self, channel: u8) -> u8 {
+        let channel = channel.min(15);
+        match self.selected_preset {
+            Some((bank, _)) if bank >= DRUM_BANK => PERCUSSION_CHANNEL,
+            Some(_) if channel == PERCUSSION_CHANNEL => MELODIC_FALLBACK_CHANNEL,
+            _ => channel,
+        }
+    }
+
+    /// The preset this player as a whole is set to, if one was applied through
+    /// [`Self::select_preset_all_channels`].
+    pub fn selected_preset(&self) -> Option<(i32, i32)> {
+        self.selected_preset
+    }
+
+    /// Whether any note is sounding by the amp envelope's reckoning: a key down,
+    /// or a key released under the sustain pedal.
+    #[inline]
+    fn any_note_active(&self) -> bool {
+        self.held
+            .iter()
+            .zip(self.sustained.iter())
+            .any(|(held, sustained)| (held | sustained) != 0)
+    }
+
+    /// Opens or closes the amp envelope if `before` no longer matches the note
+    /// bookkeeping. Every method that changes `held`/`sustained`/`hold_pedal`
+    /// must sample [`Self::any_note_active`] first and end here.
+    #[inline]
+    fn refresh_gate(&mut self, before: bool) {
+        let after = self.any_note_active();
+        if after && !before {
+            self.gate.open();
+        } else if !after && before {
+            self.gate.close();
+        }
+    }
+
+    #[inline]
+    fn track_note_on(&mut self, channel: u8, note: u8) {
+        let before = self.any_note_active();
+        let bit = 1u128 << note;
+        self.held[channel as usize] |= bit;
+        self.sustained[channel as usize] &= !bit;
+        self.refresh_gate(before);
+    }
+
+    #[inline]
+    fn track_note_off(&mut self, channel: u8, note: u8) {
+        let before = self.any_note_active();
+        let bit = 1u128 << note;
+        self.held[channel as usize] &= !bit;
+        if self.hold_pedal & (1 << channel) != 0 {
+            self.sustained[channel as usize] |= bit;
+        }
+        self.refresh_gate(before);
+    }
+
+    #[inline]
+    fn track_hold_pedal(&mut self, channel: u8, down: bool) {
+        let before = self.any_note_active();
+        if down {
+            self.hold_pedal |= 1 << channel;
+        } else {
+            self.hold_pedal &= !(1 << channel);
+            self.sustained[channel as usize] = 0;
+        }
+        self.refresh_gate(before);
+    }
+
+    #[inline]
+    fn track_all_notes_off(&mut self, channel: Option<u8>) {
+        let before = self.any_note_active();
+        match channel {
+            Some(channel) => {
+                self.held[channel as usize] = 0;
+                self.sustained[channel as usize] = 0;
+            }
+            None => {
+                self.held = [0; 16];
+                self.sustained = [0; 16];
+            }
+        }
+        self.refresh_gate(before);
+    }
+
+    /// The amp envelope currently shaping this player's output.
+    pub fn envelope(&self) -> SoundfontEnvelope {
+        self.envelope
+    }
+
+    /// Installs a new amp envelope. Unlike polyphony and reverb this needs no
+    /// rebuild — the envelope is ours, not one of rustysynth's fixed settings —
+    /// so it is safe from a control command drained on the audio thread.
+    pub fn set_envelope(&mut self, envelope: SoundfontEnvelope) {
+        let envelope = envelope.sanitized();
+        self.envelope = envelope;
+        self.gate.configure(envelope, self.output_sample_rate);
+        if self.any_note_active() {
+            self.gate.open();
+        }
+    }
+
+    pub fn quality(&self) -> SoundfontRenderQuality {
+        self.quality
+    }
+
+    /// Rate the wrapped synthesizer runs at — the output rate times the
+    /// oversampling factor.
+    pub fn internal_sample_rate(&self) -> i32 {
+        self.synthesizer.get_sample_rate()
+    }
+
+    /// Output samples of delay this player adds, from the decimation filter at
+    /// an oversampled quality. Zero at [`SoundfontRenderQuality::Standard`].
+    /// The engine folds this into the track's delay compensation.
+    pub fn latency_samples(&self) -> u32 {
+        if self.decimator.is_some() {
+            DECIMATOR_LATENCY_SAMPLES
+        } else {
+            0
+        }
     }
 
     /// The parsed font backing this player, for reuse by a rebuilt player.
@@ -243,20 +453,32 @@ impl SoundfontPlayer {
             return Err(SoundfontPlayerError::InvalidVelocity(velocity));
         }
 
+        // A velocity-0 note-on is a note-off in MIDI; letting it through as an
+        // "on" would leave the amp envelope gated open on a note that stopped.
+        if velocity == 0 {
+            return self.note_off(channel, note);
+        }
+        let channel = self.routed_channel(channel);
         self.synthesizer
             .note_on(channel.into(), note.into(), velocity.into());
+        self.track_note_on(channel, note);
         Ok(())
     }
 
     pub fn note_off(&mut self, channel: u8, note: u8) -> Result<(), SoundfontPlayerError> {
         validate_channel(channel)?;
         validate_note(note)?;
+        // Routed the same way the note-on was, so the release always finds the
+        // voice it started.
+        let channel = self.routed_channel(channel);
         self.synthesizer.note_off(channel.into(), note.into());
+        self.track_note_off(channel, note);
         Ok(())
     }
 
     pub fn all_notes_off(&mut self, immediate: bool) {
         self.synthesizer.note_off_all(immediate);
+        self.track_all_notes_off(None);
     }
 
     pub fn process_midi_message(
@@ -267,17 +489,50 @@ impl SoundfontPlayer {
         data2: u8,
     ) -> Result<(), SoundfontPlayerError> {
         validate_channel(channel)?;
+        let channel = self.routed_channel(channel);
         self.synthesizer.process_midi_message(
             channel.into(),
             command.into(),
             data1.into(),
             data2.into(),
         );
+        // Raw MIDI reaches the same voices the typed methods do, so the amp
+        // envelope's note bookkeeping has to follow it too.
+        self.track_raw_midi(channel, command, data1, data2);
         Ok(())
     }
 
+    /// Mirrors a raw MIDI message into the amp envelope's note bookkeeping.
+    /// Only the messages that start or stop voices matter here; the synthesizer
+    /// has already been told about all of them.
+    fn track_raw_midi(&mut self, channel: u8, command: u8, data1: u8, data2: u8) {
+        match command & 0xF0 {
+            0x90 if data2 > 0 && data1 <= 127 => self.track_note_on(channel, data1),
+            0x80 | 0x90 if data1 <= 127 => self.track_note_off(channel, data1),
+            0xB0 => match data1 {
+                64 => self.track_hold_pedal(channel, data2 >= 64),
+                // All Sound Off / All Notes Off.
+                120 | 123 => self.track_all_notes_off(Some(channel)),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    /// Resets the synthesizer. rustysynth's own `reset` returns every channel to
+    /// its default bank and patch, so the player-wide preset selection is
+    /// dropped with it and the caller must re-apply
+    /// [`Self::select_preset_all_channels`] before the next note.
     pub fn reset(&mut self) {
         self.synthesizer.reset();
+        self.selected_preset = None;
+        self.held = [0; 16];
+        self.sustained = [0; 16];
+        self.hold_pedal = 0;
+        self.gate.reset();
+        if let Some(decimator) = self.decimator.as_mut() {
+            decimator.reset();
+        }
     }
 
     pub fn set_master_volume(&mut self, value: f32) {
@@ -303,12 +558,23 @@ impl SoundfontPlayer {
                 right: right.len(),
             });
         }
-        self.synthesizer.render(left, right);
+        match self.decimator.as_mut() {
+            None => self.synthesizer.render(left, right),
+            Some(decimator) => {
+                let synthesizer = &mut self.synthesizer;
+                decimator.process(left, right, |os_left, os_right| {
+                    synthesizer.render(os_left, os_right);
+                });
+            }
+        }
+        self.gate.apply(left, right);
         Ok(())
     }
 
+    /// The rate this player outputs at. Not the synthesizer's rate when an
+    /// oversampled quality is selected — see [`Self::internal_sample_rate`].
     pub fn sample_rate(&self) -> i32 {
-        self.synthesizer.get_sample_rate()
+        self.output_sample_rate
     }
 
     pub fn block_size(&self) -> usize {
@@ -419,21 +685,28 @@ impl SoundfontPlayer {
     /// font's drum banks.
     ///
     /// A drum-bank preset is instead selected on the percussion channel alone,
-    /// which is the only channel that can address it.
+    /// which is the only channel that can address it. Incoming notes are then
+    /// routed to that channel by [`Self::routed_channel`] — selecting the preset
+    /// on channel 10 is not enough on its own, because the track's notes carry
+    /// whatever channel the piano roll wrote.
     pub fn select_preset_all_channels(
         &mut self,
         bank: i32,
         patch: i32,
     ) -> Result<(), SoundfontPlayerError> {
         if bank >= DRUM_BANK {
-            return self.select_preset(PERCUSSION_CHANNEL, bank, patch);
-        }
-        for channel in 0..Synthesizer::CHANNEL_COUNT as u8 {
-            if channel == PERCUSSION_CHANNEL {
-                continue;
+            self.select_preset(PERCUSSION_CHANNEL, bank, patch)?;
+        } else {
+            for channel in 0..Synthesizer::CHANNEL_COUNT as u8 {
+                if channel == PERCUSSION_CHANNEL {
+                    continue;
+                }
+                self.select_preset(channel, bank, patch)?;
             }
-            self.select_preset(channel, bank, patch)?;
         }
+        // Recorded only after every channel took the preset, so a partial
+        // failure cannot leave notes routed at a preset that was never applied.
+        self.selected_preset = Some((bank, patch));
         Ok(())
     }
 
@@ -459,12 +732,16 @@ impl SoundfontPlayer {
             // honest, and clamping it into CC 127 would be a wrong sound.
             CONTROLLER_CHANNEL_PRESSURE => Ok(()),
             _ => {
+                let controller = controller.min(127);
+                let value = value.min(127);
+                let channel = self.routed_channel(channel);
                 self.synthesizer.process_midi_message(
                     channel.into(),
                     0xB0,
-                    controller.min(127).into(),
-                    value.min(127).into(),
+                    controller.into(),
+                    value.into(),
                 );
+                self.track_raw_midi(channel, 0xB0, controller, value);
                 Ok(())
             }
         }
@@ -474,6 +751,7 @@ impl SoundfontPlayer {
     pub fn pitch_bend(&mut self, channel: u8, value: u16) -> Result<(), SoundfontPlayerError> {
         validate_channel(channel)?;
         let value = value.min(0x3FFF);
+        let channel = self.routed_channel(channel);
         self.synthesizer.process_midi_message(
             channel.into(),
             0xE0,
@@ -490,8 +768,10 @@ impl SoundfontPlayer {
         immediate: bool,
     ) -> Result<(), SoundfontPlayerError> {
         validate_channel(channel)?;
+        let channel = self.routed_channel(channel);
         self.synthesizer
             .note_off_all_channel(channel.into(), immediate);
+        self.track_all_notes_off(Some(channel));
         Ok(())
     }
 }
@@ -541,6 +821,15 @@ pub struct SphereSoundfontPlayerConfig {
     pub block_size: usize,
     pub maximum_polyphony: usize,
     pub enable_reverb_and_chorus: u8,
+    /// Amp envelope times in milliseconds and sustain in `0.0..=1.0`; all zero
+    /// with `sustain = 1.0` (the `Default`) leaves the envelope bypassed.
+    pub envelope_attack_ms: f32,
+    pub envelope_decay_ms: f32,
+    pub envelope_sustain: f32,
+    pub envelope_release_ms: f32,
+    /// Oversampling factor: 1, 2 or 4. Anything else falls back to 1.
+    pub render_oversample: u8,
+    pub max_render_frames: usize,
 }
 
 impl Default for SphereSoundfontPlayerConfig {
@@ -551,6 +840,12 @@ impl Default for SphereSoundfontPlayerConfig {
             block_size: settings.block_size,
             maximum_polyphony: settings.maximum_polyphony,
             enable_reverb_and_chorus: u8::from(settings.enable_reverb_and_chorus),
+            envelope_attack_ms: settings.envelope.attack_ms,
+            envelope_decay_ms: settings.envelope.decay_ms,
+            envelope_sustain: settings.envelope.sustain,
+            envelope_release_ms: settings.envelope.release_ms,
+            render_oversample: settings.quality.oversample() as u8,
+            max_render_frames: settings.max_render_frames,
         }
     }
 }
@@ -566,6 +861,19 @@ impl SphereSoundfontPlayerConfig {
             block_size: self.block_size,
             maximum_polyphony: self.maximum_polyphony,
             enable_reverb_and_chorus: self.enable_reverb_and_chorus != 0,
+            envelope: SoundfontEnvelope {
+                attack_ms: self.envelope_attack_ms,
+                decay_ms: self.envelope_decay_ms,
+                sustain: self.envelope_sustain,
+                release_ms: self.envelope_release_ms,
+            }
+            .sanitized(),
+            quality: match self.render_oversample {
+                2 => SoundfontRenderQuality::High,
+                4 => SoundfontRenderQuality::Ultra,
+                _ => SoundfontRenderQuality::Standard,
+            },
+            max_render_frames: self.max_render_frames,
         }
     }
 }
@@ -1138,6 +1446,308 @@ mod tests {
         .to_rustysynth()
         .unwrap_err();
         assert!(matches!(err, SoundfontPlayerError::InvalidSampleRate(-1)));
+    }
+
+    #[test]
+    fn a_drum_bank_preset_plays_from_the_channel_the_piano_roll_writes() {
+        // The bug this covers: selecting a bank-128 kit only program-changed
+        // channel 10, but a track's notes arrive on channel 1, so the kit never
+        // sounded — channel 1 played whatever melodic preset it still held.
+        let mut player = player();
+        let (bank, patch) = test_font::DRUM_PRESET;
+        player
+            .select_preset_all_channels(bank, patch)
+            .expect("drum preset selects");
+        assert_eq!(player.selected_preset(), Some((bank, patch)));
+
+        for channel in [0u8, 1, 7, 15] {
+            assert_eq!(
+                player.routed_channel(channel),
+                PERCUSSION_CHANNEL,
+                "channel {channel} must be routed to percussion"
+            );
+            player.note_on(channel, 60, 100).expect("note on");
+            assert!(
+                peak(&mut player, 2_048) > 0.01,
+                "a drum kit must sound for a note written on channel {}",
+                channel + 1
+            );
+            player.all_notes_off(true);
+            peak(&mut player, 4_096); // let the tail settle before the next one
+        }
+    }
+
+    #[test]
+    fn a_drum_note_off_releases_the_voice_its_note_on_started() {
+        let mut player = player();
+        let (bank, patch) = test_font::DRUM_PRESET;
+        player
+            .select_preset_all_channels(bank, patch)
+            .expect("drum preset selects");
+
+        player.note_on(3, 60, 100).expect("note on channel 4");
+        let held = peak(&mut player, 2_048);
+        assert!(held > 0.01);
+        // Routed to percussion on the way in, so it has to be routed the same
+        // way on the way out or the note would hang.
+        player.note_off(3, 60).expect("note off channel 4");
+        let released = peak(&mut player, 8_192);
+        assert!(
+            released < held * 0.5,
+            "note off must reach the routed voice: held={held} released={released}"
+        );
+    }
+
+    #[test]
+    fn a_melodic_preset_still_plays_for_a_note_written_on_channel_ten() {
+        // The mirror of the drum case: `select_preset_all_channels` leaves
+        // channel 10 on the font's drum banks, so a melodic track that happens
+        // to use channel 10 would play a kit instead of its instrument.
+        let mut player = player();
+        let (bank, patch) = test_font::MELODIC_PRESET;
+        player
+            .select_preset_all_channels(bank, patch)
+            .expect("melodic preset selects");
+
+        assert_eq!(player.routed_channel(PERCUSSION_CHANNEL), 0);
+        player
+            .note_on(PERCUSSION_CHANNEL, 60, 100)
+            .expect("note on channel 10");
+        assert!(peak(&mut player, 2_048) > 0.01);
+    }
+
+    #[test]
+    fn melodic_presets_leave_every_other_channel_alone() {
+        // Per-channel routing has to survive, or per-note pitch bend and CC
+        // would all collapse onto one channel.
+        let mut player = player();
+        player
+            .select_preset_all_channels(test_font::MELODIC_PRESET.0, test_font::MELODIC_PRESET.1)
+            .expect("melodic preset selects");
+        for channel in [0u8, 1, 8, 10, 15] {
+            assert_eq!(player.routed_channel(channel), channel);
+        }
+    }
+
+    #[test]
+    fn an_unselected_player_routes_nothing() {
+        let player = player();
+        assert_eq!(player.selected_preset(), None);
+        for channel in [0u8, 9, 15] {
+            assert_eq!(player.routed_channel(channel), channel);
+        }
+    }
+
+    #[test]
+    fn a_failed_preset_selection_does_not_start_routing() {
+        let mut player = player();
+        player
+            .select_preset_all_channels(0, 42)
+            .expect_err("preset is not in the font");
+        assert_eq!(
+            player.selected_preset(),
+            None,
+            "a rejected preset must not redirect notes"
+        );
+    }
+
+    #[test]
+    fn reset_drops_the_routing_with_the_preset_it_described() {
+        let mut player = player();
+        player
+            .select_preset_all_channels(test_font::DRUM_PRESET.0, test_font::DRUM_PRESET.1)
+            .expect("drum preset selects");
+        player.reset();
+        assert_eq!(player.selected_preset(), None);
+        assert_eq!(player.routed_channel(0), 0);
+    }
+
+    #[test]
+    fn a_default_player_reports_no_shaping() {
+        let player = player();
+        assert!(player.envelope().is_bypassed());
+        assert_eq!(player.quality(), SoundfontRenderQuality::Standard);
+        assert_eq!(player.latency_samples(), 0);
+        assert_eq!(player.internal_sample_rate(), player.sample_rate());
+    }
+
+    #[test]
+    fn an_attack_fades_the_instrument_in() {
+        let mut shaped = SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings {
+                sample_rate: 44_100,
+                envelope: SoundfontEnvelope {
+                    attack_ms: 250.0,
+                    ..SoundfontEnvelope::default()
+                },
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("shaped player");
+        let mut plain = player();
+
+        shaped.note_on(0, 60, 100).expect("note on");
+        plain.note_on(0, 60, 100).expect("note on");
+        // 512 frames is ~12 ms — well inside a 250 ms attack, so the shaped
+        // player must still be far quieter than the unshaped one.
+        let shaped_peak = peak(&mut shaped, 512);
+        let plain_peak = peak(&mut plain, 512);
+        assert!(
+            shaped_peak < plain_peak * 0.25,
+            "attack should fade in: shaped={shaped_peak} plain={plain_peak}"
+        );
+
+        // ...and catch up once the attack has run its course.
+        let shaped_later = peak(&mut shaped, 44_100);
+        assert!(
+            shaped_later > plain_peak * 0.5,
+            "attack should complete: {shaped_later}"
+        );
+    }
+
+    #[test]
+    fn a_release_fades_the_instrument_out_after_the_last_note() {
+        let mut player = SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings {
+                sample_rate: 44_100,
+                envelope: SoundfontEnvelope {
+                    release_ms: 20.0,
+                    ..SoundfontEnvelope::default()
+                },
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("shaped player");
+
+        player.note_on(0, 60, 100).expect("note on");
+        let held = peak(&mut player, 4_096);
+        assert!(held > 0.01, "held note renders: {held}");
+
+        player.note_off(0, 60).expect("note off");
+        // 20 ms at 44.1 kHz is 882 samples, so this block contains the whole
+        // ramp; the block after it is what must be exactly silent. Nothing
+        // shorter would prove the point — the reverb tail alone keeps ringing.
+        let ramp = peak(&mut player, 4_096);
+        assert!(ramp > 0.0, "the release ramp itself still renders");
+        let released = peak(&mut player, 4_096);
+        assert_eq!(
+            released, 0.0,
+            "the envelope release must reach true silence, got {released}"
+        );
+    }
+
+    #[test]
+    fn the_sustain_pedal_keeps_the_envelope_open_after_the_key_lifts() {
+        let mut player = SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings {
+                sample_rate: 44_100,
+                envelope: SoundfontEnvelope {
+                    release_ms: 5.0,
+                    ..SoundfontEnvelope::default()
+                },
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("shaped player");
+
+        player.controller(0, 64, 127).expect("pedal down");
+        player.note_on(0, 60, 100).expect("note on");
+        peak(&mut player, 2_048);
+        player.note_off(0, 60).expect("key up under the pedal");
+        let pedalled = peak(&mut player, 4_096);
+        assert!(
+            pedalled > 0.01,
+            "the pedal must hold the envelope open: {pedalled}"
+        );
+
+        player.controller(0, 64, 0).expect("pedal up");
+        peak(&mut player, 4_096); // consumes the 5 ms release ramp
+        let released = peak(&mut player, 4_096);
+        assert_eq!(released, 0.0, "pedal up releases the envelope");
+    }
+
+    #[test]
+    fn an_oversampled_player_still_outputs_at_the_requested_rate() {
+        let player = SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings {
+                sample_rate: 48_000,
+                quality: SoundfontRenderQuality::Ultra,
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("oversampled player");
+        assert_eq!(player.sample_rate(), 48_000, "callers see the output rate");
+        assert_eq!(player.internal_sample_rate(), 192_000);
+        assert_eq!(player.latency_samples(), DECIMATOR_LATENCY_SAMPLES);
+    }
+
+    #[test]
+    fn oversampled_rendering_produces_the_same_note_at_a_comparable_level() {
+        // Not a bit-for-bit match — the whole point is that the signal path
+        // differs — but a quality change must not alter the instrument's level
+        // or silence it.
+        let mut levels = Vec::new();
+        for quality in SoundfontRenderQuality::ALL {
+            let mut player = SoundfontPlayer::from_sound_font(
+                test_font::sound_font(),
+                SoundfontPlayerSettings {
+                    sample_rate: 44_100,
+                    quality,
+                    max_render_frames: 512,
+                    ..SoundfontPlayerSettings::default()
+                },
+            )
+            .expect("player");
+            player.note_on(0, 60, 100).expect("note on");
+            levels.push((quality, peak(&mut player, 8_192)));
+        }
+        let (_, reference) = levels[0];
+        assert!(reference > 0.01, "reference level {reference}");
+        for (quality, level) in &levels[1..] {
+            assert!(
+                (*level - reference).abs() < reference * 0.35,
+                "{quality:?} level {level} should track standard {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversampled_rendering_handles_a_block_longer_than_its_preallocation() {
+        let mut player = SoundfontPlayer::from_sound_font(
+            test_font::sound_font(),
+            SoundfontPlayerSettings {
+                sample_rate: 44_100,
+                quality: SoundfontRenderQuality::High,
+                max_render_frames: 64,
+                ..SoundfontPlayerSettings::default()
+            },
+        )
+        .expect("player");
+        player.note_on(0, 60, 100).expect("note on");
+        assert!(peak(&mut player, 4_096) > 0.01, "long block still renders");
+    }
+
+    #[test]
+    fn setting_an_envelope_needs_no_rebuild_and_takes_effect() {
+        let mut player = player();
+        assert!(player.envelope().is_bypassed());
+        player.set_envelope(SoundfontEnvelope {
+            attack_ms: 500.0,
+            ..SoundfontEnvelope::default()
+        });
+        assert!(!player.envelope().is_bypassed());
+
+        player.note_on(0, 60, 100).expect("note on");
+        let early = peak(&mut player, 256);
+        let late = peak(&mut player, 44_100);
+        assert!(
+            late > early * 2.0,
+            "the new attack should still be ramping: early={early} late={late}"
+        );
     }
 
     #[test]

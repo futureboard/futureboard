@@ -2374,6 +2374,8 @@ mod live_input_monitor_tests {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         }
     }
 
@@ -2467,7 +2469,9 @@ mod soundfont_instrument_tests {
         EngineMidiClipSnapshot, EngineMidiNoteSnapshot, EngineProjectSnapshot,
         EngineRoutingSnapshot, EngineTrackSnapshot,
     };
-    use sphere_soundfont_player::test_font;
+    use sphere_soundfont_player::{
+        test_font, SoundfontEnvelope, SoundfontRenderQuality, DECIMATOR_LATENCY_SAMPLES,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -2522,6 +2526,8 @@ mod soundfont_instrument_tests {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         }
     }
 
@@ -2548,10 +2554,28 @@ mod soundfont_instrument_tests {
             soundfont_volume: 1.0,
             soundfont_reverb_chorus: true,
             soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
         }
     }
 
     fn runtime(font: &FontFile, preset: (i32, i32)) -> RuntimeProject {
+        runtime_with_shaping(font, preset, Default::default(), Default::default())
+    }
+
+    fn runtime_with_shaping(
+        font: &FontFile,
+        preset: (i32, i32),
+        envelope: SoundfontEnvelope,
+        quality: SoundfontRenderQuality,
+    ) -> RuntimeProject {
+        let mut track = soundfont_track("sf-1", font, preset);
+        track.soundfont_envelope = envelope;
+        track.soundfont_quality = quality;
+        build_runtime(vec![track, master_track()])
+    }
+
+    fn build_runtime(tracks: Vec<EngineTrackSnapshot>) -> RuntimeProject {
         let snapshot = EngineProjectSnapshot {
             project_id: "soundfont-test".to_string(),
             project_root: None,
@@ -2560,7 +2584,7 @@ mod soundfont_instrument_tests {
             tempo_points: Vec::new(),
             time_signature: [4, 4],
             sample_rate: SAMPLE_RATE,
-            tracks: vec![soundfont_track("sf-1", font, preset), master_track()],
+            tracks,
             clips: Vec::new(),
             midi_clips: Vec::new(),
             pdc_enabled: true,
@@ -2619,6 +2643,118 @@ mod soundfont_instrument_tests {
 
         runtime.midi_preview_note_off("sf-1", 0, 60);
         assert!(!runtime.has_active_midi_preview());
+    }
+
+    #[test]
+    fn a_drum_bank_preset_sounds_for_a_note_on_the_tracks_own_channel() {
+        // Regression: choosing a bank-128 kit program-changed only MIDI channel
+        // 10, but an instrument track's notes carry channel 1, so the track was
+        // silent (or played a leftover melodic preset) no matter what the panel
+        // showed. The player now routes the track's notes to the percussion
+        // channel that kit lives on.
+        let font = FontFile::new("drum-routing");
+        let mut runtime = runtime(&font, test_font::DRUM_PRESET);
+        let player = runtime.tracks[0]
+            .soundfont_player
+            .as_ref()
+            .and_then(|sf| sf.player.as_ref())
+            .expect("font loaded");
+        assert_eq!(player.selected_preset(), Some(test_font::DRUM_PRESET));
+        assert_eq!(
+            player.routed_channel(0),
+            sphere_soundfont_player::PERCUSSION_CHANNEL
+        );
+
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(
+            render_peak(&mut runtime) > 0.001,
+            "a drum kit must sound for a note written on channel 1"
+        );
+    }
+
+    #[test]
+    fn a_melodic_preset_sounds_for_a_note_written_on_channel_ten() {
+        let font = FontFile::new("melodic-routing");
+        let mut runtime = runtime(&font, test_font::MELODIC_PRESET);
+        runtime.midi_preview_note_on("sf-1", sphere_soundfont_player::PERCUSSION_CHANNEL, 60, 100);
+        assert!(
+            render_peak(&mut runtime) > 0.001,
+            "a melodic preset must still play a note that arrives on channel 10"
+        );
+    }
+
+    #[test]
+    fn the_track_envelope_reaches_the_engine_player_and_shapes_playback() {
+        let font = FontFile::new("envelope");
+        let envelope = SoundfontEnvelope {
+            attack_ms: 400.0,
+            ..SoundfontEnvelope::default()
+        };
+        let mut shaped = runtime_with_shaping(
+            &font,
+            test_font::MELODIC_PRESET,
+            envelope,
+            SoundfontRenderQuality::Standard,
+        );
+        assert_eq!(
+            shaped.tracks[0]
+                .soundfont_player
+                .as_ref()
+                .and_then(|sf| sf.player.as_ref())
+                .expect("font loaded")
+                .envelope(),
+            envelope,
+            "the snapshot's envelope must reach the audible player, not just the window"
+        );
+
+        let mut plain = runtime(&font, test_font::MELODIC_PRESET);
+        shaped.midi_preview_note_on("sf-1", 0, 60, 100);
+        plain.midi_preview_note_on("sf-1", 0, 60, 100);
+        // One 512-frame block at 48 kHz is ~11 ms, far inside a 400 ms attack.
+        let shaped_peak = render_peak(&mut shaped);
+        let plain_peak = render_peak(&mut plain);
+        assert!(
+            shaped_peak < plain_peak * 0.25,
+            "attack should fade playback in: shaped={shaped_peak} plain={plain_peak}"
+        );
+    }
+
+    #[test]
+    fn an_oversampled_quality_still_plays_and_reports_its_latency() {
+        let font = FontFile::new("quality");
+        let mut runtime = runtime_with_shaping(
+            &font,
+            test_font::MELODIC_PRESET,
+            SoundfontEnvelope::default(),
+            SoundfontRenderQuality::High,
+        );
+        let soundfont = runtime.tracks[0]
+            .soundfont_player
+            .as_ref()
+            .expect("track carries a soundfont player");
+        assert_eq!(soundfont.quality, SoundfontRenderQuality::High);
+        let player = soundfont.player.as_ref().expect("font loaded");
+        assert_eq!(player.sample_rate(), SAMPLE_RATE as i32, "output rate");
+        assert_eq!(player.internal_sample_rate(), SAMPLE_RATE as i32 * 2);
+        assert_eq!(soundfont.latency_samples(), DECIMATOR_LATENCY_SAMPLES);
+        assert_eq!(
+            runtime.tracks[0].plugin_latency_samples, DECIMATOR_LATENCY_SAMPLES,
+            "the decimation delay has to reach delay compensation"
+        );
+
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        // The filter's 16-sample delay lands well inside the first block.
+        assert!(
+            render_peak(&mut runtime) > 0.001,
+            "an oversampled player must still be audible"
+        );
+    }
+
+    #[test]
+    fn standard_quality_adds_no_latency() {
+        let font = FontFile::new("quality-standard");
+        let runtime = runtime(&font, test_font::MELODIC_PRESET);
+        assert_eq!(runtime.tracks[0].plugin_latency_samples, 0);
     }
 
     #[test]
