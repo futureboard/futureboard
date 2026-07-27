@@ -16,6 +16,7 @@ import {
   parametersForPreset,
   presetsData,
   rackFromPath,
+  stageModelsForPreset,
   type CategoryId,
   type Param,
 } from "./data";
@@ -174,7 +175,7 @@ function factorySnapshot(id: string): RigSnapshot | null {
   return {
     activeCat: p.category,
     activeModelId: p.model,
-    stageModels: defaultStageModels(p.category, p.model),
+    stageModels: stageModelsForPreset(p),
     pathOrder: p.path ? [...p.path] : defaultPath(),
     bypassed,
     parameters: parametersForPreset(p),
@@ -190,7 +191,7 @@ export function RodhareistEditor({
    * (which is then pushed to the DSP once, becoming the persisted baseline). */
   boundSnapshot?: RigSnapshot | null;
 }) {
-  const initial = presetsData[4]!;
+  const initial = presetsData[1]!;
   const [currentPresetId, setCurrentPresetId] = useState(initial.id);
   const [activeCat, setActiveCat] = useState<CategoryId>(
     boundSnapshot?.activeCat ?? initial.category,
@@ -202,13 +203,20 @@ export function RodhareistEditor({
     () =>
       boundSnapshot
         ? { ...boundSnapshot.stageModels }
-        : defaultStageModels(initial.category, initial.model),
+        : stageModelsForPreset(initial),
   );
   const [pathOrder, setPathOrder] = useState<CategoryId[]>(() =>
-    boundSnapshot ? [...boundSnapshot.pathOrder] : defaultPath(),
+    boundSnapshot
+      ? [...boundSnapshot.pathOrder]
+      : [...(initial.path ?? defaultPath())],
   );
   const [bypassed, setBypassed] = useState<Partial<Record<CategoryId, boolean>>>(
-    () => (boundSnapshot ? { ...boundSnapshot.bypassed } : {}),
+    () => {
+      if (boundSnapshot) return { ...boundSnapshot.bypassed };
+      const initialBypassed: Partial<Record<CategoryId, boolean>> = {};
+      for (const cat of initial.bypassed ?? []) initialBypassed[cat] = true;
+      return initialBypassed;
+    },
   );
   const [parameters, setParameters] = useState<Record<string, Param[]>>(() =>
     boundSnapshot
@@ -242,8 +250,8 @@ export function RodhareistEditor({
       makeSnapshot(
         initial.category,
         initial.model,
-        defaultStageModels(initial.category, initial.model),
-        defaultPath(),
+        stageModelsForPreset(initial),
+        initial.path ?? defaultPath(),
         {},
         parametersForPreset(initial),
         DEFAULT_GLOBALS,
@@ -338,18 +346,7 @@ export function RodhareistEditor({
     // Fresh insert (no persisted state): establish the factory initial on
     // the DSP once. These posts flow through the normal edit path, so the
     // native state mirror records them as the insert's baseline.
-    const stages = defaultStageModels(initial.category, initial.model);
-    postParam("input_trim", DEFAULT_GLOBALS.inputTrim);
-    postParam("output_trim", DEFAULT_GLOBALS.outputTrim);
-    postParam(POWER_PARAM_ID, 1);
-    postPathOrder(defaultPath());
-    for (const cat of chainOrder) {
-      postModel(categories[cat].node, stages[cat]!);
-      postEnabled(categories[cat].node, true);
-      for (const param of parameters[stages[cat]!] ?? []) {
-        postParam(param.id, param.val);
-      }
-    }
+    applySnapshotToDsp(initialSnapshot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
