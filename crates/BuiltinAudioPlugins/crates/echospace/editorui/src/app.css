@@ -1,0 +1,118 @@
+/*
+ * EchoSpace editor palette.
+ *
+ * Same surface hierarchy and control language as VerbSpace (graphite planes,
+ * soft borders, amber reserved for the held/override state), with a teal accent
+ * that belongs to this delay rather than the Studio cyan or VerbSpace's violet.
+ *
+ * The knob shading is driven from tokens rather than literals so the accent is
+ * the only thing that has to change between the two plugins.
+ */
+
+:root {
+  --base: #080d0d;
+  --panel: #0e1516;
+  --raised: #131c1d;
+  --stage-top: #101a1a;
+  --stage-bottom: #080f10;
+  --knob-face: #172122;
+  --knob-face-hi: #22302f;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --track: #222e2e;
+  --grid: #1c2727;
+
+  --text: #e6f0ee;
+  --text-muted: #91a4a1;
+  --text-faint: #62726f;
+
+  --accent: #2fd6a6;
+  --accent-bright: #62f2c8;
+  --accent-dim: rgba(47, 214, 166, 0.34);
+  --accent-fill: rgba(47, 214, 166, 0.14);
+  --accent-text: #a6f8de;
+
+  /* The right channel's lane in the echo display. Distinct enough from the
+     accent to read as a second channel, not as a state change. */
+  --accent-alt: #4aa8ff;
+  --accent-alt-bright: #7cc4ff;
+
+  --overlay-scrim: rgba(8, 13, 13, 0.78);
+
+  --warn: #f0a83c;
+  --warn-dim: rgba(240, 168, 60, 0.4);
+
+  /* Knob shading — see lib/Knob.svelte. */
+  --knob-ring-hi: #2e4342;
+  --knob-ring-lo: #101817;
+  --knob-body-hi: #243433;
+  --knob-body-mid: #16201f;
+  --knob-body-lo: #080e0e;
+  --knob-cap-hi: #365351;
+  --knob-cap-mid: #1f2d2c;
+  --knob-cap-lo: #121b1a;
+  --knob-cap-edge: #070c0c;
+  --knob-pointer: #eaf6f3;
+
+  --header-height: 3rem;
+  --radius: 0.75rem;
+  --radius-sm: 0.45rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --knob-size: clamp(3.55rem, 5.2vw, 4.85rem);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 560px;
+  height: 100%;
+  min-height: 480px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--base);
+  color: var(--text);
+  font-family:
+    'Inter Variable', Inter, 'Segoe UI Variable', 'Segoe UI', system-ui,
+    sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  line-height: 1.2;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button,
+input {
+  margin: 0;
+  font: inherit;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+
+button:focus-visible,
+[role='slider']:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}

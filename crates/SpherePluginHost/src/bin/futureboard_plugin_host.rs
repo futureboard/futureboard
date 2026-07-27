@@ -245,6 +245,7 @@ enum BuiltinDsp {
     Rodhareist(rodharerist::Dsp),
     Equz8(equz8::Dsp),
     Verbspace(verbspace::Dsp),
+    Echospace(echospace::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -288,6 +289,7 @@ impl BuiltinHostProcessor {
             "rodharerist" => Some(Self::rodhareist(sample_rate, state_json)),
             "equz8" => Some(Self::equz8(sample_rate, state_json)),
             "verbspace" => Some(Self::verbspace(sample_rate, state_json)),
+            "echospace" => Some(Self::echospace(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -351,6 +353,34 @@ impl BuiltinHostProcessor {
         }
     }
 
+    fn echospace(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = echospace::Dsp::new(sr);
+        // Same pre-publish window as above: the IPC thread still owns the DSP.
+        if let Some(json) = state_json {
+            match echospace::ipc::EchospaceState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Echospace(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            // A delay has no capture or cabinet stage to hand off into.
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn verbspace(sample_rate: u32, state_json: Option<&str>) -> Self {
         let sr = sample_rate.max(1) as f32;
         let mut dsp = verbspace::Dsp::new(sr);
@@ -405,6 +435,13 @@ impl BuiltinHostProcessor {
                     interleaved[i * 2 + 1] = r;
                 }
             }
+            BuiltinDsp::Echospace(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
         }
     }
 
@@ -441,7 +478,7 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
-            BuiltinDsp::Equz8(_) | BuiltinDsp::Verbspace(_) => None,
+            BuiltinDsp::Equz8(_) | BuiltinDsp::Verbspace(_) | BuiltinDsp::Echospace(_) => None,
         }
     }
 
@@ -456,6 +493,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Rodhareist(dsp) => dsp.latency_samples(),
             BuiltinDsp::Equz8(_) => 0,
             BuiltinDsp::Verbspace(dsp) => dsp.latency_samples(),
+            BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
         }
     }
 
@@ -477,6 +515,9 @@ impl BuiltinHostProcessor {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
             BuiltinDsp::Verbspace(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::Echospace(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -690,6 +731,84 @@ mod builtin_processor_tests {
 
         // A corrupt blob falls back to defaults instead of panicking.
         let fallback = BuiltinHostProcessor::verbspace(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// Like the reverb, a delay's output outlives its input: the check that
+    /// matters is that repeats keep arriving across block boundaries, which a
+    /// per-block DSP rebuild would silence after the first one.
+    #[test]
+    fn echospace_repeats_survive_block_boundaries() {
+        let processor = BuiltinHostProcessor::echospace(48_000, None);
+        let mix = echospace::ui_param_index("mix").expect("mix in wire table");
+        let time_l = echospace::ui_param_index("timeMsL").expect("timeMsL in wire table");
+        let time_r = echospace::ui_param_index("timeMsR").expect("timeMsR in wire table");
+        processor.apply_param(mix, 100.0);
+        // Longer than one 64-frame block, so the echo can only be heard if the
+        // ring survives between calls.
+        processor.apply_param(time_l, 40.0);
+        processor.apply_param(time_r, 40.0);
+
+        let in_l = [0.3f32; 64];
+        let in_r = [-0.3f32; 64];
+        let mut output = [0.0f32; 128];
+        for _ in 0..16 {
+            processor.process_block(&in_l, &in_r, &mut output, 64);
+        }
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        let silence = [0.0f32; 64];
+        let mut tail = 0.0f32;
+        for _ in 0..16 {
+            processor.process_block(&silence, &silence, &mut output, 64);
+            tail = output.iter().fold(tail, |peak, s| peak.max(s.abs()));
+        }
+        assert!(tail > 1.0e-4, "no repeats after the input stopped: {tail}");
+
+        // Power off is a pure bypass — the clearest observable param effect.
+        let power = echospace::ui_param_index("power").expect("power in wire table");
+        processor.apply_param(power, 0.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        for i in 0..64 {
+            assert_eq!(output[i * 2], in_l[i], "power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "power-off must bypass");
+        }
+
+        // Out-of-range indices are silent no-ops, not panics.
+        processor.apply_param(u32::MAX, 1.0);
+        processor.apply_param(echospace::UI_PARAM_IDS.len() as u32, 1.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn echospace_restores_state_and_reports_no_latency_or_meters() {
+        let mut params = echospace::default_params();
+        params.power = false;
+        let json = echospace::ipc::EchospaceState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::echospace(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        }
+
+        // The delay time is a musical parameter, not lookahead, and the delay
+        // measures nothing — the meter frame is absent rather than zeroed.
+        assert_eq!(restored.latency_samples(), 0);
+        assert!(restored.meter_frame().is_none());
+        assert!(restored.nam_loader.is_none());
+        assert!(restored.ir_loader.is_none());
+
+        // A corrupt blob falls back to defaults instead of panicking.
+        let fallback = BuiltinHostProcessor::echospace(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
