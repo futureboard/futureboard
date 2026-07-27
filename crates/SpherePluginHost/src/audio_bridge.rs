@@ -38,7 +38,10 @@ pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// v6 adds the built-in DSP telemetry block (in/out peak+rms, clip flags).
 /// v7 adds the analyser spectrum block (log-spaced dB bins + publish sequence)
 /// and the `builtin_meters_published` flag that word pair replaced padding for.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 7;
+/// v8 adds `builtin_gain_reduction` — a compressor's reduction cannot be
+/// recovered from the in/out levels, because makeup gain and the dry blend both
+/// sit between them.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 8;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -53,6 +56,11 @@ pub struct BuiltinMeterFrame {
     pub in_rms: f32,
     pub out_peak: f32,
     pub out_rms: f32,
+    /// Decibels the DSP is currently taking off, positive. `0.0` for a
+    /// built-in that does not compress — a reduction meter reading zero and a
+    /// plugin with no reduction to report look the same, which is correct:
+    /// neither is taking anything off.
+    pub gain_reduction_db: f32,
     pub in_clip: bool,
     pub out_clip: bool,
 }
@@ -504,6 +512,9 @@ pub struct SharedAudioBridge {
     pub builtin_in_rms: AtomicU32,
     pub builtin_out_peak: AtomicU32,
     pub builtin_out_rms: AtomicU32,
+    /// Gain reduction in dB (positive), `f32` bits. Published by compressors;
+    /// stays zero for built-ins with nothing to reduce.
+    pub builtin_gain_reduction: AtomicU32,
     /// Bit 0: input clip latched; bit 1: output clip latched.
     pub builtin_clip_flags: AtomicU32,
     /// Non-zero once the host has published at least one telemetry frame for
@@ -621,6 +632,8 @@ impl SharedAudioBridge {
             .store(frame.out_peak.to_bits(), Ordering::Relaxed);
         self.builtin_out_rms
             .store(frame.out_rms.to_bits(), Ordering::Relaxed);
+        self.builtin_gain_reduction
+            .store(frame.gain_reduction_db.to_bits(), Ordering::Relaxed);
         let mut flags = 0u32;
         if frame.in_clip {
             flags |= 1;
@@ -647,6 +660,7 @@ impl SharedAudioBridge {
             in_rms: f32::from_bits(self.builtin_in_rms.load(Ordering::Relaxed)),
             out_peak: f32::from_bits(self.builtin_out_peak.load(Ordering::Relaxed)),
             out_rms: f32::from_bits(self.builtin_out_rms.load(Ordering::Relaxed)),
+            gain_reduction_db: f32::from_bits(self.builtin_gain_reduction.load(Ordering::Relaxed)),
             in_clip: flags & 1 != 0,
             out_clip: flags & 2 != 0,
         })
@@ -1564,6 +1578,7 @@ mod tests {
             in_rms: 0.25,
             out_peak: 0.75,
             out_rms: 0.5,
+            gain_reduction_db: 6.5,
             in_clip: false,
             out_clip: true,
         };

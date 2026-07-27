@@ -1,0 +1,91 @@
+/*
+ * FA-2A editor — a panel, not a Studio surface.
+ *
+ * The other built-in editors follow the Studio's graphite/accent language.
+ * This one is a hardware faceplate: warm grey enamel, engraved legends, chrome
+ * and bakelite. That stays strictly inside the plugin's own bounds — it is a
+ * plugin identity, not a second visual language for the app.
+ *
+ * "Warm" here means the whole panel is pulled a few degrees toward amber
+ * rather than sitting on neutral grey, and the meter is lit from behind.
+ */
+
+:root {
+  /* Faceplate enamel, top-lit. */
+  --panel-hi: #6f6a60;
+  --panel: #5d584f;
+  --panel-lo: #4a4640;
+  --panel-edge: #34312c;
+
+  /* Recessed area behind the meter and the control row. */
+  --inset: #46423b;
+  --inset-lo: #383530;
+
+  /* Engraved legend and its highlight; readouts sit brighter. */
+  --engrave: #1f1c17;
+  --readout: #17140f;
+  --ink-light: #efe6d3;
+
+  --focus: #ffcf7a;
+  --lamp: #ffb452;
+
+  --knob-lg: clamp(5rem, 10.5vw, 7.2rem);
+  --knob-sm: clamp(3.1rem, 5.6vw, 4rem);
+
+  --radius: 0.5rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 560px;
+  height: 100%;
+  min-height: 420px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--panel-edge);
+  color: var(--engrave);
+  font-family:
+    'Inter Variable', Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  line-height: 1.2;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button,
+input {
+  margin: 0;
+  font: inherit;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+
+button:focus-visible,
+[role='slider']:focus-visible,
+[role='switch']:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 2px;
+}
