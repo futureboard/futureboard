@@ -23,7 +23,10 @@ export CEF_PATH="$PWD/build/cef/150.0.11/cef_linux_x86_64"
 
 CI resolves the equivalent Windows, Linux, Intel macOS, and Apple Silicon macOS
 paths in `.github/workflows/set-cef-path.sh`. macOS bindgen builds must also set
-`LIBCLANG_PATH` to the installed LLVM library directory.
+`LIBCLANG_PATH` to the installed LLVM library directory. Windows ASIO builds
+using the repository-local LLVM tools should set `LIBCLANG_PATH` to the absolute
+`.bin/bin` directory. This is intentionally not a global Cargo setting because
+that Windows path breaks bindgen discovery on other hosts.
 
 The executable owns process dispatch and must:
 

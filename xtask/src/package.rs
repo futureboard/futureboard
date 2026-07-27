@@ -71,17 +71,41 @@ pub struct PackageOptions {
 
 /// Run the full package pipeline and return the published directory.
 pub fn run(options: &PackageOptions) -> Result<PathBuf> {
-    // 1. Build and discover the real executable paths (app + runtime sidecars).
-    let build = cargo_build::build(&options.profile, options.target.as_deref(), options.edition)?;
-    let executable = &build.app_executable;
-    eprintln!("[xtask] built executable: {}", executable.display());
-
     // Resolve the effective target triple (explicit flag or detected host) for
-    // platform naming and metadata.
+    // the build environment, platform naming, and metadata.
     let target_triple = match &options.target {
         Some(target) => target.clone(),
         None => host_target().context("could not determine host target triple")?,
     };
+    let workspace = workspace_root();
+    let cef_dist = cef::locate_cef_dist(&workspace, &target_triple);
+    if options.stage_cef && cef_dist.is_none() {
+        let checked = cef::cef_dist_candidates(&workspace, &target_triple)
+            .into_iter()
+            .map(|path| format!("  - {}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "CEF distribution not found or invalid for {target_triple}.\n\
+             Checked:\n{checked}\n\
+             Install it with `cargo run -p SphereWebView --example install_cef \
+             --features installer`, or pass --no-cef for an intentional \
+             CEF-free developer package"
+        );
+    }
+
+    // 1. Build and discover the real executable paths (app + runtime sidecars).
+    // Pass the target-matched SDK explicitly so a stale shell CEF_PATH cannot
+    // select a distribution for another operating system or architecture.
+    let build = cargo_build::build(
+        &options.profile,
+        options.target.as_deref(),
+        options.edition,
+        cef_dist.as_deref(),
+    )?;
+    let executable = &build.app_executable;
+    eprintln!("[xtask] built executable: {}", executable.display());
+
     let platform = platform_folder(&target_triple);
 
     // 2. Prepare staging (clean any stale directory first).
@@ -118,32 +142,17 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     //     who intentionally need a CEF-free tree must opt out with --no-cef.
     let mut cef_staged = false;
     if options.stage_cef {
-        match cef::locate_cef_dist(&workspace_root(), &target_triple) {
-            Some(dist) => {
-                let report = cef::stage_cef(&plan.staging_dir, &dist, &target_triple)
-                    .context("failed to stage the CEF runtime")?;
-                eprintln!(
-                    "[xtask] staged CEF runtime flat: {} files + {} locales",
-                    report.runtime_files.len(),
-                    report.locale_count
-                );
-                cef_staged = true;
-            }
-            None => {
-                let checked = cef::cef_dist_candidates(&workspace_root(), &target_triple)
-                    .into_iter()
-                    .map(|path| format!("  - {}", path.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                bail!(
-                    "CEF distribution not found or invalid for {target_triple}.\n\
-                     Checked:\n{checked}\n\
-                     Install it with `cargo run -p SphereWebView --example install_cef \
-                     --features installer`, or pass --no-cef for an intentional \
-                     CEF-free developer package"
-                )
-            }
-        }
+        let dist = cef_dist
+            .as_ref()
+            .expect("stage_cef preflight requires a distribution");
+        let report = cef::stage_cef(&plan.staging_dir, dist, &target_triple)
+            .context("failed to stage the CEF runtime")?;
+        eprintln!(
+            "[xtask] staged CEF runtime flat: {} files + {} locales",
+            report.runtime_files.len(),
+            report.locale_count
+        );
+        cef_staged = true;
     }
 
     // 4b. Optionally build and stage Built-in Plugin dynamic libraries.
