@@ -1,0 +1,97 @@
+/*
+ * VerbSpace editor palette.
+ *
+ * Same surface hierarchy as Equz8 (graphite planes + soft borders), with a
+ * violet accent that belongs to this reverb rather than the Studio cyan.
+ */
+
+:root {
+  --base: #0c0b10;
+  --panel: #13111a;
+  --raised: #1a1722;
+  --stage-top: #110f17;
+  --stage-bottom: #0a0910;
+  --knob-face: #1e1a27;
+  --knob-face-hi: #2a2435;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --track: #2a2434;
+  --grid: #241f2e;
+
+  --text: #eeeaf5;
+  --text-muted: #9d93ae;
+  --text-faint: #6a6178;
+
+  --accent: #9b7dff;
+  --accent-bright: #bda6ff;
+  --accent-dim: rgba(155, 125, 255, 0.34);
+  --accent-fill: rgba(155, 125, 255, 0.14);
+  --accent-text: #d8ccff;
+
+  --overlay-scrim: rgba(10, 9, 14, 0.78);
+
+  --warn: #f0a83c;
+  --warn-dim: rgba(240, 168, 60, 0.4);
+
+  --header-height: 3rem;
+  --radius: 0.75rem;
+  --radius-sm: 0.45rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --knob-size: clamp(3.55rem, 5.2vw, 4.85rem);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 560px;
+  height: 100%;
+  min-height: 480px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--base);
+  color: var(--text);
+  font-family:
+    'Inter Variable', Inter, 'Segoe UI Variable', 'Segoe UI', system-ui,
+    sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  line-height: 1.2;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button,
+input {
+  margin: 0;
+  font: inherit;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+}
+
+button:focus-visible,
+[role='slider']:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}

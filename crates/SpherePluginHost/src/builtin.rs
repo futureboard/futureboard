@@ -74,6 +74,13 @@ const CATALOG: &[BuiltinEntry] = &[
         has_editor: false,
     },
     BuiltinEntry {
+        stem: "verbspace",
+        name: "VerbSpace",
+        category: "Reverb",
+        kind: PluginKind::Effect,
+        has_editor: true,
+    },
+    BuiltinEntry {
         stem: "fa76",
         name: "FA-76",
         category: "Dynamics",
@@ -149,7 +156,7 @@ pub fn is_builtin_ref(id: &str) -> bool {
 /// Must stay in sync with `BuiltinHostProcessor::new` in the host binary — the
 /// two are covered by [`tests::bridge_supported_builtins_are_catalogued`] here
 /// and by the host's own construction test.
-pub const AUDIO_BRIDGE_STEMS: &[&str] = &["rodharerist", "equz8"];
+pub const AUDIO_BRIDGE_STEMS: &[&str] = &["rodharerist", "equz8", "verbspace"];
 
 /// Whether this built-in currently has an out-of-process audio DSP runtime.
 pub fn builtin_audio_bridge_supported(id: &str) -> bool {
@@ -259,6 +266,10 @@ mod tests {
             builtin_editor_url(&builtin_id("equz8")).as_deref(),
             Some("mikoplugin://equz8/index.html")
         );
+        assert_eq!(
+            builtin_editor_url(&builtin_id("verbspace")).as_deref(),
+            Some("mikoplugin://verbspace/index.html")
+        );
         assert!(builtin_editor_url(&builtin_id("compresser")).is_none());
         assert!(builtin_editor_url("vst3:whatever").is_none());
     }
@@ -275,6 +286,8 @@ mod tests {
         assert!(builtin_audio_bridge_supported("builtin:rodharerist"));
         assert!(builtin_audio_bridge_supported("equz8"));
         assert!(builtin_audio_bridge_supported("builtin:equz8"));
+        assert!(builtin_audio_bridge_supported("verbspace"));
+        assert!(builtin_audio_bridge_supported("builtin:verbspace"));
         // Catalogued, but the host has no DSP for it — must keep its old path.
         assert!(!builtin_audio_bridge_supported("compresser"));
         assert!(!builtin_audio_bridge_supported("vst3:whatever"));
@@ -298,6 +311,7 @@ mod tests {
         assert_eq!(builtin_display_name("builtin:equz8"), Some("EQ-Z8"));
         assert_eq!(builtin_display_name("equz8"), Some("EQ-Z8"));
         assert_eq!(builtin_display_name("rodharerist"), Some("Rodhareist"));
+        assert_eq!(builtin_display_name("builtin:verbspace"), Some("VerbSpace"));
         assert_eq!(builtin_display_name("vst3:whatever"), None);
     }
 

@@ -7432,6 +7432,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sphere_directaudioengine",
+ "verbspace",
  "windows 0.61.3",
 ]
 
@@ -7488,6 +7489,7 @@ dependencies = [
  "sphere-plugin-host",
  "sphere_directaudioengine",
  "unicode-segmentation",
+ "verbspace",
  "wgpu",
  "windows 0.61.3",
  "windows-core 0.61.2",
@@ -8946,6 +8948,17 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "verbspace"
+version = "0.1.0"
+dependencies = [
+ "biquad",
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "version_check"

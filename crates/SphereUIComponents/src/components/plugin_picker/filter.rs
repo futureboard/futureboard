@@ -197,9 +197,21 @@ mod builtin_filter_tests {
     use crate::components::plugin_picker::state::PickerFilter;
     use SpherePluginHost::with_builtins;
 
+    /// The whole stock catalog, and its size. Taken from the catalog itself:
+    /// what these tests assert is that the Built-in sidebar shows *every*
+    /// built-in, which a literal count silently turns into "shows however many
+    /// there were when this was written".
+    fn builtin_catalog() -> (Vec<RegistryPlugin>, usize) {
+        let catalog = with_builtins(Vec::new(), 0);
+        let count = catalog.len();
+        assert!(count > 0, "the built-in catalog is never empty");
+        (catalog, count)
+    }
+
     #[test]
     fn builtin_sidebar_lists_stock_plugins() {
-        let index = PluginSearchIndex::from_plugins(with_builtins(Vec::new(), 0));
+        let (catalog, count) = builtin_catalog();
+        let index = PluginSearchIndex::from_plugins(catalog);
         let prefs = PluginPickerPrefs::default_with_size();
         let filters = PluginFilterState {
             sidebar: PickerFilter::Builtin,
@@ -207,8 +219,8 @@ mod builtin_filter_tests {
             ..Default::default()
         };
         let result = compute_filter_result(&index, "", &filters, &prefs, false);
-        assert_eq!(result.counts.builtin, 8);
-        assert_eq!(result.indices.len(), 8);
+        assert_eq!(result.counts.builtin, count);
+        assert_eq!(result.indices.len(), count);
         assert!(result
             .indices
             .iter()
@@ -218,8 +230,10 @@ mod builtin_filter_tests {
     #[test]
     fn stale_vst3_secondary_format_must_not_hide_builtins() {
         // Regression: open_insert_picker used to pin filters.format=Vst3, which
-        // zeroed the Built-in list while the sidebar count stayed at 8.
-        let index = PluginSearchIndex::from_plugins(with_builtins(Vec::new(), 0));
+        // zeroed the Built-in list while the sidebar count stayed at the full
+        // catalog size.
+        let (catalog, count) = builtin_catalog();
+        let index = PluginSearchIndex::from_plugins(catalog);
         let prefs = PluginPickerPrefs::default_with_size();
         let filters = PluginFilterState {
             sidebar: PickerFilter::Builtin,
@@ -227,8 +241,8 @@ mod builtin_filter_tests {
             ..Default::default()
         };
         let result = compute_filter_result(&index, "", &filters, &prefs, false);
-        assert_eq!(result.counts.builtin, 8);
-        assert_eq!(result.indices.len(), 8);
+        assert_eq!(result.counts.builtin, count);
+        assert_eq!(result.indices.len(), count);
     }
 }
 
