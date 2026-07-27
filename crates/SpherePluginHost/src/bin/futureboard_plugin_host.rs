@@ -244,6 +244,7 @@ type LoadedRegistry = HashMap<String, LoadedPlugin>;
 enum BuiltinDsp {
     Rodhareist(rodharerist::Dsp),
     Equz8(equz8::Dsp),
+    Verbspace(verbspace::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -286,6 +287,7 @@ impl BuiltinHostProcessor {
         match stem {
             "rodharerist" => Some(Self::rodhareist(sample_rate, state_json)),
             "equz8" => Some(Self::equz8(sample_rate, state_json)),
+            "verbspace" => Some(Self::verbspace(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -349,6 +351,34 @@ impl BuiltinHostProcessor {
         }
     }
 
+    fn verbspace(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = verbspace::Dsp::new(sr);
+        // Same pre-publish window as above: the IPC thread still owns the DSP.
+        if let Some(json) = state_json {
+            match verbspace::ipc::VerbspaceState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Verbspace(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            // A reverb has no capture or cabinet stage to hand off into.
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         match unsafe { &mut *self.dsp.get() } {
@@ -362,6 +392,13 @@ impl BuiltinHostProcessor {
                 }
             }
             BuiltinDsp::Equz8(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
+            BuiltinDsp::Verbspace(dsp) => {
                 for i in 0..frames {
                     let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
                     interleaved[i * 2] = l;
@@ -404,19 +441,21 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
-            BuiltinDsp::Equz8(_) => None,
+            BuiltinDsp::Equz8(_) | BuiltinDsp::Verbspace(_) => None,
         }
     }
 
     /// Reported latency in samples. For Rodhareist: the NAM capture's receptive
     /// field plus the cabinet IR's convolution partition, each counted only
     /// while the stage carrying it is actually in the path. EQ-Z8 is a cascade
-    /// of direct-form biquads and adds none. Producer thread only.
+    /// of direct-form biquads and adds none; VerbSpace's pre-delay is a musical
+    /// parameter, not a processing delay to compensate. Producer thread only.
     fn latency_samples(&self) -> usize {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         match unsafe { &*self.dsp.get() } {
             BuiltinDsp::Rodhareist(dsp) => dsp.latency_samples(),
             BuiltinDsp::Equz8(_) => 0,
+            BuiltinDsp::Verbspace(dsp) => dsp.latency_samples(),
         }
     }
 
@@ -435,6 +474,9 @@ impl BuiltinHostProcessor {
             }
             // Already the compact wire form the DSP consumes — no id lookup.
             BuiltinDsp::Equz8(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::Verbspace(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -576,6 +618,78 @@ mod builtin_processor_tests {
 
         // A corrupt blob falls back to defaults instead of panicking.
         let fallback = BuiltinHostProcessor::equz8(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// A reverb's output outlives its input, so the check that matters here is
+    /// that the tail keeps arriving across block boundaries — a per-block
+    /// rebuild of the DSP would silence it after the first block.
+    #[test]
+    fn verbspace_processes_and_sustains_a_tail_across_blocks() {
+        let processor = BuiltinHostProcessor::verbspace(48_000, None);
+        let mix = verbspace::ui_param_index("mix").expect("mix in wire table");
+        processor.apply_param(mix, 100.0);
+
+        let in_l = [0.3f32; 64];
+        let in_r = [-0.3f32; 64];
+        let mut output = [0.0f32; 128];
+        for _ in 0..16 {
+            processor.process_block(&in_l, &in_r, &mut output, 64);
+        }
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        let silence = [0.0f32; 64];
+        let mut tail = 0.0f32;
+        for _ in 0..16 {
+            processor.process_block(&silence, &silence, &mut output, 64);
+            tail = output.iter().fold(tail, |peak, s| peak.max(s.abs()));
+        }
+        assert!(tail > 1.0e-4, "no tail after the input stopped: {tail}");
+
+        // Power off is a pure bypass — the clearest observable param effect.
+        let power = verbspace::ui_param_index("power").expect("power in wire table");
+        processor.apply_param(power, 0.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        for i in 0..64 {
+            assert_eq!(output[i * 2], in_l[i], "power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "power-off must bypass");
+        }
+
+        // Out-of-range indices are silent no-ops, not panics.
+        processor.apply_param(u32::MAX, 1.0);
+        processor.apply_param(verbspace::UI_PARAM_IDS.len() as u32, 1.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn verbspace_restores_state_and_reports_no_latency_or_meters() {
+        let mut params = verbspace::default_params();
+        params.power = false;
+        let json = verbspace::ipc::VerbspaceState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::verbspace(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        }
+
+        // The pre-delay is a musical parameter, not lookahead, and the reverb
+        // measures nothing — the meter frame is absent rather than zeroed.
+        assert_eq!(restored.latency_samples(), 0);
+        assert!(restored.meter_frame().is_none());
+        assert!(restored.nam_loader.is_none());
+        assert!(restored.ir_loader.is_none());
+
+        // A corrupt blob falls back to defaults instead of panicking.
+        let fallback = BuiltinHostProcessor::verbspace(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }

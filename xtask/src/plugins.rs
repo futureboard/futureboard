@@ -36,6 +36,7 @@ pub const BUILTIN_PLUGIN_CRATES: &[&str] = &[
     "fa76",
     "meowsyn",
     "rodharerist",
+    "verbspace",
 ];
 
 /// The platform-correct dynamic-library file names every built-in plugin is

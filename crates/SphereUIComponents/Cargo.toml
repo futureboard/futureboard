@@ -27,6 +27,7 @@ builtin-plugin-editor = [
     "dep:sphere-webview",
     "dep:rodharerist",
     "dep:equz8",
+    "dep:verbspace",
     "dep:builtin-ui-embed",
 ]
 
@@ -58,6 +59,7 @@ sphere-plugin-host.workspace = true
 sphere-webview = { workspace = true, optional = true, features = ["cef-runtime"] }
 rodharerist = { workspace = true, optional = true }
 equz8 = { workspace = true, optional = true }
+verbspace = { workspace = true, optional = true }
 builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true
