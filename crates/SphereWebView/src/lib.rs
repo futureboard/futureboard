@@ -1,4 +1,4 @@
-//! Native, windowed Chromium Embedded Framework views for Futureboard Studio.
+//! Chromium Embedded Framework views for Futureboard Studio.
 //!
 //! The CEF SDK is intentionally not downloaded by normal workspace builds.
 //! Run the `install_cef` example with the `installer` feature to populate the
@@ -7,8 +7,7 @@
 //!
 //! Two presentations are supported: a native CEF child window (Windows), and
 //! windowless/off-screen rendering into a host-owned framebuffer (see
-//! [`osr`]), which is what platforms without usable child-window embedding —
-//! Linux/Wayland in particular — use.
+//! [`osr`]), which Linux and macOS use.
 
 use std::path::{Path, PathBuf};
 

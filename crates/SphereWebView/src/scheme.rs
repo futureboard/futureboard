@@ -138,10 +138,12 @@ fn make_resource_handler(asset: Option<SchemeAsset>, request_id: u64) -> Resourc
             cef::stream_reader_create_for_data(asset.bytes.as_ptr().cast_mut(), asset.bytes.len());
         if let Some(stream) = stream {
             let (mime, _) = split_mime(asset.mime_type);
-            eprintln!(
-                "[cef-resource] request_id={request_id} handler=builtin length={} mime={mime:?} bytes_lifetime=static",
-                asset.bytes.len()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-resource] request_id={request_id} handler=builtin length={} mime={mime:?} bytes_lifetime=static",
+                    asset.bytes.len()
+                );
+            }
             let handler = StreamResourceHandler::new_with_stream(mime.to_string(), stream);
             if cef_diagnostics_enabled() {
                 eprintln!(
@@ -156,10 +158,12 @@ fn make_resource_handler(asset: Option<SchemeAsset>, request_id: u64) -> Resourc
         );
     }
 
-    eprintln!(
-        "[cef-resource] request_id={request_id} handler=custom length={} bytes_lifetime=static",
-        asset.map(|asset| asset.bytes.len()).unwrap_or(0)
-    );
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-resource] request_id={request_id} handler=custom length={} bytes_lifetime=static",
+            asset.map(|asset| asset.bytes.len()).unwrap_or(0)
+        );
+    }
     let handler = PluginAssetHandler::new(
         asset,
         ReadState::new(request_id),
@@ -223,12 +227,14 @@ wrap_app! {
                 Some(&CefString::from(PLUGIN_SCHEME)),
                 options as _,
             );
-            eprintln!(
-                "[plugin-scheme] event=OnRegisterCustomSchemes scheme={PLUGIN_SCHEME} options={options} registered={} pid={} thread={:?}",
-                registered != 0,
-                std::process::id(),
-                std::thread::current().id()
-            );
+            if registered == 0 || cef_diagnostics_enabled() {
+                eprintln!(
+                    "[plugin-scheme] event=OnRegisterCustomSchemes scheme={PLUGIN_SCHEME} options={options} registered={} pid={} thread={:?}",
+                    registered != 0,
+                    std::process::id(),
+                    std::thread::current().id()
+                );
+            }
         }
     }
 }
@@ -633,12 +639,12 @@ pub fn split_plugin_url(url: &str) -> Option<(String, String)> {
 
 /// Build the [`App`] that declares the plugin scheme. Pass the **same** app to
 /// both `execute_subprocess` and `CefRuntime::initialize`.
-pub fn plugin_scheme_app() -> App {
+pub fn plugin_scheme_app() -> Result<App, crate::runtime::CefRuntimeError> {
     // Constructing a `cef::App` is itself a CEF object creation, so macOS must
     // load the bundled framework and every platform must bind the API version
     // *here* — not when the app is consumed later. Skipping either step makes
     // the first generated CEF wrapper call invalid.
-    crate::runtime::prepare_process().expect("failed to prepare the CEF process");
+    crate::runtime::prepare_process()?;
     let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
     let app = PluginSchemeApp::new(ObjectLifetime::new("cef_app_t", object_id));
     if cef_diagnostics_enabled() {
@@ -647,7 +653,7 @@ pub fn plugin_scheme_app() -> App {
             app.has_one_ref()
         );
     }
-    app
+    Ok(app)
 }
 
 /// Install the handler that serves plugin assets. Call once, after

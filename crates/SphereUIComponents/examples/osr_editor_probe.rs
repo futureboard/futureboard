@@ -39,11 +39,14 @@ fn run() {
     sphere_webview::runtime::log_process_entry();
 
     // CEF re-launches this executable for its helpers; they must exit here.
-    let mut scheme_app = sphere_webview::scheme::plugin_scheme_app();
-    if let ProcessDispatch::SubprocessExit(code) =
-        sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app))
+    let mut scheme_app = sphere_webview::scheme::plugin_scheme_app()
+        .expect("failed to prepare CEF before process dispatch");
+    match sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app))
+        .expect("CEF process dispatch failed")
     {
-        std::process::exit(code);
+        ProcessDispatch::SubprocessExit(code) => std::process::exit(code),
+        ProcessDispatch::BrowserProcess => host::install_process_app(scheme_app)
+            .expect("failed to transfer the browser process application"),
     }
 
     let plugin_id = "rodharerist";

@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use sphere_webview::{CEF_SHORT_VERSION, CefTarget};
 
 use crate::platform::dynamic_library_extension;
 use crate::staging::copy_into;
@@ -22,7 +23,6 @@ use crate::staging::copy_into;
 const RELEASE_DIR: &str = "Release";
 /// Directory (relative to `build/cef`) holding the `.pak`/`icu` resources.
 const RESOURCES_DIR: &str = "Resources";
-const PINNED_CEF_VERSION: &str = "150.0.11";
 const MAC_FRAMEWORK_DIR: &str = "Chromium Embedded Framework.framework";
 /// The one CEF subdirectory that must keep its name at the app root.
 pub const LOCALES_DIR: &str = "locales";
@@ -50,7 +50,7 @@ pub fn cef_dist_candidates(workspace_root: &Path, triple: &str) -> Vec<PathBuf> 
     };
     let cef_root = workspace_root.join("build").join("cef");
     vec![
-        cef_root.join(PINNED_CEF_VERSION).join(platform_dir),
+        cef_root.join(CEF_SHORT_VERSION).join(platform_dir),
         // Compatibility with the original installer and existing developer
         // workspaces. This can be removed after those installations migrate.
         cef_root,
@@ -68,23 +68,19 @@ pub fn locate_cef_dist(workspace_root: &Path, triple: &str) -> Option<PathBuf> {
 }
 
 fn platform_dir(triple: &str) -> Option<&'static str> {
-    match triple {
-        "x86_64-pc-windows-msvc" => Some("cef_windows_x86_64"),
-        "x86_64-unknown-linux-gnu" => Some("cef_linux_x86_64"),
-        "x86_64-apple-darwin" => Some("cef_macos_x86_64"),
-        "aarch64-apple-darwin" => Some("cef_macos_aarch64"),
-        _ => None,
-    }
+    CefTarget::from_target_triple(triple)
+        .ok()
+        .map(CefTarget::directory_name)
 }
 
 fn validate_pinned_distribution(dist: &Path) -> Result<()> {
     let version_header = dist.join("include/cef_version.h");
     let version = fs::read_to_string(&version_header)
         .with_context(|| format!("cannot read {}", version_header.display()))?;
-    let expected = format!("#define CEF_VERSION \"{PINNED_CEF_VERSION}+");
+    let expected = format!("#define CEF_VERSION \"{CEF_SHORT_VERSION}+");
     if !version.contains(&expected) {
         bail!(
-            "CEF SDK version mismatch in {}: expected {PINNED_CEF_VERSION}",
+            "CEF SDK version mismatch in {}: expected {CEF_SHORT_VERSION}",
             version_header.display()
         );
     }
@@ -92,10 +88,10 @@ fn validate_pinned_distribution(dist: &Path) -> Result<()> {
     let archive_path = dist.join("archive.json");
     let archive = fs::read_to_string(&archive_path)
         .with_context(|| format!("cannot read {}", archive_path.display()))?;
-    let expected_archive = format!("cef_binary_{PINNED_CEF_VERSION}+");
+    let expected_archive = format!("cef_binary_{CEF_SHORT_VERSION}+");
     if !archive.contains(&expected_archive) {
         bail!(
-            "CEF archive mismatch in {}: expected {PINNED_CEF_VERSION}",
+            "CEF archive mismatch in {}: expected {CEF_SHORT_VERSION}",
             archive_path.display()
         );
     }
@@ -397,7 +393,7 @@ mod tests {
         let versioned = temp
             .path()
             .join("build/cef")
-            .join(PINNED_CEF_VERSION)
+            .join(CEF_SHORT_VERSION)
             .join("cef_windows_x86_64");
         fs::create_dir_all(versioned.parent().unwrap()).unwrap();
         copy_test_distribution(&source, &versioned);

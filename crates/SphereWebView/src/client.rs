@@ -145,28 +145,34 @@ wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             let id = browser_id(browser);
             self.lifecycle.mark_after_created(id);
-            eprintln!(
-                "[cef-lifecycle] event=OnAfterCreated browser_id={id} thread={:?}",
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=OnAfterCreated browser_id={id} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
         }
 
         fn do_close(&self, browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
             let id = browser_id(browser);
-            eprintln!(
-                "[cef-lifecycle] event=DoClose browser_id={id} return=false thread={:?}",
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=DoClose browser_id={id} return=false thread={:?}",
+                    std::thread::current().id()
+                );
+            }
             0
         }
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             let id = browser_id(browser);
             self.lifecycle.mark_before_close();
-            eprintln!(
-                "[cef-lifecycle] event=OnBeforeClose browser_id={id} thread={:?}",
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=OnBeforeClose browser_id={id} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
         }
     }
 }
@@ -186,13 +192,15 @@ wrap_load_handler! {
             can_go_forward: ::std::os::raw::c_int,
         ) {
             let id = browser_id(browser);
-            eprintln!(
-                "[cef-lifecycle] event=OnLoadingStateChange browser_id={id} is_loading={} can_go_back={} can_go_forward={} thread={:?}",
-                is_loading != 0,
-                can_go_back != 0,
-                can_go_forward != 0,
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=OnLoadingStateChange browser_id={id} is_loading={} can_go_back={} can_go_forward={} thread={:?}",
+                    is_loading != 0,
+                    can_go_back != 0,
+                    can_go_forward != 0,
+                    std::thread::current().id()
+                );
+            }
         }
 
         fn on_load_start(
@@ -203,10 +211,12 @@ wrap_load_handler! {
         ) {
             let id = browser_id(browser);
             let url = frame_url(frame);
-            eprintln!(
-                "[cef-lifecycle] event=OnLoadStart browser_id={id} url={url:?} transition={transition_type:?} thread={:?}",
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=OnLoadStart browser_id={id} url={url:?} transition={transition_type:?} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
         }
 
         fn on_load_end(
@@ -217,18 +227,22 @@ wrap_load_handler! {
         ) {
             let id = browser_id(browser);
             let Some(frame) = frame else {
-                eprintln!(
-                    "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} url=\"<no-frame>\" thread={:?}",
-                    std::thread::current().id()
-                );
+                if cef_diagnostics_enabled() {
+                    eprintln!(
+                        "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} url=\"<no-frame>\" thread={:?}",
+                        std::thread::current().id()
+                    );
+                }
                 return;
             };
             let url = CefStringUtf16::from(&frame.url()).to_string();
             let is_main = frame.is_main() != 0;
-            eprintln!(
-                "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} is_main={is_main} url={url:?} thread={:?}",
-                std::thread::current().id()
-            );
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} is_main={is_main} url={url:?} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
             if is_main {
                 frame.execute_java_script(
                     Some(&CefString::from(JAVASCRIPT_PROBE)),
