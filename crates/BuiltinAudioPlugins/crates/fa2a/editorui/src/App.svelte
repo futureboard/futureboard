@@ -10,6 +10,7 @@
   import BakeliteKnob from './lib/BakeliteKnob.svelte'
   import ToggleSwitch from './lib/ToggleSwitch.svelte'
   import VuMeter from './lib/VuMeter.svelte'
+  import logo from './assets/logo.svg'
 
   /**
    * Local view of the parameters. Rust is the authority: this starts at the
@@ -80,63 +81,8 @@
 
 <div class="unit">
   <div class="panel">
-    <div class="top">
-      <div class="badge">
-        <div class="maker">Futureboard</div>
-        <div class="model">FA-2A</div>
-        <div class="kind">Leveling Amplifier</div>
-      </div>
-
-      <div class="meter-well">
-        <VuMeter
-          mode={meterMode}
-          value={meterValue}
-          live={connected && meters !== null}
-          clip={meters?.outClip ?? false}
-          onclearclip={() => {
-            if (meters) meters = { ...meters, outClip: false }
-          }}
-        />
-      </div>
-
-      <div class="switches">
-        <ToggleSwitch
-          label="Meter"
-          options={['GR', 'Output']}
-          value={meterMode === 'output'}
-          onchange={(v) => (meterMode = v ? 'output' : 'reduction')}
-        />
-        <ToggleSwitch
-          label="Mode"
-          options={['Comp', 'Limit']}
-          value={params.mode === 'limit'}
-          onchange={(v) => setMode(v ? 'limit' : 'compress')}
-        />
-        <button
-          type="button"
-          class="power"
-          class:on={params.power}
-          role="switch"
-          aria-checked={params.power}
-          aria-label="Power"
-          onclick={() => setPower(!params.power)}
-        >
-          <span class="lamp"></span>
-          <span class="legend">Power</span>
-        </button>
-      </div>
-    </div>
-
-    <div class="rail"></div>
-
-    <div class="controls">
-      <div class="mains">
-        <BakeliteKnob
-          spec={PARAMS.peakReduction}
-          value={params.peakReduction}
-          onchange={(v) => set('peakReduction', v)}
-          dial
-        />
+    <section class="face" aria-label="Main controls">
+      <div class="hero-control">
         <BakeliteKnob
           spec={PARAMS.gainDb}
           value={params.gainDb}
@@ -145,153 +91,193 @@
         />
       </div>
 
-      <div class="trim">
+      <div class="center-bay">
+        <header class="badge">
+          <img class="logo" src={logo} alt="FA-2A Leveling Amplifier" />
+        </header>
+
+        <div class="meter-well">
+          <VuMeter
+            mode={meterMode}
+            value={meterValue}
+            live={connected && meters !== null}
+            clip={meters?.outClip ?? false}
+            onclearclip={() => {
+              if (meters) meters = { ...meters, outClip: false }
+            }}
+          />
+        </div>
+
+        <div class="switches">
+          <ToggleSwitch
+            label="Meter"
+            options={['GR', '+4']}
+            value={meterMode === 'output'}
+            onchange={(v) => (meterMode = v ? 'output' : 'reduction')}
+          />
+          <ToggleSwitch
+            label="Mode"
+            options={['Compress', 'Limit']}
+            value={params.mode === 'limit'}
+            onchange={(v) => setMode(v ? 'limit' : 'compress')}
+          />
+          <button
+            type="button"
+            class="power"
+            class:on={params.power}
+            role="switch"
+            aria-checked={params.power}
+            aria-label="Power"
+            onclick={() => setPower(!params.power)}
+          >
+            <span class="lamp"></span>
+            <span class="legend">Power</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="hero-control">
         <BakeliteKnob
-          spec={PARAMS.emphasis}
-          value={params.emphasis}
-          onchange={(v) => set('emphasis', v)}
-          size="var(--knob-sm)"
-        />
-        <BakeliteKnob
-          spec={PARAMS.sidechainLowCutHz}
-          value={params.sidechainLowCutHz}
-          onchange={(v) => set('sidechainLowCutHz', v)}
-          size="var(--knob-sm)"
-        />
-        <BakeliteKnob
-          spec={PARAMS.color}
-          value={params.color}
-          onchange={(v) => set('color', v)}
-          size="var(--knob-sm)"
-        />
-        <BakeliteKnob
-          spec={PARAMS.mix}
-          value={params.mix}
-          onchange={(v) => set('mix', v)}
-          size="var(--knob-sm)"
-        />
-        <BakeliteKnob
-          spec={PARAMS.outputTrimDb}
-          value={params.outputTrimDb}
-          onchange={(v) => set('outputTrimDb', v)}
-          size="var(--knob-sm)"
+          spec={PARAMS.peakReduction}
+          value={params.peakReduction}
+          onchange={(v) => set('peakReduction', v)}
+          dial
         />
       </div>
-    </div>
+    </section>
 
-    <div class="feet">
-      <span class="screw"></span>
-      <span class="link" class:connected></span>
-      <span class="screw"></span>
-    </div>
+    <section class="extras" aria-label="Extras">
+      <BakeliteKnob
+        spec={PARAMS.emphasis}
+        value={params.emphasis}
+        onchange={(v) => set('emphasis', v)}
+        size="var(--knob-sm)"
+      />
+      <BakeliteKnob
+        spec={PARAMS.sidechainLowCutHz}
+        value={params.sidechainLowCutHz}
+        onchange={(v) => set('sidechainLowCutHz', v)}
+        size="var(--knob-sm)"
+      />
+      <BakeliteKnob
+        spec={PARAMS.color}
+        value={params.color}
+        onchange={(v) => set('color', v)}
+        size="var(--knob-sm)"
+      />
+      <BakeliteKnob
+        spec={PARAMS.mix}
+        value={params.mix}
+        onchange={(v) => set('mix', v)}
+        size="var(--knob-sm)"
+      />
+      <BakeliteKnob
+        spec={PARAMS.outputTrimDb}
+        value={params.outputTrimDb}
+        onchange={(v) => set('outputTrimDb', v)}
+        size="var(--knob-sm)"
+      />
+    </section>
+
+    <footer class="feet">
+      <span
+        class="link"
+        class:connected
+        title={connected ? 'Linked to DSP' : 'Preview'}
+      ></span>
+    </footer>
   </div>
 </div>
 
 <style>
   .unit {
     display: flex;
-    align-items: stretch;
     height: 100%;
-    padding: clamp(0.4rem, 1.4vw, 1rem);
-    background:
-      radial-gradient(
-        ellipse at 50% 0%,
-        rgba(255, 190, 120, 0.06),
-        transparent 65%
-      ),
-      var(--panel-edge);
+    padding: 0.5rem;
+    background: var(--chassis);
   }
 
-  /* Brushed enamel: a vertical light falloff plus a fine horizontal grain. */
   .panel {
-    position: relative;
     display: grid;
-    grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto auto;
     flex: 1;
     min-width: 0;
-    padding: clamp(0.5rem, 1.6vw, 1.1rem);
+    min-height: 0;
+    padding: 0.85rem 1.1rem 0.6rem;
+    border: 1px solid var(--border);
     border-radius: var(--radius);
-    background:
-      repeating-linear-gradient(
-        180deg,
-        rgba(255, 255, 255, 0.022) 0px,
-        rgba(255, 255, 255, 0.022) 1px,
-        rgba(0, 0, 0, 0.022) 1px,
-        rgba(0, 0, 0, 0.022) 2px
-      ),
-      linear-gradient(
-        180deg,
-        var(--panel-hi) 0%,
-        var(--panel) 46%,
-        var(--panel-lo) 100%
-      );
+    background: linear-gradient(
+      180deg,
+      var(--panel-hi) 0%,
+      var(--panel) 38%,
+      var(--panel-lo) 100%
+    );
     box-shadow:
-      inset 0 1px 0 rgba(255, 245, 225, 0.22),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.35),
-      0 2px 10px rgba(0, 0, 0, 0.55);
+      inset 0 1px 0 var(--border-hi),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.22),
+      0 8px 22px rgba(0, 0, 0, 0.35);
   }
 
-  .top {
+  .face {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-columns:
+      minmax(10rem, 0.9fr)
+      minmax(18.5rem, 1.55fr)
+      minmax(10rem, 0.9fr);
     align-items: center;
-    gap: clamp(0.5rem, 2vw, 1.6rem);
+    gap: clamp(1rem, 3vw, 2.4rem);
+    min-width: 0;
+    min-height: 0;
+    padding: 0.3rem 0.4rem 0.85rem;
+  }
+
+  .hero-control {
+    display: grid;
+    place-items: center;
+    min-width: 0;
+  }
+
+  .center-bay {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.65rem;
+    min-width: 0;
     min-height: 0;
   }
 
   .badge {
     display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
+    align-items: center;
+    justify-content: center;
     min-width: 0;
   }
 
-  .maker {
-    color: var(--engrave);
-    font-size: 0.58rem;
-    font-weight: 700;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    opacity: 0.72;
-    text-shadow: 0 1px 0 rgba(255, 250, 240, 0.16);
+  .logo {
+    display: block;
+    width: min(100%, 23rem);
+    height: auto;
   }
 
-  .model {
-    color: var(--readout);
-    font-size: clamp(1.15rem, 3vw, 1.75rem);
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    line-height: 1;
-    text-shadow:
-      0 1px 0 rgba(255, 250, 240, 0.2),
-      0 -1px 0 rgba(0, 0, 0, 0.4);
-  }
-
-  .kind {
-    color: var(--engrave);
-    font-size: 0.56rem;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    opacity: 0.6;
-  }
-
-  /* Recessed bezel the meter sits down inside. */
   .meter-well {
-    width: clamp(12rem, 34vw, 20rem);
-    padding: 0.4rem;
-    border-radius: 6px;
-    background: linear-gradient(180deg, var(--inset-lo), var(--inset));
+    width: 100%;
+    max-width: 25.5rem;
+    justify-self: center;
+    padding: 0.55rem;
+    border: 1px solid rgba(0, 0, 0, 0.45);
+    border-radius: 3px;
+    background: linear-gradient(180deg, var(--bezel) 0%, #1a1814 100%);
     box-shadow:
-      inset 0 2px 5px rgba(0, 0, 0, 0.6),
-      0 1px 0 rgba(255, 250, 240, 0.14);
+      inset 0 1px 0 rgba(255, 248, 235, 0.08),
+      0 1px 0 var(--border-soft),
+      0 4px 10px rgba(0, 0, 0, 0.28);
   }
 
   .switches {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: clamp(0.6rem, 2.2vw, 1.5rem);
+    justify-content: center;
+    gap: clamp(1.25rem, 3vw, 2rem);
     min-width: 0;
   }
 
@@ -299,137 +285,96 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.3rem;
+    gap: 0.28rem;
     cursor: pointer;
   }
 
   .lamp {
-    width: 0.85rem;
-    height: 0.85rem;
+    width: 0.92rem;
+    height: 0.92rem;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #6a5f4e, #241f19);
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(0, 0, 0, 0.5);
+    background: radial-gradient(circle at 35% 30%, #3f382e, #17140f);
   }
 
   .power.on .lamp {
-    background: radial-gradient(circle at 35% 30%, #ffe3ae, var(--lamp) 55%, #a35a12);
-    box-shadow:
-      inset 0 1px 2px rgba(120, 60, 10, 0.5),
-      0 0 10px rgba(255, 170, 70, 0.75);
+    background: radial-gradient(circle at 35% 28%, #ffe7b5, var(--lamp) 68%);
+    border-color: color-mix(in srgb, var(--lamp) 40%, #000);
+    box-shadow: 0 0 9px var(--lamp-soft);
   }
 
   .legend {
-    color: var(--engrave);
-    font-size: 0.54rem;
+    color: var(--engrave-muted);
+    font-size: 0.62rem;
     font-weight: 700;
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    text-shadow: 0 1px 0 rgba(255, 250, 240, 0.14);
   }
 
-  /* Engraved separator between the meter bay and the control row. */
-  .rail {
-    height: 2px;
-    margin: clamp(0.4rem, 1.4vh, 0.9rem) 0;
-    border-radius: 1px;
-    background: linear-gradient(
-      180deg,
-      rgba(0, 0, 0, 0.35),
-      rgba(255, 250, 240, 0.14)
-    );
+  .power.on .legend {
+    color: var(--engrave);
   }
 
-  .controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-evenly;
-    gap: clamp(0.5rem, 2vw, 1.6rem);
-    min-width: 0;
-    min-height: 0;
-  }
-
-  /* The two hero controls hold their own width; the trim bank takes what is
-     left. Without this the growing bank squeezed them together. */
-  .mains {
-    display: flex;
-    align-items: center;
-    justify-content: space-evenly;
-    gap: clamp(1rem, 4vw, 3.5rem);
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
-  /* The five trim controls read as one secondary bank, set off from the two
-     hero knobs by a scribed line rather than by a gap. */
-  .trim {
+  .extras {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(3.6rem, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     justify-items: center;
-    align-items: start;
-    gap: clamp(0.4rem, 1.4vh, 0.8rem) clamp(0.3rem, 1.2vw, 0.9rem);
-    flex: 1 1 16rem;
+    gap: 0.65rem;
     min-width: 0;
-    padding-left: clamp(0.5rem, 2vw, 1.5rem);
-    border-left: 1px solid rgba(0, 0, 0, 0.28);
-    box-shadow: inset 1px 0 0 rgba(255, 250, 240, 0.1);
+    padding: 0.7rem 0.5rem 0.15rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.2);
+    box-shadow: inset 0 1px 0 var(--border-soft);
+    opacity: 0.86;
   }
 
   .feet {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding-top: clamp(0.3rem, 1vh, 0.6rem);
-  }
-
-  /* Rack screws, and a small pilot between them that lights when the editor
-     is bound to a running instance. */
-  .screw {
-    width: 0.6rem;
-    height: 0.6rem;
-    border-radius: 50%;
-    background: radial-gradient(circle at 34% 30%, #b4a992, #4c463c);
-    box-shadow:
-      inset 0 -1px 1px rgba(0, 0, 0, 0.5),
-      0 1px 0 rgba(255, 250, 240, 0.12);
+    justify-content: center;
+    padding-top: 0.25rem;
   }
 
   .link {
     width: 0.34rem;
     height: 0.34rem;
     border-radius: 50%;
-    background: #2c2822;
-    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.7);
+    background: #2a2621;
+    border: 1px solid rgba(0, 0, 0, 0.4);
   }
 
   .link.connected {
-    background: #7fd6a0;
-    box-shadow: 0 0 6px rgba(127, 214, 160, 0.7);
+    background: var(--link);
+    border-color: color-mix(in srgb, var(--link) 45%, #000);
   }
 
   @media (max-width: 820px) {
-    .top {
-      grid-template-columns: minmax(0, 1fr) auto;
-      row-gap: 0.6rem;
+    .face {
+      grid-template-columns:
+        minmax(7.5rem, 0.8fr)
+        minmax(14rem, 1.35fr)
+        minmax(7.5rem, 0.8fr);
+      gap: 0.6rem;
     }
 
-    .badge {
-      grid-column: 1;
+    .extras {
+      grid-template-columns: repeat(auto-fit, minmax(3.2rem, 1fr));
+    }
+  }
+
+  @media (max-height: 520px) {
+    .panel {
+      padding-block: 0.5rem 0.35rem;
     }
 
-    .meter-well {
-      grid-column: 2;
-      grid-row: 1;
+    .face {
+      padding-bottom: 0.4rem;
     }
 
-    .switches {
-      grid-column: 1 / -1;
-      justify-content: center;
+    .center-bay {
+      gap: 0.3rem;
     }
 
-    .controls {
-      flex-wrap: wrap;
-      justify-content: center;
+    .extras {
+      padding-top: 0.4rem;
     }
   }
 </style>

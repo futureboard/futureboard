@@ -1,38 +1,47 @@
 /*
- * FA-2A editor — a panel, not a Studio surface.
+ * FA-2A — Teletronix LA-2A–inspired leveling amp faceplate.
  *
- * The other built-in editors follow the Studio's graphite/accent language.
- * This one is a hardware faceplate: warm grey enamel, engraved legends, chrome
- * and bakelite. That stays strictly inside the plugin's own bounds — it is a
- * plugin identity, not a second visual language for the app.
- *
- * "Warm" here means the whole panel is pulled a few degrees toward amber
- * rather than sitting on neutral grey, and the meter is lit from behind.
+ * Layout and materials follow the hardware: warm gray enamel, a cream VU in
+ * the centre, two large bakelite dials below. Extra FA-2A controls stay in a
+ * quiet secondary strip so they do not compete with the classic two-knob bay.
  */
 
 :root {
-  /* Faceplate enamel, top-lit. */
-  --panel-hi: #6f6a60;
-  --panel: #5d584f;
-  --panel-lo: #4a4640;
-  --panel-edge: #34312c;
+  --panel-hi: #aaa69d;
+  --panel: #969289;
+  --panel-lo: #817d75;
+  --base: #292928;
+  --chassis: #1c1c1b;
 
-  /* Recessed area behind the meter and the control row. */
-  --inset: #46423b;
-  --inset-lo: #383530;
+  --inset: #55534f;
+  --inset-lo: #41403d;
+  --bezel: #252524;
+  --bezel-hi: #aaa69d;
 
-  /* Engraved legend and its highlight; readouts sit brighter. */
-  --engrave: #1f1c17;
-  --readout: #17140f;
-  --ink-light: #efe6d3;
+  --border: rgba(18, 18, 17, 0.42);
+  --border-hi: rgba(255, 255, 252, 0.22);
+  --border-soft: rgba(255, 255, 252, 0.1);
 
-  --focus: #ffcf7a;
-  --lamp: #ffb452;
+  --engrave: #22211e;
+  --engrave-muted: rgba(34, 33, 30, 0.62);
+  --readout: #171614;
 
-  --knob-lg: clamp(5rem, 10.5vw, 7.2rem);
-  --knob-sm: clamp(3.1rem, 5.6vw, 4rem);
+  --focus: #b78134;
+  --lamp: #e9a33c;
+  --lamp-soft: rgba(233, 163, 60, 0.42);
+  --link: #4c9e6b;
+  --clip: #aa321f;
 
-  --radius: 0.5rem;
+  --meter-face: #f8efd9;
+  --meter-face-lo: #ead8b5;
+  --meter-ink: #403629;
+  --meter-hot: #a92f1c;
+
+  --knob-lg: clamp(6.75rem, 15vw, 9.5rem);
+  --knob-sm: clamp(3.25rem, 6vw, 4.2rem);
+
+  --radius: 0.35rem;
+  --radius-sm: 0.3rem;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -49,7 +58,7 @@ html,
 body,
 #root {
   width: 100%;
-  min-width: 560px;
+  min-width: 640px;
   height: 100%;
   min-height: 420px;
   margin: 0;
@@ -57,7 +66,7 @@ body,
 }
 
 body {
-  background: var(--panel-edge);
+  background: var(--chassis);
   color: var(--engrave);
   font-family:
     'Inter Variable', Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -65,6 +74,7 @@ body {
   font-variant-numeric: tabular-nums;
   font-synthesis: none;
   line-height: 1.2;
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;

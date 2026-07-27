@@ -21,8 +21,6 @@
 
   const { mode, value, live, clip, onclearclip }: Props = $props()
 
-  // The pivot sits below the visible window, as it does in the real movement.
-  // The needle stops just inside the scale arc rather than crossing it.
   const PIVOT_X = 100
   const PIVOT_Y = 134
   const NEEDLE_R = 100
@@ -32,14 +30,12 @@
   const TICK_MINOR = 5
 
   const ticks = $derived(ticksFor(mode))
-  const target = $derived(live ? normFor(mode, value) : normFor(mode, mode === 'reduction' ? 0 : -20))
+  const target = $derived(
+    live
+      ? normFor(mode, value)
+      : normFor(mode, mode === 'reduction' ? 0 : -20),
+  )
 
-  // The needle is animated rather than bound straight to `target`: the host
-  // sends telemetry at ~30 Hz, and a VU needle that teleports between frames
-  // reads as a bar graph. `advance` uses the real 300 ms VU ballistic.
-  //
-  // Seeded untracked on purpose — this is the needle's starting position, not
-  // a subscription; the loop below is what follows `target` afterwards.
   let needle = $state(untrack(() => target))
 
   $effect(() => {
@@ -69,37 +65,26 @@
 </script>
 
 <div class="meter" class:dark={!live}>
-  <svg viewBox="0 0 200 120" role="img" aria-label="{mode === 'reduction' ? 'Gain reduction' : 'Output level'} meter">
+  <svg
+    viewBox="0 0 200 120"
+    role="img"
+    aria-label="{mode === 'reduction' ? 'Gain reduction' : 'Output level'} meter"
+  >
     <defs>
       <linearGradient id="face" x1="0" x2="0" y1="0" y2="1">
-        <stop offset="0" stop-color="#f6ecd6" />
-        <stop offset="0.55" stop-color="#efe0c2" />
-        <stop offset="1" stop-color="#e2cea6" />
-      </linearGradient>
-      <radialGradient id="lamp" cx="0.5" cy="0.95" r="0.85">
-        <stop offset="0" stop-color="#ffd9a0" stop-opacity="0.55" />
-        <stop offset="0.6" stop-color="#ffc172" stop-opacity="0.12" />
-        <stop offset="1" stop-color="#ffb452" stop-opacity="0" />
-      </radialGradient>
-      <linearGradient id="glass" x1="0" x2="1" y1="0" y2="1">
-        <stop offset="0" stop-color="#ffffff" stop-opacity="0.20" />
-        <stop offset="0.42" stop-color="#ffffff" stop-opacity="0.05" />
-        <stop offset="0.56" stop-color="#000000" stop-opacity="0.05" />
-        <stop offset="1" stop-color="#000000" stop-opacity="0.12" />
+        <stop offset="0" stop-color="#fff7e5" />
+        <stop offset="0.55" stop-color="#f5e7c9" />
+        <stop offset="1" stop-color="#e7d2aa" />
       </linearGradient>
     </defs>
 
-    <rect x="0" y="0" width="200" height="120" rx="5" fill="url(#face)" />
-    <!-- Warm lamp behind the face, the way the hardware's meter is lit. -->
-    <rect x="0" y="0" width="200" height="120" rx="5" fill="url(#lamp)" />
+    <rect x="0" y="0" width="200" height="120" rx="3" fill="url(#face)" />
 
-    <!-- Scale arc -->
     <path
       class="arc"
       d="M {arcStart.x.toFixed(2)} {arcStart.y.toFixed(2)} A {SCALE_R} {SCALE_R} 0 0 1 {arcEnd.x.toFixed(2)} {arcEnd.y.toFixed(2)}"
     />
 
-    <!-- Red end of the scale, over the arc it shares -->
     {#each [ticks.filter((t) => t.hot)] as hot}
       {#if hot.length > 1}
         {@const a = polar(Math.min(...hot.map((t) => t.norm)), SCALE_R)}
@@ -113,7 +98,10 @@
 
     {#each ticks as tick (tick.norm)}
       {@const outer = polar(tick.norm, SCALE_R)}
-      {@const inner = polar(tick.norm, SCALE_R - (tick.major ? TICK_MAJOR : TICK_MINOR))}
+      {@const inner = polar(
+        tick.norm,
+        SCALE_R - (tick.major ? TICK_MAJOR : TICK_MINOR),
+      )}
       {@const text = polar(tick.norm, LABEL_R)}
       <line
         class="tick"
@@ -135,23 +123,21 @@
       {mode === 'reduction' ? 'GAIN REDUCTION dB' : 'VU'}
     </text>
 
-    <!-- Needle -->
     <g class="needle" class:parked={!live}>
-      <line
-        x1={PIVOT_X}
-        y1={PIVOT_Y}
-        x2={needleTip.x}
-        y2={needleTip.y}
-      />
-      <circle cx={PIVOT_X} cy={PIVOT_Y} r="7" />
+      <line x1={PIVOT_X} y1={PIVOT_Y} x2={needleTip.x} y2={needleTip.y} />
+      <circle cx={PIVOT_X} cy={PIVOT_Y} r="6.5" />
     </g>
 
-    <rect x="0" y="0" width="200" height="120" rx="5" fill="url(#glass)" />
-    <rect class="bezel" x="0.75" y="0.75" width="198.5" height="118.5" rx="4.5" />
+    <rect class="bezel" x="0.8" y="0.8" width="198.4" height="118.4" rx="2.5" />
   </svg>
 
   {#if clip}
-    <button type="button" class="clip" onclick={onclearclip} title="Output clipped — click to reset">
+    <button
+      type="button"
+      class="clip"
+      onclick={onclearclip}
+      title="Output clipped — click to reset"
+    >
       CLIP
     </button>
   {/if}
@@ -171,103 +157,100 @@
     display: block;
     width: 100%;
     height: auto;
-    border-radius: 5px;
-    box-shadow:
-      inset 0 2px 6px rgba(60, 36, 12, 0.35),
-      0 2px 5px rgba(0, 0, 0, 0.5);
+    border-radius: 2px;
+    box-shadow: inset 0 1px 3px rgba(70, 48, 18, 0.14);
   }
 
   .arc {
     fill: none;
-    stroke: #4a3a22;
-    stroke-width: 1.4;
+    stroke: var(--meter-ink);
+    stroke-width: 1.35;
   }
 
   .arc.hot {
-    stroke: #b23a20;
-    stroke-width: 2.6;
+    stroke: var(--meter-hot);
+    stroke-width: 2.4;
   }
 
   .tick {
-    stroke: #4a3a22;
-    stroke-width: 1.1;
+    stroke: var(--meter-ink);
+    stroke-width: 1.05;
     stroke-linecap: round;
   }
 
   .tick.major {
-    stroke-width: 1.9;
+    stroke-width: 1.8;
   }
 
   .tick.hot {
-    stroke: #b23a20;
+    stroke: var(--meter-hot);
   }
 
   .label {
-    fill: #4a3a22;
+    fill: var(--meter-ink);
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    font-size: 8px;
+    font-size: 8.2px;
     font-weight: 600;
     text-anchor: middle;
     dominant-baseline: middle;
   }
 
   .label.hot {
-    fill: #b23a20;
+    fill: var(--meter-hot);
   }
 
   .unit {
-    fill: #6b5638;
+    fill: #6b5840;
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-    font-size: 7px;
+    font-size: 6.8px;
     font-weight: 700;
-    letter-spacing: 0.16em;
+    letter-spacing: 0.14em;
     text-anchor: middle;
   }
 
   .needle line {
-    stroke: #17100a;
-    stroke-width: 1.9;
+    stroke: #160f08;
+    stroke-width: 1.85;
     stroke-linecap: round;
   }
 
   .needle circle {
-    fill: #241a0e;
+    fill: #160f08;
   }
 
   .needle.parked line {
-    stroke: #8f7a58;
+    stroke: #8a7860;
   }
 
   .bezel {
     fill: none;
-    stroke: rgba(40, 24, 8, 0.5);
-    stroke-width: 1.5;
+    stroke: rgba(35, 26, 14, 0.32);
+    stroke-width: 1.4;
   }
 
   .clip {
     position: absolute;
     top: 8%;
-    right: 6%;
+    right: 5.5%;
     padding: 0.15rem 0.4rem;
     border-radius: 2px;
-    background: #c4381c;
+    background: var(--clip);
     color: #fff;
     font-size: 0.55rem;
-    font-weight: 800;
-    letter-spacing: 0.12em;
+    font-weight: 750;
+    letter-spacing: 0.1em;
     cursor: pointer;
-    box-shadow: 0 0 8px rgba(220, 70, 30, 0.7);
   }
 
   .offline {
     position: absolute;
     left: 50%;
-    bottom: 4%;
+    bottom: 5%;
     transform: translateX(-50%);
-    color: #8f7a58;
+    color: #8a7860;
     font-size: 0.55rem;
-    font-weight: 700;
-    letter-spacing: 0.14em;
+    font-weight: 650;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
   }
 </style>

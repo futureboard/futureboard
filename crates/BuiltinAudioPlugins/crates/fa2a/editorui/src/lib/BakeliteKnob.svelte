@@ -7,7 +7,7 @@
     onchange: (value: number) => void
     /** CSS size; defaults to the panel's `--knob-lg`. */
     size?: string
-    /** Numbered skirt, the way the hardware's two main controls are marked. */
+    /** Numbered aluminum skirt — Peak Reduction / Gain on the hardware. */
     dial?: boolean
     disabled?: boolean
   }
@@ -22,6 +22,7 @@
   }: Props = $props()
 
   const norm = $derived(toNorm(spec, value))
+  const uid = $derived(`k${spec.id}`)
 
   let dragging = $state(false)
   let editing = $state(false)
@@ -37,7 +38,7 @@
     }
   })
 
-  const TRAVEL_PX = 230
+  const TRAVEL_PX = 240
 
   function commit(nextNorm: number) {
     if (disabled) return
@@ -113,7 +114,7 @@
     editing = false
   }
 
-  // 300° of travel, opening at the bottom, like a panel-mount potentiometer.
+  // 300° travel opening at the bottom — classic panel pot.
   const START_DEG = -240
   const SWEEP_DEG = 300
 
@@ -126,16 +127,21 @@
   const skirtTicks = Array.from({ length: 11 }, (_, i) => {
     const deg = START_DEG + SWEEP_DEG * (i / 10)
     return {
-      a: polar(deg, 45),
-      b: polar(deg, i % 5 === 0 ? 38 : 41),
+      a: polar(deg, 46.5),
+      b: polar(deg, i % 5 === 0 ? 41 : 43.5),
       label: i % 5 === 0 ? String(i) : '',
-      text: polar(deg, 32),
+      text: polar(deg, 36),
       major: i % 5 === 0,
     }
   })
 </script>
 
-<div class="knob" class:disabled style={size ? `--knob: ${size}` : undefined}>
+<div
+  class="knob"
+  class:dial
+  class:disabled
+  style={size ? `--knob: ${size}` : undefined}
+>
   <div
     class="cap"
     class:dragging
@@ -158,21 +164,19 @@
   >
     <svg viewBox="0 0 100 100" aria-hidden="true">
       <defs>
-        <radialGradient id="{spec.id}-body" cx="0.36" cy="0.28" r="0.82">
-          <stop offset="0" stop-color="#4a453f" />
-          <stop offset="0.4" stop-color="#282521" />
-          <stop offset="0.82" stop-color="#141210" />
-          <stop offset="1" stop-color="#0a0908" />
+        <radialGradient id="{uid}-body" cx="0.34" cy="0.26" r="0.8">
+          <stop offset="0" stop-color="#454440" />
+          <stop offset="0.45" stop-color="#242321" />
+          <stop offset="1" stop-color="#0b0b0a" />
         </radialGradient>
-        <linearGradient id="{spec.id}-chrome" x1="0" x2="0.4" y1="0" y2="1">
-          <stop offset="0" stop-color="#d8cdb8" />
-          <stop offset="0.35" stop-color="#8d8272" />
-          <stop offset="0.62" stop-color="#c9bda6" />
-          <stop offset="1" stop-color="#6d6456" />
+        <linearGradient id="{uid}-ring" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stop-color="#5c5a55" />
+          <stop offset="1" stop-color="#272624" />
         </linearGradient>
       </defs>
 
       {#if dial}
+        <!-- Scale is printed on the faceplate around the bakelite knob. -->
         {#each skirtTicks as tick}
           <line
             class="skirt-tick"
@@ -188,25 +192,31 @@
             </text>
           {/if}
         {/each}
+        <circle class="ring" cx="50" cy="50" r="31" fill="url(#{uid}-ring)" />
+      {:else}
+        <circle class="ring" cx="50" cy="50" r="30" fill="url(#{uid}-ring)" />
       {/if}
 
-      <!-- Chrome skirt, then the bakelite cap that turns on it -->
-      <circle class="skirt" cx="50" cy="50" r={dial ? 26 : 30} fill="url(#{spec.id}-chrome)" />
       <g style="transform: rotate({pointerAngle + 90}deg); transform-origin: 50px 50px">
-        <circle class="body" cx="50" cy="50" r={dial ? 22 : 26} fill="url(#{spec.id}-body)" />
+        <circle
+          class="body"
+          cx="50"
+          cy="50"
+          r={dial ? 27 : 26}
+          fill="url(#{uid}-body)"
+        />
         <path
           class="gloss"
           d={dial
-            ? 'M 36 40 A 17 17 0 0 1 63 36'
+            ? 'M 36 41 A 17 17 0 0 1 63 37'
             : 'M 33 38 A 21 21 0 0 1 66 33'}
         />
-        <!-- Pointer flute, cut into the cap the way a chicken-head knob is -->
         <rect
           class="flute"
           x="48.6"
-          y={dial ? 30 : 26}
+          y={dial ? 25.5 : 26}
           width="2.8"
-          height={dial ? 13 : 15}
+          height={dial ? 18.5 : 15}
           rx="1.4"
         />
       </g>
@@ -256,17 +266,17 @@
     cursor: ns-resize;
     touch-action: none;
     outline: none;
-    filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.55));
+    filter: drop-shadow(0 3px 4px rgba(0, 0, 0, 0.32));
   }
 
-  .cap:focus-visible {
-    border-radius: 50%;
-    box-shadow: 0 0 0 2px var(--focus);
+  .cap.dragging {
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.38));
   }
 
   .knob.disabled .cap {
     cursor: default;
     opacity: 0.4;
+    filter: none;
   }
 
   svg {
@@ -276,40 +286,40 @@
     overflow: visible;
   }
 
-  .skirt {
-    stroke: rgba(0, 0, 0, 0.45);
+  .ring {
+    stroke: rgba(0, 0, 0, 0.4);
     stroke-width: 0.8;
   }
 
   .body {
-    stroke: rgba(0, 0, 0, 0.7);
+    stroke: rgba(0, 0, 0, 0.65);
     stroke-width: 1;
   }
 
   .gloss {
     fill: none;
-    stroke: rgba(255, 245, 225, 0.22);
-    stroke-width: 2.2;
+    stroke: rgba(255, 245, 225, 0.16);
+    stroke-width: 1.8;
     stroke-linecap: round;
   }
 
   .flute {
-    fill: #efe4cd;
+    fill: #f4ead4;
   }
 
   .skirt-tick {
-    stroke: var(--engrave);
-    stroke-width: 1;
+    stroke: var(--engrave-muted);
+    stroke-width: 1.1;
     stroke-linecap: round;
   }
 
   .skirt-tick.major {
-    stroke-width: 1.8;
+    stroke-width: 1.9;
   }
 
   .skirt-label {
     fill: var(--engrave);
-    font-size: 8.5px;
+    font-size: 7.5px;
     font-weight: 700;
     text-anchor: middle;
     dominant-baseline: middle;
@@ -319,54 +329,62 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.1rem;
+    gap: 0.12rem;
   }
 
-  /* Wraps rather than nowrap: an engraved legend like PEAK REDUCTION is wider
-     than its knob, and forbidding the wrap makes the label — not the control —
-     set the panel's minimum width, which overflowed at the host's smallest
-     editor size. */
   .name {
-    max-width: 7rem;
+    max-width: 8rem;
     color: var(--engrave);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
+    font-size: 0.76rem;
+    font-weight: 750;
+    letter-spacing: 0.1em;
     line-height: 1.15;
     text-transform: uppercase;
     text-align: center;
-    text-shadow: 0 1px 0 rgba(255, 250, 240, 0.16);
+    text-shadow: 0 1px 0 rgba(255, 248, 235, 0.12);
+  }
+
+  .knob:not(.dial) .name {
+    color: var(--engrave-muted);
+    font-size: 0.65rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
   }
 
   .readout {
-    padding: 0.05rem 0.3rem;
-    border-radius: 2px;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-sm);
     color: var(--readout);
-    font-size: 0.72rem;
+    font-size: 0.84rem;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     cursor: text;
   }
 
+  .knob:not(.dial) .readout {
+    font-size: 0.72rem;
+    opacity: 0.9;
+  }
+
   .readout:hover {
-    background: rgba(0, 0, 0, 0.12);
+    background: rgba(0, 0, 0, 0.1);
   }
 
   .unit {
     margin-left: 0.1rem;
-    font-size: 0.55rem;
-    opacity: 0.65;
+    font-size: 0.6rem;
+    opacity: 0.6;
   }
 
   .input {
     width: 3.6rem;
-    padding: 0.05rem 0.2rem;
-    border: 1px solid var(--engrave);
-    border-radius: 2px;
+    padding: 0.06rem 0.2rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     outline: none;
-    background: rgba(255, 250, 240, 0.85);
+    background: #efe6d3;
     color: #1d1a15;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 600;
     text-align: center;
     user-select: text;

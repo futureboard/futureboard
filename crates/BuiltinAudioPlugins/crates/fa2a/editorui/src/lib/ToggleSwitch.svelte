@@ -1,8 +1,6 @@
 <script lang="ts">
   /**
-   * Two-position panel toggle. Used for the COMPRESS/LIMIT mode switch and the
-   * meter selector, which are physical switches on the hardware rather than
-   * knobs — so they read as switches here too.
+   * Two-position panel toggle — Compress/Limit and meter select on the LA-2A.
    */
   type Props = {
     label: string
@@ -49,47 +47,37 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 0.2rem;
+    gap: 0.22rem;
   }
 
   .legend {
-    color: var(--engrave);
-    font-size: 0.54rem;
+    color: var(--engrave-muted);
+    font-size: 0.62rem;
     font-weight: 700;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    opacity: 0.45;
-    text-shadow: 0 1px 0 rgba(255, 250, 240, 0.14);
     white-space: nowrap;
   }
 
   .legend.on {
-    opacity: 1;
-    color: var(--readout);
+    color: var(--engrave);
   }
 
   .body {
     position: relative;
-    width: 1.5rem;
-    height: 2.4rem;
-    border-radius: 0.75rem;
+    width: 1.65rem;
+    height: 2.7rem;
+    border: 1px solid rgba(0, 0, 0, 0.48);
+    border-radius: 0.72rem;
     cursor: pointer;
-    background:
-      radial-gradient(
-        ellipse at 50% 20%,
-        rgba(255, 255, 255, 0.14),
-        transparent 60%
-      ),
-      linear-gradient(180deg, #22201c 0%, #100f0d 100%);
-    box-shadow:
-      inset 0 1px 2px rgba(0, 0, 0, 0.8),
-      0 1px 0 rgba(255, 250, 240, 0.12);
+    background: linear-gradient(180deg, #2b2b29 0%, #111110 100%);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
   }
 
   .body:focus-visible {
     outline: none;
     box-shadow:
-      inset 0 1px 2px rgba(0, 0, 0, 0.8),
+      inset 0 1px 2px rgba(0, 0, 0, 0.55),
       0 0 0 2px var(--focus);
   }
 
@@ -98,22 +86,21 @@
     opacity: 0.4;
   }
 
-  /* The bat travels; the chrome shading stays lit from above so it reads as a
-     physical lever rather than a sliding dot. */
   .bat {
     position: absolute;
     left: 50%;
-    width: 0.72rem;
-    height: 1.15rem;
-    margin-left: -0.36rem;
-    border-radius: 0.36rem;
-    background: linear-gradient(180deg, #e6dcc8 0%, #9c9282 55%, #6b6356 100%);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    width: 0.8rem;
+    height: 1.25rem;
+    margin-left: -0.4rem;
+    border-radius: 0.4rem;
+    background: linear-gradient(180deg, #f2ead8 0%, #bbb4a5 100%);
+    border: 1px solid rgba(0, 0, 0, 0.3);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
     top: 0.16rem;
     transition: top 90ms ease-out;
   }
 
   .body.down .bat {
-    top: 1.09rem;
+    top: 1.22rem;
   }
 </style>
