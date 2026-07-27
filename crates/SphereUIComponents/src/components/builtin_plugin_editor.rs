@@ -76,6 +76,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         verbspace::ui::UI_ORIGIN => verbspace::ui_param_index(param_id),
         echospace::ui::UI_ORIGIN => echospace::ui_param_index(param_id),
         fa2a::ui::UI_ORIGIN => fa2a::ui_param_index(param_id),
+        fa76::ui::UI_ORIGIN => fa76::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -115,6 +116,7 @@ mod state_mirror {
         Verbspace(Box<verbspace::Params>),
         Echospace(Box<echospace::Params>),
         Fa2a(Box<fa2a::Params>),
+        Fa76(Box<fa76::Params>),
     }
 
     impl BuiltinParams {
@@ -125,6 +127,7 @@ mod state_mirror {
                 Self::Verbspace(_) => verbspace::ui::UI_ORIGIN,
                 Self::Echospace(_) => echospace::ui::UI_ORIGIN,
                 Self::Fa2a(_) => fa2a::ui::UI_ORIGIN,
+                Self::Fa76(_) => fa76::ui::UI_ORIGIN,
             }
         }
 
@@ -142,6 +145,7 @@ mod state_mirror {
                     Some(Self::Echospace(Box::new(echospace::default_params())))
                 }
                 fa2a::ui::UI_ORIGIN => Some(Self::Fa2a(Box::new(fa2a::default_params()))),
+                fa76::ui::UI_ORIGIN => Some(Self::Fa76(Box::new(fa76::default_params()))),
                 _ => None,
             }
         }
@@ -181,6 +185,7 @@ mod state_mirror {
             verbspace::ui::UI_ORIGIN => verbspace::ui_param_id(wire_index).is_some(),
             echospace::ui::UI_ORIGIN => echospace::ui_param_id(wire_index).is_some(),
             fa2a::ui::UI_ORIGIN => fa2a::ui_param_id(wire_index).is_some(),
+            fa76::ui::UI_ORIGIN => fa76::ui_param_id(wire_index).is_some(),
             _ => false,
         };
         if !known {
@@ -206,6 +211,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::Fa2a(params)) => {
                 let _ = fa2a::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::Fa76(params)) => {
+                let _ = fa76::ipc::apply_wire_param(params, wire_index, value);
             }
             None => {}
         }
@@ -236,6 +244,9 @@ mod state_mirror {
             fa2a::ui::UI_ORIGIN => fa2a::ipc::Fa2aState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::Fa2a(Box::new(state.params))),
+            fa76::ui::UI_ORIGIN => fa76::ipc::Fa76State::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Fa76(Box::new(state.params))),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -285,6 +296,11 @@ mod state_mirror {
                     .to_json()
                     .ok()?
             }
+            BuiltinParams::Fa76(params) if origin == fa76::ui::UI_ORIGIN => {
+                fa76::ipc::Fa76State::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
             _ => return None,
         };
         Some(json.into_bytes())
@@ -331,6 +347,12 @@ mod state_mirror {
                 fa2a::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| fa2a::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::Fa76(params)) if origin == fa76::ui::UI_ORIGIN => {
+                fa76::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| fa76::ui_param_index(id).map(|i| (i, value)))
                     .collect()
             }
             _ => Vec::new(),
@@ -717,6 +739,7 @@ mod imp {
             verbspace::ui::UI_ORIGIN => verbspace::ui::VerbspaceUi::resolve_ui_asset(path)?,
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::resolve_ui_asset(path)?,
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::resolve_ui_asset(path)?,
+            fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -737,6 +760,7 @@ mod imp {
                 | verbspace::ui::UI_ORIGIN
                 | echospace::ui::UI_ORIGIN
                 | fa2a::ui::UI_ORIGIN
+                | fa76::ui::UI_ORIGIN
         )
     }
 
@@ -748,6 +772,7 @@ mod imp {
             verbspace::ui::UI_ORIGIN => verbspace::ui::VerbspaceUi::is_embedded(),
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::is_embedded(),
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::is_embedded(),
+            fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::is_embedded(),
             _ => false,
         }
     }
@@ -1581,6 +1606,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("builtin:verbspace"), Some("verbspace"));
         assert_eq!(origin_for_plugin_id("builtin:echospace"), Some("echospace"));
         assert_eq!(origin_for_plugin_id("builtin:fa2a"), Some("fa2a"));
+        assert_eq!(origin_for_plugin_id("builtin:fa76"), Some("fa76"));
     }
 
     /// Regression guard for the bug that left the editor unopenable in the real
@@ -1593,6 +1619,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("verbspace"), Some("verbspace"));
         assert_eq!(origin_for_plugin_id("echospace"), Some("echospace"));
         assert_eq!(origin_for_plugin_id("fa2a"), Some("fa2a"));
+        assert_eq!(origin_for_plugin_id("fa76"), Some("fa76"));
         assert_eq!(
             origin_for_plugin_id("rodharerist"),
             origin_for_plugin_id("builtin:rodharerist"),

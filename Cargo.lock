@@ -2622,6 +2622,9 @@ name = "fa76"
 version = "0.1.0"
 dependencies = [
  "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7433,6 +7436,7 @@ dependencies = [
  "embed-resource",
  "equz8",
  "fa2a",
+ "fa76",
  "libc",
  "napi",
  "napi-build",
@@ -7486,6 +7490,7 @@ dependencies = [
  "echospace",
  "equz8",
  "fa2a",
+ "fa76",
  "gpui",
  "image",
  "midir",
