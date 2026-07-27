@@ -97,11 +97,7 @@ package-exclusive = [
     "exclusive",
 ]
 
-[env]
-# bindgen, used by asio-sys, loads libclang.dll from this directory.
-LIBCLANG_PATH = { value = ".bin/bin", relative = true, force = false }
-
-# cef-dll-sys reads CEF_PATH during compilation.
-# This is the Windows developer default. Linux/macOS builds export their
-# platform-specific versioned path (as CI does) before invoking Cargo.
-CEF_PATH = { value = "build/cef/150.0.11/cef_windows_x86_64", relative = true, force = false }
+# Do not set CEF_PATH or LIBCLANG_PATH globally here. Cargo has no target-scoped
+# [env] support, so a platform-specific default contaminates builds for every
+# other host and cross-compilation target. CI and developer shells must export
+# paths that match Cargo's TARGET before invoking Cargo.

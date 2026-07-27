@@ -12,9 +12,6 @@ use sphere_ui_components::boot;
 use sphere_ui_components::embedded_assets::EmbeddedAssets;
 
 fn main() {
-    #[cfg(feature = "builtin-plugin-editor")]
-    sphere_webview::runtime::log_process_entry();
-
     // ── Phase -1 — CEF process dispatch ───────────────────────────────────────
     // CEF re-launches THIS executable for its own helper processes (renderer,
     // GPU, utility). Those launches must be detected and serviced before any
@@ -23,24 +20,11 @@ fn main() {
     // returns >= 0 only in a helper, and in that case the only correct action is
     // to exit with the code it hands back.
     //
-    // The app passed here declares the `mikoplugin://` scheme. CEF requires that
-    // declaration in *every* process, so the same app type is used again when
-    // the browser-side runtime initializes.
+    // The app passed here declares the `mikoplugin://` scheme. CEF requires the
+    // same object to be handed to browser-process initialization, so ownership
+    // is transferred to the UI-thread host after dispatch.
     #[cfg(feature = "builtin-plugin-editor")]
-    {
-        use sphere_webview::runtime::ProcessDispatch;
-        let mut scheme_app = sphere_webview::scheme::plugin_scheme_app();
-        if let ProcessDispatch::SubprocessExit(code) =
-            sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app))
-        {
-            eprintln!(
-                "[cef-process] subprocess_exit pid={} code={} before_futureboard_startup=true",
-                std::process::id(),
-                code
-            );
-            std::process::exit(code);
-        }
-    }
+    dispatch_cef_process();
 
     // Privilege safety — must run before audio, plugins, settings, or project I/O.
     // Community and Exclusive Edition both block elevated launches. Developer
@@ -136,6 +120,53 @@ fn main() {
         discord_rpc.shutdown();
     }
     boot::log("gpui application exited");
+}
+
+#[cfg(feature = "builtin-plugin-editor")]
+fn dispatch_cef_process() {
+    use sphere_webview::runtime::ProcessDispatch;
+
+    sphere_webview::runtime::log_process_entry();
+    let mut scheme_app = match sphere_webview::scheme::plugin_scheme_app() {
+        Ok(app) => app,
+        Err(error) => {
+            handle_cef_process_setup_failure(&error);
+            return;
+        }
+    };
+    match sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app)) {
+        Ok(ProcessDispatch::SubprocessExit(code)) => {
+            eprintln!(
+                "[cef-process] subprocess_exit pid={} code={} before_futureboard_startup=true",
+                std::process::id(),
+                code
+            );
+            std::process::exit(code);
+        }
+        Ok(ProcessDispatch::BrowserProcess) => {
+            if let Err(error) =
+                sphere_ui_components::components::builtin_plugin_editor::install_process_app(
+                    scheme_app,
+                )
+            {
+                eprintln!("[cef-process] browser_app_install_failed error={error}");
+            }
+        }
+        Err(error) => handle_cef_process_setup_failure(&error),
+    }
+}
+
+#[cfg(feature = "builtin-plugin-editor")]
+fn handle_cef_process_setup_failure(error: &sphere_webview::runtime::CefRuntimeError) {
+    let subprocess = sphere_webview::runtime::is_subprocess_command_line();
+    eprintln!(
+        "[cef-process] setup_failed pid={} subprocess={} error={error}",
+        std::process::id(),
+        subprocess
+    );
+    if subprocess {
+        std::process::exit(1);
+    }
 }
 
 /// Builds a GPUI [`Application`] with the correct OS platform backend.

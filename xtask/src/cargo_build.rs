@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -54,7 +54,12 @@ pub struct BuildOutput {
 
 /// Build the application and its sidecars for the requested profile / target /
 /// edition, returning the actual executable paths parsed from Cargo's output.
-pub fn build(profile: &str, target: Option<&str>, edition: Edition) -> Result<BuildOutput> {
+pub fn build(
+    profile: &str,
+    target: Option<&str>,
+    edition: Edition,
+    cef_path: Option<&Path>,
+) -> Result<BuildOutput> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
 
     let mut command = Command::new(&cargo);
@@ -72,6 +77,12 @@ pub fn build(profile: &str, target: Option<&str>, edition: Edition) -> Result<Bu
     }
     if let Some(target) = target {
         command.args(["--target", target]);
+    }
+    if let Some(cef_path) = cef_path {
+        // Always pass an absolute, target-matched distribution. cef-dll-sys
+        // treats relative CEF_PATH values as version roots and may append its
+        // own version/platform components.
+        command.env("CEF_PATH", cef_path);
     }
 
     // Merge the edition features with the sidecar bin features into one

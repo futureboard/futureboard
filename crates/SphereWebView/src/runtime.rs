@@ -24,6 +24,38 @@ pub enum ProcessDispatch {
     SubprocessExit(i32),
 }
 
+impl ProcessDispatch {
+    fn from_exit_code(exit_code: i32) -> Self {
+        if exit_code < 0 {
+            Self::BrowserProcess
+        } else {
+            Self::SubprocessExit(exit_code)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProcessIdentity {
+    executable: PathBuf,
+    process_type: Option<String>,
+    utility_sub_type: Option<String>,
+    argument_count: usize,
+}
+
+impl ProcessIdentity {
+    fn current() -> Result<Self, CefRuntimeError> {
+        let args: Vec<String> = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        Ok(Self {
+            executable: std::env::current_exe()?,
+            process_type: command_line_switch(&args, "--type").map(str::to_owned),
+            utility_sub_type: command_line_switch(&args, "--utility-sub-type").map(str::to_owned),
+            argument_count: args.len(),
+        })
+    }
+}
+
 /// Load platform runtime state and bind the CEF API version for this process.
 ///
 /// macOS does not link the Chromium framework into the executable. The
@@ -68,15 +100,29 @@ pub fn ensure_api_version() {
 /// the same executable. Keeping this at the first statement of `main` makes it
 /// unambiguous whether a helper escaped into normal application startup.
 pub fn log_process_entry() {
+    match ProcessIdentity::current() {
+        Ok(identity) => eprintln!(
+            "[cef-process] entry pid={} executable={} type={:?} utility_sub_type={:?} argument_count={}",
+            std::process::id(),
+            identity.executable.display(),
+            identity.process_type.as_deref().unwrap_or("<browser>"),
+            identity.utility_sub_type.as_deref().unwrap_or("<none>"),
+            identity.argument_count,
+        ),
+        Err(error) => eprintln!(
+            "[cef-process] entry pid={} executable=<unresolved> error={error}",
+            std::process::id()
+        ),
+    }
+}
+
+/// Whether this invocation has the CEF `--type` switch used by renderer, GPU,
+/// utility, and other helper processes.
+pub fn is_subprocess_command_line() -> bool {
     let args: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let process_type = command_line_switch(&args, "--type").unwrap_or("<browser>");
-    let utility_sub_type = command_line_switch(&args, "--utility-sub-type").unwrap_or("<none>");
-    eprintln!(
-        "[cef-process] entry pid={} command_line={args:?} type={process_type:?} utility_sub_type={utility_sub_type:?}",
-        std::process::id()
-    );
+    command_line_switch(&args, "--type").is_some()
 }
 
 fn command_line_switch<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -90,8 +136,10 @@ fn command_line_switch<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 }
 
 /// Dispatch CEF subprocess command lines before starting the native UI.
-pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch {
-    prepare_process().expect("failed to prepare the CEF process");
+pub fn execute_subprocess(
+    application: Option<&mut cef::App>,
+) -> Result<ProcessDispatch, CefRuntimeError> {
+    prepare_process()?;
     let args = cef::args::Args::new();
     let exit_code =
         cef::execute_process(Some(args.as_main_args()), application, std::ptr::null_mut());
@@ -101,11 +149,20 @@ pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch
         std::process::id(),
         std::thread::current().id()
     );
-    if exit_code < 0 {
-        ProcessDispatch::BrowserProcess
-    } else {
-        ProcessDispatch::SubprocessExit(exit_code)
-    }
+    Ok(ProcessDispatch::from_exit_code(exit_code))
+}
+
+/// Executable CEF should launch for renderer, GPU, utility, and other helper
+/// processes.
+#[derive(Debug, Clone, Default)]
+pub enum BrowserSubprocess {
+    /// CEF re-launches the browser executable. This is represented by an empty
+    /// `browser_subprocess_path`, per CEF's API contract, and requires the
+    /// executable to call [`execute_subprocess`] before normal startup.
+    #[default]
+    CurrentExecutable,
+    /// Use a separately packaged helper executable.
+    SeparateExecutable(PathBuf),
 }
 
 /// Browser-process configuration. The runtime uses a portable, integrated
@@ -117,6 +174,10 @@ pub struct CefRuntimeConfig {
     pub locale: Option<String>,
     pub user_agent: Option<String>,
     pub remote_debugging_port: Option<u16>,
+    /// Helper-process ownership is a packaging decision. Futureboard uses the
+    /// integrated current-executable model; a separate helper must only be
+    /// selected by packaging that actually supplies one.
+    pub browser_subprocess: BrowserSubprocess,
     /// Allow [`RenderMode::Windowless`] browsers in this process. Chromium
     /// decides this once, at `cef_initialize`, so a runtime that may ever need
     /// off-screen rendering must opt in before any browser is created.
@@ -232,7 +293,33 @@ impl CefRuntime {
         application: Option<&mut cef::App>,
     ) -> Result<Self, CefRuntimeError> {
         prepare_process()?;
+        let identity = ProcessIdentity::current()?;
         let args = cef::args::Args::new();
+        let browser_subprocess_path = match &config.browser_subprocess {
+            BrowserSubprocess::CurrentExecutable => cef::CefString::default(),
+            BrowserSubprocess::SeparateExecutable(path) => {
+                cef::CefString::from(path.to_string_lossy().as_ref())
+            }
+        };
+        let resolved_subprocess = match &config.browser_subprocess {
+            BrowserSubprocess::CurrentExecutable => identity.executable.as_path(),
+            BrowserSubprocess::SeparateExecutable(path) => path.as_path(),
+        };
+        eprintln!(
+            "[cef-runtime] initialize begin executable={} process_type={:?} subprocess_model={} subprocess_path={} cache_path={} root_cache_path={} resources_path=<cef-default> locales_path=<cef-default> message_loop=manual-do-work windowless={} remote_debugging_port={} thread={:?}",
+            identity.executable.display(),
+            identity.process_type.as_deref().unwrap_or("<browser>"),
+            match &config.browser_subprocess {
+                BrowserSubprocess::CurrentExecutable => "integrated",
+                BrowserSubprocess::SeparateExecutable(_) => "separate",
+            },
+            resolved_subprocess.display(),
+            display_optional_path(config.cache_path.as_ref()),
+            display_optional_path(config.root_cache_path.as_ref()),
+            config.windowless_rendering,
+            config.remote_debugging_port.unwrap_or(0),
+            thread::current().id(),
+        );
         let settings = cef::Settings {
             no_sandbox: 1,
             multi_threaded_message_loop: 0,
@@ -240,10 +327,7 @@ impl CefRuntime {
             windowless_rendering_enabled: i32::from(config.windowless_rendering),
             cache_path: cef_path(config.cache_path.as_ref()),
             root_cache_path: cef_path(config.root_cache_path.as_ref()),
-            // Intentionally empty during CEF integration diagnosis: every CEF
-            // helper re-enters this executable and is dispatched at the first
-            // statement of `main`.
-            browser_subprocess_path: cef::CefString::default(),
+            browser_subprocess_path,
             locale: cef_string(config.locale.as_deref()),
             user_agent: cef_string(config.user_agent.as_deref()),
             remote_debugging_port: config.remote_debugging_port.unwrap_or(0) as i32,
@@ -256,8 +340,13 @@ impl CefRuntime {
             std::ptr::null_mut(),
         ) != 1
         {
+            eprintln!("[cef-runtime] initialize result=false");
             return Err(CefRuntimeError::InitializeFailed);
         }
+        eprintln!(
+            "[cef-runtime] initialize result=true owner_thread={:?}",
+            thread::current().id()
+        );
 
         Ok(Self {
             owner_thread: thread::current().id(),
@@ -302,14 +391,16 @@ impl CefRuntime {
             window_info.windowless_rendering_enabled,
             i32::from(windowless)
         );
-        eprintln!(
-            "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} render_mode={:?} thread={:?}",
-            config.url,
-            parent.as_raw(),
-            config.bounds,
-            config.render_mode,
-            std::thread::current().id()
-        );
+        if crate::scheme::cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} render_mode={:?} thread={:?}",
+                config.url,
+                parent.as_raw(),
+                config.bounds,
+                config.render_mode,
+                std::thread::current().id()
+            );
+        }
         let browser_settings = cef::BrowserSettings {
             // A transparent windowless surface would composite the timeline
             // through the editor; an opaque background also lets the host
@@ -334,12 +425,14 @@ impl CefRuntime {
             );
             return Err(CefRuntimeError::CreateBrowserFailed);
         };
-        eprintln!(
-            "[cef-lifecycle] event=CreateBrowserSync result=true browser_id={} url={:?} thread={:?}",
-            browser.identifier(),
-            config.url,
-            std::thread::current().id()
-        );
+        if crate::scheme::cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-lifecycle] event=CreateBrowserSync result=true browser_id={} url={:?} thread={:?}",
+                browser.identifier(),
+                config.url,
+                std::thread::current().id()
+            );
+        }
 
         Ok(WebView {
             browser,
@@ -383,8 +476,13 @@ impl CefRuntime {
     pub fn shutdown(mut self) -> Result<(), CefRuntimeError> {
         self.ensure_thread()?;
         if !self.shutdown {
+            eprintln!(
+                "[cef-runtime] shutdown begin owner_thread={:?}",
+                self.owner_thread
+            );
             cef::shutdown();
             self.shutdown = true;
+            eprintln!("[cef-runtime] shutdown complete");
         }
         Ok(())
     }
@@ -400,8 +498,19 @@ impl CefRuntime {
 impl Drop for CefRuntime {
     fn drop(&mut self) {
         if !self.shutdown && thread::current().id() == self.owner_thread {
+            eprintln!(
+                "[cef-runtime] shutdown begin source=drop owner_thread={:?}",
+                self.owner_thread
+            );
             cef::shutdown();
             self.shutdown = true;
+            eprintln!("[cef-runtime] shutdown complete source=drop");
+        } else if !self.shutdown {
+            eprintln!(
+                "[cef-runtime] shutdown skipped reason=wrong-thread owner_thread={:?} current_thread={:?}",
+                self.owner_thread,
+                thread::current().id()
+            );
         }
     }
 }
@@ -416,13 +525,15 @@ pub struct WebView<'runtime> {
 
 impl Drop for WebView<'_> {
     fn drop(&mut self) {
-        eprintln!(
-            "[cef-ref] object_type=cef_browser_t browser_id={} event=webview_release has_one_ref={} has_at_least_one_ref={} thread={:?}",
-            self.browser.identifier(),
-            self.browser.has_one_ref(),
-            self.browser.has_at_least_one_ref(),
-            std::thread::current().id()
-        );
+        if crate::scheme::cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-ref] object_type=cef_browser_t browser_id={} event=webview_release has_one_ref={} has_at_least_one_ref={} thread={:?}",
+                self.browser.identifier(),
+                self.browser.has_one_ref(),
+                self.browser.has_at_least_one_ref(),
+                std::thread::current().id()
+            );
+        }
     }
 }
 
@@ -578,6 +689,11 @@ fn cef_string(value: Option<&str>) -> cef::CefString {
     value.map(cef::CefString::from).unwrap_or_default()
 }
 
+fn display_optional_path(path: Option<&PathBuf>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<cef-default>".to_owned())
+}
+
 #[cfg(target_os = "macos")]
 fn load_macos_framework() -> Result<(), CefRuntimeError> {
     static LIBRARY: std::sync::OnceLock<Result<cef::library_loader::LibraryLoader, ()>> =
@@ -726,6 +842,37 @@ mod tests {
                 width: 1280,
                 height: 720,
             }
+        );
+    }
+
+    #[test]
+    fn parses_equals_and_separate_switch_values() {
+        let args = vec![
+            "FutureboardNative".to_owned(),
+            "--type=renderer".to_owned(),
+            "--utility-sub-type".to_owned(),
+            "network.mojom.NetworkService".to_owned(),
+        ];
+        assert_eq!(command_line_switch(&args, "--type"), Some("renderer"));
+        assert_eq!(
+            command_line_switch(&args, "--utility-sub-type"),
+            Some("network.mojom.NetworkService")
+        );
+    }
+
+    #[test]
+    fn process_dispatch_matches_cef_return_contract() {
+        assert_eq!(
+            ProcessDispatch::from_exit_code(-1),
+            ProcessDispatch::BrowserProcess
+        );
+        assert_eq!(
+            ProcessDispatch::from_exit_code(0),
+            ProcessDispatch::SubprocessExit(0)
+        );
+        assert_eq!(
+            ProcessDispatch::from_exit_code(9),
+            ProcessDispatch::SubprocessExit(9)
         );
     }
 }

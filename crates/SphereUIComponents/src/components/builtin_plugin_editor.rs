@@ -568,6 +568,9 @@ mod imp {
         closing_views: HashMap<ViewId, ClosingView>,
         warmup: Option<WarmupBrowser>,
         runtime: CefRuntime,
+        // The exact CefApp passed to execute_process in the browser process.
+        // Keep it alive until after the runtime shuts down.
+        _application: sphere_webview::runtime::cef::App,
     }
 
     struct PendingOpen {
@@ -597,6 +600,12 @@ mod imp {
         /// Browser-process CEF state, owned by the UI thread because
         /// `CefRuntime` is `!Send`.
         static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+        /// Browser-process app transferred from the executable after
+        /// `execute_process` returns the browser-process sentinel.
+        static PROCESS_APP: RefCell<Option<sphere_webview::runtime::cef::App>> = const { RefCell::new(None) };
+        /// CEF initialization is process-global and must not be retried after a
+        /// partial failure.
+        static RUNTIME_FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
         /// Native operations are queued separately from `HOST`. GPUI/Win32 can
         /// re-enter while CEF is working; nested callbacks may enqueue commands,
         /// but must never try to borrow or call CEF synchronously.
@@ -743,14 +752,40 @@ mod imp {
         HostAvailability::Ready
     }
 
+    /// Transfer ownership of the browser process's `CefApp` into the UI-thread
+    /// host. CEF requires this exact object for both `execute_process` and
+    /// `initialize`.
+    pub fn install_process_app(
+        app: sphere_webview::runtime::cef::App,
+    ) -> Result<(), HostAvailability> {
+        PROCESS_APP.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_some() || HOST.with(|host| host.borrow().is_some()) {
+                return Err(HostAvailability::RuntimeFailed(
+                    "CEF process application was installed more than once".to_owned(),
+                ));
+            }
+            *slot = Some(app);
+            Ok(())
+        })
+    }
+
     /// Start CEF if it is not already running. Idempotent.
     fn ensure_runtime(slot: &mut Option<Host>) -> Result<(), HostAvailability> {
         if slot.is_some() {
             return Ok(());
         }
+        if let Some(error) = RUNTIME_FAILURE.with(|failure| failure.borrow().clone()) {
+            return Err(HostAvailability::RuntimeFailed(error));
+        }
 
-        // The same scheme declaration the helper processes made in `main`.
-        let mut app = sphere_webview::scheme::plugin_scheme_app();
+        let mut app = PROCESS_APP
+            .with(|cell| cell.borrow_mut().take())
+            .ok_or_else(|| {
+                HostAvailability::RuntimeFailed(
+                    "CEF process application was not installed before UI startup".to_owned(),
+                )
+            })?;
         let config = CefRuntimeConfig {
             cache_path: cef_cache_dir(),
             remote_debugging_port: debug_port(),
@@ -759,22 +794,33 @@ mod imp {
             windowless_rendering: OFFSCREEN_HOSTING,
             ..Default::default()
         };
-        let runtime = CefRuntime::initialize(config, Some(&mut app))
-            .map_err(|e| HostAvailability::RuntimeFailed(e.to_string()))?;
+        let runtime = match CefRuntime::initialize(config, Some(&mut app)) {
+            Ok(runtime) => runtime,
+            Err(error) => return remember_runtime_failure(error.to_string()),
+        };
 
         // The factory can only be installed once initialize has succeeded.
         let resolver: sphere_webview::scheme::SchemeResolver =
             Arc::new(|origin: &str, path: &str| resolve_asset(origin, path));
-        register_plugin_scheme_factory(resolver, Some(bridge_sink()))
-            .map_err(|e| HostAvailability::RuntimeFailed(e.to_string()))?;
+        if let Err(error) = register_plugin_scheme_factory(resolver, Some(bridge_sink())) {
+            return remember_runtime_failure(error.to_string());
+        }
 
         *slot = Some(Host {
             views: HashMap::new(),
             closing_views: HashMap::new(),
             warmup: None,
             runtime,
+            _application: app,
         });
         Ok(())
+    }
+
+    fn remember_runtime_failure(error: String) -> Result<(), HostAvailability> {
+        RUNTIME_FAILURE.with(|failure| {
+            *failure.borrow_mut() = Some(error.clone());
+        });
+        Err(HostAvailability::RuntimeFailed(error))
     }
 
     /// Hidden 2×2 native window to parent the warm-up browser to on windowed
@@ -1407,18 +1453,10 @@ mod imp {
     /// Per-user cache directory. CEF requires a writable path; an unwritable or
     /// missing one degrades to in-memory, which is acceptable for an editor UI.
     fn cef_cache_dir() -> Option<std::path::PathBuf> {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .or_else(dirs_cache_fallback)?;
+        let base = dirs::cache_dir()?;
         let dir = base.join("Futureboard").join("cef");
         std::fs::create_dir_all(&dir).ok()?;
         Some(dir)
-    }
-
-    fn dirs_cache_fallback() -> Option<std::path::PathBuf> {
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .map(|home| home.join(".cache"))
     }
 
     /// Optional normal-page control. The exact URL is also whitelisted by the
@@ -1438,6 +1476,8 @@ mod imp {
     }
 }
 
+#[cfg(feature = "builtin-plugin-editor")]
+pub use imp::install_process_app;
 pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, preload, pump, reload_view,
     send_to_view, send_view_input, set_view_bounds, take_inbound, take_view_events,
