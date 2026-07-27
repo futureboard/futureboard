@@ -1,0 +1,9 @@
+<svg width="34" height="30" viewBox="0 0 34 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Source tap plus three decaying repeats: the plugin's mark, reading as a
+       delay line. Colours are baked because an <img> cannot see page CSS. -->
+  <rect x="1" y="4" width="3" height="22" rx="1.5" fill="#E6F0EE" />
+  <rect x="9" y="8" width="3" height="14" rx="1.5" fill="#2FD6A6" />
+  <rect x="17" y="11" width="3" height="8" rx="1.5" fill="#2FD6A6" opacity="0.62" />
+  <rect x="25" y="13" width="3" height="4" rx="1.5" fill="#2FD6A6" opacity="0.32" />
+  <circle cx="32" cy="15" r="1.4" fill="#2FD6A6" opacity="0.18" />
+</svg>

@@ -2387,6 +2387,9 @@ version = "0.1.0"
 dependencies = [
  "biquad",
  "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7419,6 +7422,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",
+ "echospace",
  "embed-resource",
  "equz8",
  "libc",
@@ -7471,6 +7475,7 @@ dependencies = [
  "builtin_ui_embed",
  "crc32fast",
  "dirs 5.0.1",
+ "echospace",
  "equz8",
  "gpui",
  "image",
