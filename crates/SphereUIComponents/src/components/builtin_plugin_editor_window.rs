@@ -185,6 +185,9 @@ struct MetersMsg {
     in_rms: f32,
     out_peak: f32,
     out_rms: f32,
+    /// Decibels the DSP is taking off, positive; `0.0` for a built-in with no
+    /// reduction to report.
+    gain_reduction_db: f32,
     in_clip: bool,
     out_clip: bool,
 }
@@ -1186,6 +1189,7 @@ impl BuiltinPluginEditorWindow {
                         in_rms: frame.in_rms,
                         out_peak: frame.out_peak,
                         out_rms: frame.out_rms,
+                        gain_reduction_db: frame.gain_reduction_db,
                         in_clip: frame.in_clip,
                         out_clip: frame.out_clip,
                     });

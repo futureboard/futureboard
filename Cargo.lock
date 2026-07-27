@@ -2608,6 +2608,9 @@ name = "fa2a"
 version = "0.1.0"
 dependencies = [
  "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7425,6 +7428,7 @@ dependencies = [
  "echospace",
  "embed-resource",
  "equz8",
+ "fa2a",
  "libc",
  "napi",
  "napi-build",
@@ -7477,6 +7481,7 @@ dependencies = [
  "dirs 5.0.1",
  "echospace",
  "equz8",
+ "fa2a",
  "gpui",
  "image",
  "midir",

@@ -75,6 +75,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         equz8::ui::UI_ORIGIN => equz8::ui_param_index(param_id),
         verbspace::ui::UI_ORIGIN => verbspace::ui_param_index(param_id),
         echospace::ui::UI_ORIGIN => echospace::ui_param_index(param_id),
+        fa2a::ui::UI_ORIGIN => fa2a::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -113,6 +114,7 @@ mod state_mirror {
         Equz8(Box<equz8::Params>),
         Verbspace(Box<verbspace::Params>),
         Echospace(Box<echospace::Params>),
+        Fa2a(Box<fa2a::Params>),
     }
 
     impl BuiltinParams {
@@ -122,6 +124,7 @@ mod state_mirror {
                 Self::Equz8(_) => equz8::ui::UI_ORIGIN,
                 Self::Verbspace(_) => verbspace::ui::UI_ORIGIN,
                 Self::Echospace(_) => echospace::ui::UI_ORIGIN,
+                Self::Fa2a(_) => fa2a::ui::UI_ORIGIN,
             }
         }
 
@@ -138,6 +141,7 @@ mod state_mirror {
                 echospace::ui::UI_ORIGIN => {
                     Some(Self::Echospace(Box::new(echospace::default_params())))
                 }
+                fa2a::ui::UI_ORIGIN => Some(Self::Fa2a(Box::new(fa2a::default_params()))),
                 _ => None,
             }
         }
@@ -176,6 +180,7 @@ mod state_mirror {
             equz8::ui::UI_ORIGIN => equz8::ui_param_id(wire_index).is_some(),
             verbspace::ui::UI_ORIGIN => verbspace::ui_param_id(wire_index).is_some(),
             echospace::ui::UI_ORIGIN => echospace::ui_param_id(wire_index).is_some(),
+            fa2a::ui::UI_ORIGIN => fa2a::ui_param_id(wire_index).is_some(),
             _ => false,
         };
         if !known {
@@ -198,6 +203,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::Echospace(params)) => {
                 let _ = echospace::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::Fa2a(params)) => {
+                let _ = fa2a::ipc::apply_wire_param(params, wire_index, value);
             }
             None => {}
         }
@@ -225,6 +233,9 @@ mod state_mirror {
             echospace::ui::UI_ORIGIN => echospace::ipc::EchospaceState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::Echospace(Box::new(state.params))),
+            fa2a::ui::UI_ORIGIN => fa2a::ipc::Fa2aState::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Fa2a(Box::new(state.params))),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -269,6 +280,11 @@ mod state_mirror {
                     .to_json()
                     .ok()?
             }
+            BuiltinParams::Fa2a(params) if origin == fa2a::ui::UI_ORIGIN => {
+                fa2a::ipc::Fa2aState::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
             _ => return None,
         };
         Some(json.into_bytes())
@@ -309,6 +325,12 @@ mod state_mirror {
                 echospace::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| echospace::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::Fa2a(params)) if origin == fa2a::ui::UI_ORIGIN => {
+                fa2a::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| fa2a::ui_param_index(id).map(|i| (i, value)))
                     .collect()
             }
             _ => Vec::new(),
@@ -694,6 +716,7 @@ mod imp {
             equz8::ui::UI_ORIGIN => equz8::ui::Equz8Ui::resolve_ui_asset(path)?,
             verbspace::ui::UI_ORIGIN => verbspace::ui::VerbspaceUi::resolve_ui_asset(path)?,
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::resolve_ui_asset(path)?,
+            fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -713,6 +736,7 @@ mod imp {
                 | equz8::ui::UI_ORIGIN
                 | verbspace::ui::UI_ORIGIN
                 | echospace::ui::UI_ORIGIN
+                | fa2a::ui::UI_ORIGIN
         )
     }
 
@@ -723,6 +747,7 @@ mod imp {
             equz8::ui::UI_ORIGIN => equz8::ui::Equz8Ui::is_embedded(),
             verbspace::ui::UI_ORIGIN => verbspace::ui::VerbspaceUi::is_embedded(),
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::is_embedded(),
+            fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::is_embedded(),
             _ => false,
         }
     }
@@ -1555,6 +1580,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("builtin:equz8"), Some("equz8"));
         assert_eq!(origin_for_plugin_id("builtin:verbspace"), Some("verbspace"));
         assert_eq!(origin_for_plugin_id("builtin:echospace"), Some("echospace"));
+        assert_eq!(origin_for_plugin_id("builtin:fa2a"), Some("fa2a"));
     }
 
     /// Regression guard for the bug that left the editor unopenable in the real
@@ -1566,6 +1592,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("equz8"), Some("equz8"));
         assert_eq!(origin_for_plugin_id("verbspace"), Some("verbspace"));
         assert_eq!(origin_for_plugin_id("echospace"), Some("echospace"));
+        assert_eq!(origin_for_plugin_id("fa2a"), Some("fa2a"));
         assert_eq!(
             origin_for_plugin_id("rodharerist"),
             origin_for_plugin_id("builtin:rodharerist"),

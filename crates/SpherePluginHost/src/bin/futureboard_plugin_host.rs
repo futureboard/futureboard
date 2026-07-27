@@ -246,6 +246,7 @@ enum BuiltinDsp {
     Equz8(equz8::Dsp),
     Verbspace(verbspace::Dsp),
     Echospace(echospace::Dsp),
+    Fa2a(fa2a::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -290,6 +291,7 @@ impl BuiltinHostProcessor {
             "equz8" => Some(Self::equz8(sample_rate, state_json)),
             "verbspace" => Some(Self::verbspace(sample_rate, state_json)),
             "echospace" => Some(Self::echospace(sample_rate, state_json)),
+            "fa2a" => Some(Self::fa2a(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -347,6 +349,34 @@ impl BuiltinHostProcessor {
             dsp: UnsafeCell::new(BuiltinDsp::Equz8(dsp)),
             spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
             // An EQ has no capture or cabinet stage to hand off into.
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
+    fn fa2a(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = fa2a::Dsp::new(sr);
+        // Same pre-publish window as above: the IPC thread still owns the DSP.
+        if let Some(json) = state_json {
+            match fa2a::ipc::Fa2aState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Fa2a(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            // A compressor has no capture or cabinet stage to hand off into.
             nam_loader: None,
             ir_loader: None,
             sample_rate: sr,
@@ -442,6 +472,13 @@ impl BuiltinHostProcessor {
                     interleaved[i * 2 + 1] = r;
                 }
             }
+            BuiltinDsp::Fa2a(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
         }
     }
 
@@ -474,6 +511,21 @@ impl BuiltinHostProcessor {
                     in_rms: f.in_rms,
                     out_peak: f.out_peak,
                     out_rms: f.out_rms,
+                    // The multi-FX chain has a compressor stage, but its
+                    // reduction is not surfaced separately today.
+                    gain_reduction_db: 0.0,
+                    in_clip: f.in_clip,
+                    out_clip: f.out_clip,
+                })
+            }
+            BuiltinDsp::Fa2a(dsp) => {
+                let f = dsp.meter_frame();
+                Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+                    in_peak: f.in_peak,
+                    in_rms: f.in_rms,
+                    out_peak: f.out_peak,
+                    out_rms: f.out_rms,
+                    gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
                 })
@@ -493,6 +545,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Rodhareist(dsp) => dsp.latency_samples(),
             BuiltinDsp::Equz8(_) => 0,
             BuiltinDsp::Verbspace(dsp) => dsp.latency_samples(),
+            BuiltinDsp::Fa2a(dsp) => dsp.latency_samples(),
             BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
         }
     }
@@ -518,6 +571,9 @@ impl BuiltinHostProcessor {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
             BuiltinDsp::Echospace(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::Fa2a(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -809,6 +865,75 @@ mod builtin_processor_tests {
 
         // A corrupt blob falls back to defaults instead of panicking.
         let fallback = BuiltinHostProcessor::echospace(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// Unlike the other bridged built-ins, FA-2A publishes a meter frame — the
+    /// editor's VU needle is driven by it, so the host has to actually carry
+    /// the reduction figure rather than a zero.
+    #[test]
+    fn fa2a_publishes_real_gain_reduction_through_the_host_frame() {
+        let processor = BuiltinHostProcessor::fa2a(48_000, None);
+        let reduction = fa2a::ui_param_index("peakReduction").expect("in wire table");
+        processor.apply_param(reduction, 90.0);
+
+        // A block of silence first: nothing over the threshold, nothing taken
+        // off, but a frame is still published.
+        let silence = [0.0f32; 64];
+        let mut output = [0.0f32; 128];
+        processor.process_block(&silence, &silence, &mut output, 64);
+        let quiet = processor
+            .meter_frame()
+            .expect("fa2a always publishes a frame");
+        assert!(quiet.gain_reduction_db < 1.0);
+
+        // Then a hot signal for long enough for the envelope to settle.
+        let loud = [0.7f32; 64];
+        for _ in 0..64 {
+            processor.process_block(&loud, &loud, &mut output, 64);
+        }
+        let frame = processor
+            .meter_frame()
+            .expect("fa2a always publishes a frame");
+        assert!(
+            frame.gain_reduction_db > 1.0,
+            "no reduction reported for a hot signal: {}",
+            frame.gain_reduction_db
+        );
+        assert!(frame.in_rms > 0.0 && frame.out_rms > 0.0);
+        assert_eq!(processor.latency_samples(), 0);
+    }
+
+    #[test]
+    fn fa2a_restores_state_and_takes_wire_params() {
+        let mut params = fa2a::default_params();
+        params.power = false;
+        let json = fa2a::ipc::Fa2aState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::fa2a(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        }
+        // Bypassed still meters, but reports nothing taken off.
+        let frame = restored.meter_frame().expect("frame is published");
+        assert_eq!(frame.gain_reduction_db, 0.0);
+
+        // Out-of-range indices are silent no-ops, not panics.
+        restored.apply_param(u32::MAX, 1.0);
+        restored.apply_param(fa2a::UI_PARAM_IDS.len() as u32, 1.0);
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        // A corrupt blob falls back to defaults instead of panicking.
+        let fallback = BuiltinHostProcessor::fa2a(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
