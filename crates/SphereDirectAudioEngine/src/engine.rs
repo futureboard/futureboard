@@ -5079,17 +5079,31 @@ mod bridge_insert_tests {
     }
 
     #[test]
-    fn external_bridge_effect_processes_when_sink_is_bound() {
-        let mut track = bridge_effect_track(1.0);
-        let sink = WetEffectSink {
-            done_seq: AtomicU64::new(1),
-            requests: AtomicU64::new(0),
-            latency_samples: 0,
-        };
-        track.inserts[0].bridge_sink = Some(std::sync::Arc::new(sink));
-        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
-        assert!((track.block_l[0] - 0.25).abs() < 1e-6);
-        assert!((track.block_r[0] - 0.25).abs() < 1e-6);
+    fn bridged_vst3_and_builtin_effects_process_on_master_when_sink_is_bound() {
+        for bridge_is_builtin in [false, true] {
+            let mut track = bridge_effect_track(1.0);
+            track.track_type = "master".to_string();
+            track.inserts[0].bridge_is_builtin = bridge_is_builtin;
+            let sink = WetEffectSink {
+                done_seq: AtomicU64::new(1),
+                requests: AtomicU64::new(0),
+                latency_samples: 0,
+            };
+            track.inserts[0].bridge_sink = Some(std::sync::Arc::new(sink));
+            apply_track_chain_block(&mut track, 4, RuntimeTransportContext::default());
+            assert!(
+                (track.block_l[0] - 0.25).abs() < 1e-6,
+                "master bridge format={} left={}",
+                if bridge_is_builtin { "BuiltIn" } else { "VST3" },
+                track.block_l[0]
+            );
+            assert!(
+                (track.block_r[0] - 0.25).abs() < 1e-6,
+                "master bridge format={} right={}",
+                if bridge_is_builtin { "BuiltIn" } else { "VST3" },
+                track.block_r[0]
+            );
+        }
     }
 
     #[derive(Debug, Default)]
@@ -5163,7 +5177,7 @@ mod bridge_insert_tests {
             ppq_position: 2.0,
             ..RuntimeTransportContext::default()
         };
-        apply_track_chain_block(&mut track, 4, true, transport);
+        apply_track_chain_block(&mut track, 4, transport);
 
         assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
         assert_eq!(sink.last_param_id.load(Ordering::Acquire), 42);
@@ -5190,8 +5204,8 @@ mod bridge_insert_tests {
             ..RuntimeTransportContext::default()
         };
         // Same beat twice → second block must not re-push the identical value.
-        apply_track_chain_block(&mut track, 4, true, transport);
-        apply_track_chain_block(&mut track, 4, true, transport);
+        apply_track_chain_block(&mut track, 4, transport);
+        apply_track_chain_block(&mut track, 4, transport);
         assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
 
         // Stopped transport must not drive parameter automation at all.
@@ -5200,7 +5214,7 @@ mod bridge_insert_tests {
             ppq_position: 3.5,
             ..RuntimeTransportContext::default()
         };
-        apply_track_chain_block(&mut track, 4, true, stopped);
+        apply_track_chain_block(&mut track, 4, stopped);
         assert_eq!(sink.pushes.load(Ordering::Acquire), 1);
     }
 
@@ -5243,7 +5257,7 @@ mod bridge_insert_tests {
     #[test]
     fn external_bridge_effect_stays_dry_without_sink() {
         let mut track = bridge_effect_track(1.0);
-        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
+        apply_track_chain_block(&mut track, 4, RuntimeTransportContext::default());
         assert!((track.block_l[0] - 1.0).abs() < 1e-6);
         assert!((track.block_r[0] - 1.0).abs() < 1e-6);
     }
@@ -5370,7 +5384,7 @@ mod bridge_insert_tests {
         });
         track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
         track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
+        apply_track_chain_block(&mut track, 4, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 6.0).abs() < 1e-4,
             "serial chain expected 1*2*3=6 got {}",
@@ -5493,7 +5507,7 @@ mod bridge_insert_tests {
         track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
         track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
         track.inserts[2].bridge_sink = Some(sink_c as Arc<dyn PluginBridgeSink>);
-        apply_track_chain_block(&mut track, 4, true, RuntimeTransportContext::default());
+        apply_track_chain_block(&mut track, 4, RuntimeTransportContext::default());
         assert!(
             (track.block_l[0] - 10.0).abs() < 1e-4,
             "A x2, B missed, C x5 expected 1*2*5=10 got {}",

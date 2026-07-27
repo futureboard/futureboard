@@ -67,6 +67,97 @@ pub fn locate_cef_dist(workspace_root: &Path, triple: &str) -> Option<PathBuf> {
         .find(|dist| validate_pinned_distribution(dist).is_ok())
 }
 
+/// Locate the pinned distribution and repair the duplicated layout produced
+/// when `cef-rs` is given a distribution directory as though it were a version
+/// root:
+///
+/// `<version>/<platform>/<version>/<platform>`.
+///
+/// The promotion is atomic at the directory level. The valid inner
+/// distribution is moved aside first, the invalid wrapper is renamed to a
+/// backup, and the inner distribution is promoted into the canonical path.
+/// This runs only in xtask's package preflight, never from a Cargo build script.
+pub fn prepare_cef_dist(workspace_root: &Path, triple: &str) -> Result<Option<PathBuf>> {
+    let Some(platform_dir) = platform_dir(triple) else {
+        return Ok(None);
+    };
+    let cef_root = workspace_root.join("build").join("cef");
+    let canonical = cef_root.join(CEF_SHORT_VERSION).join(platform_dir);
+    if validate_pinned_distribution(&canonical).is_ok() {
+        return Ok(Some(canonical));
+    }
+
+    let duplicated = canonical.join(CEF_SHORT_VERSION).join(platform_dir);
+    if validate_pinned_distribution(&duplicated).is_ok() {
+        promote_duplicated_distribution(&canonical, &duplicated)?;
+        return Ok(Some(canonical));
+    }
+
+    Ok(locate_cef_dist(workspace_root, triple))
+}
+
+fn promote_duplicated_distribution(canonical: &Path, duplicated: &Path) -> Result<()> {
+    let parent = canonical
+        .parent()
+        .context("canonical CEF distribution must have a version directory")?;
+    let directory_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("canonical CEF distribution must have a UTF-8 directory name")?;
+    let process_id = std::process::id();
+    let promoted = parent.join(format!(".{directory_name}.promote-{process_id}"));
+    let backup = parent.join(format!(".{directory_name}.layout-backup-{process_id}"));
+    if promoted.exists() || backup.exists() {
+        bail!(
+            "CEF layout repair scratch path already exists: {} or {}",
+            promoted.display(),
+            backup.display()
+        );
+    }
+
+    fs::rename(duplicated, &promoted).with_context(|| {
+        format!(
+            "cannot move duplicated CEF distribution {} to {}",
+            duplicated.display(),
+            promoted.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(canonical, &backup) {
+        let _ = fs::rename(&promoted, duplicated);
+        return Err(error).with_context(|| {
+            format!(
+                "cannot move invalid CEF wrapper {} to {}",
+                canonical.display(),
+                backup.display()
+            )
+        });
+    }
+    if let Err(error) = fs::rename(&promoted, canonical) {
+        let _ = fs::rename(&backup, canonical);
+        return Err(error).with_context(|| {
+            format!(
+                "cannot promote CEF distribution {} to {}",
+                promoted.display(),
+                canonical.display()
+            )
+        });
+    }
+
+    validate_pinned_distribution(canonical)
+        .context("promoted CEF distribution failed validation")?;
+    fs::remove_dir_all(&backup).with_context(|| {
+        format!(
+            "cannot remove duplicated CEF layout backup {}",
+            backup.display()
+        )
+    })?;
+    eprintln!(
+        "[xtask] repaired duplicated CEF layout: {}",
+        canonical.display()
+    );
+    Ok(())
+}
+
 fn platform_dir(triple: &str) -> Option<&'static str> {
     CefTarget::from_target_triple(triple)
         .ok()
@@ -401,6 +492,27 @@ mod tests {
             locate_cef_dist(temp.path(), "x86_64-pc-windows-msvc"),
             Some(versioned)
         );
+    }
+
+    #[test]
+    fn prepare_repairs_duplicated_version_and_platform_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = fake_windows_dist(&temp.path().join("source"));
+        let canonical = temp
+            .path()
+            .join("build/cef")
+            .join(CEF_SHORT_VERSION)
+            .join("cef_windows_x86_64");
+        let duplicated = canonical.join(CEF_SHORT_VERSION).join("cef_windows_x86_64");
+        copy_test_distribution(&source, &duplicated);
+
+        assert_eq!(
+            prepare_cef_dist(temp.path(), "x86_64-pc-windows-msvc").unwrap(),
+            Some(canonical.clone())
+        );
+        assert!(canonical.join("archive.json").is_file());
+        assert!(canonical.join("include/cef_version.h").is_file());
+        assert!(!canonical.join(CEF_SHORT_VERSION).exists());
     }
 
     #[test]

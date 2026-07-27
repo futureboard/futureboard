@@ -78,7 +78,8 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         None => host_target().context("could not determine host target triple")?,
     };
     let workspace = workspace_root();
-    let cef_dist = cef::locate_cef_dist(&workspace, &target_triple);
+    let cef_dist = cef::prepare_cef_dist(&workspace, &target_triple)
+        .context("failed to prepare the CEF distribution")?;
     if options.stage_cef && cef_dist.is_none() {
         let checked = cef::cef_dist_candidates(&workspace, &target_triple)
             .into_iter()

@@ -457,7 +457,7 @@ fn process_track_block(
     beat: f64,
     transport: RuntimeTransportContext,
 ) {
-    apply_track_chain_block(&mut runtime.tracks[track_index], frames, true, transport);
+    apply_track_chain_block(&mut runtime.tracks[track_index], frames, transport);
     // Multi-out: demux this track's bridged-instrument output channels into the
     // child "Out Ch" tracks' receive buffers (no-op unless the insert defines
     // child routes). Runs before pass 2, where the child routing tracks consume
@@ -1176,7 +1176,7 @@ fn render_project_block_interleaved_core(
                 master.block_l[i] = frame[0];
                 master.block_r[i] = frame[1];
             }
-            apply_track_chain_block(master, frames, false, transport);
+            apply_track_chain_block(master, frames, transport);
             // Write back, accumulate master meter, apply preview mode.
             for i in 0..frames {
                 let (l, r) =
@@ -1345,7 +1345,7 @@ pub fn apply_track_chain_at_beat(
 /// Bridged inserts use the wait-free `push_param` ring; in-process VST3 inserts
 /// queue the value via `set_param`.
 #[inline]
-fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64, bridge_enabled: bool) {
+fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64) {
     if track.plugin_param_automation.is_empty() {
         return;
     }
@@ -1376,10 +1376,8 @@ fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64, bridge_ena
         }
         match insert.kind_tag {
             crate::runtime::RuntimeInsertKind::ExternalBridge => {
-                if bridge_enabled {
-                    if let Some(sink) = insert.bridge_sink.as_ref() {
-                        sink.push_param(binding.param_id, value, 0);
-                    }
+                if let Some(sink) = insert.bridge_sink.as_ref() {
+                    sink.push_param(binding.param_id, value, 0);
                 }
             }
             _ => {
@@ -1469,14 +1467,12 @@ fn render_soundfont_segment(track: &mut RuntimeTrack, start: usize, end: usize) 
     }
 }
 
-/// `bridge_enabled` — false on the master-bus chain, which has never routed
-/// external-bridge inserts (parity with the old empty sink-map call); true for
-/// regular track strips, where each bridge insert uses its build/command-time
-/// cached `bridge_sink` (no per-block `HashMap<String, _>` lookup).
+/// Apply every insert on a channel strip, including external-bridge inserts on
+/// the master bus. Each bridge insert uses its build/command-time cached
+/// `bridge_sink` (no per-block `HashMap<String, _>` lookup).
 pub fn apply_track_chain_block(
     track: &mut RuntimeTrack,
     frames: usize,
-    bridge_enabled: bool,
     transport: RuntimeTransportContext,
 ) {
     if !track.inserts.is_empty() && !track.callback_insert_log_done {
@@ -1497,7 +1493,7 @@ pub fn apply_track_chain_block(
     // while playing so manual edits / the plugin editor own the value when the
     // transport is stopped.
     if transport.playing {
-        apply_plugin_param_automation(track, transport.ppq_position, bridge_enabled);
+        apply_plugin_param_automation(track, transport.ppq_position);
     }
 
     render_soundfont_instrument_block(track, frames);
@@ -1511,11 +1507,7 @@ pub fn apply_track_chain_block(
         if insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge {
             // Arc clone (refcount bump only) so the sink can be borrowed
             // alongside the &mut insert.
-            let bridge_sink = if bridge_enabled {
-                insert.bridge_sink.clone()
-            } else {
-                None
-            };
+            let bridge_sink = insert.bridge_sink.clone();
             apply_external_bridge_insert_block(
                 &mut track.block_l[..frames],
                 &mut track.block_r[..frames],
