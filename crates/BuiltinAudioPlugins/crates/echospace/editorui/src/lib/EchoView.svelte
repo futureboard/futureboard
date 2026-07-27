@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { EchoParams } from '../bridge'
   import { echoModel, envelopeAt, filterMagnitude, tapTimes } from '../model'
+  import { MODE_HINTS } from '../params'
 
   type Props = { params: EchoParams }
   const { params }: Props = $props()
@@ -10,31 +11,16 @@
   let cssWidth = $state(0)
   let cssHeight = $state(0)
 
-  /** Longest window the axis will show, so a 4 s delay does not squash the
-   *  first repeat into the left edge. */
   const MAX_WINDOW_SEC = 6
-
-  /** Reference tone the per-pass filter dulling is measured at. Sits inside the
-   *  high cut's usual range so the colour actually tracks it, but low enough
-   *  that a dark setting does not put every repeat past the floor at once. */
   const TONE_REF_HZ = 3000
-
-  /** Ceiling on how far a repeat's colour is pulled toward grey. Fully grey
-   *  would lose which channel the repeat is on, which is the display's whole
-   *  point under ping-pong. */
-  const MAX_DULL = 0.6
-
-  /** Bottom of the amplitude axis, in decibels. Matches the -60 the repeat
-   *  model stops at. */
+  const MAX_DULL = 0.5
   const FLOOR_DB = -60
+  const WINDOW_FLOOR_DB = -40
+  /** Number echo marks 1..N so the first hits read as a countable sequence. */
+  const NUMBERED_PASSES = 4
 
   const model = $derived(echoModel(params))
   const times = $derived(tapTimes(params))
-
-  /** Repeats below this are drawn but do not get to widen the time axis — at a
-   *  modest feedback the last few are 50 dB down and would leave most of the
-   *  plot empty. */
-  const WINDOW_FLOOR_DB = -40
 
   const windowSec = $derived.by(() => {
     const floor = 10 ** (WINDOW_FLOOR_DB / 20)
@@ -49,8 +35,6 @@
     return value || fallback
   }
 
-  /** `#rrggbb` + alpha -> `rgba(...)`, so one palette drives both the DOM and
-   *  the canvas instead of the canvas carrying a second set of literals. */
   function alpha(hex: string, a: number): string {
     const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
     if (!match?.[1]) return hex
@@ -58,7 +42,6 @@
     return `rgba(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255}, ${a})`
   }
 
-  /** Blend two `#rrggbb` colours, `t` = 0 keeps `from`. */
   function blend(from: string, to: string, t: number, a: number): string {
     const parse = (hex: string) => {
       const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
@@ -94,36 +77,30 @@
     const grid = cssVar('--grid', '#1c2727')
     const faint = cssVar('--text-faint', '#62726f')
     const dull = cssVar('--text-faint', '#62726f')
+    const text = cssVar('--text', '#e6f0ee')
 
-    const padL = 30
-    const padR = 14
-    const padT = 16
-    const padB = 20
+    const padL = 44
+    const padR = 16
+    const padT = 30
+    const padB = 30
     const w = Math.max(cssWidth - padL - padR, 1)
     const h = Math.max(cssHeight - padT - padB, 1)
-    const mid = padT + h / 2
-    // Each lane gets half the height, less a small gap at the centre line.
-    const lane = h / 2 - 5
+    const base = padT + h
 
     const x = (t: number) => padL + (t / windowSec) * w
-
-    // Bar height is decibels, not raw amplitude. On a linear scale everything
-    // past the second repeat collapses into a stub at the centre line, even
-    // though a -30 dB repeat is plainly audible.
-    const height = (amplitude: number) => {
+    const barH = (amplitude: number) => {
       if (amplitude <= 0) return 0
       const db = 20 * Math.log10(amplitude)
       if (db <= FLOOR_DB) return 0
-      return lane * (1 - db / FLOOR_DB)
+      return h * (1 - db / FLOOR_DB)
     }
 
-    ctx.font =
-      '9px ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace'
-    ctx.lineWidth = 1
-
-    // ---- time grid -------------------------------------------------------
+    // ---- light time grid (no dB numbers — those read as engineering) -----
     const tickSec =
       windowSec <= 0.5 ? 0.1 : windowSec <= 1.5 ? 0.25 : windowSec <= 4 ? 0.5 : 1
+    ctx.lineWidth = 1
+    ctx.font =
+      '10px Inter, "Segoe UI", system-ui, sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'top'
     for (let t = tickSec; t < windowSec; t += tickSec) {
@@ -131,137 +108,147 @@
       ctx.strokeStyle = grid
       ctx.beginPath()
       ctx.moveTo(gx, padT)
-      ctx.lineTo(gx, padT + h)
+      ctx.lineTo(gx, base)
       ctx.stroke()
       ctx.fillStyle = faint
       ctx.fillText(
-        tickSec < 1 ? `${Math.round(t * 1000)}ms` : `${t.toFixed(0)}s`,
+        tickSec < 1 ? `${Math.round(t * 1000)} ms` : `${t.toFixed(0)} s`,
         gx,
-        padT + h + 5,
+        base + 8,
       )
     }
 
-    // ---- amplitude grid --------------------------------------------------
-    ctx.textAlign = 'right'
-    ctx.textBaseline = 'middle'
-    for (const db of [-12, -24, -36, -48]) {
-      const off = height(10 ** (db / 20))
-      for (const sign of [-1, 1]) {
-        const gy = Math.round(mid + sign * off) + 0.5
-        ctx.strokeStyle = grid
-        ctx.beginPath()
-        ctx.moveTo(padL, gy)
-        ctx.lineTo(padL + w, gy)
-        ctx.stroke()
-      }
-      // Labelled on the upper lane only — the lower one mirrors it exactly.
-      ctx.fillStyle = faint
-      ctx.fillText(`${db}`, padL - 6, mid - off)
+    // Soft loudness guides without numbers.
+    for (const db of [-18, -36]) {
+      const gy = Math.round(base - barH(10 ** (db / 20))) + 0.5
+      ctx.strokeStyle = alpha(faint, 0.12)
+      ctx.beginPath()
+      ctx.moveTo(padL, gy)
+      ctx.lineTo(padL + w, gy)
+      ctx.stroke()
     }
 
-    // ---- lane labels + centre line --------------------------------------
-    ctx.strokeStyle = alpha(faint, 0.22)
-    ctx.beginPath()
-    ctx.moveTo(padL, Math.round(mid) + 0.5)
-    ctx.lineTo(padL + w, Math.round(mid) + 0.5)
-    ctx.stroke()
-
-    ctx.textAlign = 'left'
+    ctx.save()
+    ctx.translate(14, padT + h / 2)
+    ctx.rotate(-Math.PI / 2)
+    ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillStyle = alpha(faint, 0.9)
-    ctx.fillText('L', padL + 12, padT + 5)
-    ctx.fillText('R', padL + 12, padT + h - 5)
+    ctx.fillStyle = faint
+    ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+    ctx.fillText('quiet  →  loud', 0, 0)
+    ctx.restore()
 
-    // ---- dry signal ------------------------------------------------------
-    // Drawn at unity on both lanes so the repeats have a reference to read
-    // against; it is the input, not a repeat.
-    const dryX = Math.round(x(0)) + 0.5
-    ctx.strokeStyle = alpha(faint, 0.85)
-    ctx.lineWidth = 2
+    ctx.strokeStyle = alpha(faint, 0.4)
     ctx.beginPath()
-    ctx.moveTo(dryX, mid - lane)
-    ctx.lineTo(dryX, mid + lane)
+    ctx.moveTo(padL, Math.round(base) + 0.5)
+    ctx.lineTo(padL + w, Math.round(base) + 0.5)
     ctx.stroke()
 
-    // ---- feedback envelopes ---------------------------------------------
-    const floor = 10 ** (-60 / 20)
-    const envelope = (step: number, sign: number) => {
-      const path = new Path2D()
+    // ---- soft decay fill (shows “getting quieter”) -----------------------
+    const floor = 10 ** (FLOOR_DB / 20)
+    const fillEnvelope = (step: number, color: string) => {
+      const region = new Path2D()
       const steps = Math.max(Math.round(w), 2)
       let started = false
+      let lastX = padL
       for (let i = 0; i <= steps; i++) {
         const t = (i / steps) * windowSec
         const a = envelopeAt(t, step, model.gain)
         if (a < floor) break
-        const py = mid + sign * height(Math.min(a, 1))
-        if (started) path.lineTo(x(t), py)
+        const px = x(t)
+        const py = base - barH(Math.min(a, 1))
+        lastX = px
+        if (started) region.lineTo(px, py)
         else {
-          path.moveTo(x(t), py)
+          region.moveTo(px, base)
+          region.lineTo(px, py)
           started = true
         }
       }
-      return path
+      if (!started) return
+      region.lineTo(lastX, base)
+      region.closePath()
+      ctx.fillStyle = alpha(color, 0.07)
+      ctx.fill(region)
     }
 
-    const tailColor = params.freeze ? warn : accent
-    ctx.setLineDash([3, 3])
-    ctx.lineWidth = 1
-    ctx.strokeStyle = alpha(tailColor, 0.4)
-    ctx.stroke(envelope(times.left, -1))
-    ctx.stroke(envelope(times.right, 1))
-    ctx.setLineDash([])
+    if (params.freeze) {
+      fillEnvelope(times.left, warn)
+    } else {
+      fillEnvelope(times.left, accent)
+      if (Math.abs(times.right - times.left) > 0.0005) {
+        fillEnvelope(times.right, alt)
+      }
+    }
 
-    // ---- repeats ---------------------------------------------------------
-    // Each pass runs through the feedback filters once more, so successive
-    // repeats are drawn duller by exactly the magnitude those filters have at
-    // the reference tone.
+    // ---- original sound --------------------------------------------------
+    const dryX = Math.round(x(0)) + 0.5
+    ctx.fillStyle = alpha(text, 0.16)
+    ctx.fillRect(dryX - 4, padT + 8, 8, h - 8)
+    ctx.fillStyle = alpha(text, 0.85)
+    ctx.beginPath()
+    ctx.roundRect(dryX - 5, padT + 4, 10, 10, 2)
+    ctx.fill()
+    ctx.fillStyle = faint
+    ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText('Sound', dryX, padT - 4)
+
+    // ---- echoes ----------------------------------------------------------
     const perPass = filterMagnitude(params, TONE_REF_HZ)
+    const occupied = new Map<number, number>()
     for (const tap of model.taps) {
       if (tap.time > windowSec) continue
-      const sign = tap.lane === 'left' ? -1 : 1
-      const base = tap.lane === 'left' ? accentBright : altBright
-      const color = params.freeze ? warn : base
+      const key = Math.round(tap.time * 1000)
+      const peers = occupied.get(key) ?? 0
+      occupied.set(key, peers + 1)
+
+      const baseColor =
+        tap.lane === 'left'
+          ? params.freeze
+            ? warn
+            : accentBright
+          : params.freeze
+            ? warn
+            : altBright
       const tone = perPass ** tap.pass
       const dulled = Math.min(1 - tone, MAX_DULL)
-      const gx = Math.round(x(tap.time)) + 0.5
-      const bar = height(Math.min(tap.amplitude, 1))
+      const nudge =
+        peers > 0
+          ? tap.lane === 'left'
+            ? -3
+            : 3
+          : tap.lane === 'left'
+            ? -1.5
+            : 1.5
+      const gx = Math.round(x(tap.time) + nudge) + 0.5
+      const top = base - barH(Math.min(tap.amplitude, 1))
 
-      // Opacity floors well above zero: a -40 dB repeat is quiet, not absent,
-      // and an almost-invisible bar reads as the delay having stopped.
-      ctx.strokeStyle = blend(color, dull, dulled, 0.5 + tap.amplitude * 0.45)
-      ctx.lineWidth = 2.5
+      ctx.strokeStyle = blend(baseColor, dull, dulled, 0.55 + tap.amplitude * 0.4)
+      ctx.lineWidth = 6
+      ctx.lineCap = 'round'
       ctx.beginPath()
-      ctx.moveTo(gx, mid)
-      ctx.lineTo(gx, mid + sign * bar)
+      ctx.moveTo(gx, base - 1)
+      ctx.lineTo(gx, top + 3)
       ctx.stroke()
 
-      // Cap the bar so a short repeat still reads as a discrete event.
-      ctx.fillStyle = blend(color, dull, dulled, 0.7 + tap.amplitude * 0.3)
-      ctx.fillRect(gx - 2, mid + sign * bar - (sign < 0 ? 0 : 2), 4, 2)
-    }
-
-    // ---- tap-time markers ------------------------------------------------
-    // Drawn full height rather than in "their" lane: a tap time marks a moment,
-    // and under ping-pong the line's own first repeat comes back on the
-    // opposite side — a half-height marker would point at the wrong one.
-    for (const [step, color] of [
-      [times.left, accent],
-      [times.right, alt],
-    ] as const) {
-      if (step > windowSec) continue
-      const gx = Math.round(x(step)) + 0.5
-      ctx.strokeStyle = alpha(color, 0.4)
-      ctx.setLineDash([1, 3])
+      ctx.fillStyle = blend(baseColor, dull, dulled, 0.9)
       ctx.beginPath()
-      ctx.moveTo(gx, padT)
-      ctx.lineTo(gx, padT + h)
-      ctx.stroke()
-      ctx.setLineDash([])
+      ctx.arc(gx, top + 1, 3, 0, Math.PI * 2)
+      ctx.fill()
+
+      if (tap.pass <= NUMBERED_PASSES && tap.amplitude > 0.08) {
+        ctx.fillStyle = alpha(text, 0.75)
+        ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'bottom'
+        ctx.fillText(String(tap.pass), gx, top - 4)
+      }
     }
   }
 
   $effect(() => {
-    // Touch every input so the redraw re-runs when any of them changes.
     void params
     void windowSec
     void cssWidth
@@ -284,6 +271,9 @@
   function ms(value: number): string {
     return value >= 1 ? `${value.toFixed(2)}s` : `${Math.round(value * 1000)}ms`
   }
+
+  const mono = $derived(params.mode === 'mono')
+  const story = $derived(MODE_HINTS[params.mode])
 </script>
 
 <div class="view" bind:this={host} class:frozen={params.freeze}>
@@ -291,21 +281,31 @@
   ></canvas>
   <div class="overlay">
     <div class="caption">
-      <span class="title">Echo model</span>
-      <span class="note">computed from parameters · repeats over time</span>
+      <span class="title">Each bar is one echo</span>
+      <span class="note">{story}</span>
     </div>
     <div class="legend">
       <div class="item">
-        <span class="key">L</span>
-        <span class="val">{ms(times.left)}</span>
+        <span class="swatch left"></span>
+        <div class="copy">
+          <span class="key">{mono ? 'Delay' : 'Left'}</span>
+          <span class="val">{ms(times.left)}</span>
+        </div>
       </div>
+      {#if !mono}
+        <div class="item">
+          <span class="swatch right"></span>
+          <div class="copy">
+            <span class="key">Right</span>
+            <span class="val">{ms(times.right)}</span>
+          </div>
+        </div>
+      {/if}
       <div class="item">
-        <span class="key">R</span>
-        <span class="val">{ms(times.right)}</span>
-      </div>
-      <div class="item">
-        <span class="key">Repeats</span>
-        <span class="val">{params.freeze ? '∞' : model.passes}</span>
+        <div class="copy">
+          <span class="key">Heard</span>
+          <span class="val">{params.freeze ? '∞' : model.passes}</span>
+        </div>
       </div>
     </div>
   </div>
@@ -336,57 +336,80 @@
 
   .caption {
     position: absolute;
-    left: 2rem;
-    bottom: 1.4rem;
+    left: 2.6rem;
+    bottom: 1.7rem;
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    padding: 0.2rem 0.4rem;
+    gap: 0.15rem;
+    max-width: min(22rem, 55%);
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--overlay-scrim);
   }
 
   .title {
-    color: var(--text-muted);
-    font-size: 0.6rem;
+    color: var(--text);
+    font-size: 0.72rem;
     font-weight: 650;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
   }
 
   .note {
-    color: var(--text-faint);
-    font-size: 0.6rem;
+    color: var(--text-muted);
+    font-size: 0.62rem;
+    line-height: 1.25;
   }
 
   .legend {
     position: absolute;
-    top: 0.5rem;
-    right: 0.6rem;
+    top: 0.55rem;
+    right: 0.65rem;
     display: flex;
-    gap: 0.75rem;
-    padding: 0.2rem 0.45rem;
+    gap: 0.85rem;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--overlay-scrim);
   }
 
   .item {
     display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .swatch {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+  }
+
+  .swatch.left {
+    background: var(--accent-bright);
+  }
+
+  .swatch.right {
+    background: var(--accent-alt-bright);
+  }
+
+  .copy {
+    display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 1px;
   }
 
   .key {
     color: var(--text-faint);
     font-size: 0.55rem;
-    letter-spacing: 0.1em;
+    font-weight: 650;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
   .val {
     color: var(--text);
-    font-size: 0.72rem;
+    font-size: 0.78rem;
     font-weight: 600;
   }
 </style>

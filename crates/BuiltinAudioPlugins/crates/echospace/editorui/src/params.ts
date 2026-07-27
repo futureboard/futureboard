@@ -76,13 +76,13 @@ const spec = (
 export const PARAMS: Record<ParamId, ParamSpec> = {
   // Musical delay times live in the low hundreds of ms; an exponential taper
   // keeps eighth-note territory off the very bottom of the travel.
-  timeMsL: spec('timeMsL', 'Time L', 1, 4000, 375, 'ms', 'exp', 0, 1),
-  timeMsR: spec('timeMsR', 'Time R', 1, 4000, 563, 'ms', 'exp', 0, 1),
-  feedback: spec('feedback', 'Feedback', 0, 98, 34, '%', 'lin', 0, 1),
-  crossFeedback: spec('crossFeedback', 'Cross', 0, 100, 65, '%', 'lin', 0, 1),
+  timeMsL: spec('timeMsL', 'Left', 1, 4000, 375, 'ms', 'exp', 0, 1),
+  timeMsR: spec('timeMsR', 'Right', 1, 4000, 563, 'ms', 'exp', 0, 1),
+  feedback: spec('feedback', 'Repeats', 0, 98, 34, '%', 'lin', 0, 1),
+  crossFeedback: spec('crossFeedback', 'Bounce', 0, 100, 65, '%', 'lin', 0, 1),
   lowCutHz: spec('lowCutHz', 'Low Cut', 20, 2000, 180, 'Hz', 'exp', 0, 1),
   highCutHz: spec('highCutHz', 'High Cut', 1000, 20000, 9000, 'Hz', 'exp', 0, 10),
-  saturation: spec('saturation', 'Saturation', 0, 100, 8, '%', 'lin', 0, 1),
+  saturation: spec('saturation', 'Drive', 0, 100, 8, '%', 'lin', 0, 1),
   mix: spec('mix', 'Mix', 0, 100, 20, '%', 'lin', 0, 1),
   outputDb: spec('outputDb', 'Output', -24, 12, 0, 'dB', 'lin', 1, 0.5, 0),
 }
@@ -94,6 +94,13 @@ export const MODE_LABELS: Record<Mode, string> = {
   stereo: 'Stereo',
   pingpong: 'Ping-Pong',
   mono: 'Mono',
+}
+
+/** One plain sentence under the mode chips — what the picture will do. */
+export const MODE_HINTS: Record<Mode, string> = {
+  stereo: 'Left and right keep their own echo spacing.',
+  pingpong: 'Echoes bounce left ↔ right on each repeat.',
+  mono: 'One shared delay — both sides use the same time.',
 }
 
 /** Wire value for `mode`; the index in [`MODES`] is the contract. */
