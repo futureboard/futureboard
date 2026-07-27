@@ -247,6 +247,7 @@ enum BuiltinDsp {
     Verbspace(verbspace::Dsp),
     Echospace(echospace::Dsp),
     Fa2a(fa2a::Dsp),
+    Fa76(fa76::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -292,6 +293,7 @@ impl BuiltinHostProcessor {
             "verbspace" => Some(Self::verbspace(sample_rate, state_json)),
             "echospace" => Some(Self::echospace(sample_rate, state_json)),
             "fa2a" => Some(Self::fa2a(sample_rate, state_json)),
+            "fa76" => Some(Self::fa76(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -375,6 +377,34 @@ impl BuiltinHostProcessor {
         }
         Self {
             dsp: UnsafeCell::new(BuiltinDsp::Fa2a(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            // A compressor has no capture or cabinet stage to hand off into.
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
+    fn fa76(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = fa76::Dsp::new(sr);
+        // Same pre-publish window as above: the IPC thread still owns the DSP.
+        if let Some(json) = state_json {
+            match fa76::ipc::Fa76State::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Fa76(dsp)),
             spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
             // A compressor has no capture or cabinet stage to hand off into.
             nam_loader: None,
@@ -479,6 +509,13 @@ impl BuiltinHostProcessor {
                     interleaved[i * 2 + 1] = r;
                 }
             }
+            BuiltinDsp::Fa76(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
         }
     }
 
@@ -530,6 +567,18 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
+            BuiltinDsp::Fa76(dsp) => {
+                let f = dsp.meter_frame();
+                Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+                    in_peak: f.in_peak,
+                    in_rms: f.in_rms,
+                    out_peak: f.out_peak,
+                    out_rms: f.out_rms,
+                    gain_reduction_db: f.gain_reduction_db,
+                    in_clip: f.in_clip,
+                    out_clip: f.out_clip,
+                })
+            }
             BuiltinDsp::Equz8(_) | BuiltinDsp::Verbspace(_) | BuiltinDsp::Echospace(_) => None,
         }
     }
@@ -546,6 +595,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Equz8(_) => 0,
             BuiltinDsp::Verbspace(dsp) => dsp.latency_samples(),
             BuiltinDsp::Fa2a(dsp) => dsp.latency_samples(),
+            BuiltinDsp::Fa76(dsp) => dsp.latency_samples(),
             BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
         }
     }
@@ -574,6 +624,9 @@ impl BuiltinHostProcessor {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
             BuiltinDsp::Fa2a(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::Fa76(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -934,6 +987,70 @@ mod builtin_processor_tests {
 
         // A corrupt blob falls back to defaults instead of panicking.
         let fallback = BuiltinHostProcessor::fa2a(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// FA-76 publishes a meter frame like FA-2A — the FET editor's blue VU is
+    /// driven by real gain reduction from the host.
+    #[test]
+    fn fa76_publishes_real_gain_reduction_through_the_host_frame() {
+        let processor = BuiltinHostProcessor::fa76(48_000, None);
+        let input = fa76::ui_param_index("inputDb").expect("in wire table");
+        let ratio = fa76::ui_param_index("ratio").expect("in wire table");
+        processor.apply_param(input, 30.0);
+        processor.apply_param(ratio, fa76::RatioButton::R20.to_wire());
+
+        let silence = [0.0f32; 64];
+        let mut output = [0.0f32; 128];
+        processor.process_block(&silence, &silence, &mut output, 64);
+        let quiet = processor
+            .meter_frame()
+            .expect("fa76 always publishes a frame");
+        assert!(quiet.gain_reduction_db < 1.0);
+
+        let loud = [0.7f32; 64];
+        for _ in 0..64 {
+            processor.process_block(&loud, &loud, &mut output, 64);
+        }
+        let frame = processor
+            .meter_frame()
+            .expect("fa76 always publishes a frame");
+        assert!(
+            frame.gain_reduction_db > 1.0,
+            "no reduction reported for a hot signal: {}",
+            frame.gain_reduction_db
+        );
+        assert!(frame.in_rms > 0.0 && frame.out_rms > 0.0);
+        assert_eq!(processor.latency_samples(), 0);
+    }
+
+    #[test]
+    fn fa76_restores_state_and_takes_wire_params() {
+        let mut params = fa76::default_params();
+        params.power = false;
+        let json = fa76::ipc::Fa76State::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::fa76(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        }
+        let frame = restored.meter_frame().expect("frame is published");
+        assert_eq!(frame.gain_reduction_db, 0.0);
+
+        restored.apply_param(u32::MAX, 1.0);
+        restored.apply_param(fa76::UI_PARAM_IDS.len() as u32, 1.0);
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        let fallback = BuiltinHostProcessor::fa76(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
