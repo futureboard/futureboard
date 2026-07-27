@@ -10,7 +10,7 @@
   const { value, onchange, disabled = false }: Props = $props()
 </script>
 
-<div class="modes" class:disabled role="radiogroup" aria-label="Reverb mode">
+<div class="modes" class:disabled role="radiogroup" aria-label="Delay mode">
   {#each MODES as mode (mode)}
     <button
       type="button"

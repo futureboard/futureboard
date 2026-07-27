@@ -76,11 +76,7 @@
   <header class="chrome">
     <div class="bar">
       <div class="identity">
-        <img class="mark" src={logo} alt="" aria-hidden="true" />
-        <div class="names">
-          <div class="name">EchoSpace</div>
-          <div class="sub">stereo delay</div>
-        </div>
+        <img class="logo" src={logo} alt="EchoSpace" />
         <div
           class="link"
           class:connected
@@ -122,8 +118,8 @@
     </div>
 
     <div class="rack">
-      <section class="group" aria-label="Time">
-        <div class="group-title">Time</div>
+      <section class="group" aria-label="Timing">
+        <div class="group-title">Timing</div>
         <div class="group-knobs">
           <Knob
             spec={PARAMS.timeMsL}
@@ -139,8 +135,8 @@
         </div>
       </section>
 
-      <section class="group" aria-label="Feedback">
-        <div class="group-title">Feedback</div>
+      <section class="group" aria-label="Echoes">
+        <div class="group-title">Echoes</div>
         <div class="group-knobs">
           <Knob
             spec={PARAMS.feedback}
@@ -231,38 +227,12 @@
     min-width: 0;
   }
 
-  .mark {
+  .logo {
     display: block;
-    flex: none;
-    width: 2.1rem;
+    width: clamp(7.25rem, 13vw, 10rem);
+    max-width: 100%;
     height: auto;
     opacity: 0.95;
-  }
-
-  .names {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
-  }
-
-  .name {
-    color: var(--text);
-    font-size: 0.92rem;
-    font-weight: 650;
-    letter-spacing: 0.01em;
-    line-height: 1;
-    white-space: nowrap;
-  }
-
-  .sub {
-    color: var(--text-faint);
-    font-size: 0.6rem;
-    font-weight: 600;
-    letter-spacing: 0.09em;
-    line-height: 1;
-    text-transform: uppercase;
-    white-space: nowrap;
   }
 
   .link {
