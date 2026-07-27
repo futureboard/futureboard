@@ -1,11 +1,12 @@
 //! FA-2A — optical / program-dependent compressor (LA-2A-style).
 //!
-//! Phase 1 (easy). Parameter model mirrors `plugins/FB2AComp/Core`. Dynamics
-//! use `SoftKneeCompressor` (sidechain HPF via [`biquad`]).
+//! The dynamics stage models the broad behaviour of an electro-optical,
+//! feedback leveling amplifier: a soft control curve, roughly 10 ms attack,
+//! and a two-stage, program-dependent release.
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect, clamp,
-    db_to_linear, mix, time_constant,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
+    linear_to_db, mix, time_constant,
 };
 use serde::{Deserialize, Serialize};
 
@@ -188,6 +189,7 @@ pub struct OpticalModel {
     pub knee_db: f32,
     pub attack_sec: f32,
     pub release_sec: f32,
+    pub release_tail_sec: f32,
 }
 
 pub fn optical_model_from_params(params: &Params) -> OpticalModel {
@@ -210,16 +212,19 @@ pub fn optical_model_from_params(params: &Params) -> OpticalModel {
             2.2 + amount * 1.6
         },
         knee_db: if limit {
-            2.5 + (1.0 - amount) * 2.0
+            3.0 + (1.0 - amount) * 2.0
         } else {
-            8.0 + (1.0 - amount) * 8.0
+            10.0 + (1.0 - amount) * 6.0
         },
-        attack_sec: clamp(
-            (if limit { 0.004 } else { 0.008 }) + (1.0 - amount) * 0.032 - emphasis * 0.003,
-            0.002,
-            0.07,
-        ),
-        release_sec: clamp(0.12 + amount * 0.68 + emphasis * 0.12, 0.08, 1.1),
+        // A real T4 cell is not a fast peak limiter. Its attack is around
+        // 10 ms; Limit is only slightly quicker and primarily changes the
+        // control curve.
+        attack_sec: if limit { 0.007 } else { 0.010 },
+        // About half the recovery happens quickly, followed by a much longer
+        // memory tail. The tail coefficient is further modulated by the
+        // amount of reduction in `OpticalCell::process_stereo_linked`.
+        release_sec: 0.060 + amount * 0.020,
+        release_tail_sec: (if limit { 1.4 } else { 0.8 }) + amount * if limit { 6.6 } else { 4.2 },
     }
 }
 
@@ -312,10 +317,183 @@ pub fn descriptor() -> PluginDescriptor {
     }
 }
 
+/// Stereo-linked feedback gain cell with T4-style two-stage recovery.
+///
+/// Unlike a conventional feed-forward peak compressor, the detector observes
+/// the signal after the cell's current attenuation. That feedback topology is
+/// a large part of the forgiving leveling behaviour associated with an LA-2A.
+#[derive(Debug, Clone)]
+struct OpticalCell {
+    sample_rate: f32,
+    threshold_db: f32,
+    ratio: f32,
+    knee_db: f32,
+    attack_coeff: f32,
+    release_fast_coeff: f32,
+    release_tail_short_coeff: f32,
+    release_tail_long_coeff: f32,
+    detector_attack_coeff: f32,
+    detector_release_coeff: f32,
+    detector_envelope: f32,
+    fast_gr_db: f32,
+    slow_gr_db: f32,
+    sidechain_coeff: f32,
+    sidechain_x1: [f32; 2],
+    sidechain_y1: [f32; 2],
+}
+
+impl OpticalCell {
+    fn new(sample_rate: f32) -> Self {
+        let sr = sample_rate.max(1.0);
+        let mut cell = Self {
+            sample_rate: sr,
+            threshold_db: -18.0,
+            ratio: 3.0,
+            knee_db: 12.0,
+            attack_coeff: 0.0,
+            release_fast_coeff: 0.0,
+            release_tail_short_coeff: 0.0,
+            release_tail_long_coeff: 0.0,
+            detector_attack_coeff: 0.0,
+            detector_release_coeff: 0.0,
+            detector_envelope: 0.0,
+            fast_gr_db: 0.0,
+            slow_gr_db: 0.0,
+            sidechain_coeff: 0.0,
+            sidechain_x1: [0.0; 2],
+            sidechain_y1: [0.0; 2],
+        };
+        cell.set_model(
+            OpticalModel {
+                threshold_db: -18.0,
+                ratio: 3.0,
+                knee_db: 12.0,
+                attack_sec: 0.010,
+                release_sec: 0.060,
+                release_tail_sec: 2.0,
+            },
+            90.0,
+        );
+        cell
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    fn set_model(&mut self, model: OpticalModel, sidechain_cutoff_hz: f32) {
+        self.threshold_db = model.threshold_db;
+        self.ratio = model.ratio.max(1.0);
+        self.knee_db = model.knee_db.max(0.0);
+        self.attack_coeff = time_constant(self.sample_rate, model.attack_sec);
+        self.release_fast_coeff = time_constant(self.sample_rate, model.release_sec);
+        self.release_tail_short_coeff =
+            time_constant(self.sample_rate, model.release_tail_sec.max(0.25) * 0.35);
+        self.release_tail_long_coeff =
+            time_constant(self.sample_rate, model.release_tail_sec.max(0.25));
+        self.detector_attack_coeff = time_constant(self.sample_rate, 0.001);
+        self.detector_release_coeff = time_constant(self.sample_rate, 0.040);
+
+        let cutoff = clamp(sidechain_cutoff_hz, 20.0, self.sample_rate * 0.45);
+        self.sidechain_coeff = (-2.0 * std::f32::consts::PI * cutoff / self.sample_rate).exp();
+    }
+
+    fn reset(&mut self) {
+        self.detector_envelope = 0.0;
+        self.fast_gr_db = 0.0;
+        self.slow_gr_db = 0.0;
+        self.sidechain_x1 = [0.0; 2];
+        self.sidechain_y1 = [0.0; 2];
+    }
+
+    #[inline]
+    fn gain_reduction_db(&self) -> f32 {
+        // The fast half gives the cell its initial recovery; the slow half is
+        // the phosphor memory that makes release program-dependent.
+        self.fast_gr_db * 0.5 + self.slow_gr_db * 0.5
+    }
+
+    #[inline]
+    fn high_pass(&mut self, input: f32, channel: usize) -> f32 {
+        let output = self.sidechain_coeff
+            * (self.sidechain_y1[channel] + input - self.sidechain_x1[channel]);
+        self.sidechain_x1[channel] = input;
+        self.sidechain_y1[channel] = output;
+        output
+    }
+
+    #[inline]
+    fn target_reduction_db(&self, level_db: f32) -> f32 {
+        let over = level_db - self.threshold_db;
+        let half_knee = self.knee_db * 0.5;
+        let curved_over = if over <= -half_knee {
+            0.0
+        } else if over >= half_knee {
+            over
+        } else {
+            let t = over + half_knee;
+            t * t / (2.0 * self.knee_db.max(1.0e-6))
+        };
+
+        // In a feedback topology this is loop gain, not the usual
+        // feed-forward `(1 - 1 / ratio)` slope. `ratio - 1` produces the
+        // intended closed-loop compression ratio.
+        curved_over * (self.ratio - 1.0)
+    }
+
+    #[inline]
+    fn follow(current: f32, target: f32, rise_coeff: f32, fall_coeff: f32) -> f32 {
+        let coeff = if target > current {
+            rise_coeff
+        } else {
+            fall_coeff
+        };
+        coeff * current + (1.0 - coeff) * target
+    }
+
+    #[inline]
+    fn process_stereo_linked(&mut self, left: f32, right: f32) -> (f32, f32) {
+        // The detector is fed from immediately after the gain cell, before
+        // makeup gain. Use the previous sample's cell gain to avoid an
+        // algebraic loop while retaining feedback behaviour.
+        let cell_gain = db_to_linear(-self.gain_reduction_db());
+        let sc_l = self.high_pass(left * cell_gain, 0).abs();
+        let sc_r = self.high_pass(right * cell_gain, 1).abs();
+        let detected = sc_l.max(sc_r);
+        let detector_coeff = if detected > self.detector_envelope {
+            self.detector_attack_coeff
+        } else {
+            self.detector_release_coeff
+        };
+        self.detector_envelope =
+            detector_coeff * self.detector_envelope + (1.0 - detector_coeff) * detected;
+
+        let level_db = linear_to_db(self.detector_envelope.max(1.0e-12));
+        let target_gr_db = self.target_reduction_db(level_db);
+        self.fast_gr_db = Self::follow(
+            self.fast_gr_db,
+            target_gr_db,
+            self.attack_coeff,
+            self.release_fast_coeff,
+        );
+
+        // Deeper reduction leaves a longer optical memory. Interpolating the
+        // already-computed coefficients keeps the sample path inexpensive.
+        let memory = clamp(self.slow_gr_db / 18.0, 0.0, 1.0);
+        let tail_coeff = self.release_tail_short_coeff
+            + (self.release_tail_long_coeff - self.release_tail_short_coeff) * memory;
+        self.slow_gr_db =
+            Self::follow(self.slow_gr_db, target_gr_db, self.attack_coeff, tail_coeff);
+
+        let gain = db_to_linear(-self.gain_reduction_db());
+        (left * gain, right * gain)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Dsp {
     params: Params,
-    compressor: SoftKneeCompressor,
+    compressor: OpticalCell,
     output_gain: f32,
     meters: Meters,
 }
@@ -325,7 +503,7 @@ impl Dsp {
         let sr = sample_rate.max(1.0);
         let mut dsp = Self {
             params: default_params(),
-            compressor: SoftKneeCompressor::new(sr),
+            compressor: OpticalCell::new(sr),
             output_gain: 1.0,
             meters: Meters::new(sr),
         };
@@ -399,25 +577,17 @@ impl Dsp {
         }
     }
 
-    /// FA-2A is a feed-forward peak compressor with no lookahead, so it adds
-    /// no latency for the graph to compensate.
+    /// The feedback cell uses its previous gain state rather than lookahead,
+    /// so it adds no latency for the graph to compensate.
     pub fn latency_samples(&self) -> usize {
         0
     }
 
     fn apply_params(&mut self) {
         let model = optical_model_from_params(&self.params);
-        self.compressor.set_curve(
-            model.threshold_db,
-            model.ratio,
-            model.knee_db,
-            self.params.gain_db,
-        );
         self.compressor
-            .set_timing(model.attack_sec, model.release_sec);
-        self.compressor
-            .set_sidechain_hpf(self.params.sidechain_low_cut_hz);
-        self.output_gain = db_to_linear(self.params.output_trim_db);
+            .set_model(model, self.params.sidechain_low_cut_hz);
+        self.output_gain = db_to_linear(self.params.gain_db + self.params.output_trim_db);
     }
 
     #[inline]
@@ -425,8 +595,11 @@ impl Dsp {
         if drive <= 0.0 {
             return sample;
         }
-        let amount = 1.0 + drive * 4.0;
-        (sample * amount).tanh() / amount.tanh().max(0.001)
+        // Gentle transformer/tube curvature without a tanh ceiling. The old
+        // normalized tanh stage raised low-level gain and flattened peaks,
+        // which made FA-2A behave more like a soft clipper than a compressor.
+        let squared = sample * sample;
+        sample - (0.18 * drive) * sample * squared / (1.0 + squared)
     }
 }
 
@@ -623,6 +796,57 @@ mod tests {
             assert!(frame.in_rms.is_finite() && frame.out_rms.is_finite());
             assert!(frame.gain_reduction_db.is_finite());
         }
+    }
+
+    #[test]
+    fn optical_release_has_a_fast_recovery_and_a_slow_memory_tail() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.peak_reduction = 75.0;
+        params.color = 0.0;
+        dsp.set_params(params);
+
+        let driven = run_tone(&mut dsp, 0.8, 48_000).gain_reduction_db;
+        for _ in 0..4_800 {
+            let _ = dsp.process_stereo(0.0, 0.0);
+        }
+        let after_100_ms = dsp.gain_reduction_db();
+        for _ in 0..43_200 {
+            let _ = dsp.process_stereo(0.0, 0.0);
+        }
+        let after_one_second = dsp.gain_reduction_db();
+
+        assert!(driven > 6.0, "test signal must drive the cell: {driven}");
+        assert!(
+            after_100_ms < driven && after_100_ms > driven * 0.2,
+            "the fast half should recover without erasing optical memory: \
+             {driven} -> {after_100_ms}"
+        );
+        assert!(
+            after_one_second < after_100_ms && after_one_second > 0.1,
+            "the slow phosphor tail should keep recovering after one second: \
+             {after_100_ms} -> {after_one_second}"
+        );
+    }
+
+    #[test]
+    fn color_curve_preserves_small_signal_gain_and_has_no_clip_ceiling() {
+        let quiet = Dsp::apply_color(0.001, 1.0);
+        assert!(
+            (quiet - 0.001).abs() < 1.0e-8,
+            "color must not act like normalized tanh makeup: {quiet}"
+        );
+
+        let one = Dsp::apply_color(1.0, 1.0);
+        let two = Dsp::apply_color(2.0, 1.0);
+        assert!(
+            two > one * 1.5,
+            "color must not flatten into a clip ceiling"
+        );
+        assert!(
+            two > 1.0,
+            "signals above full scale must not be hard bounded"
+        );
     }
 
     #[test]

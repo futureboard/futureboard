@@ -38,7 +38,7 @@ members = [
     "crates/BuiltinAudioPlugins/crates/rodharerist",
     "crates/BuiltinAudioPlugins/crates/verbspace",
 
-    "xtask",
+    "xtask", "crates/WhiteSharp",
 ]
 
 exclude = [
