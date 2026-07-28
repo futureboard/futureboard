@@ -149,6 +149,13 @@ pub fn window_control_button(
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .rounded_none()
+        .hover(move |style| {
+            style.bg(if area == WindowControlArea::Close {
+                Colors::accent_danger()
+            } else {
+                Colors::surface_control_hover()
+            })
+        })
         .window_control_area(area)
         .occlude();
 
@@ -352,7 +359,14 @@ fn external_window_control_button(
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .hover(move |style| {
+            style.bg(if area == WindowControlArea::Close {
+                Colors::accent_danger()
+            } else {
+                Colors::surface_control_hover()
+            })
+        })
+        .active(|style| style.bg(Colors::button_bg_pressed()))
         .occlude()
         .on_click(move |_, window, cx| on_click(window, cx))
         .child(window_control_icon(area, icon_path, "").text_color(Colors::text_faint()))

@@ -987,6 +987,13 @@ fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> i
                 .w(px(WINDOW_CONTROL_WIDTH))
                 .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
                 .rounded_none()
+                .hover(move |style| {
+                    style.bg(if area == WindowControlArea::Close {
+                        Colors::accent_danger()
+                    } else {
+                        Colors::surface_control_hover()
+                    })
+                })
                 .window_control_area(area)
                 .occlude();
 

@@ -1265,6 +1265,11 @@ fn fader_area(
     let on_vol_commit = move |w: &mut gpui::Window, cx: &mut gpui::App| {
         commit_cb(&commit_id, w, cx);
     };
+    let reset_cb = callbacks.on_volume_change.clone();
+    let reset_id = track_id;
+    let on_vol_reset = move |w: &mut gpui::Window, cx: &mut gpui::App| {
+        reset_cb(&(reset_id.clone(), volume::db_to_norm(0.0)), w, cx);
+    };
 
     div()
         .flex()
@@ -1341,6 +1346,7 @@ fn fader_area(
                             Some(on_vol_start),
                             Some(on_vol_preview),
                             Some(on_vol_commit),
+                            Some(on_vol_reset),
                         )),
                 )
                 .child(meter_surface(
@@ -1753,7 +1759,10 @@ pub(crate) fn master_strip(
     let on_master_commit = move |w: &mut gpui::Window, cx: &mut gpui::App| {
         on_commit_cb(w, cx);
     };
-    let _ = on_master_vol_change;
+    let on_reset_cb = on_master_vol_change;
+    let on_master_reset = move |w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_reset_cb(&volume::db_to_norm(0.0), w, cx);
+    };
     let (insert_h, _send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
         split.send_px,
@@ -1887,6 +1896,7 @@ pub(crate) fn master_strip(
                                             Some(on_master_start),
                                             Some(on_master_preview),
                                             Some(on_master_commit),
+                                            Some(on_master_reset),
                                         )),
                                 )
                                 .child(meter_surface(
@@ -2508,9 +2518,24 @@ pub(crate) fn mixer_strip_scroller(
                 gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
                 gpui::ScrollDelta::Lines(l) => (l.x * STRIP_WIDTH, l.y * STRIP_WIDTH * 0.5),
             };
-            let delta = if dx.abs() >= dy.abs() { dx } else { dy };
+            let delta = if event.modifiers.shift {
+                if dx.abs() > f32::EPSILON {
+                    dx
+                } else {
+                    dy
+                }
+            } else if dx.abs() >= dy.abs() {
+                dx
+            } else {
+                dy
+            };
+            if delta.abs() <= f32::EPSILON || max_scroll_x <= 0.0 {
+                return;
+            }
             let new_x = (scroll_x + delta).clamp(0.0, max_scroll_x.max(0.0));
             on_scroll(new_x, window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
         }
     };
 

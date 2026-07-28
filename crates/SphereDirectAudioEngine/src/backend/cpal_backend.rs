@@ -149,9 +149,10 @@ pub(crate) fn open_on_host(
             config.mmcss_priority,
         ) {
             Ok(stream) => {
-                // Prefer what the device actually negotiated over what we
-                // predicted. ALSA rounds both the period and the ring to what
-                // the hardware supports, so the request is only ever a request.
+                // Prefer what ALSA actually negotiated over what we predicted.
+                // The negotiated-buffer extension is provided by our Linux cpal
+                // fork only; other backends report the requested callback size.
+                #[cfg(target_os = "linux")]
                 let buf_size = match stream.negotiated_buffer() {
                     Some(negotiated) => {
                         if negotiated.period_frames != *callback_frames {
@@ -167,6 +168,11 @@ pub(crate) fn open_on_host(
                         BufferSize::Fixed(_) => *callback_frames,
                         BufferSize::Default => 0,
                     },
+                };
+                #[cfg(not(target_os = "linux"))]
+                let buf_size = match stream_config.buffer_size {
+                    BufferSize::Fixed(_) => *callback_frames,
+                    BufferSize::Default => 0,
                 };
                 return Ok(CpalStreamHandle {
                     stream,
@@ -494,7 +500,9 @@ where
                 match err {
                     // The device ran dry and recovered. Counted rather than
                     // logged: underruns arrive in bursts, and one eprintln per
-                    // xrun would itself starve the callback.
+                    // xrun would itself starve the callback. This variant is an
+                    // ALSA-only extension in our cpal fork.
+                    #[cfg(target_os = "linux")]
                     cpal::StreamError::Underrun => {
                         err_shared.device_xruns.fetch_add(1, Ordering::Relaxed);
                     }

@@ -7,8 +7,8 @@ use std::{collections::HashSet, sync::Arc};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement,
-    IntoElement, ParentElement, Point, Render, Styled, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, ParentElement, Point, Render, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle,
 };
 
 use crate::components::mixer_panel::{
@@ -96,7 +96,7 @@ pub struct MixerWindow {
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
-    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+    dispatch_key: Arc<dyn Fn(&KeyDownEvent, &mut App) -> bool + Send + Sync>,
     focus_handle: FocusHandle,
 }
 
@@ -108,7 +108,7 @@ impl MixerWindow {
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
         on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
-        dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+        dispatch_key: Arc<dyn Fn(&KeyDownEvent, &mut App) -> bool + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
         external_mixer_debug(&format!(
@@ -122,7 +122,7 @@ impl MixerWindow {
             on_close,
             on_mixer_scroll,
             on_mixer_split,
-            dispatch_command,
+            dispatch_key,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -138,7 +138,9 @@ impl MixerWindow {
 
 impl Render for MixerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.focus_handle.is_focused(window) {
+        // Claim otherwise-unowned keyboard focus, but never steal it from a
+        // future inline parameter editor mounted inside the mixer.
+        if window.focused(cx).is_none() {
             self.focus_handle.focus(window, cx);
         }
         let viewport_width: f32 = window.bounds().size.width.into();
@@ -162,7 +164,8 @@ impl Render for MixerWindow {
         let on_mixer_scroll = self.on_mixer_scroll.clone();
         let on_mixer_split = self.on_mixer_split.clone();
         let on_close = self.on_close.clone();
-        let dispatch_command = self.dispatch_command.clone();
+        let dispatch_key = self.dispatch_key.clone();
+        let shortcut_focus = self.focus_handle.clone();
         let tree_width = if tree_sidebar_enabled {
             if tree_sidebar_collapsed {
                 MIXER_TREE_COLLAPSED_RAIL_WIDTH
@@ -192,16 +195,16 @@ impl Render for MixerWindow {
             .bg(Colors::surface_window())
             .overflow_hidden()
             .capture_key_down(move |event, _window, cx| {
-                let mods = event.keystroke.modifiers;
-                if !event.is_held
-                    && event.keystroke.key.eq_ignore_ascii_case("space")
-                    && !mods.control
-                    && !mods.alt
-                    && !mods.platform
-                    && !mods.function
+                let window = _window;
+                if window
+                    .focused(cx)
+                    .is_some_and(|focused| focused != shortcut_focus)
                 {
+                    return;
+                }
+                if (dispatch_key)(event, cx) {
+                    window.prevent_default();
                     cx.stop_propagation();
-                    (dispatch_command)("transport:play-pause", cx);
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
@@ -249,7 +252,7 @@ pub fn open_mixer_window(
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
-    dispatch_command: Arc<dyn Fn(&'static str, &mut App) + Send + Sync>,
+    dispatch_key: Arc<dyn Fn(&KeyDownEvent, &mut App) -> bool + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<MixerWindow>, String> {
     external_mixer_debug(&format!(
@@ -266,12 +269,11 @@ pub fn open_mixer_window(
         y: px((parent_y + parent_h - MIXER_WINDOW_HEIGHT).max(24.0)),
     };
 
-    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    let mut options = crate::platform_chrome::external_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(Bounds {
         origin,
         size: size(px(MIXER_WINDOW_WIDTH), px(MIXER_WINDOW_HEIGHT)),
     }));
-    options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = true;
     options.window_background = WindowBackgroundAppearance::Opaque;
@@ -290,7 +292,7 @@ pub fn open_mixer_window(
                 on_close,
                 on_mixer_scroll,
                 on_mixer_split,
-                dispatch_command,
+                dispatch_key,
                 cx,
             )
         })

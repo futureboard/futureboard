@@ -11,7 +11,10 @@ use windows::{
         Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         System::LibraryLoader::LoadLibraryA,
-        UI::WindowsAndMessaging::*,
+        UI::{
+            HiDpi::{GetDpiForSystem, GetDpiForWindow},
+            WindowsAndMessaging::*,
+        },
     },
     core::{BOOL, PCSTR},
 };
@@ -93,7 +96,7 @@ pub(crate) fn windows_credentials_target_name(url: &str) -> String {
 }
 
 pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
-    if let Some(cursor) = load_custom_cursor(style) {
+    if let Some(cursor) = load_custom_cursor(style, current_cursor_dpi()) {
         return Some(cursor);
     }
 
@@ -146,6 +149,9 @@ struct CursorAssetSet {
 }
 
 const FUTUREBOARD_CURSOR_RENDER_SCALE: f32 = 0.7;
+const FUTUREBOARD_CURSOR_BASE_ASSET_SCALE: f32 = 0.5 * FUTUREBOARD_CURSOR_RENDER_SCALE;
+const CURSOR_DPI_BUCKETS: [u32; 8] = [96, 120, 144, 168, 192, 240, 288, 384];
+type CursorCache = [OnceLock<SafeCursor>; CURSOR_DPI_BUCKETS.len()];
 
 const FB_ARROW: CursorAssetSet = CursorAssetSet {
     half: include_bytes!("../../../../../packages/shared/cursors/Arrow@0.5x.png"),
@@ -219,19 +225,21 @@ const FB_RESIZE_RIGHT: CursorAssetSet = CursorAssetSet {
     hotspot_1x: (82, 53),
 };
 
-fn load_custom_cursor(style: CursorStyle) -> Option<HCURSOR> {
-    static ARROW: OnceLock<SafeCursor> = OnceLock::new();
-    static SELECT: OnceLock<SafeCursor> = OnceLock::new();
-    static MARQUEE: OnceLock<SafeCursor> = OnceLock::new();
-    static MOVE: OnceLock<SafeCursor> = OnceLock::new();
-    static FADE_IN: OnceLock<SafeCursor> = OnceLock::new();
-    static FADE_OUT: OnceLock<SafeCursor> = OnceLock::new();
-    static RESIZE_HORIZON: OnceLock<SafeCursor> = OnceLock::new();
-    static RESIZE_LEFT: OnceLock<SafeCursor> = OnceLock::new();
-    static RESIZE_RIGHT: OnceLock<SafeCursor> = OnceLock::new();
+fn load_custom_cursor(style: CursorStyle, dpi: u32) -> Option<HCURSOR> {
+    static ARROW: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static SELECT: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static MARQUEE: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static MOVE: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static FADE_IN: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static FADE_OUT: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static RESIZE_HORIZON: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static RESIZE_LEFT: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
+    static RESIZE_RIGHT: CursorCache = [const { OnceLock::new() }; CURSOR_DPI_BUCKETS.len()];
 
     let (lock, assets) = match style {
-        CursorStyle::Arrow | CursorStyle::FutureboardArrow => (&ARROW, &FB_ARROW),
+        // Keep the ordinary desktop pointer native. Futureboard's illustrated
+        // arrow is opt-in for editing surfaces through `FutureboardArrow`.
+        CursorStyle::FutureboardArrow => (&ARROW, &FB_ARROW),
         CursorStyle::FutureboardSelect => (&SELECT, &FB_SELECT),
         CursorStyle::FutureboardMarquee => (&MARQUEE, &FB_MARQUEE),
         CursorStyle::FutureboardMove => (&MOVE, &FB_MOVE),
@@ -243,24 +251,65 @@ fn load_custom_cursor(style: CursorStyle) -> Option<HCURSOR> {
         _ => return None,
     };
 
-    Some(**lock.get_or_init(|| create_custom_cursor(assets).unwrap_or_default().into()))
+    let bucket = cursor_dpi_bucket(dpi);
+    Some(**lock[bucket].get_or_init(|| {
+        create_custom_cursor(assets, CURSOR_DPI_BUCKETS[bucket])
+            .unwrap_or_default()
+            .into()
+    }))
 }
 
-fn select_cursor_png(assets: &CursorAssetSet) -> (&'static [u8], f32) {
-    (assets.half, 0.5)
+fn current_cursor_dpi() -> u32 {
+    let mut point = POINT::default();
+    let window_dpi = unsafe {
+        GetCursorPos(&mut point)
+            .ok()
+            .map(|_| WindowFromPoint(point))
+            .filter(|window| !window.is_invalid())
+            .map(|window| GetDpiForWindow(window))
+            .filter(|dpi| *dpi > 0)
+    };
+    window_dpi.unwrap_or_else(|| unsafe { GetDpiForSystem() }.max(96))
 }
 
-fn create_custom_cursor(assets: &CursorAssetSet) -> Option<HCURSOR> {
-    let (bytes, scale) = select_cursor_png(assets);
+fn cursor_dpi_bucket(dpi: u32) -> usize {
+    CURSOR_DPI_BUCKETS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, bucket)| bucket.abs_diff(dpi.max(96)))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn target_cursor_asset_scale(dpi: u32) -> f32 {
+    FUTUREBOARD_CURSOR_BASE_ASSET_SCALE * dpi.max(96) as f32 / 96.0
+}
+
+fn select_cursor_png(assets: &CursorAssetSet, target_scale: f32) -> (&'static [u8], f32) {
+    [
+        (assets.half, 0.5_f32),
+        (assets.one, 1.0),
+        (assets.one_half, 1.5),
+        (assets.two, 2.0),
+    ]
+    .into_iter()
+    .min_by(|(_, left), (_, right)| {
+        (left - target_scale)
+            .abs()
+            .total_cmp(&(right - target_scale).abs())
+    })
+    .unwrap_or((assets.half, 0.5))
+}
+
+fn create_custom_cursor(assets: &CursorAssetSet, dpi: u32) -> Option<HCURSOR> {
+    let target_scale = target_cursor_asset_scale(dpi);
+    let (bytes, source_scale) = select_cursor_png(assets, target_scale);
     let mut image = image::load_from_memory(bytes).log_err()?.into_rgba8();
     let (width, height) = image.dimensions();
-    if FUTUREBOARD_CURSOR_RENDER_SCALE != 1.0 {
-        let scaled_width = ((width as f32) * FUTUREBOARD_CURSOR_RENDER_SCALE)
-            .round()
-            .max(1.0) as u32;
-        let scaled_height = ((height as f32) * FUTUREBOARD_CURSOR_RENDER_SCALE)
-            .round()
-            .max(1.0) as u32;
+    let resize_scale = target_scale / source_scale;
+    if (resize_scale - 1.0).abs() > f32::EPSILON {
+        let scaled_width = ((width as f32) * resize_scale).round().max(1.0) as u32;
+        let scaled_height = ((height as f32) * resize_scale).round().max(1.0) as u32;
         image = image::imageops::resize(
             &image,
             scaled_width,
@@ -269,9 +318,8 @@ fn create_custom_cursor(assets: &CursorAssetSet) -> Option<HCURSOR> {
         );
     }
     let (width, height) = image.dimensions();
-    let effective_scale = scale * FUTUREBOARD_CURSOR_RENDER_SCALE;
-    let hotspot_x = ((assets.hotspot_1x.0 as f32) * effective_scale).round() as u32;
-    let hotspot_y = ((assets.hotspot_1x.1 as f32) * effective_scale).round() as u32;
+    let hotspot_x = ((assets.hotspot_1x.0 as f32) * target_scale).round() as u32;
+    let hotspot_y = ((assets.hotspot_1x.1 as f32) * target_scale).round() as u32;
 
     unsafe {
         let mut bitmap_info = BITMAPINFO {

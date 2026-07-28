@@ -1078,12 +1078,21 @@ impl StudioLayout {
                 split_owner.update(cx, |layout, cx| layout.apply_mixer_split_action(action, cx));
         });
         let dispatch_owner = cx.entity().clone();
-        let dispatch_command: std::sync::Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync> =
-            std::sync::Arc::new(move |command_id, cx| {
-                let _ = dispatch_owner.update(cx, |layout, cx| {
-                    layout.dispatch_command_id(command_id, cx);
-                });
+        let dispatch_key: std::sync::Arc<
+            dyn Fn(&gpui::KeyDownEvent, &mut gpui::App) -> bool + Send + Sync,
+        > = std::sync::Arc::new(move |event, cx| {
+            if event.is_held {
+                return false;
+            }
+            let Some(command_id) = dispatch_owner.read(cx).shortcut_command_id(event) else {
+                return false;
+            };
+            let _ = dispatch_owner.update(cx, |layout, cx| {
+                let owner_bounds = layout.studio_window_bounds(cx);
+                layout.dispatch_command_id_from_bounds(&command_id, owner_bounds, cx);
             });
+            true
+        });
 
         match open_mixer_window(
             owner_bounds,
@@ -1093,11 +1102,15 @@ impl StudioLayout {
             on_close,
             on_mixer_scroll,
             on_mixer_split,
-            dispatch_command,
+            dispatch_key,
             cx,
         ) {
             Ok(handle) => {
                 self.external_windows.mixer = Some(handle);
+                // Removing the docked mixer changes the arrangement's client
+                // rectangle. Force both DirectComposition surfaces to repaint
+                // once so no pixels from the old bottom-panel bounds survive.
+                cx.refresh_windows();
                 cx.notify();
             }
             Err(err) => {

@@ -294,7 +294,8 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         .items_baseline()
         .justify_center()
         .gap(px(2.0))
-        .min_w(px(46.0))
+        .w(px(52.0))
+        .flex_none()
         .h(px(18.0))
         .px(px(6.0))
         .rounded_sm()
@@ -332,6 +333,7 @@ pub fn fader(
         None::<fn(&f32, &mut Window, &mut App)>,
         Some(on_change),
         None::<fn(&mut Window, &mut App)>,
+        None::<fn(&mut Window, &mut App)>,
     )
 }
 
@@ -342,6 +344,7 @@ pub fn fader_with_drag_callbacks(
     on_drag_start: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
     on_drag_preview: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
     on_drag_commit: Option<impl Fn(&mut Window, &mut App) + 'static>,
+    on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
@@ -394,6 +397,13 @@ pub fn fader_with_drag_callbacks(
             })
             .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| {
                 commit(window, cx)
+            })
+        })
+        .when_some(on_double_click_reset, |this, reset| {
+            this.on_click(move |event, window, cx| {
+                if event.click_count() >= 2 {
+                    reset(window, cx);
+                }
             })
         })
 }
