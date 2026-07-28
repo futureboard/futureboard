@@ -231,7 +231,34 @@ fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
         }
         Err(e) => eprintln!("[MidiDeviceScan] MIDI output backend unavailable: {e}"),
     }
-    devices
+    coalesce_detected_midi_devices(devices)
+}
+
+/// Merge same-name input and output ports into a single InputOutput entry so a
+/// bidirectional controller does not appear twice in Preferences / routing lists.
+fn coalesce_detected_midi_devices(devices: Vec<DetectedMidiDevice>) -> Vec<DetectedMidiDevice> {
+    let mut by_name: HashMap<String, DetectedMidiDevice> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for device in devices {
+        match by_name.get_mut(&device.name) {
+            Some(existing) => {
+                if existing.direction != device.direction
+                    && existing.direction != MidiDeviceDirection::InputOutput
+                {
+                    existing.direction = MidiDeviceDirection::InputOutput;
+                    existing.id = stable_id(MidiDeviceDirection::InputOutput, &existing.name);
+                }
+            }
+            None => {
+                order.push(device.name.clone());
+                by_name.insert(device.name.clone(), device);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|name| by_name.remove(&name))
+        .collect()
 }
 
 /// Merge saved preferences with freshly detected devices. Saved-only entries stay visible as missing.
@@ -239,6 +266,7 @@ pub fn resolve_midi_devices(
     saved: &[MidiDeviceSetting],
     detected: &[DetectedMidiDevice],
 ) -> Vec<MidiDeviceSetting> {
+    let detected = coalesce_detected_midi_devices(detected.to_vec());
     if midi_settings_debug_enabled() {
         eprintln!("[MIDI settings] saved preferences ({})", saved.len());
         for device in saved {
@@ -251,22 +279,33 @@ pub fn resolve_midi_devices(
 
     let saved_by_id: HashMap<&str, &MidiDeviceSetting> =
         saved.iter().map(|d| (d.id.as_str(), d)).collect();
+    let saved_by_name: HashMap<&str, &MidiDeviceSetting> =
+        saved.iter().map(|d| (d.name.as_str(), d)).collect();
     let mut resolved = Vec::new();
+    let mut resolved_names = std::collections::HashSet::new();
 
-    for det in detected {
-        let saved = saved_by_id.get(det.id.as_str());
+    for det in &detected {
+        let saved = saved_by_id
+            .get(det.id.as_str())
+            .copied()
+            .or_else(|| saved_by_name.get(det.name.as_str()).copied());
+        resolved_names.insert(det.name.clone());
         resolved.push(MidiDeviceSetting {
             id: det.id.clone(),
             name: det.name.clone(),
             direction: det.direction,
-            enabled: saved.map(|s| s.enabled).unwrap_or(false),
+            // New devices default to enabled so real-time MIDI input works
+            // without a Preferences visit; users can still disable them.
+            enabled: saved.map(|s| s.enabled).unwrap_or(true),
             connected: true,
             clock_enabled: saved.map(|s| s.clock_enabled).unwrap_or(false),
         });
     }
 
     for saved_device in saved {
-        if detected.iter().any(|d| d.id == saved_device.id) {
+        if detected.iter().any(|d| d.id == saved_device.id)
+            || resolved_names.contains(&saved_device.name)
+        {
             continue;
         }
         if midi_settings_debug_enabled() {
@@ -420,6 +459,222 @@ impl Drop for HardwareMidiPlayback {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// One decoded MIDI message received from an enabled hardware input port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardwareMidiInputMessage {
+    pub device_id: String,
+    pub device_name: String,
+    pub event: MidiInputEvent,
+}
+
+/// Control-thread hardware MIDI input listener. Opens midir connections for
+/// enabled input / input-output devices and pushes decoded events onto a
+/// bounded queue drained by the UI poll loop.
+pub struct HardwareMidiInput {
+    event_rx: Option<std::sync::mpsc::Receiver<HardwareMidiInputMessage>>,
+    /// Cancel + join handles for the active input connections.
+    connections: Vec<HardwareMidiInputConnection>,
+    /// Last synced set of enabled device ids (so we can no-op when unchanged).
+    enabled_ids: Vec<String>,
+}
+
+struct HardwareMidiInputConnection {
+    #[allow(dead_code)]
+    device_id: String,
+    /// Dropping the connection closes the port. Kept alive for the session.
+    #[cfg(not(target_os = "macos"))]
+    _connection: midir::MidiInputConnection<()>,
+    #[cfg(target_os = "macos")]
+    _connection: (),
+}
+
+impl Default for HardwareMidiInput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HardwareMidiInput {
+    pub fn new() -> Self {
+        Self {
+            event_rx: None,
+            connections: Vec::new(),
+            enabled_ids: Vec::new(),
+        }
+    }
+
+    /// Open / refresh connections for every enabled input-capable device.
+    /// Safe to call repeatedly from the UI poll; reconnects only when the
+    /// enabled set changes.
+    pub fn sync_enabled_devices(&mut self, devices: &[MidiDeviceSetting]) {
+        let mut enabled: Vec<(String, String)> = devices
+            .iter()
+            .filter(|d| {
+                d.enabled
+                    && d.connected
+                    && matches!(
+                        d.direction,
+                        MidiDeviceDirection::Input | MidiDeviceDirection::InputOutput
+                    )
+            })
+            .map(|d| (d.id.clone(), d.name.clone()))
+            .collect();
+        enabled.sort_by(|a, b| a.0.cmp(&b.0));
+        let enabled_ids: Vec<String> = enabled.iter().map(|(id, _)| id.clone()).collect();
+        if enabled_ids == self.enabled_ids {
+            return;
+        }
+        self.stop();
+        self.enabled_ids = enabled_ids;
+        if enabled.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.event_rx = Some(rx);
+        self.connections = open_hardware_midi_inputs(enabled, tx);
+    }
+
+    /// Drain pending hardware MIDI messages (non-blocking). Bounded by caller.
+    pub fn drain(&mut self, max: usize) -> Vec<HardwareMidiInputMessage> {
+        let Some(rx) = self.event_rx.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        while out.len() < max {
+            match rx.try_recv() {
+                Ok(msg) => out.push(msg),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    pub fn stop(&mut self) {
+        self.connections.clear();
+        self.event_rx = None;
+        self.enabled_ids.clear();
+    }
+}
+
+impl Drop for HardwareMidiInput {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn decode_midi_bytes(bytes: &[u8]) -> Option<MidiInputEvent> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let status = bytes[0];
+    let kind = status & 0xF0;
+    let channel = status & 0x0F;
+    match kind {
+        0x90 => {
+            let note = *bytes.get(1)?;
+            let velocity = *bytes.get(2)?;
+            if velocity == 0 {
+                Some(MidiInputEvent::NoteOff { note, channel })
+            } else {
+                Some(MidiInputEvent::NoteOn {
+                    note,
+                    velocity,
+                    channel,
+                })
+            }
+        }
+        0x80 => {
+            let note = *bytes.get(1)?;
+            Some(MidiInputEvent::NoteOff { note, channel })
+        }
+        0xB0 => {
+            let controller = *bytes.get(1)?;
+            let value = *bytes.get(2)?;
+            if controller == 123 {
+                Some(MidiInputEvent::AllNotesOff)
+            } else {
+                Some(MidiInputEvent::ControlChange {
+                    controller,
+                    value,
+                    channel,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_hardware_midi_inputs(
+    enabled: Vec<(String, String)>,
+    tx: std::sync::mpsc::Sender<HardwareMidiInputMessage>,
+) -> Vec<HardwareMidiInputConnection> {
+    use midir::MidiInput;
+
+    let mut connections = Vec::new();
+    let Ok(scanner) = MidiInput::new("Futureboard MIDI input scan") else {
+        eprintln!("[MIDI input] backend unavailable — cannot open hardware ports");
+        return connections;
+    };
+    let ports = scanner.ports();
+    for (device_id, device_name) in enabled {
+        let Some(port) = ports.iter().find(|port| {
+            scanner
+                .port_name(port)
+                .ok()
+                .is_some_and(|name| name == device_name)
+        }) else {
+            eprintln!("[MIDI input] port not found for enabled device '{device_name}'");
+            continue;
+        };
+        // midir requires a fresh MidiInput per connection.
+        let Ok(input) = MidiInput::new(&format!("Futureboard MIDI in ({device_name})")) else {
+            continue;
+        };
+        let tx = tx.clone();
+        let id = device_id.clone();
+        let name = device_name.clone();
+        match input.connect(
+            port,
+            &format!("Futureboard listen ({device_name})"),
+            move |_stamp, message, _| {
+                if let Some(event) = decode_midi_bytes(message) {
+                    let _ = tx.send(HardwareMidiInputMessage {
+                        device_id: id.clone(),
+                        device_name: name.clone(),
+                        event,
+                    });
+                }
+            },
+            (),
+        ) {
+            Ok(connection) => {
+                if midi_settings_debug_enabled() {
+                    eprintln!("[MIDI input] connected '{device_name}' ({device_id})");
+                }
+                connections.push(HardwareMidiInputConnection {
+                    device_id,
+                    _connection: connection,
+                });
+            }
+            Err(error) => {
+                eprintln!("[MIDI input] failed to open '{device_name}': {error}");
+            }
+        }
+    }
+    connections
+}
+
+#[cfg(target_os = "macos")]
+fn open_hardware_midi_inputs(
+    _enabled: Vec<(String, String)>,
+    _tx: std::sync::mpsc::Sender<HardwareMidiInputMessage>,
+) -> Vec<HardwareMidiInputConnection> {
+    // midir's CoreMIDI backend currently conflicts with gpui's pinned
+    // core-foundation version (same limitation as port scan / output).
+    Vec::new()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -957,8 +1212,61 @@ mod tests {
         assert!(
             resolved
                 .iter()
-                .any(|d| d.id == "midi-in-new" && d.connected)
+                .any(|d| d.id == "midi-in-new" && d.connected && d.enabled)
         );
+    }
+
+    #[test]
+    fn coalesce_merges_same_name_input_and_output() {
+        let detected = vec![
+            DetectedMidiDevice {
+                id: "midi-in-pad".to_string(),
+                name: "Pad Controller".to_string(),
+                direction: MidiDeviceDirection::Input,
+            },
+            DetectedMidiDevice {
+                id: "midi-out-pad".to_string(),
+                name: "Pad Controller".to_string(),
+                direction: MidiDeviceDirection::Output,
+            },
+            DetectedMidiDevice {
+                id: "midi-in-keys".to_string(),
+                name: "Keys".to_string(),
+                direction: MidiDeviceDirection::Input,
+            },
+        ];
+        let coalesced = coalesce_detected_midi_devices(detected);
+        assert_eq!(coalesced.len(), 2);
+        let pad = coalesced
+            .iter()
+            .find(|d| d.name == "Pad Controller")
+            .expect("pad");
+        assert_eq!(pad.direction, MidiDeviceDirection::InputOutput);
+        assert!(pad.id.starts_with("midi-io-"));
+        let keys = coalesced.iter().find(|d| d.name == "Keys").expect("keys");
+        assert_eq!(keys.direction, MidiDeviceDirection::Input);
+    }
+
+    #[test]
+    fn resolve_dedupes_saved_clone_when_live_name_matches() {
+        let saved = vec![MidiDeviceSetting {
+            id: "midi-in-pad".to_string(),
+            name: "Pad Controller".to_string(),
+            direction: MidiDeviceDirection::Input,
+            enabled: true,
+            connected: false,
+            clock_enabled: false,
+        }];
+        let detected = vec![DetectedMidiDevice {
+            id: "midi-io-pad-controller".to_string(),
+            name: "Pad Controller".to_string(),
+            direction: MidiDeviceDirection::InputOutput,
+        }];
+        let resolved = resolve_midi_devices(&saved, &detected);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].id, "midi-io-pad-controller");
+        assert!(resolved[0].enabled);
+        assert!(resolved[0].connected);
     }
 
     #[test]

@@ -424,10 +424,7 @@ pub(crate) fn route_main_output(
         .filter(|&t| t < runtime.tracks.len());
 
     if let Some(t) = target {
-        let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
-        let accept = t != src_index
-            && is_routing_type(&runtime.tracks[t].track_type)
-            && (!src_routing || t > src_index);
+        let accept = t != src_index && is_routing_type(&runtime.tracks[t].track_type);
         if accept {
             let (src, tgt) = two_mut(&mut runtime.tracks, src_index, t);
             for f in 0..frames {
@@ -467,6 +464,11 @@ fn process_track_block(
     accumulate_sends(runtime, track_index, frames, true);
     let smooth = runtime.fader_smoothing;
     apply_fader(&mut runtime.tracks[track_index], frames, beat, smooth);
+    accumulate_block_meter(&mut runtime.tracks[track_index], frames);
+    // Post-fader sends tap *before* PDC so return FX latency can be compensated
+    // on the dry/main path without also delaying the send feed (which would
+    // push wet further behind dry).
+    accumulate_sends(runtime, track_index, frames, false);
     let pdc_delay = runtime
         .latency_graph
         .track_pdc_delay
@@ -485,10 +487,7 @@ fn process_track_block(
             frames,
         );
     }
-    accumulate_block_meter(&mut runtime.tracks[track_index], frames);
-    // Post-fader sends tap the post-fader (and PDC-aligned) signal in block_*.
-    accumulate_sends(runtime, track_index, frames, false);
-    // Route the post-fader signal to master or the track's output bus.
+    // Route the post-fader (and PDC-aligned) signal to master or the track's output bus.
     route_main_output(runtime, track_index, frames, output, channels);
 }
 
@@ -498,10 +497,11 @@ fn process_track_block(
 /// `pre_fader` flag matches the requested phase are routed.
 ///
 /// Cycle-safe by construction: a send is accepted only when the target is a
-/// routing track (bus/return); a *routing* source may additionally only target
-/// a *later* routing track in array order. Sends to non-routing tracks, to
-/// self, or backward between routing tracks are dropped (logged at build time
-/// under `FUTUREBOARD_ROUTING_DEBUG`). No allocation on the audio thread.
+/// routing track (bus/return). Cyclic routes are rejected at graph-plan time
+/// (`plan_runtime_audio_graph`) and pass-2 processes routing tracks in
+/// topological order so chained bus→return feeds land before the target runs.
+/// Sends to non-routing tracks or to self are dropped. No allocation on the
+/// audio thread.
 #[inline]
 pub(crate) fn accumulate_sends(
     runtime: &mut RuntimeProject,
@@ -513,7 +513,6 @@ pub(crate) fn accumulate_sends(
     if send_count == 0 {
         return;
     }
-    let src_routing = is_routing_type(&runtime.tracks[src_index].track_type);
     for s in 0..send_count {
         let (enabled, level, target_index) = {
             let send = &runtime.tracks[src_index].sends[s];
@@ -530,9 +529,6 @@ pub(crate) fn accumulate_sends(
             continue;
         };
         if t == src_index || !is_routing_type(&runtime.tracks[t].track_type) {
-            continue;
-        }
-        if src_routing && t <= src_index {
             continue;
         }
         let (src, tgt) = two_mut(&mut runtime.tracks, src_index, t);

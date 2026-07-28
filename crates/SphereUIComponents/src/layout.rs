@@ -471,6 +471,8 @@ pub struct StudioLayout {
     /// Control-thread scheduler for MIDI tracks routed to hardware/virtual MIDI
     /// outputs. Kept out of the realtime audio callback.
     hardware_midi_playback: sphere_midi_service::HardwareMidiPlayback,
+    /// Live hardware MIDI input connections (enabled ports → UI poll drain).
+    hardware_midi_input: sphere_midi_service::HardwareMidiInput,
     /// Active recording-session UI state (take start position, UI phase, live
     /// growing-waveform preview). Grouped into
     /// [`recording_ops::RecordingSessionState`] (decomposition slice).
@@ -1003,6 +1005,7 @@ impl StudioLayout {
             overlay: studio_state::OverlayState::default(),
             audio_bridge: audio_transport::AudioBridgeState::default(),
             hardware_midi_playback: sphere_midi_service::HardwareMidiPlayback::new(),
+            hardware_midi_input: sphere_midi_service::HardwareMidiInput::new(),
             recording: recording_ops::RecordingSessionState::default(),
             engine_sync: audio_transport::EngineSyncState::default(),
             bpm_drag: audio_transport::BpmDragState::default(),

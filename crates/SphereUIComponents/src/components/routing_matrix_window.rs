@@ -178,7 +178,6 @@ impl Render for RoutingMatrixWindow {
 
         let mut rows = div().flex().flex_col().min_h_0();
         for (index, track) in source_tracks.iter().enumerate() {
-            let source_is_routing = track.track_type.is_routing();
             let alt = index % 2 == 1;
             let mut row = div()
                 .flex()
@@ -217,10 +216,11 @@ impl Render for RoutingMatrixWindow {
                     .as_ref()
                     .map(|dest_id| track.sends.iter().any(|s| &s.target_track_id == dest_id))
                     .unwrap_or(false);
-                // A send is toggleable only from a non-routing source into a
+                // A send is toggleable from any non-master source into a
                 // Bus/Return destination that is not the source itself.
+                // Bus/return → bus/return chains are allowed; the engine rejects
+                // cycles when the graph is planned.
                 let toggleable = dest.accepts_sends
-                    && !source_is_routing
                     && dest.track_id.as_deref() != Some(track.id.as_str());
 
                 let mut cell = div()

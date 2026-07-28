@@ -422,9 +422,9 @@ impl TimelineState {
             .map(|target| (target.id.clone(), target.name.clone()))?;
 
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        if (track.track_type.is_routing() && !is_vsti_output_child_track_id(&track.id))
-            || track.sends.iter().any(|s| s.target_track_id == target_id)
-        {
+        // Allow bus/return → bus/return chains; engine rejects cycles at plan time.
+        // VSTi multi-out children remain send sources as before.
+        if track.sends.iter().any(|s| s.target_track_id == target_id) {
             return None;
         }
         let send_id = format!("send-{}-{}", track.id, track.sends.len() + 1);
@@ -450,9 +450,7 @@ impl TimelineState {
             .tracks
             .iter()
             .find(|track| track.id == track_id)
-            .is_none_or(|track| {
-                track.track_type.is_routing() && !is_vsti_output_child_track_id(&track.id)
-            })
+            .is_none()
         {
             return None;
         }

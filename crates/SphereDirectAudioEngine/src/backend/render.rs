@@ -423,6 +423,13 @@ pub fn drain_commands(
                 // sinks still needs flushing through the new graph.
                 runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
                 runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
+                // Keep the live master-fader ramp continuous across media/control
+                // graph swaps (clip mute/gain sync). Prefer the live master
+                // atomic (authoritative fader position) so a fresh runtime that
+                // still carries the build-time seed of 1.0 cannot briefly
+                // bypass a lowered master on the first blocks after LoadProject.
+                runtime.smoothed_master_gain =
+                    f32_load(shared.master_volume.load(Ordering::Relaxed));
                 crate::graveyard::retire(old);
                 // Transport/audio-graph separation: a graph swap must never
                 // change the user's transport state.  If the transport was
@@ -535,6 +542,10 @@ pub fn drain_commands(
                     );
                 }
                 runtime.all_notes_off("stop");
+                // Drop latency-compensated pre-stop audio immediately so Stop
+                // cuts at the command. Plugin release / reverb still ring out
+                // via `stop_tail_samples`; only the PDC rings are cleared.
+                runtime.reset_pdc_delay_lines();
             }
             EngineCommand::Seek { position_seconds } => {
                 let sr = shared.sample_rate.load(Ordering::Relaxed) as f64;
