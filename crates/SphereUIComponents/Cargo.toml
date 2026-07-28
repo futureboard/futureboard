@@ -79,6 +79,8 @@ sphere-midi-service.workspace = true
 sphere-soundfont-player.workspace = true
 # Cross-platform user directories for the file browser default location.
 dirs.workspace = true
+# Reading other DAWs' XML project files (Cubase track archives).
+roxmltree.workspace = true
 # Menu manifest is shared with Electron/Web via a generated JSON file.
 serde.workspace = true
 serde_json.workspace = true

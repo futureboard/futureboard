@@ -122,8 +122,17 @@ pub fn save_project(project: &mut FutureboardProject, path: &Path) -> Result<(),
 }
 
 /// Loads a `FutureboardProject` from `path`.
+///
+/// Files another DAW wrote (see [`super::import`]) are parsed by their importer
+/// instead of the native decoder; everything downstream sees the same project
+/// model either way.
 pub fn load_project(path: &Path) -> Result<FutureboardProject, ProjectError> {
     project_load_log(format_args!("opening: {}", path.display()));
+    if super::import::is_import_path(path) {
+        let project = super::import::import_project(path)?;
+        project_load_log(format_args!("imported ok: {}", project.name));
+        return Ok(project);
+    }
     let bytes = fs::read(path).map_err(|error| {
         project_load_log(format_args!("failed: I/O error: {error}"));
         ProjectError::Io(error)
@@ -140,9 +149,16 @@ pub fn verify_project_file(path: &Path) -> Result<(), ProjectError> {
 }
 
 /// Cheaply validate a project file on disk by reading only its header.
+///
+/// Importable files have no Futureboard header; they are sniffed instead and
+/// report version `0`, which callers only log.
 pub fn validate_project_file(path: &Path) -> Result<u32, ProjectError> {
     use std::io::Read;
     project_load_log(format_args!("validating header: {}", path.display()));
+    if super::import::is_import_path(path) {
+        super::import::validate_import(path)?;
+        return Ok(0);
+    }
     let mut file = fs::File::open(path)?;
     let mut header = [0u8; 20];
     if file.read_exact(&mut header).is_err() {

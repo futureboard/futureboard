@@ -7523,6 +7523,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "rodharerist",
+ "roxmltree",
  "serde",
  "serde_json",
  "smallvec 1.15.1",

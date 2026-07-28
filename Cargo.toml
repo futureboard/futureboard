@@ -233,6 +233,9 @@ anyhow = "1.0.86"
 bitflags = "2.6.0"
 chrono = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2.7.0", features = ["serde"] }
+# Read-only DOM parser for importing other DAWs' XML project files
+# (`crates/SphereUIComponents/src/project/import`).
+roxmltree = "0.20"
 schemars = { version = "1.0", features = ["indexmap2"] }
 semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
