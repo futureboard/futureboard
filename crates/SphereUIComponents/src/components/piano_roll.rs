@@ -4544,6 +4544,11 @@ impl PianoRoll {
             gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             gpui::ScrollDelta::Lines(p) => (p.x * 36.0, p.y * 36.0),
         };
+        // Wheel up is a *positive* delta on every platform. The zoom helpers
+        // multiply by the factor, so wheel up must yield a factor above 1
+        // (zoom in) — the exponent is deliberately not negated. The scroll
+        // branches below do subtract it, because panning maps wheel motion onto
+        // the content origin rather than onto a scale.
         // Alt + wheel = Zoom Y (independent of Zoom X).
         if event.modifiers.alt && !(event.modifiers.control || event.modifiers.platform) {
             let (_, view_h) = self.grid_view_size();
@@ -4551,7 +4556,7 @@ impl PianoRoll {
                 .grid_local(event.position)
                 .map(|(_, ly)| ly)
                 .unwrap_or(view_h * 0.5);
-            let factor = (1.0022_f32).powf(-dy);
+            let factor = (1.0022_f32).powf(dy);
             self.zoom_row_h_around(factor, anchor_y, cx);
             return;
         }
@@ -4563,7 +4568,7 @@ impl PianoRoll {
                 .grid_local(event.position)
                 .map(|(lx, _)| lx)
                 .unwrap_or(view_w * 0.5);
-            let factor = (1.0022_f32).powf(-dy);
+            let factor = (1.0022_f32).powf(dy);
             self.zoom_ppb_around(factor, anchor_x, cx);
             return;
         }
