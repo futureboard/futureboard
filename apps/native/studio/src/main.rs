@@ -56,22 +56,14 @@ fn main() {
     // app-visible plugin window from spawning a stray taskbar identity.
     sphere_ui_components::plugin_host_lifecycle::set_futureboard_app_user_model_id();
 
-    // Discord IPC is optional and never runs on the GPUI thread. Production
-    // builds can bake in FUTUREBOARD_DISCORD_CLIENT_ID; development builds may
-    // provide it at runtime. Missing Discord/config must not block app startup.
+    // Discord IPC is optional and never runs on the GPUI thread. The
+    // application ID resolves to Futureboard's own unless a build or runtime
+    // override points elsewhere, so a plain checkout gets Rich Presence without
+    // any local configuration. Missing Discord itself must not block startup.
     let discord_rpc_enabled = sphere_ui_components::settings::SettingsSchema::load_from_disk()
         .general
         .discord_rpc_enabled;
-    let discord_application_id = std::env::var("FUTUREBOARD_DISCORD_CLIENT_ID")
-        .ok()
-        .or_else(|| option_env!("FUTUREBOARD_DISCORD_CLIENT_ID").map(str::to_owned));
-    let discord_rpc = discord_application_id
-        .and_then(|application_id| {
-            sphere_discord_rpc::DiscordRpcConfig::from_application_id(
-                application_id,
-                env!("CARGO_PKG_VERSION"),
-            )
-        })
+    let discord_rpc = sphere_discord_rpc::DiscordRpcConfig::from_env(env!("CARGO_PKG_VERSION"))
         .and_then(|config| {
             match sphere_discord_rpc::DiscordRpc::start(
                 config,
