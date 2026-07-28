@@ -26,6 +26,7 @@ pub use echospace;
 pub use equz8;
 pub use fa2a;
 pub use fa76;
+pub use clipper67;
 pub use meowsyn;
 pub use wrapsynth;
 
@@ -40,6 +41,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         echospace::descriptor(),
         fa76::descriptor(),
         burnlimit::descriptor(),
+        clipper67::descriptor(),
         c1073::descriptor(),
         meowsyn::descriptor(),
         wrapsynth::descriptor(),
@@ -60,6 +62,7 @@ mod tests {
         assert!(ids.contains(&echospace::PLUGIN_ID));
         assert!(ids.contains(&fa76::PLUGIN_ID));
         assert!(ids.contains(&burnlimit::PLUGIN_ID));
+        assert!(ids.contains(&clipper67::PLUGIN_ID));
         assert!(ids.contains(&c1073::PLUGIN_ID));
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
         assert!(ids.contains(&wrapsynth::PLUGIN_ID));

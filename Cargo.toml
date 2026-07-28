@@ -34,6 +34,7 @@ members = [
     "crates/BuiltinAudioPlugins/crates/echospace",
     "crates/BuiltinAudioPlugins/crates/fa76",
     "crates/BuiltinAudioPlugins/crates/burnLimit",
+    "crates/BuiltinAudioPlugins/crates/67Clipper",
     "crates/BuiltinAudioPlugins/crates/c1073",
     "crates/BuiltinAudioPlugins/crates/meowsyn",
     "crates/BuiltinAudioPlugins/crates/wrapsynth",
@@ -101,6 +102,7 @@ fa2a = { path = "crates/BuiltinAudioPlugins/crates/fa2a" }
 echospace = { path = "crates/BuiltinAudioPlugins/crates/echospace" }
 fa76 = { path = "crates/BuiltinAudioPlugins/crates/fa76" }
 burnlimit = { path = "crates/BuiltinAudioPlugins/crates/burnLimit" }
+clipper67 = { path = "crates/BuiltinAudioPlugins/crates/67Clipper" }
 c1073 = { path = "crates/BuiltinAudioPlugins/crates/c1073" }
 meowsyn = { path = "crates/BuiltinAudioPlugins/crates/meowsyn" }
 wrapsynth = { path = "crates/BuiltinAudioPlugins/crates/wrapsynth" }

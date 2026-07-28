@@ -41,6 +41,7 @@ echospace.workspace = true
 fa2a.workspace = true
 fa76.workspace = true
 burnlimit.workspace = true
+clipper67.workspace = true
 wrapsynth.workspace = true
 # Analyser FFT for the bridged-insert spectrum (src/spectrum.rs). Already a
 # workspace dependency via rodharerist / SphereAudioProcessor — no new tree.

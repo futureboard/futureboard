@@ -78,6 +78,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         fa2a::ui::UI_ORIGIN => fa2a::ui_param_index(param_id),
         fa76::ui::UI_ORIGIN => fa76::ui_param_index(param_id),
         burnlimit::ui::UI_ORIGIN => burnlimit::ui_param_index(param_id),
+        clipper67::ui::UI_ORIGIN => clipper67::ui_param_index(param_id),
         wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_index(param_id),
         _ => None,
     }
@@ -120,6 +121,7 @@ mod state_mirror {
         Fa2a(Box<fa2a::Params>),
         Fa76(Box<fa76::Params>),
         BurnLimit(Box<burnlimit::Params>),
+        Clipper67(Box<clipper67::Params>),
         WrapSynth(Box<wrapsynth::Params>),
     }
 
@@ -133,6 +135,7 @@ mod state_mirror {
                 Self::Fa2a(_) => fa2a::ui::UI_ORIGIN,
                 Self::Fa76(_) => fa76::ui::UI_ORIGIN,
                 Self::BurnLimit(_) => burnlimit::ui::UI_ORIGIN,
+                Self::Clipper67(_) => clipper67::ui::UI_ORIGIN,
                 Self::WrapSynth(_) => wrapsynth::ui::UI_ORIGIN,
             }
         }
@@ -154,6 +157,9 @@ mod state_mirror {
                 fa76::ui::UI_ORIGIN => Some(Self::Fa76(Box::new(fa76::default_params()))),
                 burnlimit::ui::UI_ORIGIN => {
                     Some(Self::BurnLimit(Box::new(burnlimit::default_params())))
+                }
+                clipper67::ui::UI_ORIGIN => {
+                    Some(Self::Clipper67(Box::new(clipper67::default_params())))
                 }
                 wrapsynth::ui::UI_ORIGIN => {
                     Some(Self::WrapSynth(Box::new(wrapsynth::default_params())))
@@ -199,6 +205,7 @@ mod state_mirror {
             fa2a::ui::UI_ORIGIN => fa2a::ui_param_id(wire_index).is_some(),
             fa76::ui::UI_ORIGIN => fa76::ui_param_id(wire_index).is_some(),
             burnlimit::ui::UI_ORIGIN => burnlimit::ui_param_id(wire_index).is_some(),
+            clipper67::ui::UI_ORIGIN => clipper67::ui_param_id(wire_index).is_some(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_id(wire_index).is_some(),
             _ => false,
         };
@@ -231,6 +238,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::BurnLimit(params)) => {
                 let _ = burnlimit::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::Clipper67(params)) => {
+                let _ = clipper67::ipc::apply_wire_param(params, wire_index, value);
             }
             Some(BuiltinParams::WrapSynth(params)) => {
                 let _ = wrapsynth::ipc::apply_wire_param(params, wire_index, value);
@@ -270,6 +280,9 @@ mod state_mirror {
             burnlimit::ui::UI_ORIGIN => burnlimit::ipc::BurnLimitState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::BurnLimit(Box::new(state.params))),
+            clipper67::ui::UI_ORIGIN => clipper67::ipc::Clipper67State::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Clipper67(Box::new(state.params))),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ipc::WrapSynthState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::WrapSynth(Box::new(state.params))),
@@ -329,6 +342,11 @@ mod state_mirror {
             }
             BuiltinParams::BurnLimit(params) if origin == burnlimit::ui::UI_ORIGIN => {
                 burnlimit::ipc::BurnLimitState::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            BuiltinParams::Clipper67(params) if origin == clipper67::ui::UI_ORIGIN => {
+                clipper67::ipc::Clipper67State::new((**params).clone())
                     .to_json()
                     .ok()?
             }
@@ -395,6 +413,12 @@ mod state_mirror {
                 burnlimit::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| burnlimit::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::Clipper67(params)) if origin == clipper67::ui::UI_ORIGIN => {
+                clipper67::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| clipper67::ui_param_index(id).map(|i| (i, value)))
                     .collect()
             }
             Some(BuiltinParams::WrapSynth(params)) if origin == wrapsynth::ui::UI_ORIGIN => {
@@ -789,6 +813,7 @@ mod imp {
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::resolve_ui_asset(path)?,
             fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::resolve_ui_asset(path)?,
             burnlimit::ui::UI_ORIGIN => burnlimit::ui::BurnLimitUi::resolve_ui_asset(path)?,
+            clipper67::ui::UI_ORIGIN => clipper67::ui::Clipper67Ui::resolve_ui_asset(path)?,
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::resolve_ui_asset(path)?,
             _ => return None,
         };
@@ -812,6 +837,7 @@ mod imp {
                 | fa2a::ui::UI_ORIGIN
                 | fa76::ui::UI_ORIGIN
                 | burnlimit::ui::UI_ORIGIN
+                | clipper67::ui::UI_ORIGIN
                 | wrapsynth::ui::UI_ORIGIN
         )
     }
@@ -826,6 +852,7 @@ mod imp {
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::is_embedded(),
             fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::is_embedded(),
             burnlimit::ui::UI_ORIGIN => burnlimit::ui::BurnLimitUi::is_embedded(),
+            clipper67::ui::UI_ORIGIN => clipper67::ui::Clipper67Ui::is_embedded(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::is_embedded(),
             _ => false,
         }
@@ -1662,6 +1689,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("builtin:fa2a"), Some("fa2a"));
         assert_eq!(origin_for_plugin_id("builtin:fa76"), Some("fa76"));
         assert_eq!(origin_for_plugin_id("builtin:burnlimit"), Some("burnlimit"));
+        assert_eq!(origin_for_plugin_id("builtin:clipper67"), Some("clipper67"));
     }
 
     /// Regression guard for the bug that left the editor unopenable in the real
@@ -1676,6 +1704,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("fa2a"), Some("fa2a"));
         assert_eq!(origin_for_plugin_id("fa76"), Some("fa76"));
         assert_eq!(origin_for_plugin_id("burnlimit"), Some("burnlimit"));
+        assert_eq!(origin_for_plugin_id("clipper67"), Some("clipper67"));
         assert_eq!(
             origin_for_plugin_id("rodharerist"),
             origin_for_plugin_id("builtin:rodharerist"),
