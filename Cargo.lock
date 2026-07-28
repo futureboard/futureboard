@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "builtin_dsp_core",
  "builtin_ui_embed",
+ "burnlimit",
  "c1073",
  "compresser",
  "echospace",
@@ -1114,6 +1115,16 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+
+[[package]]
+name = "burnlimit"
+version = "0.1.0"
+dependencies = [
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "bytemuck"
@@ -7424,6 +7435,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "builtin_dsp_core",
+ "burnlimit",
  "cc",
  "cpal",
  "crossbeam-channel",
@@ -7484,6 +7496,7 @@ dependencies = [
  "SphereWebView",
  "base64",
  "builtin_ui_embed",
+ "burnlimit",
  "crc32fast",
  "dirs 5.0.1",
  "echospace",
