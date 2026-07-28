@@ -21,6 +21,7 @@ pub use builtin_dsp_core as core;
 
 pub use c1073;
 pub use compresser;
+pub use burnlimit;
 pub use echospace;
 pub use equz8;
 pub use fa2a;
@@ -38,6 +39,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         fa2a::descriptor(),
         echospace::descriptor(),
         fa76::descriptor(),
+        burnlimit::descriptor(),
         c1073::descriptor(),
         meowsyn::descriptor(),
         wrapsynth::descriptor(),
@@ -57,6 +59,7 @@ mod tests {
         assert!(ids.contains(&fa2a::PLUGIN_ID));
         assert!(ids.contains(&echospace::PLUGIN_ID));
         assert!(ids.contains(&fa76::PLUGIN_ID));
+        assert!(ids.contains(&burnlimit::PLUGIN_ID));
         assert!(ids.contains(&c1073::PLUGIN_ID));
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
         assert!(ids.contains(&wrapsynth::PLUGIN_ID));
