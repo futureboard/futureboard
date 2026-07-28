@@ -10,6 +10,7 @@ dependencies = [
  "builtin_ui_embed",
  "burnlimit",
  "c1073",
+ "clipper67",
  "compresser",
  "echospace",
  "equz8",
@@ -1415,6 +1416,16 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "clipper67"
+version = "0.1.0"
+dependencies = [
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "cmake"
@@ -7437,6 +7448,7 @@ dependencies = [
  "builtin_dsp_core",
  "burnlimit",
  "cc",
+ "clipper67",
  "cpal",
  "crossbeam-channel",
  "dirs 5.0.1",
@@ -7497,6 +7509,7 @@ dependencies = [
  "base64",
  "builtin_ui_embed",
  "burnlimit",
+ "clipper67",
  "crc32fast",
  "dirs 5.0.1",
  "echospace",

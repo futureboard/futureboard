@@ -32,6 +32,7 @@ builtin-plugin-editor = [
     "dep:fa2a",
     "dep:fa76",
     "dep:burnlimit",
+    "dep:clipper67",
     "dep:wrapsynth",
     "dep:builtin-ui-embed",
 ]
@@ -69,6 +70,7 @@ echospace = { workspace = true, optional = true }
 fa2a = { workspace = true, optional = true }
 fa76 = { workspace = true, optional = true }
 burnlimit = { workspace = true, optional = true }
+clipper67 = { workspace = true, optional = true }
 wrapsynth = { workspace = true, optional = true }
 builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
