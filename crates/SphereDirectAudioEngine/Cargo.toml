@@ -87,6 +87,17 @@ windows.workspace = true
 # drivers (see src/asio_registry.rs).
 windows-registry.workspace = true
 
+# ── Linux-only: realtime scheduling for the ALSA callback thread ─────────────
+#
+# cpal spawns `cpal_alsa_out` at plain SCHED_OTHER, so the audio thread loses
+# against the compositor and plugin editors. See `rt_priority` in
+# src/backend/cpal_backend.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+# RealtimeKit is the only way to get SCHED_FIFO on a stock desktop, where
+# RLIMIT_RTPRIO is 0 and the direct syscall is refused.
+zbus.workspace = true
+
 # ── Build dependencies ───────────────────────────────────────────────────────
 [build-dependencies]
 # Required when building the N-API addon path.

@@ -8,6 +8,18 @@
 
 use std::sync::Arc;
 
+/// Largest block, in frames, that one bridge exchange can carry.
+///
+/// Part of the contract rather than the implementation: the shared-memory
+/// region is sized from it, and [`PluginBridgeSink::request_block`] clamps to
+/// it, so a callback block larger than this loses its tail — bridged plugin
+/// audio would be silently truncated. Backends must therefore keep the device
+/// buffer they negotiate at or below this, since a callback can be handed the
+/// device's entire ring in one go.
+///
+/// `sphere-plugin-host` asserts its own `MAX_BLOCK_FRAMES` matches this.
+pub const MAX_BRIDGE_BLOCK_FRAMES: usize = 2048;
+
 /// One-block exchange with the external plugin host, called from the audio
 /// callback. The engine reads the host's previously produced block (one-block
 /// latency) and requests the next one — it never spins waiting for the host.
