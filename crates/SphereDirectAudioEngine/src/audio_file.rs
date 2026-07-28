@@ -32,6 +32,15 @@ pub struct AudioFileBuffer {
     pub samples: Vec<f32>,
 }
 
+/// Declick ramp lengths for a browser audition, in seconds.
+///
+/// Every Browser selection starts a voice from an arbitrary sample value and
+/// every new selection cuts the previous one mid-waveform. Without these ramps
+/// each step through a folder produces a click, which is what the preview
+/// mostly sounds like when walking a directory with the arrow keys.
+const AUDITION_ATTACK_SECONDS: f32 = 0.002;
+const AUDITION_RELEASE_SECONDS: f32 = 0.008;
+
 /// A pre-decoded, one-shot browser audition voice. It owns immutable PCM data
 /// prepared off the audio thread; rendering only advances a cursor and mixes
 /// samples, so no callback allocation, locks, or I/O are required.
@@ -39,14 +48,41 @@ pub struct AudioFileBuffer {
 pub struct AudioFileAudition {
     source: Box<AudioFileBuffer>,
     source_frame: f64,
+    /// Source frames consumed per output frame (source rate / device rate).
+    step: f64,
+    /// Declick envelope: current gain plus its per-output-frame increment.
+    gain: f32,
+    gain_step: f32,
+    /// Source frame at which the end-of-file fade starts, and the reciprocal of
+    /// that fade's length — precomputed so the mix loop stays division-free.
+    tail_start: f64,
+    inv_tail_len: f64,
 }
 
 impl AudioFileAudition {
-    pub fn new(source: Box<AudioFileBuffer>) -> Self {
+    pub fn new(source: Box<AudioFileBuffer>, output_rate: u32) -> Self {
+        let rate = output_rate.max(1);
+        let step = source.sample_rate.max(1) as f64 / rate as f64;
+        // The tail fade is measured in source frames, so it stays the same
+        // audible length whatever the resample ratio is.
+        let tail_len = (AUDITION_RELEASE_SECONDS as f64 * source.sample_rate.max(1) as f64)
+            .min(source.frames as f64)
+            .max(1.0);
         Self {
-            source,
             source_frame: 0.0,
+            step,
+            gain: 0.0,
+            gain_step: 1.0 / (AUDITION_ATTACK_SECONDS * rate as f32).max(1.0),
+            tail_start: source.frames as f64 - tail_len,
+            inv_tail_len: 1.0 / tail_len,
+            source,
         }
+    }
+
+    /// Start fading this voice out; it retires once the ramp reaches silence.
+    pub fn begin_release(&mut self, output_rate: u32) {
+        let frames = (AUDITION_RELEASE_SECONDS * output_rate.max(1) as f32).max(1.0);
+        self.gain_step = -1.0 / frames;
     }
 
     pub fn into_source(self) -> Box<AudioFileBuffer> {
@@ -54,42 +90,110 @@ impl AudioFileAudition {
     }
 
     /// Mix this source into an interleaved output block. Returns `true` once
-    /// playback reaches EOF. Mono sources are duplicated; source channels
-    /// beyond stereo are downmixed by taking their first stereo pair.
+    /// the voice is finished (EOF, or a release ramp that reached silence).
+    /// Mono sources are duplicated; source channels beyond stereo are downmixed
+    /// by taking their first stereo pair.
     #[inline]
-    pub fn mix_into(
-        &mut self,
-        output: &mut [f32],
-        output_channels: usize,
-        output_rate: u32,
-    ) -> bool {
+    pub fn mix_into(&mut self, output: &mut [f32], output_channels: usize) -> bool {
         if output_channels == 0 || self.source.channels == 0 || self.source.frames == 0 {
             return true;
         }
-        let step = self.source.sample_rate.max(1) as f64 / output_rate.max(1) as f64;
         for frame in output.chunks_mut(output_channels) {
             let source_index = self.source_frame as usize;
             if source_index >= self.source.frames {
                 return true;
+            }
+            self.gain = (self.gain + self.gain_step).clamp(0.0, 1.0);
+            if self.gain <= 0.0 && self.gain_step < 0.0 {
+                return true; // release ramp finished
             }
             let next_index = (source_index + 1).min(self.source.frames - 1);
             let fraction = (self.source_frame - source_index as f64) as f32;
             let sample_at = |frame_index: usize, channel: usize| {
                 self.source.samples[frame_index * self.source.channels + channel]
             };
+            let tail = if self.source_frame > self.tail_start {
+                (((self.source.frames as f64 - self.source_frame) * self.inv_tail_len) as f32)
+                    .clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let env = self.gain * tail;
             let left = sample_at(source_index, 0)
                 + (sample_at(next_index, 0) - sample_at(source_index, 0)) * fraction;
             let right_channel = if self.source.channels > 1 { 1 } else { 0 };
             let right = sample_at(source_index, right_channel)
                 + (sample_at(next_index, right_channel) - sample_at(source_index, right_channel))
                     * fraction;
-            frame[0] = (frame[0] + left).clamp(-1.0, 1.0);
+            frame[0] = (frame[0] + left * env).clamp(-1.0, 1.0);
             if output_channels > 1 {
-                frame[1] = (frame[1] + right).clamp(-1.0, 1.0);
+                frame[1] = (frame[1] + right * env).clamp(-1.0, 1.0);
             }
-            self.source_frame += step;
+            self.source_frame += self.step;
         }
         self.source_frame >= self.source.frames as f64
+    }
+}
+
+/// The realtime side of the Browser sample preview: the voice currently
+/// auditioning plus at most one voice fading out because it was replaced or
+/// stopped. Owned by the render callback, so both slots are plain `Option`s and
+/// finished sources leave through the graveyard rather than being freed here.
+#[derive(Debug, Default)]
+pub struct AuditionPlayer {
+    current: Option<AudioFileAudition>,
+    releasing: Option<AudioFileAudition>,
+}
+
+impl AuditionPlayer {
+    /// Audition `source`, fading out whatever was playing instead of cutting it.
+    pub fn start(&mut self, source: Box<AudioFileBuffer>, output_rate: u32) {
+        let voice = AudioFileAudition::new(source, output_rate);
+        if let Some(previous) = self.current.replace(voice) {
+            self.release(previous, output_rate);
+        }
+    }
+
+    /// Stop the current audition through the same fade-out.
+    pub fn stop(&mut self, output_rate: u32) {
+        if let Some(previous) = self.current.take() {
+            self.release(previous, output_rate);
+        }
+    }
+
+    /// `true` when nothing is playing or fading — the render callback uses this
+    /// to decide whether the graph still has to be woken while stopped.
+    pub fn is_idle(&self) -> bool {
+        self.current.is_none() && self.releasing.is_none()
+    }
+
+    /// Mix both voices into an interleaved output block and retire whichever
+    /// finished during it.
+    #[inline]
+    pub fn mix_into(&mut self, output: &mut [f32], output_channels: usize) {
+        if let Some(voice) = self.current.as_mut() {
+            if voice.mix_into(output, output_channels) {
+                Self::retire(self.current.take());
+            }
+        }
+        if let Some(voice) = self.releasing.as_mut() {
+            if voice.mix_into(output, output_channels) {
+                Self::retire(self.releasing.take());
+            }
+        }
+    }
+
+    fn release(&mut self, mut voice: AudioFileAudition, output_rate: u32) {
+        voice.begin_release(output_rate);
+        // Only one fade-out slot: a third selection inside 8 ms drops the
+        // oldest, which is quieter than letting the queue grow.
+        Self::retire(self.releasing.replace(voice));
+    }
+
+    fn retire(voice: Option<AudioFileAudition>) {
+        if let Some(voice) = voice {
+            crate::graveyard::retire_audio_file(voice.into_source());
+        }
     }
 }
 
@@ -1313,6 +1417,108 @@ fn clamp_i16_as_i32(value: f32) -> i32 {
     (value.clamp(-1.0, 1.0) * 32767.0)
         .round()
         .clamp(-32768.0, 32767.0) as i32
+}
+
+#[cfg(test)]
+mod audition_tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+
+    /// Constant full-scale stereo source: any envelope shows up directly in the
+    /// mixed output, so the declick ramps are readable from the block.
+    fn dc_source(seconds: f32) -> Box<AudioFileBuffer> {
+        let frames = (RATE as f32 * seconds) as usize;
+        Box::new(AudioFileBuffer {
+            sample_rate: RATE,
+            channels: 2,
+            frames,
+            samples: vec![1.0; frames * 2],
+        })
+    }
+
+    fn mix_block(player: &mut AuditionPlayer, frames: usize) -> Vec<f32> {
+        let mut block = vec![0.0f32; frames * 2];
+        player.mix_into(&mut block, 2);
+        block
+    }
+
+    #[test]
+    fn audition_ramps_in_rather_than_jumping_to_full_scale() {
+        let mut player = AuditionPlayer::default();
+        player.start(dc_source(1.0), RATE);
+        let attack_frames = (AUDITION_ATTACK_SECONDS * RATE as f32) as usize;
+
+        let block = mix_block(&mut player, 8);
+        assert!(
+            block[0] > 0.0 && block[0] < 0.05,
+            "first frame must start on the ramp, got {}",
+            block[0]
+        );
+
+        let settled = mix_block(&mut player, attack_frames);
+        let last = settled[settled.len() - 1];
+        assert!(
+            (last - 1.0).abs() < 1e-6,
+            "ramp must reach unity gain, got {last}"
+        );
+    }
+
+    #[test]
+    fn replacing_an_audition_fades_the_old_voice_instead_of_cutting_it() {
+        let mut player = AuditionPlayer::default();
+        player.start(dc_source(1.0), RATE);
+        let _ = mix_block(&mut player, 4_800); // let the first voice settle
+
+        player.start(dc_source(1.0), RATE);
+        let block = mix_block(&mut player, 8);
+        // The retiring voice is still audible (near unity) while the new one
+        // ramps up, so the sum stays above the new voice on its own.
+        assert!(
+            block[0] > 0.9,
+            "replaced voice must fade, not cut, got {}",
+            block[0]
+        );
+    }
+
+    #[test]
+    fn stopped_audition_releases_to_silence_and_goes_idle() {
+        let mut player = AuditionPlayer::default();
+        player.start(dc_source(1.0), RATE);
+        let _ = mix_block(&mut player, 4_800);
+
+        player.stop(RATE);
+        assert!(!player.is_idle(), "release voice must keep the mixer awake");
+
+        let release_frames = (AUDITION_RELEASE_SECONDS * RATE as f32) as usize + 2;
+        let block = mix_block(&mut player, release_frames);
+        assert!(
+            block[0] > 0.9,
+            "release must start from the current gain, got {}",
+            block[0]
+        );
+        assert!(
+            block[block.len() - 1].abs() < 1e-6,
+            "release must reach silence, got {}",
+            block[block.len() - 1]
+        );
+        assert!(player.is_idle(), "finished release must retire the voice");
+    }
+
+    #[test]
+    fn source_end_fades_out_before_the_last_frame() {
+        let mut player = AuditionPlayer::default();
+        // 20 ms source: long enough to pass the attack, short enough that the
+        // tail fade covers the end of a single mixed block.
+        player.start(dc_source(0.02), RATE);
+        let block = mix_block(&mut player, (RATE as f32 * 0.02) as usize);
+        let last = block[block.len() - 2];
+        assert!(
+            last.abs() < 0.2,
+            "end of file must fade out, got {last} on the last frame"
+        );
+        assert!(player.is_idle(), "finished source must retire the voice");
+    }
 }
 
 #[cfg(test)]
