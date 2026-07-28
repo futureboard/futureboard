@@ -21,7 +21,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use sphere_audio_plugins::{canonical_plugin_id, process_stereo_sample};
 
-use crate::audio_file::AudioFileAudition;
+use crate::audio_file::AuditionPlayer;
 use crate::audio_graph::is_routing_track_type;
 use crate::audio_source::{sample_source_stereo, ClipAudioSource};
 #[cfg(target_os = "windows")]
@@ -489,6 +489,11 @@ pub struct SharedState {
     /// Monotonic generation of the latency-compensation graph (bumped on PDC
     /// toggle). Stamped into the offline-export snapshot for graph-version parity.
     pub latency_graph_version: AtomicU64,
+    /// Monotonic id of the newest Browser sample-preview request (control →
+    /// audio). Decodes run off the realtime thread and finish out of order, so
+    /// both the decode worker and the callback compare against this before a
+    /// source is allowed to start playing.
+    pub audition_request_token: AtomicU64,
 }
 
 impl Default for SharedState {
@@ -561,6 +566,7 @@ impl Default for SharedState {
             device_lost: AtomicBool::new(false),
             pdc_enabled: AtomicBool::new(true),
             latency_graph_version: AtomicU64::new(1),
+            audition_request_token: AtomicU64::new(0),
         }
     }
 }
@@ -756,6 +762,24 @@ pub struct EngineInner {
     // Settings input test reads the ASIO session peak instead of owning a
     // stream (true only between start/stop_input_test on the ASIO backend).
     input_test_uses_session: std::sync::atomic::AtomicBool,
+
+    // Browser sample-preview decode requests (see `AuditionRequests`).
+    audition_requests: Arc<AuditionRequests>,
+}
+
+/// Single-slot mailbox for Browser sample-preview decode requests.
+///
+/// Arrow-keying through a folder selects files far faster than they decode, and
+/// a thread per selection let those decodes finish in any order: an older,
+/// slower one could land last and audition a sample the user had already moved
+/// past. One worker drains this mailbox, only the newest request survives in
+/// it, and every request carries the token the callback checks before playing.
+#[derive(Default)]
+struct AuditionRequests {
+    /// Newest un-decoded request; replaced (not queued) by a later selection.
+    pending: Mutex<Option<(u64, String)>>,
+    ready: parking_lot::Condvar,
+    worker_running: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -820,6 +844,7 @@ impl EngineInner {
             live_input: Mutex::new(None),
             asio_caps: Mutex::new(None),
             input_test_uses_session: std::sync::atomic::AtomicBool::new(false),
+            audition_requests: Arc::new(AuditionRequests::default()),
         }
     }
 
@@ -3665,30 +3690,112 @@ impl EngineInner {
             .map_err(|e| SphereAudioError::NativeError(e.to_string()))
     }
 
+    /// Queue a Browser sample preview. The decode itself runs on the single
+    /// audition worker, so a burst of selections collapses to the newest one
+    /// instead of racing a thread per click.
     pub(crate) fn audition_file_async(
         self: &Arc<Self>,
         path: String,
     ) -> Result<(), SphereAudioError> {
         self.cmd_sender().ok_or(SphereAudioError::EngineNotOpen)?;
-        let engine = Arc::clone(self);
-        std::thread::Builder::new()
-            .name("browser-audition-decode".to_string())
-            .spawn(move || match crate::audio_file::load_audio_file(&path) {
-                Ok(source) => {
-                    if let Err(error) = engine.send_command(EngineCommand::StartAudition {
-                        source: Box::new(source),
-                    }) {
-                        eprintln!("[audition] could not start preview for {path}: {error}");
-                    }
-                }
-                Err(error) => eprintln!("[audition] could not decode {path}: {error}"),
-            })
-            .map_err(|error| SphereAudioError::NativeError(error.to_string()))?;
-        Ok(())
+        // Retiring a previous preview is the callback's first graveyard use in
+        // a session that never loaded a project; prime it from here so that
+        // enqueue can't spawn the drop thread on the audio thread.
+        crate::graveyard::prime();
+        let token = self
+            .shared
+            .audition_request_token
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        *self.audition_requests.pending.lock() = Some((token, path));
+        self.audition_requests.ready.notify_one();
+        self.ensure_audition_worker()
     }
 
     pub(crate) fn stop_audition(&self) -> Result<(), SphereAudioError> {
+        // Invalidate any decode still in flight so it cannot start playing
+        // after the user asked for silence.
+        self.shared
+            .audition_request_token
+            .fetch_add(1, Ordering::Relaxed);
+        self.audition_requests.pending.lock().take();
         self.send_command(EngineCommand::StopAudition)
+    }
+
+    fn ensure_audition_worker(self: &Arc<Self>) -> Result<(), SphereAudioError> {
+        if self
+            .audition_requests
+            .worker_running
+            .swap(true, Ordering::AcqRel)
+        {
+            return Ok(()); // already draining the mailbox
+        }
+        let requests = Arc::clone(&self.audition_requests);
+        let engine = Arc::downgrade(self);
+        match std::thread::Builder::new()
+            .name("browser-audition-decode".to_string())
+            .spawn(move || audition_decode_worker(requests, engine))
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.audition_requests
+                    .worker_running
+                    .store(false, Ordering::Release);
+                Err(SphereAudioError::NativeError(error.to_string()))
+            }
+        }
+    }
+}
+
+/// Decode the newest queued Browser preview and hand it to the callback.
+///
+/// Requests superseded before or during their decode are dropped here rather
+/// than sent, and the ones that do get sent still carry their token so the
+/// callback can reject a source that lost the race after this check.
+fn audition_decode_worker(requests: Arc<AuditionRequests>, engine: std::sync::Weak<EngineInner>) {
+    loop {
+        let next = {
+            let mut pending = requests.pending.lock();
+            while pending.is_none() {
+                // Timed waits let the worker notice a dropped engine instead of
+                // parking forever on a mailbox nobody can fill again.
+                if requests
+                    .ready
+                    .wait_for(&mut pending, std::time::Duration::from_millis(500))
+                    .timed_out()
+                    && engine.strong_count() == 0
+                {
+                    requests.worker_running.store(false, Ordering::Release);
+                    return;
+                }
+            }
+            pending.take()
+        };
+        let Some((token, path)) = next else {
+            continue;
+        };
+        let Some(engine) = engine.upgrade() else {
+            requests.worker_running.store(false, Ordering::Release);
+            return;
+        };
+        let is_current = || token == engine.shared.audition_request_token.load(Ordering::Relaxed);
+        if !is_current() {
+            continue; // superseded while it sat in the mailbox — never decode it
+        }
+        match crate::audio_file::load_audio_file(&path) {
+            Ok(source) => {
+                if !is_current() {
+                    continue; // a newer selection landed while this decoded
+                }
+                if let Err(error) = engine.send_command(EngineCommand::StartAudition {
+                    token,
+                    source: Box::new(source),
+                }) {
+                    eprintln!("[audition] could not start preview for {path}: {error}");
+                }
+            }
+            Err(error) => eprintln!("[audition] could not decode {path}: {error}"),
+        }
     }
 }
 
@@ -3867,7 +3974,7 @@ where
     let mut render_path_logged = false;
     let mut block_scratch: Vec<f32> = Vec::new();
     let mut metronome = crate::backend::render::LocalAudioState::new(sr);
-    let mut audition: Option<AudioFileAudition> = None;
+    let mut audition = AuditionPlayer::default();
 
     // Meter state with peak hold.
     let mut prev_peak_l = 0.0f32;
@@ -3971,15 +4078,20 @@ where
                             osc_l.set_frequency(frequency as f64);
                             osc_r.set_frequency(frequency as f64);
                         }
-                        EngineCommand::StartAudition { source } => {
-                            if let Some(old) = audition.replace(AudioFileAudition::new(source)) {
-                                crate::graveyard::retire_audio_file(old.into_source());
+                        EngineCommand::StartAudition { token, source } => {
+                            // Reject a decode the user has already moved past;
+                            // the source leaves through the graveyard so this
+                            // block never frees it on the audio thread.
+                            if token
+                                == shared.audition_request_token.load(Ordering::Relaxed)
+                            {
+                                audition.start(source, output_sample_rate);
+                            } else {
+                                crate::graveyard::retire_audio_file(source);
                             }
                         }
                         EngineCommand::StopAudition => {
-                            if let Some(old) = audition.take() {
-                                crate::graveyard::retire_audio_file(old.into_source());
-                            }
+                            audition.stop(output_sample_rate);
                         }
                         EngineCommand::StartTransport => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -4335,15 +4447,18 @@ where
                         .saturating_sub(frames_in_block);
                 }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
-                let audition_active = audition.is_some();
-                let preview_render_active = has_preview
+                let audition_active = !audition.is_idle();
+                // A Browser preview is mixed into the master output and needs
+                // nothing from the graph, so it is not a graph wake reason —
+                // see the DAUx path for the same split.
+                let graph_wake_active = has_preview
                     || pending_midi
                     || panic_flush
                     || bridge_preview_tail
                     || metronome.preview_tail_samples > 0
                     || metronome.stop_tail_samples > 0
-                    || bridge_editor_wakeup
-                    || audition_active;
+                    || bridge_editor_wakeup;
+                let preview_render_active = graph_wake_active || audition_active;
                 if preview_render_active
                     && !playing_local
                     && (has_preview || pending_midi || metronome.preview_tail_samples > 0)
@@ -4398,26 +4513,25 @@ where
                         block_scratch.resize(scratch_len, 0.0);
                     }
                     let scratch = &mut block_scratch[..scratch_len];
-                    frames = render_project_block_interleaved(
-                        &mut runtime,
-                        base_sample,
-                        master_vol,
-                        scratch,
-                        ch,
-                        playing_local,
-                        shared.time_sig_num.load(Ordering::Relaxed),
-                        shared.time_sig_den.load(Ordering::Relaxed),
-                        loop_bounds,
-                    );
-                    let audition_finished = audition
-                        .as_mut()
-                        .map(|audition| audition.mix_into(scratch, ch, runtime.sample_rate))
-                        .unwrap_or(false);
-                    if audition_finished {
-                        if let Some(audition) = audition.take() {
-                            crate::graveyard::retire_audio_file(audition.into_source());
-                        }
-                    }
+                    frames = if !playing_local && !graph_wake_active {
+                        // Audition-only block: the graph would render silence,
+                        // so zero the scratch instead of processing it.
+                        scratch.fill(0.0);
+                        frames_needed as u64
+                    } else {
+                        render_project_block_interleaved(
+                            &mut runtime,
+                            base_sample,
+                            master_vol,
+                            scratch,
+                            ch,
+                            playing_local,
+                            shared.time_sig_num.load(Ordering::Relaxed),
+                            shared.time_sig_den.load(Ordering::Relaxed),
+                            loop_bounds,
+                        )
+                    };
+                    audition.mix_into(scratch, ch);
                     if !render_path_logged {
                         render_path_logged = true;
                         if callback_debug_enabled() {

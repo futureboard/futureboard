@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::audio_file::AudioFileAudition;
+use crate::audio_file::AuditionPlayer;
 use crate::command::EngineCommand;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::engine::{SharedState, PEAK_DECAY, TEST_TONE_AMPLITUDE};
@@ -127,7 +127,7 @@ pub struct LocalAudioState {
     /// When true, metronome scheduling and output are suppressed (playhead scrub).
     pub metronome_suspended: bool,
     /// Standalone File Browser audition, owned by this stream/callback.
-    pub audition: Option<AudioFileAudition>,
+    pub audition: AuditionPlayer,
 }
 
 impl LocalAudioState {
@@ -167,7 +167,7 @@ impl LocalAudioState {
             metronome_click_phase_inc: 0.0,
             metronome_click_gain: 0.0,
             metronome_suspended: false,
-            audition: None,
+            audition: AuditionPlayer::default(),
         }
     }
 
@@ -467,15 +467,18 @@ pub fn drain_commands(
                 local.osc_l.set_frequency(frequency as f64);
                 local.osc_r.set_frequency(frequency as f64);
             }
-            EngineCommand::StartAudition { source } => {
-                if let Some(old) = local.audition.replace(AudioFileAudition::new(source)) {
-                    crate::graveyard::retire_audio_file(old.into_source());
+            EngineCommand::StartAudition { token, source } => {
+                // Reject a decode the user has already moved past; the source
+                // leaves through the graveyard so this block never frees it on
+                // the audio thread.
+                if token == shared.audition_request_token.load(Ordering::Relaxed) {
+                    local.audition.start(source, output_sample_rate);
+                } else {
+                    crate::graveyard::retire_audio_file(source);
                 }
             }
             EngineCommand::StopAudition => {
-                if let Some(old) = local.audition.take() {
-                    crate::graveyard::retire_audio_file(old.into_source());
-                }
+                local.audition.stop(output_sample_rate);
             }
             EngineCommand::StartTransport => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -992,16 +995,20 @@ fn fill_output_f32_inner(
     // so the plugin's own UI keyboard stays audible (parity with the legacy
     // callback path).
     let bridge_editor_wakeup = runtime.has_bridge_editor_active();
-    let audition_active = local.audition.is_some();
-    let preview_render_active = has_preview
+    let audition_active = !local.audition.is_idle();
+    // Reasons the *graph* has to run while the transport is stopped. A Browser
+    // preview is deliberately not one of them: it is a decoded buffer mixed
+    // into the master output, so pulling every track's plugin chain through a
+    // block of silence just to audition it only buys xruns on a loaded project.
+    let graph_wake_active = has_preview
         || pending_midi
         || panic_flush
         || bridge_preview_tail
         || bridge_editor_wakeup
         || local.preview_tail_samples > 0
         || local.stop_tail_samples > 0
-        || audition_active
         || software_monitoring;
+    let preview_render_active = graph_wake_active || audition_active;
     if preview_render_active
         && !transport_playing
         && (has_preview || pending_midi || local.preview_tail_samples > 0)
@@ -1060,7 +1067,12 @@ fn fill_output_f32_inner(
     };
 
     if channels >= 2 && (transport_playing || preview_render_active) {
-        frames = if software_monitoring && monitor_input_ready {
+        frames = if !transport_playing && !graph_wake_active {
+            // Audition-only block: the graph would render silence, so hand the
+            // rest of this callback a zeroed buffer instead of processing it.
+            data.fill(0.0);
+            frames_in_block
+        } else if software_monitoring && monitor_input_ready {
             render_project_block_interleaved_with_live_input(
                 runtime,
                 base_sample,
@@ -1087,16 +1099,6 @@ fn fill_output_f32_inner(
                 loop_bounds,
             )
         };
-        let audition_finished = local
-            .audition
-            .as_mut()
-            .map(|audition| audition.mix_into(data, channels, runtime.sample_rate))
-            .unwrap_or(false);
-        if audition_finished {
-            if let Some(audition) = local.audition.take() {
-                crate::graveyard::retire_audio_file(audition.into_source());
-            }
-        }
         if !local.render_path_logged {
             local.render_path_logged = true;
             if callback_debug_enabled() {
@@ -1223,6 +1225,12 @@ fn fill_output_f32_inner(
             *sample = v;
             frames += 1;
         }
+    }
+
+    // Browser sample preview, summed after the graph so it is metered like the
+    // rest of the output but never counts as bridge-tail activity above.
+    if channels >= 2 {
+        local.audition.mix_into(data, channels);
     }
 
     // Legacy master-bus bridge fallback (disabled by default — per-track routing

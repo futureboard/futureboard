@@ -119,7 +119,12 @@ pub enum EngineCommand {
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     },
     /// Play a pre-decoded standalone browser sample through the master output.
+    /// `token` is the `SharedState::audition_request_token` value this decode
+    /// was started for; the callback drops the source when a newer selection
+    /// has since been made, so a slow decode can never resurrect a sample the
+    /// user already moved past.
     StartAudition {
+        token: u64,
         source: Box<crate::audio_file::AudioFileBuffer>,
     },
     /// Stop the current standalone browser sample audition.
