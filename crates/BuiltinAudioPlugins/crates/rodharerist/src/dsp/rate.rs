@@ -16,8 +16,9 @@
 //! cabinet) is already heavily band-limited. Running the session at the
 //! capture's own rate is still the better-sounding option.
 //!
-//! Realtime: [`RateAdapter::run`] allocates nothing, locks nothing and never
-//! panics; every buffer is a fixed-size array built in [`RateAdapter::new`].
+//! Realtime: [`RateAdapter::run_block`] allocates nothing, locks nothing and
+//! never panics; every buffer is a fixed-size array or a `Vec` sized once in
+//! [`RateAdapter::new`] on the control thread.
 
 use builtin_dsp_core::make_eq_coefficients;
 
@@ -144,6 +145,14 @@ pub(super) struct RateAdapter {
     ratio: f32,
     /// Engine samples per inner sample (`1 / ratio`).
     inv_ratio: f32,
+    /// Inner-rate staging for [`Self::run_block`], preallocated for the largest
+    /// engine block the caller declared. The inner processor runs over this in
+    /// one call instead of once per inner sample.
+    inner_l: Vec<f32>,
+    inner_r: Vec<f32>,
+    /// How many inner samples each engine sample of the current block produced
+    /// — the bookkeeping that lets phase 3 replay the interleaving exactly.
+    produced: Vec<u8>,
     /// Gap at which the next inner sample is produced. Chosen so the read
     /// position stays inside the interpolatable window for every legal ratio.
     produce_at: f32,
@@ -168,7 +177,11 @@ impl RateAdapter {
     /// rate is not a usable positive number. A ratio of exactly 1 still builds
     /// an adapter — callers that want the zero-cost path skip construction
     /// themselves rather than paying for a pass-through here.
-    pub(super) fn new(inner_rate: f64, engine_rate: f64) -> Option<Self> {
+    ///
+    /// `max_block` is the largest engine block [`Self::run_block`] will be
+    /// handed; the inner-rate staging is sized for it here, on the control
+    /// thread, so the audio thread never grows a buffer.
+    pub(super) fn new(inner_rate: f64, engine_rate: f64, max_block: usize) -> Option<Self> {
         if !inner_rate.is_finite() || !engine_rate.is_finite() {
             return None;
         }
@@ -187,9 +200,16 @@ impl RateAdapter {
         // serves as long as `HIST` covers `MAX_RATIO`.
         let produce_at = 2.0 + inv_ratio;
         let guard_hz = GUARD_FRACTION * (inner_rate.min(engine_rate)) as f32;
+        // Worst case one engine block can ask for: every sample produces
+        // `ceil(ratio)` inner samples, plus the one the fractional carry can
+        // add at the block's first sample.
+        let inner_capacity = (max_block as f32 * ratio).ceil() as usize + 2;
         Some(Self {
             ratio,
             inv_ratio,
+            inner_l: vec![0.0; inner_capacity],
+            inner_r: vec![0.0; inner_capacity],
+            produced: vec![0; max_block],
             produce_at,
             in_gap: produce_at,
             out_gap: 3.0 + ratio,
@@ -216,12 +236,6 @@ impl RateAdapter {
         (self.produce_at + self.out_gap * self.inv_ratio).ceil() as usize
     }
 
-    /// Convert a count of inner-rate samples (e.g. a capture's receptive
-    /// field) into engine samples.
-    pub(super) fn inner_to_engine_samples(&self, inner_samples: usize) -> usize {
-        (inner_samples as f32 * self.inv_ratio).ceil() as usize
-    }
-
     pub(super) fn reset(&mut self) {
         self.in_hist_l.clear();
         self.in_hist_r.clear();
@@ -236,7 +250,11 @@ impl RateAdapter {
     /// One engine sample in, one engine sample out. `inner` is stepped zero or
     /// more times — whatever the ratio calls for at this position — and must
     /// itself be realtime-safe.
-    #[inline]
+    ///
+    /// Kept as the reference the block path is checked against
+    /// (`block_matches_the_per_sample_path`); production runs through
+    /// [`Self::run_block`], which lets the model process a whole chunk at once.
+    #[cfg(test)]
     pub(super) fn run<F>(&mut self, left: f32, right: f32, mut inner: F) -> (f32, f32)
     where
         F: FnMut(f32, f32) -> (f32, f32),
@@ -266,6 +284,72 @@ impl RateAdapter {
         self.out_gap -= self.ratio;
         out
     }
+
+    /// Block twin of [`Self::run`]: `n` engine samples in, `n` engine samples
+    /// out, with the inner processor run **once** over all the inner-rate
+    /// samples the block calls for instead of once per sample. `inner` is
+    /// handed the staged inner-rate buffers and processes them in place.
+    ///
+    /// Bit-for-bit equivalent to `n` calls of [`Self::run`] (see
+    /// `block_matches_the_per_sample_path`): the inner processor's *inputs*
+    /// depend only on the engine-side history, so staging them all up front
+    /// changes nothing, and phase 3 replays the output pushes and reads in the
+    /// original per-sample order. Allocation-free; `n` must not exceed the
+    /// `max_block` the adapter was built with.
+    pub(super) fn run_block<F>(
+        &mut self,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        mut inner: F,
+    ) where
+        F: FnMut(&mut [f32], &mut [f32]),
+    {
+        let n = in_l.len().min(self.produced.len());
+        let mut produced_total = 0usize;
+
+        // Phase 1: engine → inner. Interpolate every inner-rate input sample
+        // the block calls for, remembering how many belong to each engine
+        // sample so phase 3 can interleave the outputs identically.
+        for i in 0..n {
+            let (xl, xr) = self.pre_lp.run(in_l[i], in_r[i]);
+            self.in_hist_l.push(xl);
+            self.in_hist_r.push(xr);
+
+            self.in_gap += 1.0;
+            let mut count = 0u8;
+            while self.in_gap > self.produce_at && produced_total < self.inner_l.len() {
+                self.inner_l[produced_total] = self.in_hist_l.read(self.in_gap);
+                self.inner_r[produced_total] = self.in_hist_r.read(self.in_gap);
+                produced_total += 1;
+                count += 1;
+                self.in_gap -= self.inv_ratio;
+            }
+            self.produced[i] = count;
+        }
+
+        // Phase 2: one inner-rate run over the whole staged block.
+        inner(
+            &mut self.inner_l[..produced_total],
+            &mut self.inner_r[..produced_total],
+        );
+
+        // Phase 3: inner → engine, in the same order the per-sample path used.
+        let mut read = 0usize;
+        for i in 0..n {
+            for _ in 0..self.produced[i] {
+                let (ol, or) = self.post_lp.run(self.inner_l[read], self.inner_r[read]);
+                self.out_hist_l.push(ol);
+                self.out_hist_r.push(or);
+                self.out_gap += 1.0;
+                read += 1;
+            }
+            out_l[i] = self.out_hist_l.read(self.out_gap);
+            out_r[i] = self.out_hist_r.read(self.out_gap);
+            self.out_gap -= self.ratio;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,13 +369,13 @@ mod tests {
 
     #[test]
     fn rejects_unusable_and_out_of_range_ratios() {
-        assert!(RateAdapter::new(f64::NAN, 48_000.0).is_none());
-        assert!(RateAdapter::new(48_000.0, 0.0).is_none());
-        assert!(RateAdapter::new(-48_000.0, 48_000.0).is_none());
-        assert!(RateAdapter::new(8_000.0, 48_000.0).is_none()); // ratio 1/6
-        assert!(RateAdapter::new(384_000.0, 48_000.0).is_none()); // ratio 8
-        assert!(RateAdapter::new(12_000.0, 48_000.0).is_some()); // ratio 1/4
-        assert!(RateAdapter::new(192_000.0, 48_000.0).is_some()); // ratio 4
+        assert!(RateAdapter::new(f64::NAN, 48_000.0, 64).is_none());
+        assert!(RateAdapter::new(48_000.0, 0.0, 64).is_none());
+        assert!(RateAdapter::new(-48_000.0, 48_000.0, 64).is_none());
+        assert!(RateAdapter::new(8_000.0, 48_000.0, 64).is_none()); // ratio 1/6
+        assert!(RateAdapter::new(384_000.0, 48_000.0, 64).is_none()); // ratio 8
+        assert!(RateAdapter::new(12_000.0, 48_000.0, 64).is_some()); // ratio 1/4
+        assert!(RateAdapter::new(192_000.0, 48_000.0, 64).is_some()); // ratio 4
     }
 
     /// The inner processor must be stepped at the inner rate, on average, for
@@ -299,7 +383,7 @@ mod tests {
     #[test]
     fn steps_the_inner_processor_at_the_inner_rate() {
         for (inner_rate, engine_rate) in PAIRS {
-            let mut adapter = RateAdapter::new(inner_rate, engine_rate).expect("legal ratio");
+            let mut adapter = RateAdapter::new(inner_rate, engine_rate, 64).expect("legal ratio");
             let engine_samples = engine_rate as usize; // one second
             let mut inner_calls = 0usize;
             for _ in 0..engine_samples {
@@ -323,7 +407,7 @@ mod tests {
     #[test]
     fn a_sine_survives_the_round_trip_at_every_supported_pair() {
         for (inner_rate, engine_rate) in PAIRS {
-            let mut adapter = RateAdapter::new(inner_rate, engine_rate).expect("legal ratio");
+            let mut adapter = RateAdapter::new(inner_rate, engine_rate, 64).expect("legal ratio");
             let sr = engine_rate as f32;
             let freq = 440.0f32;
             let n = engine_rate as usize;
@@ -364,7 +448,7 @@ mod tests {
     fn content_above_the_inner_nyquist_is_rejected_not_aliased() {
         // A 22 kHz tone in a 48 kHz engine, through a 24 kHz capture: without
         // the guard this folds back to 2 kHz, right in the guitar's range.
-        let mut adapter = RateAdapter::new(24_000.0, 48_000.0).expect("legal ratio");
+        let mut adapter = RateAdapter::new(24_000.0, 48_000.0, 64).expect("legal ratio");
         let sr = 48_000.0f32;
         for i in 0..4_000 {
             let x = (i as f32 * 22_000.0 * TAU / sr).sin() * 0.5;
@@ -382,7 +466,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state_and_reproduces_the_same_output() {
-        let mut adapter = RateAdapter::new(44_100.0, 48_000.0).expect("legal ratio");
+        let mut adapter = RateAdapter::new(44_100.0, 48_000.0, 64).expect("legal ratio");
         let render = |adapter: &mut RateAdapter| {
             (0..512)
                 .map(|i| {
@@ -400,12 +484,71 @@ mod tests {
         );
     }
 
+    /// The block path exists purely to let the inner processor run over a whole
+    /// chunk at once; it must not change a single sample of the result, or the
+    /// capture would sound different at a mismatched rate than the per-sample
+    /// path it replaced.
+    #[test]
+    fn block_matches_the_per_sample_path() {
+        const BLOCK: usize = 64;
+        for (inner_rate, engine_rate) in PAIRS {
+            let mut per_sample =
+                RateAdapter::new(inner_rate, engine_rate, BLOCK).expect("legal ratio");
+            let mut blocked =
+                RateAdapter::new(inner_rate, engine_rate, BLOCK).expect("legal ratio");
+            // A stand-in for the model: state-dependent, so any reordering of
+            // the inner calls would show up in the output.
+            let mut state = 0.0f32;
+            let inner = |x: f32, state: &mut f32| {
+                *state = 0.85 * *state + 0.15 * x;
+                (x - *state).tanh()
+            };
+
+            let input: Vec<f32> = (0..BLOCK * 24)
+                .map(|i| (i as f32 * 0.021).sin() * 0.4 + (i as f32 * 0.003).cos() * 0.1)
+                .collect();
+
+            let expected: Vec<(f32, f32)> = input
+                .iter()
+                .map(|&x| {
+                    per_sample.run(x, -x, |l, r| (inner(l, &mut state), inner(r, &mut state)))
+                })
+                .collect();
+
+            state = 0.0;
+            let mut actual = Vec::with_capacity(input.len());
+            let mut out_l = [0.0f32; BLOCK];
+            let mut out_r = [0.0f32; BLOCK];
+            for chunk in input.chunks(BLOCK) {
+                let in_l: Vec<f32> = chunk.to_vec();
+                let in_r: Vec<f32> = chunk.iter().map(|x| -x).collect();
+                blocked.run_block(&in_l, &in_r, &mut out_l, &mut out_r, |l, r| {
+                    for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                        *a = inner(*a, &mut state);
+                        *b = inner(*b, &mut state);
+                    }
+                });
+                actual.extend(
+                    out_l[..chunk.len()]
+                        .iter()
+                        .zip(&out_r[..chunk.len()])
+                        .map(|(&l, &r)| (l, r)),
+                );
+            }
+
+            assert_eq!(
+                expected, actual,
+                "{inner_rate}→{engine_rate}: block path diverged from per-sample"
+            );
+        }
+    }
+
     /// Silence in, silence out — no self-oscillation from the guard filters or
     /// the interpolation bookkeeping.
     #[test]
     fn silence_stays_silent() {
         for (inner_rate, engine_rate) in PAIRS {
-            let mut adapter = RateAdapter::new(inner_rate, engine_rate).expect("legal ratio");
+            let mut adapter = RateAdapter::new(inner_rate, engine_rate, 64).expect("legal ratio");
             for _ in 0..4_000 {
                 let (l, r) = adapter.run(0.0, 0.0, |a, b| (a, b));
                 assert_eq!((l, r), (0.0, 0.0), "{inner_rate}→{engine_rate}");

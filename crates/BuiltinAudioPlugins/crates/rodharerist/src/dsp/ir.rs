@@ -19,9 +19,24 @@
 //! accumulates the FDL against the partition spectra. Latency is exactly
 //! [`PARTITION`] samples, reported to the host for delay compensation.
 //!
-//! Cost scales with IR length, which is why [`MAX_IR_SECONDS`] caps it: this is
-//! a *cabinet* IR engine, and a uniform partitioning is the wrong shape for a
-//! multi-second reverb tail.
+//! Three things keep that affordable:
+//!
+//! - **Both channels ride one transform.** Left goes in the real plane and
+//!   right in the imaginary one, so a stereo block costs one forward and one
+//!   inverse FFT instead of four. The two real spectra are untangled from the
+//!   packed transform with a handful of adds per bin.
+//! - **Only half of each spectrum is stored.** A real signal's transform is
+//!   conjugate-symmetric, so DC..Nyquist ([`BINS`]) is the whole of the
+//!   information — halving both the frequency-delay line and the
+//!   multiply-accumulate loop that dominates the cost.
+//! - **Real and imaginary parts live in separate planes**, so that loop is a
+//!   pair of contiguous `f32` sweeps a compiler can vectorize, rather than a
+//!   stride-2 walk over interleaved complex values.
+//!
+//! Cost still scales with IR length, which is why [`MAX_IR_SECONDS`] caps it
+//! and why the inaudible tail is trimmed at load ([`TAIL_ENERGY_FLOOR`]): this
+//! is a *cabinet* IR engine, and a uniform partitioning is the wrong shape for
+//! a multi-second reverb tail.
 //!
 //! ## Realtime rules
 //!
@@ -45,6 +60,11 @@ pub const PARTITION: usize = 128;
 /// Overlap-save transform length: twice the partition.
 const FFT_SIZE: usize = PARTITION * 2;
 
+/// Bins kept per partition: DC through Nyquist. Everything above is the
+/// conjugate mirror of a real signal's spectrum, so storing it would double
+/// both the memory and the accumulate loop for no extra information.
+const BINS: usize = FFT_SIZE / 2 + 1;
+
 /// Longest IR the engine keeps, in seconds. A guitar cabinet IR is tens of
 /// milliseconds of useful content; anything past this is truncated (with a
 /// fade so the cut is not a click) rather than paying uniform-partition cost
@@ -53,6 +73,21 @@ pub const MAX_IR_SECONDS: f32 = 0.5;
 
 /// Samples of raised-cosine fade applied at a truncation point.
 const TRUNCATE_FADE: usize = 64;
+
+/// Fraction of an IR's total energy allowed to sit in the tail that gets cut.
+///
+/// Cabinet IR files are routinely padded out to a round length — half a second
+/// of file for thirty milliseconds of cabinet — and under a *uniform*
+/// partitioning every one of those padded partitions costs the same
+/// multiply-accumulate sweep as the ones carrying the sound. `1e-7` is −70 dB
+/// of energy: the discarded tail is a hundredth of a percent of the signal,
+/// well under the noise floor of the capture itself, and cutting it is worth
+/// several times the convolution cost on a typical file.
+const TAIL_ENERGY_FLOOR: f32 = 1.0e-7;
+
+/// Never trim below this many samples, however little energy an IR carries —
+/// a short, quiet IR is still the cabinet the user chose.
+const MIN_TAIL_FRAMES: usize = PARTITION * 2;
 
 /// Shortest IR worth loading — below this a file is a click, not a cabinet.
 const MIN_IR_FRAMES: usize = 8;
@@ -102,7 +137,9 @@ pub struct IrInfo {
     pub name: String,
     /// Rate the file declared, before any resampling.
     pub source_sample_rate: f64,
-    /// Frames actually convolved, at the engine's rate.
+    /// Frames actually convolved, at the engine's rate — after resampling and
+    /// after the inaudible tail past [`TAIL_ENERGY_FLOOR`] is trimmed, so this
+    /// is the length the CPU cost scales with rather than the file's.
     pub frames: usize,
     /// True when the file carried two distinct channels (true-stereo IR).
     pub stereo: bool,
@@ -118,24 +155,53 @@ pub struct PreparedIrRuntime {
     info: IrInfo,
     fft: Arc<dyn Fft<f32>>,
     ifft: Arc<dyn Fft<f32>>,
-    /// Partition spectra, `partitions * FFT_SIZE` complex values per channel.
-    /// Already scaled by `1/FFT_SIZE` so the round trip comes back at unity.
-    h_l: Vec<Complex<f32>>,
-    h_r: Vec<Complex<f32>>,
+    /// Partition spectra: `partitions * BINS` bins per channel, real and
+    /// imaginary parts in separate planes. Already scaled by `1/FFT_SIZE` so
+    /// the round trip comes back at unity.
+    h_l: Spectra,
+    h_r: Spectra,
     /// Frequency-delay lines of past input blocks, same layout as `h_*`.
-    fdl_l: Vec<Complex<f32>>,
-    fdl_r: Vec<Complex<f32>>,
+    fdl_l: Spectra,
+    fdl_r: Spectra,
     /// Partition slot holding the newest input block.
     fdl_head: usize,
     partitions: usize,
     /// The previous block's input samples (the overlap in overlap-save).
     prev_l: Vec<f32>,
     prev_r: Vec<f32>,
-    /// Transform/accumulation scratch, all `FFT_SIZE` long.
+    /// The one transform both channels ride: left in the real plane, right in
+    /// the imaginary one. `FFT_SIZE` long.
     block: Vec<Complex<f32>>,
-    accum: Vec<Complex<f32>>,
+    /// Accumulated product of the FDL against the partition spectra, one
+    /// half-spectrum per channel.
+    acc_l: HalfSpectrum,
+    acc_r: HalfSpectrum,
     fft_scratch: Vec<Complex<f32>>,
 }
+
+/// One half-spectrum (DC..Nyquist) in split real/imaginary planes.
+#[derive(Debug, Clone)]
+struct HalfSpectrum {
+    re: Vec<f32>,
+    im: Vec<f32>,
+}
+
+impl HalfSpectrum {
+    fn zeros(bins: usize) -> Self {
+        Self {
+            re: vec![0.0; bins],
+            im: vec![0.0; bins],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.re.fill(0.0);
+        self.im.fill(0.0);
+    }
+}
+
+/// `partitions` consecutive half-spectra, indexed by partition slot.
+type Spectra = HalfSpectrum;
 
 impl std::fmt::Debug for PreparedIrRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,69 +218,128 @@ impl PreparedIrRuntime {
     }
 
     fn clear(&mut self) {
-        self.fdl_l.fill(Complex::new(0.0, 0.0));
-        self.fdl_r.fill(Complex::new(0.0, 0.0));
+        self.fdl_l.clear();
+        self.fdl_r.clear();
         self.fdl_head = 0;
         self.prev_l.fill(0.0);
         self.prev_r.fill(0.0);
     }
 
-    /// Audio thread: convolve one [`PARTITION`]-sample block. Input and output
-    /// buffers are the caller's fixed accumulation buffers; nothing here
-    /// allocates.
+    /// Audio thread: convolve one [`PARTITION`]-sample stereo block. Input and
+    /// output buffers are the caller's fixed accumulation buffers; nothing
+    /// here allocates.
     fn process_block(&mut self, in_l: &[f32], in_r: &[f32], out_l: &mut [f32], out_r: &mut [f32]) {
         self.fdl_head = (self.fdl_head + 1) % self.partitions;
         let head = self.fdl_head;
-        let n = FFT_SIZE;
         let p = self.partitions;
 
-        for channel in 0..2 {
-            let (input, prev, output, h, fdl) = if channel == 0 {
-                (
-                    in_l,
-                    &mut self.prev_l,
-                    &mut *out_l,
-                    &self.h_l,
-                    &mut self.fdl_l,
-                )
-            } else {
-                (
-                    in_r,
-                    &mut self.prev_r,
-                    &mut *out_r,
-                    &self.h_r,
-                    &mut self.fdl_r,
-                )
-            };
-
-            // Overlap-save input block: the previous partition then this one.
-            for i in 0..PARTITION {
-                self.block[i] = Complex::new(prev[i], 0.0);
-                self.block[PARTITION + i] = Complex::new(input[i], 0.0);
-            }
-            self.fft
-                .process_with_scratch(&mut self.block, &mut self.fft_scratch);
-            fdl[head * n..head * n + n].copy_from_slice(&self.block);
-
-            // Accumulate every partition against the matching past block.
-            self.accum.fill(Complex::new(0.0, 0.0));
-            for part in 0..p {
-                let slot = (head + p - part) % p;
-                let x = &fdl[slot * n..slot * n + n];
-                let hp = &h[part * n..part * n + n];
-                for k in 0..n {
-                    self.accum[k] += x[k] * hp[k];
-                }
-            }
-            self.ifft
-                .process_with_scratch(&mut self.accum, &mut self.fft_scratch);
-
-            // Overlap-save: only the second half of the block is valid output.
-            for i in 0..PARTITION {
-                output[i] = self.accum[PARTITION + i].re;
-            }
-            prev.copy_from_slice(input);
+        // Overlap-save input block — the previous partition then this one —
+        // with both channels packed into a single complex transform.
+        for i in 0..PARTITION {
+            self.block[i] = Complex::new(self.prev_l[i], self.prev_r[i]);
+            self.block[PARTITION + i] = Complex::new(in_l[i], in_r[i]);
         }
+        self.fft
+            .process_with_scratch(&mut self.block, &mut self.fft_scratch);
+
+        // Untangle the two real spectra: for X = FFT(l + j·r),
+        // L[k] = (X[k] + conj(X[N-k]))/2 and R[k] = -j·(X[k] - conj(X[N-k]))/2.
+        let base = head * BINS;
+        for k in 0..BINS {
+            let a = self.block[k];
+            let mirror = self.block[(FFT_SIZE - k) % FFT_SIZE];
+            let (b_re, b_im) = (mirror.re, -mirror.im);
+            self.fdl_l.re[base + k] = 0.5 * (a.re + b_re);
+            self.fdl_l.im[base + k] = 0.5 * (a.im + b_im);
+            let d_re = 0.5 * (a.re - b_re);
+            let d_im = 0.5 * (a.im - b_im);
+            self.fdl_r.re[base + k] = d_im;
+            self.fdl_r.im[base + k] = -d_re;
+        }
+
+        // Accumulate every partition against the matching past input block.
+        // Split planes and a half spectrum make this the vectorizable sweep it
+        // needs to be — it is the whole cost of a long IR.
+        let Self {
+            h_l,
+            h_r,
+            fdl_l,
+            fdl_r,
+            acc_l,
+            acc_r,
+            ..
+        } = self;
+        acc_l.clear();
+        acc_r.clear();
+        for part in 0..p {
+            let slot = (head + p - part) % p;
+            let x = slot * BINS;
+            let h = part * BINS;
+            accumulate(
+                &fdl_l.re[x..x + BINS],
+                &fdl_l.im[x..x + BINS],
+                &h_l.re[h..h + BINS],
+                &h_l.im[h..h + BINS],
+                &mut acc_l.re,
+                &mut acc_l.im,
+            );
+            accumulate(
+                &fdl_r.re[x..x + BINS],
+                &fdl_r.im[x..x + BINS],
+                &h_r.re[h..h + BINS],
+                &h_r.im[h..h + BINS],
+                &mut acc_r.re,
+                &mut acc_r.im,
+            );
+        }
+
+        // Repack the two results into one inverse transform (`acc_l + j·acc_r`),
+        // rebuilding the conjugate mirror the half spectrum left implicit.
+        for k in 0..BINS {
+            self.block[k] = Complex::new(
+                self.acc_l.re[k] - self.acc_r.im[k],
+                self.acc_l.im[k] + self.acc_r.re[k],
+            );
+            if k > 0 && k < FFT_SIZE / 2 {
+                self.block[FFT_SIZE - k] = Complex::new(
+                    self.acc_l.re[k] + self.acc_r.im[k],
+                    self.acc_r.re[k] - self.acc_l.im[k],
+                );
+            }
+        }
+        self.ifft
+            .process_with_scratch(&mut self.block, &mut self.fft_scratch);
+
+        // Overlap-save: only the second half of the block is valid output, and
+        // the two channels come back out of the two planes they went in on.
+        for i in 0..PARTITION {
+            out_l[i] = self.block[PARTITION + i].re;
+            out_r[i] = self.block[PARTITION + i].im;
+        }
+        self.prev_l.copy_from_slice(in_l);
+        self.prev_r.copy_from_slice(in_r);
+    }
+}
+
+/// One partition's complex multiply-accumulate over split real/imaginary
+/// planes. Every slice is `BINS` long; the equal lengths are asserted once so
+/// the inner loop carries no bounds checks.
+#[inline]
+fn accumulate(
+    x_re: &[f32],
+    x_im: &[f32],
+    h_re: &[f32],
+    h_im: &[f32],
+    acc_re: &mut [f32],
+    acc_im: &mut [f32],
+) {
+    let n = BINS;
+    let (x_re, x_im) = (&x_re[..n], &x_im[..n]);
+    let (h_re, h_im) = (&h_re[..n], &h_im[..n]);
+    let (acc_re, acc_im) = (&mut acc_re[..n], &mut acc_im[..n]);
+    for k in 0..n {
+        acc_re[k] += x_re[k] * h_re[k] - x_im[k] * h_im[k];
+        acc_im[k] += x_re[k] * h_im[k] + x_im[k] * h_re[k];
     }
 }
 
@@ -248,6 +373,21 @@ fn resample_offline(input: &[f32], from_rate: f64, to_rate: f64) -> Vec<f32> {
             ((c3 * f + c2) * f + c1) * f + p1
         })
         .collect()
+}
+
+/// Length of the shortest prefix that still holds all but
+/// [`TAIL_ENERGY_FLOOR`] of the pair's energy — where the file stops being a
+/// cabinet and starts being padding.
+fn audible_length(left: &[f32], right: &[f32], total_energy: f32) -> usize {
+    let budget = total_energy * TAIL_ENERGY_FLOOR;
+    let mut tail = 0.0f32;
+    for i in (0..left.len()).rev() {
+        tail += 0.5 * (left[i] * left[i] + right[i] * right[i]);
+        if tail > budget {
+            return (i + 1).max(MIN_TAIL_FRAMES).min(left.len());
+        }
+    }
+    left.len().min(MIN_TAIL_FRAMES)
 }
 
 /// Cut to `max_frames`, fading the last [`TRUNCATE_FADE`] samples so the cut
@@ -327,6 +467,15 @@ pub fn prepare_ir_runtime(
         *sample *= gain;
     }
 
+    // Drop the padding past the cabinet. Under a uniform partitioning every
+    // trailing block of near-silence costs exactly as much as a block carrying
+    // sound, and IR files in the wild are mostly padding. The fade window is
+    // kept *past* the audible length so it lands on the sub-floor tail rather
+    // than attenuating content the cabinet still needs.
+    let audible = audible_length(&left, &right, energy * gain * gain) + TRUNCATE_FADE;
+    truncate_with_fade(&mut left, audible);
+    truncate_with_fade(&mut right, audible);
+
     let frames = left.len();
     let partitions = frames.div_ceil(PARTITION).max(1);
 
@@ -341,8 +490,8 @@ pub fn prepare_ir_runtime(
     // Fold the inverse transform's 1/N into the IR spectra so the hot path
     // never scales anything.
     let norm = 1.0 / FFT_SIZE as f32;
-    let mut build = |channel: &[f32]| -> Vec<Complex<f32>> {
-        let mut spectra = vec![Complex::new(0.0, 0.0); partitions * FFT_SIZE];
+    let mut build = |channel: &[f32]| -> Spectra {
+        let mut spectra = Spectra::zeros(partitions * BINS);
         let mut scratch_block = vec![Complex::new(0.0, 0.0); FFT_SIZE];
         for part in 0..partitions {
             let start = part * PARTITION;
@@ -352,7 +501,11 @@ pub fn prepare_ir_runtime(
                 scratch_block[i] = Complex::new(sample * norm, 0.0);
             }
             fft.process_with_scratch(&mut scratch_block, &mut fft_scratch);
-            spectra[part * FFT_SIZE..(part + 1) * FFT_SIZE].copy_from_slice(&scratch_block);
+            // Keep DC..Nyquist only; the rest is the conjugate mirror.
+            for (k, bin) in scratch_block[..BINS].iter().enumerate() {
+                spectra.re[part * BINS + k] = bin.re;
+                spectra.im[part * BINS + k] = bin.im;
+            }
         }
         spectra
     };
@@ -372,14 +525,15 @@ pub fn prepare_ir_runtime(
         ifft,
         h_l,
         h_r,
-        fdl_l: vec![Complex::new(0.0, 0.0); partitions * FFT_SIZE],
-        fdl_r: vec![Complex::new(0.0, 0.0); partitions * FFT_SIZE],
+        fdl_l: Spectra::zeros(partitions * BINS),
+        fdl_r: Spectra::zeros(partitions * BINS),
         fdl_head: 0,
         partitions,
         prev_l: vec![0.0; PARTITION],
         prev_r: vec![0.0; PARTITION],
         block: vec![Complex::new(0.0, 0.0); FFT_SIZE],
-        accum: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+        acc_l: HalfSpectrum::zeros(BINS),
+        acc_r: HalfSpectrum::zeros(BINS),
         fft_scratch,
     })
 }
@@ -542,10 +696,16 @@ impl IrConvolver {
         self.active.as_ref().map(|rt| rt.info())
     }
 
-    /// Latency the convolution adds, in samples — [`PARTITION`] while an IR is
-    /// loaded, 0 when the slot is a dry pass through.
+    /// Latency the convolution adds, in samples: always [`PARTITION`], because
+    /// the block ring runs whether or not a file is loaded.
+    ///
+    /// Reporting 0 for an empty slot — as this used to — left the host
+    /// uncompensated for a delay the engine was applying anyway, so the IR
+    /// cabinet sat [`PARTITION`] samples behind every parallel path in the
+    /// project. Keeping it constant also means loading a file mid-playback
+    /// does not move the plugin's latency under the graph's feet.
     pub(super) fn latency_samples(&self) -> usize {
-        if self.active.is_some() { PARTITION } else { 0 }
+        PARTITION
     }
 
     fn retire(&mut self, runtime: Box<PreparedIrRuntime>) {
@@ -721,9 +881,11 @@ mod tests {
     }
 
     #[test]
-    fn reports_partition_latency_only_while_an_ir_is_loaded() {
+    fn reports_partition_latency_whether_or_not_an_ir_is_loaded() {
         let mut conv = IrConvolver::new(SR as f32);
-        assert_eq!(conv.latency_samples(), 0);
+        // The ring runs either way, so the reported latency must not move when
+        // a file lands — the empty slot is a *delayed* pass through.
+        assert_eq!(conv.latency_samples(), PARTITION);
         assert!(conv.active_info().is_none());
 
         let ir = test_ir(200);

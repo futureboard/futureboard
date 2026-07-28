@@ -18,7 +18,7 @@ const MAX_DELAY_SECONDS: f32 = 0.035;
 #[inline]
 fn finite(x: f32) -> f32 {
     if x.is_finite() {
-        x.clamp(-6.0, 6.0)
+        super::flush_denormal(x.clamp(-6.0, 6.0))
     } else {
         0.0
     }
@@ -654,7 +654,8 @@ impl CabLane {
             controls.mode2_f,
             (profile.resonance_damping + 0.18).min(1.5),
         );
-        channel.body_low += body_alpha * (channel.hp_y - channel.body_low);
+        channel.body_low =
+            finite(channel.body_low + body_alpha * (channel.hp_y - channel.body_low));
         let body = channel.hp_y - channel.body_low;
         let breakup =
             channel
@@ -726,31 +727,37 @@ impl CabLane {
             }
         };
 
-        channel.envelope += 0.002 * (acoustic.abs() - channel.envelope);
+        channel.envelope = finite(channel.envelope + 0.002 * (acoustic.abs() - channel.envelope));
         acoustic /= 1.0 + channel.envelope * profile.compression;
 
         // Natural loudspeaker radiation loss: two to four cascaded poles.
         for stage in channel.lpf.iter_mut().take(profile.slope) {
-            *stage += controls.speaker_lpf_alpha * (acoustic - *stage);
+            *stage = finite(*stage + controls.speaker_lpf_alpha * (acoustic - *stage));
             acoustic = *stage;
         }
 
         // Position changes proximity and cone breakup as well as high
         // radiation. Distance reduces proximity and introduces a softened,
         // delayed early-room reflection.
-        channel.proximity_low += controls.proximity_alpha * (acoustic - channel.proximity_low);
+        channel.proximity_low = finite(
+            channel.proximity_low + controls.proximity_alpha * (acoustic - channel.proximity_low),
+        );
         let proximity =
             channel.proximity_low * (1.0 - controls.distance) * (0.36 - controls.position * 0.10);
         let close = acoustic + proximity;
 
         // Three capsule topologies, continuously crossfaded for automation.
-        channel.dynamic_mid += controls.dynamic_alpha * (close - channel.dynamic_mid);
+        channel.dynamic_mid =
+            finite(channel.dynamic_mid + controls.dynamic_alpha * (close - channel.dynamic_mid));
         let dynamic = close
             + (close - channel.dynamic_mid) * (0.13 + center * 0.12)
             + breakup * center * 0.035;
-        channel.ribbon_low += controls.ribbon_alpha * (close - channel.ribbon_low);
+        channel.ribbon_low =
+            finite(channel.ribbon_low + controls.ribbon_alpha * (close - channel.ribbon_low));
         let ribbon = channel.ribbon_low + channel.proximity_low * 0.15 * (1.0 - controls.distance);
-        channel.condenser_low += controls.condenser_alpha * (close - channel.condenser_low);
+        channel.condenser_low = finite(
+            channel.condenser_low + controls.condenser_alpha * (close - channel.condenser_low),
+        );
         let condenser = close + (close - channel.condenser_low) * 0.10 + breakup * center * 0.025;
         let mic = if controls.mic_kind <= 1.0 {
             dynamic * (1.0 - controls.mic_kind) + ribbon * controls.mic_kind
@@ -759,7 +766,7 @@ impl CabLane {
             ribbon * (1.0 - blend) + condenser * blend
         };
 
-        channel.room_low += controls.air_alpha * (mic - channel.room_low);
+        channel.room_low = finite(channel.room_low + controls.air_alpha * (mic - channel.room_low));
         let direct = channel.room_low;
         let reflection = delay.read(controls.room_delay);
         let softened_reflection = reflection * (1.0 - controls.position * 0.18);

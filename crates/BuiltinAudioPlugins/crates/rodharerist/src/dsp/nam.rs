@@ -33,6 +33,18 @@ const SAMPLE_RATE_TOLERANCE_HZ: f64 = 0.5;
 /// Roughly how long a runtime swap crossfades for, in milliseconds.
 const SWAP_FADE_MS: f32 = 8.0;
 
+/// Engine samples the capture buffers before running one inference, and
+/// therefore the engine's exact latency while the NAM tone engine is selected.
+///
+/// nam-rs has two entry points that produce identical output: `process_sample`
+/// and the block kernel `process_buffer`, which pushes a whole chunk through
+/// one weight matrix at a time instead of reloading every matrix per sample.
+/// Measured on a stock "standard" capture the block kernel is ~2.8x faster at
+/// 64 samples (13.6 → 4.8 µs/sample) and ~3.5x at 128. 64 buys most of that
+/// speedup for 1.3 ms at 48 kHz — the trade a per-sample host callback forces,
+/// since the block cannot be computed until its last input sample has arrived.
+pub const NAM_BLOCK: usize = 64;
+
 /// A `.nam` failed to parse/build, or its sample rate is too far from the
 /// engine's for the rate adapter to bridge.
 #[derive(Debug)]
@@ -89,11 +101,20 @@ pub struct PreparedNamRuntime {
     /// runs the model at the capture's own rate from inside the engine's
     /// stream. `None` is the native, zero-overhead path.
     adapter: Option<RateAdapter>,
-    /// The capture's total latency in **engine** samples: its receptive field
-    /// converted out of the model's rate, plus whatever the adapter's own
-    /// interpolation contributes. Equals `receptive_field` when running
-    /// natively.
+    /// The capture's own latency in **engine** samples, on top of the
+    /// [`NAM_BLOCK`] the buffering costs: zero for a natively-run capture,
+    /// and the adapter's interpolation delay for a rate-adapted one.
+    ///
+    /// The receptive field is deliberately *not* part of this. A WaveNet's
+    /// dilated convolutions are causal — output sample `n` is computed from
+    /// inputs up to `n` — so the field is how much history the model needs
+    /// warmed, not a delay it imposes. [`prepare_nam_runtime`] warms it here,
+    /// on the control thread, exactly like the reference NAM plugin.
     latency_samples: usize,
+    /// Inference staging, `NAM_BLOCK` long: the model runs mono, in place, on
+    /// one channel at a time.
+    scratch_l: Vec<f32>,
+    scratch_r: Vec<f32>,
 }
 
 impl std::fmt::Debug for PreparedNamRuntime {
@@ -128,18 +149,20 @@ pub fn prepare_nam_runtime(
     let nam_model = NamModel::from_json_str(json).map_err(NamLoadError::Parse)?;
     let expected = nam_model.expected_sample_rate();
     let adapter = if (expected - engine_sample_rate).abs() > SAMPLE_RATE_TOLERANCE_HZ {
-        Some(RateAdapter::new(expected, engine_sample_rate).ok_or(
-            NamLoadError::SampleRateMismatch {
-                expected,
-                engine: engine_sample_rate,
-            },
-        )?)
+        Some(
+            RateAdapter::new(expected, engine_sample_rate, NAM_BLOCK).ok_or(
+                NamLoadError::SampleRateMismatch {
+                    expected,
+                    engine: engine_sample_rate,
+                },
+            )?,
+        )
     } else {
         None
     };
 
-    let model_l = Model::from_nam(&nam_model).map_err(NamLoadError::Parse)?;
-    let model_r = if stereo {
+    let mut model_l = Model::from_nam(&nam_model).map_err(NamLoadError::Parse)?;
+    let mut model_r = if stereo {
         Some(Model::from_nam(&nam_model).map_err(NamLoadError::Parse)?)
     } else {
         None
@@ -149,12 +172,18 @@ pub fn prepare_nam_runtime(
         .loudness()
         .map(|l| 10f32.powf((TARGET_LUFS - l) / 20.0).clamp(0.05, 20.0))
         .unwrap_or(1.0);
-    // The receptive field is counted in the *model's* samples; the host's
-    // delay compensation works in engine samples.
-    let latency_samples = match adapter.as_ref() {
-        Some(a) => a.inner_to_engine_samples(receptive_field) + a.latency_samples(),
-        None => receptive_field,
-    };
+
+    // Warm the receptive field here rather than making the host delay the whole
+    // track by it. A fresh WaveNet's first `receptive_field` outputs are
+    // computed against zero-filled history — a startup transient, not a
+    // latency — so running silence through it now retires the transient on the
+    // control thread and leaves the audio path aligned with the dry signal.
+    prewarm(&mut model_l, receptive_field);
+    if let Some(model_r) = model_r.as_mut() {
+        prewarm(model_r, receptive_field);
+    }
+
+    let latency_samples = adapter.as_ref().map_or(0, RateAdapter::latency_samples);
 
     Ok(PreparedNamRuntime {
         name,
@@ -166,7 +195,24 @@ pub fn prepare_nam_runtime(
         full_rig,
         adapter,
         latency_samples,
+        scratch_l: vec![0.0; NAM_BLOCK],
+        scratch_r: vec![0.0; NAM_BLOCK],
     })
+}
+
+/// Run `samples` of silence through a freshly built model so its dilation
+/// history holds the model's own steady-state response to silence instead of
+/// hard zeros. Control thread only: this is the expensive part of a load.
+fn prewarm(model: &mut Model, samples: usize) {
+    const CHUNK: usize = 256;
+    let mut silence = [0.0f32; CHUNK];
+    let mut done = 0;
+    while done < samples {
+        let n = CHUNK.min(samples - done);
+        silence[..n].fill(0.0);
+        model.process_buffer(&mut silence[..n]);
+        done += n;
+    }
 }
 
 impl PreparedNamRuntime {
@@ -179,8 +225,16 @@ impl PreparedNamRuntime {
         }
     }
 
-    #[inline]
-    fn process(&mut self, left: f32, right: f32, loudness_on: bool) -> (f32, f32) {
+    /// Audio thread: run one block of at most [`NAM_BLOCK`] engine samples.
+    /// `out_*` receive the model's output; nothing here allocates or locks.
+    fn process_block(
+        &mut self,
+        in_l: &[f32],
+        in_r: &[f32],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        loudness_on: bool,
+    ) {
         // Split the borrow so the inference closure and the adapter can be
         // held mutably at the same time.
         let Self {
@@ -188,30 +242,57 @@ impl PreparedNamRuntime {
             model_r,
             adapter,
             loudness_gain,
+            scratch_l,
+            scratch_r,
             ..
         } = self;
         let gain = if loudness_on { *loudness_gain } else { 1.0 };
-        let mut infer = |l: f32, r: f32| {
-            let out_l = model_l.process_sample(l) * gain;
-            let out_r = match model_r.as_mut() {
-                Some(model_r) => model_r.process_sample(r) * gain,
-                None => out_l,
-            };
-            (out_l, out_r)
+        // One call per weight matrix per block instead of per sample — this is
+        // the whole reason the capture is buffered.
+        let mut infer = |l: &mut [f32], r: &mut [f32]| {
+            model_l.process_buffer(l);
+            match model_r.as_mut() {
+                Some(model_r) => {
+                    model_r.process_buffer(r);
+                    for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                        *a *= gain;
+                        *b *= gain;
+                    }
+                }
+                // Mono capture: one inference, mirrored to both channels.
+                None => {
+                    for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                        *a *= gain;
+                        *b = *a;
+                    }
+                }
+            }
         };
+
         match adapter.as_mut() {
-            // Rate-adapted: the model still sees its own rate, one inference
-            // per *model* sample, not per engine sample.
-            Some(adapter) => adapter.run(left, right, infer),
-            None => infer(left, right),
+            // Rate-adapted: the model still sees its own rate, and still runs
+            // over a whole staged chunk rather than sample by sample.
+            Some(adapter) => adapter.run_block(in_l, in_r, out_l, out_r, infer),
+            None => {
+                let n = in_l.len();
+                scratch_l[..n].copy_from_slice(in_l);
+                scratch_r[..n].copy_from_slice(in_r);
+                infer(&mut scratch_l[..n], &mut scratch_r[..n]);
+                out_l[..n].copy_from_slice(&scratch_l[..n]);
+                out_r[..n].copy_from_slice(&scratch_r[..n]);
+            }
         }
     }
 
+    /// Clear the streaming state a transport stop should clear — but
+    /// deliberately **not** the model's dilation history.
+    ///
+    /// That history was warmed at load ([`prewarm`]) precisely so the capture
+    /// has no startup transient; zeroing it here would bring the transient
+    /// back on every stop, and the host is no longer delaying the track by the
+    /// receptive field to hide it. A stopped transport feeds the model silence
+    /// anyway, which is the state the prewarm put it in.
     fn reset(&mut self) {
-        self.model_l.reset();
-        if let Some(model_r) = self.model_r.as_mut() {
-            model_r.reset();
-        }
         if let Some(adapter) = self.adapter.as_mut() {
             adapter.reset();
         }
@@ -295,6 +376,25 @@ pub(super) struct NamCapture {
     /// The shared hand-off cells; [`Self::loader`] clones this out.
     channel: Arc<NamChannel>,
 
+    /// Input ring: the block being filled. Doubles as the dry-signal delay
+    /// line, so the wet/dry mix stays phase-aligned instead of comb-filtering
+    /// the block delay against itself.
+    in_l: Vec<f32>,
+    in_r: Vec<f32>,
+    /// The active runtime's output for the previous block.
+    out_l: Vec<f32>,
+    out_r: Vec<f32>,
+    /// The retiring runtime's output for the same block, crossfaded against
+    /// `out_*` while a swap resolves.
+    fade_l: Vec<f32>,
+    fade_r: Vec<f32>,
+    /// Input staging with the input trim applied — the model must see the
+    /// trimmed signal while `in_*` keeps the untrimmed dry.
+    trim_l: Vec<f32>,
+    trim_r: Vec<f32>,
+    /// How many samples of the current block have been written.
+    fill: usize,
+
     sample_rate: f32,
     dc_hpf: StereoBiquad,
 
@@ -319,6 +419,15 @@ impl NamCapture {
                 pending: HandoffCell::new(),
                 retired: HandoffCell::new(),
             }),
+            in_l: vec![0.0; NAM_BLOCK],
+            in_r: vec![0.0; NAM_BLOCK],
+            out_l: vec![0.0; NAM_BLOCK],
+            out_r: vec![0.0; NAM_BLOCK],
+            fade_l: vec![0.0; NAM_BLOCK],
+            fade_r: vec![0.0; NAM_BLOCK],
+            trim_l: vec![0.0; NAM_BLOCK],
+            trim_r: vec![0.0; NAM_BLOCK],
+            fill: 0,
             sample_rate: sample_rate.max(1.0),
             dc_hpf: StereoBiquad::none(),
             input_trim: 1.0,
@@ -351,6 +460,17 @@ impl NamCapture {
 
     pub(super) fn reset(&mut self) {
         self.dc_hpf.reset();
+        for buffer in [
+            &mut self.in_l,
+            &mut self.in_r,
+            &mut self.out_l,
+            &mut self.out_r,
+            &mut self.fade_l,
+            &mut self.fade_r,
+        ] {
+            buffer.fill(0.0);
+        }
+        self.fill = 0;
         if let Some(rt) = self.active.as_mut() {
             rt.reset();
         }
@@ -403,15 +523,21 @@ impl NamCapture {
         self.active.as_ref().map(|rt| rt.info())
     }
 
-    /// Latency contributed by the active capture, in **engine** samples (0 if
-    /// none loaded, or an LSTM capture, which has no warmup). Already accounts
-    /// for a rate-adapted capture, whose receptive field is counted in its own
-    /// rate's samples.
+    /// Latency this engine adds, in **engine** samples: the [`NAM_BLOCK`] the
+    /// inference buffering costs, plus a rate-adapted capture's interpolation
+    /// delay. The receptive field is not part of it — see
+    /// [`PreparedNamRuntime::latency_samples`].
+    ///
+    /// It is reported whether or not a capture is loaded, because the block
+    /// buffer runs either way: an empty slot that reported 0 would force the
+    /// host to redo delay compensation the moment a capture landed, mid-play.
     pub(super) fn latency_samples(&self) -> usize {
-        self.active
-            .as_ref()
-            .map(|rt| rt.latency_samples)
-            .unwrap_or(0)
+        NAM_BLOCK
+            + self
+                .active
+                .as_ref()
+                .map(|rt| rt.latency_samples)
+                .unwrap_or(0)
     }
 
     /// Audio thread: adopt a pending runtime and retire a finished fade.
@@ -432,6 +558,12 @@ impl NamCapture {
                 if let Some(old) = self.active.replace(new_rt) {
                     self.fading_out = Some(old);
                     self.fade = 0.0;
+                    // The current block was already computed by the outgoing
+                    // runtime. Seed the fade buffer with it so the crossfade
+                    // blends continuous audio for the rest of this block
+                    // instead of whatever an earlier swap left behind.
+                    self.fade_l.copy_from_slice(&self.out_l);
+                    self.fade_r.copy_from_slice(&self.out_r);
                 }
             }
         }
@@ -445,22 +577,21 @@ impl NamCapture {
         }
     }
 
-    /// Audio thread hot path: input trim → model(s) → DC block → loudness →
-    /// output trim → wet/dry mix. Crossfades against `fading_out` if a swap is
-    /// in progress. No allocation, no locks, no swap logic (see
-    /// [`Self::begin_block`]).
+    /// Audio thread hot path. One sample in, one sample out, delayed by
+    /// [`NAM_BLOCK`]; the inference itself runs once every [`NAM_BLOCK`] calls
+    /// over the whole block. Per sample this is only the DC blocker, the trims
+    /// and the wet/dry mix — the dry side comes out of the same ring as the
+    /// wet, so the two stay phase-aligned. No allocation, no locks, no swap
+    /// logic (see [`Self::begin_block`]).
     #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let dry = (left, right);
-        let xin = (left * self.input_trim, right * self.input_trim);
+        // Read this slot's finished output and the dry sample that produced it
+        // *before* the slot is overwritten with the newest input.
+        let dry = (self.in_l[self.fill], self.in_r[self.fill]);
+        let new_out = (self.out_l[self.fill], self.out_r[self.fill]);
 
-        let new_out = match self.active.as_mut() {
-            Some(rt) => rt.process(xin.0, xin.1, self.loudness_norm_on),
-            None => xin,
-        };
-
-        let wet = if let Some(old_rt) = self.fading_out.as_mut() {
-            let old_out = old_rt.process(xin.0, xin.1, self.loudness_norm_on);
+        let wet = if self.fading_out.is_some() {
+            let old_out = (self.fade_l[self.fill], self.fade_r[self.fill]);
             self.fade = (self.fade + self.fade_step).min(1.0);
             (
                 old_out.0 * (1.0 - self.fade) + new_out.0 * self.fade,
@@ -470,12 +601,55 @@ impl NamCapture {
             new_out
         };
 
+        self.in_l[self.fill] = left;
+        self.in_r[self.fill] = right;
+        self.fill += 1;
+        if self.fill >= NAM_BLOCK {
+            self.fill = 0;
+            self.run_block();
+        }
+
         let (mut ol, mut or) = self.dc_hpf.run(wet.0, wet.1);
         ol *= self.output_trim;
         or *= self.output_trim;
 
         let m = self.mix;
         (dry.0 * (1.0 - m) + ol * m, dry.1 * (1.0 - m) + or * m)
+    }
+
+    /// Run the just-filled input block through the active runtime (and the
+    /// retiring one, while a swap crossfades). Called from [`Self::process`]
+    /// every [`NAM_BLOCK`] samples; allocates nothing.
+    fn run_block(&mut self) {
+        let trim = self.input_trim;
+        for i in 0..NAM_BLOCK {
+            self.trim_l[i] = self.in_l[i] * trim;
+            self.trim_r[i] = self.in_r[i] * trim;
+        }
+
+        match self.active.as_mut() {
+            Some(rt) => rt.process_block(
+                &self.trim_l,
+                &self.trim_r,
+                &mut self.out_l,
+                &mut self.out_r,
+                self.loudness_norm_on,
+            ),
+            None => {
+                self.out_l.copy_from_slice(&self.trim_l);
+                self.out_r.copy_from_slice(&self.trim_r);
+            }
+        }
+
+        if let Some(old_rt) = self.fading_out.as_mut() {
+            old_rt.process_block(
+                &self.trim_l,
+                &self.trim_r,
+                &mut self.fade_l,
+                &mut self.fade_r,
+                self.loudness_norm_on,
+            );
+        }
     }
 }
 
@@ -500,14 +674,17 @@ mod tests {
     }"#;
 
     /// A rate mismatch inside the adapter's range builds a runtime that runs
-    /// the model at its own rate; the reported latency is in engine samples,
-    /// so it must scale with the ratio rather than echo the raw field.
+    /// the model at its own rate; only the adapter's own interpolation delay
+    /// is latency, and it is counted in engine samples.
     #[test]
     fn adapts_a_mismatched_rate_instead_of_rejecting_it() {
         let native = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 48_000.0, false, false)
             .expect("native rate loads");
         assert!(native.adapter.is_none(), "matching rate must not resample");
-        assert_eq!(native.latency_samples, native.receptive_field);
+        assert_eq!(
+            native.latency_samples, 0,
+            "a natively-run capture is causal: no latency beyond the block"
+        );
 
         let adapted = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 44_100.0, false, false)
             .expect("a 48 kHz capture must adapt into a 44.1 kHz engine");
@@ -516,9 +693,11 @@ mod tests {
             adapted.sample_rate, 48_000.0,
             "info keeps the capture's rate"
         );
-        // 48 kHz model samples are fewer 44.1 kHz engine samples, plus the
-        // adapter's own interpolation delay.
-        assert!(adapted.latency_samples >= adapted.receptive_field * 44_100 / 48_000);
+        assert!(
+            adapted.latency_samples > 0 && adapted.latency_samples < NAM_BLOCK,
+            "only the adapter's interpolation delay counts as latency, got {}",
+            adapted.latency_samples
+        );
 
         let mut cap = NamCapture::new(44_100.0);
         cap.configure(0.0, 0.0, 100.0, false);
@@ -630,13 +809,91 @@ mod tests {
         assert_eq!(cap.active_info().map(|i| i.name), Some("second".into()));
     }
 
+    /// With no capture loaded the slot passes the signal through — delayed by
+    /// the block the engine always buffers, which is exactly what
+    /// `latency_samples()` reports so the host can compensate it.
     #[test]
-    fn no_capture_loaded_is_pass_through_at_unity() {
+    fn no_capture_loaded_is_a_delayed_pass_through_at_unity() {
         let mut cap = NamCapture::new(48_000.0);
         cap.configure(0.0, 0.0, 100.0, false);
-        let (l, r) = cap.process(0.3, -0.3);
-        // DC blocker still runs, so allow a small tolerance rather than exact equality.
-        assert!((l - 0.3).abs() < 1.0e-3);
-        assert!((r + 0.3).abs() < 1.0e-3);
+        assert_eq!(cap.latency_samples(), NAM_BLOCK);
+
+        // A single pulse, so the delay can be read off directly rather than
+        // through the DC blocker's (tiny, but non-zero) phase shift.
+        let input: Vec<f32> = (0..NAM_BLOCK * 8)
+            .map(|n| if n == 7 { 1.0 } else { 0.0 })
+            .collect();
+        let out: Vec<(f32, f32)> = input.iter().map(|&x| cap.process(x, -x)).collect();
+
+        let peak_at = |pick: fn(&(f32, f32)) -> f32| {
+            out.iter()
+                .enumerate()
+                .max_by(|a, b| pick(a.1).abs().total_cmp(&pick(b.1).abs()))
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        assert_eq!(
+            peak_at(|s| s.0),
+            7 + NAM_BLOCK,
+            "left delay is not the block"
+        );
+        assert_eq!(
+            peak_at(|s| s.1),
+            7 + NAM_BLOCK,
+            "right delay is not the block"
+        );
+        let energy: f32 = out.iter().map(|(l, _)| l * l).sum();
+        assert!(
+            (energy - 1.0).abs() < 0.05,
+            "the dry path changed level: pulse energy {energy}"
+        );
+    }
+
+    /// The wet/dry mix must blend the *aligned* dry sample. If the dry side
+    /// skipped the block delay, a mix would comb-filter the signal against a
+    /// 64-sample-old copy of itself — at 375 Hz that delay is half a period,
+    /// so a misaligned 50 % mix cancels almost completely.
+    #[test]
+    fn the_wet_dry_mix_stays_phase_aligned_through_the_block_delay() {
+        let mut cap = NamCapture::new(48_000.0);
+        cap.configure(0.0, 0.0, 50.0, false);
+
+        let half_period = std::f32::consts::PI / NAM_BLOCK as f32;
+        let input: Vec<f32> = (0..NAM_BLOCK * 32)
+            .map(|n| (n as f32 * half_period).sin() * 0.5)
+            .collect();
+        let out: Vec<f32> = input.iter().map(|&x| cap.process(x, x).0).collect();
+
+        let rms = |signal: &[f32]| {
+            (signal.iter().map(|x| x * x).sum::<f32>() / signal.len() as f32).sqrt()
+        };
+        let settled = &out[NAM_BLOCK * 4..];
+        let reference = rms(&input[NAM_BLOCK * 4..]);
+        assert!(
+            (rms(settled) / reference - 1.0).abs() < 0.02,
+            "mix comb-filtered: {} vs {reference}",
+            rms(settled)
+        );
+    }
+
+    /// A freshly loaded capture must be warm: the reference plugin runs the
+    /// receptive field through with silence at load rather than making the
+    /// host delay the track by it.
+    #[test]
+    fn a_prepared_runtime_reports_no_receptive_field_latency() {
+        let prepared = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 48_000.0, false, false)
+            .expect("matching rate must load");
+        assert!(prepared.receptive_field >= 1, "the field is still reported");
+        assert_eq!(prepared.latency_samples, 0);
+
+        let mut cap = NamCapture::new(48_000.0);
+        cap.configure(0.0, 0.0, 100.0, false);
+        cap.submit(Box::new(prepared));
+        cap.begin_block();
+        assert_eq!(
+            cap.latency_samples(),
+            NAM_BLOCK,
+            "the block buffer is the only latency a native-rate capture adds"
+        );
     }
 }

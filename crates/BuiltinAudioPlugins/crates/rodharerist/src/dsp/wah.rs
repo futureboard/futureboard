@@ -39,9 +39,9 @@ impl Svf {
     /// `f` is the SVF frequency coefficient, `q_inv` the damping (1/Q).
     #[inline]
     fn band_pass(&mut self, input: f32, f: f32, q_inv: f32) -> f32 {
-        self.low += f * self.band;
+        self.low = super::flush_denormal(self.low + f * self.band);
         let high = input - self.low - q_inv * self.band;
-        self.band += f * high;
+        self.band = super::flush_denormal(self.band + f * high);
         self.band
     }
 }

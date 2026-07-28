@@ -63,7 +63,10 @@ pub use ir::{
     PreparedIrRuntime, prepare_ir_runtime,
 };
 use mod_stage::ModStage;
-pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
+pub use nam::{
+    NAM_BLOCK as NAM_BLOCK_SAMPLES, NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime,
+    prepare_nam_runtime,
+};
 use reverb::PlateReverb;
 pub use tone_stage::ToneEngineKind;
 use tone_stage::ToneStage;
@@ -1578,9 +1581,15 @@ impl Dsp {
         self.amp_stage.nam_capture_info()
     }
 
-    /// Latency contributed by the active NAM capture's receptive field, in
-    /// engine samples (0 if none loaded), already accounting for a capture
-    /// running through the rate adapter.
+    /// Latency the NAM engine adds, in engine samples: the block it buffers
+    /// for inference plus, for a capture running at a different rate, the rate
+    /// adapter's interpolation delay.
+    ///
+    /// **Not** the receptive field. A WaveNet's dilated convolutions are
+    /// causal, so the field is history the model needs warmed — which
+    /// `prepare_nam_runtime` does at load — rather than a delay it imposes.
+    /// Reporting it as latency put a stock capture 85 ms behind the dry
+    /// signal.
     pub fn nam_latency_samples(&self) -> usize {
         self.amp_stage.nam_latency_samples()
     }
@@ -1622,7 +1631,7 @@ impl Dsp {
     }
 
     /// Total latency this instance reports to the host, in samples: the NAM
-    /// capture's receptive field plus the IR convolution's partition, counting
+    /// engine's inference block plus the IR convolution's partition, counting
     /// each only while the stage that carries it is actually in the path.
     pub fn latency_samples(&self) -> usize {
         let p = &self.params;
@@ -2002,23 +2011,54 @@ impl StereoEffect for Dsp {
 // Shared realtime-safe building blocks used by the stage modules.
 // ---------------------------------------------------------------------------
 
-use biquad::{Biquad, Coefficients, DirectForm1};
+use biquad::Coefficients;
+
+/// One channel's direct-form-I state.
+///
+/// Spelled out here rather than taken from `biquad::DirectForm1` for one
+/// reason: the feedback taps have to be reachable so [`flush_denormal`] can
+/// snap them to zero as a tail decays. A biquad whose `y1`/`y2` slide into the
+/// subnormal range keeps running — just one to two orders of magnitude slower
+/// — and this chain has dozens of them. The arithmetic is otherwise identical.
+#[derive(Debug, Clone, Copy, Default)]
+struct DirectForm1 {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl DirectForm1 {
+    #[inline]
+    fn run(&mut self, coefficients: &Coefficients<f32>, x: f32) -> f32 {
+        let y = coefficients.b0 * x + coefficients.b1 * self.x1 + coefficients.b2 * self.x2
+            - coefficients.a1 * self.y1
+            - coefficients.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = flush_denormal(y);
+        y
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 /// A biquad with independent left/right state but shared coefficients, so a
 /// stereo stage filters each channel correctly (a single instance cannot serve
 /// both channels — its state would be stepped at twice the rate).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StereoBiquad {
-    left: Option<DirectForm1<f32>>,
-    right: Option<DirectForm1<f32>>,
+    coefficients: Option<Coefficients<f32>>,
+    left: DirectForm1,
+    right: DirectForm1,
 }
 
 impl StereoBiquad {
     pub(crate) fn none() -> Self {
-        Self {
-            left: None,
-            right: None,
-        }
+        Self::default()
     }
 
     /// Retune (or clear) the filter for both channels, **keeping its running
@@ -2035,38 +2075,25 @@ impl StereoBiquad {
     /// Going from a filter to `None` still steps — that is a real topology
     /// change (a band switching to true bypass), not a retune.
     pub(crate) fn set(&mut self, coefficients: Option<Coefficients<f32>>) {
-        let Some(coefficients) = coefficients else {
-            self.left = None;
-            self.right = None;
-            return;
-        };
-        match (self.left.as_mut(), self.right.as_mut()) {
-            (Some(left), Some(right)) => {
-                left.update_coefficients(coefficients);
-                right.update_coefficients(coefficients);
-            }
+        let had_filter = self.coefficients.is_some();
+        self.coefficients = coefficients;
+        if !had_filter {
             // First install: there is no history to carry over.
-            _ => {
-                self.left = Some(DirectForm1::<f32>::new(coefficients));
-                self.right = Some(DirectForm1::<f32>::new(coefficients));
-            }
+            self.reset();
         }
     }
 
     pub(crate) fn reset(&mut self) {
-        if let Some(f) = self.left.as_mut() {
-            f.reset_state();
-        }
-        if let Some(f) = self.right.as_mut() {
-            f.reset_state();
-        }
+        self.left.reset();
+        self.right.reset();
     }
 
     #[inline]
     pub(crate) fn run(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let l = self.left.as_mut().map(|f| f.run(left)).unwrap_or(left);
-        let r = self.right.as_mut().map(|f| f.run(right)).unwrap_or(right);
-        (l, r)
+        match self.coefficients.as_ref() {
+            Some(c) => (self.left.run(c, left), self.right.run(c, right)),
+            None => (left, right),
+        }
     }
 }
 
@@ -2163,6 +2190,18 @@ impl Lfo {
 pub(crate) fn soft_clip(x: f32) -> f32 {
     x.tanh()
 }
+
+/// Snap a decaying recursive state to zero before it reaches the subnormal
+/// range — see [`builtin_dsp_core::flush_denormal`].
+///
+/// Every IIR state in this chain (resonators, one-poles, the halfband
+/// allpasses, the biquads) decays geometrically once the player stops. Left
+/// alone they cross into denormal floats, where each operation costs tens to
+/// hundreds of cycles: the modeled cabinet alone measured **19x** slower on
+/// the decay into silence than on signal, which is exactly the "spikes a
+/// moment after I stop playing" fault. Applying this to whatever a filter
+/// feeds back is what keeps a silent chain cheap.
+pub(crate) use builtin_dsp_core::flush_denormal;
 
 #[cfg(test)]
 mod tests {
@@ -2344,7 +2383,12 @@ mod tests {
     fn ir_cabinet_without_a_file_does_not_mute_the_rig() {
         let mut dsp = Dsp::new(48_000.0);
         assert!(dsp.select_model("cab", "ir"));
-        assert_eq!(dsp.latency_samples(), 0, "an empty IR slot adds no latency");
+        assert_eq!(
+            dsp.latency_samples(),
+            IR_PARTITION_SAMPLES,
+            "the IR slot's block ring runs whether or not a file is loaded, and \
+             its latency must be reported so the host compensates it"
+        );
         let mut peak = 0.0f32;
         for n in 0..12_000 {
             if n % 128 == 0 {

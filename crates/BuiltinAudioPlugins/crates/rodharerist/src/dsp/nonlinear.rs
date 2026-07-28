@@ -30,7 +30,7 @@
 #[inline]
 fn finite(x: f32) -> f32 {
     if x.is_finite() {
-        x.clamp(-64.0, 64.0)
+        super::flush_denormal(x.clamp(-64.0, 64.0))
     } else {
         0.0
     }

@@ -78,6 +78,25 @@ pub fn time_constant(sample_rate: f32, seconds: f32) -> f32 {
     (-1.0 / samples).exp()
 }
 
+/// Below this magnitude a filter or envelope state is silence: 1e-25 is
+/// −500 dBFS, far under anything a converter can represent.
+pub const DENORMAL_FLOOR: f32 = 1.0e-25;
+
+/// Snap a decaying recursive state to zero before it reaches the subnormal
+/// range.
+///
+/// Every IIR state — envelope followers, one-poles, filter feedback taps —
+/// decays geometrically once the input goes quiet. Left alone it crosses into
+/// denormal floats, where x86 hands the operation to microcode at tens to
+/// hundreds of cycles apiece, so a *silent* plugin can cost several times what
+/// a playing one does. Apply this wherever a state is fed back into itself.
+///
+/// Compiles to a compare and a select, and nothing at −500 dBFS is audible.
+#[inline]
+pub fn flush_denormal(x: f32) -> f32 {
+    if x.abs() < DENORMAL_FLOOR { 0.0 } else { x }
+}
+
 /// Soft-knee peak compressor (Giannoulis / Reiss style gain computer).
 ///
 /// Envelope detection is allocation-free. Sidechain HPF uses `biquad`.
@@ -160,7 +179,10 @@ impl SoftKneeCompressor {
         } else {
             self.release_coeff
         };
-        self.envelope = coeff * self.envelope + (1.0 - coeff) * level;
+        // Flushed: the envelope decays toward zero on every release, and a
+        // subnormal envelope makes a *silent* compressor cost several times
+        // what a working one does.
+        self.envelope = flush_denormal(coeff * self.envelope + (1.0 - coeff) * level);
 
         let level_db = linear_to_db(self.envelope.max(1.0e-12));
         let gr_db = self.compute_gr_db(level_db);
@@ -180,7 +202,10 @@ impl SoftKneeCompressor {
         } else {
             self.release_coeff
         };
-        self.envelope = coeff * self.envelope + (1.0 - coeff) * level;
+        // Flushed: the envelope decays toward zero on every release, and a
+        // subnormal envelope makes a *silent* compressor cost several times
+        // what a working one does.
+        self.envelope = flush_denormal(coeff * self.envelope + (1.0 - coeff) * level);
 
         let level_db = linear_to_db(self.envelope.max(1.0e-12));
         let gr_db = self.compute_gr_db(level_db);
