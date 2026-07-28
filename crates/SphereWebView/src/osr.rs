@@ -66,15 +66,48 @@ impl Plane {
     ///
     /// `buffer` must point to at least `width * height * 4` readable bytes, as
     /// guaranteed by CEF's `OnPaint` contract.
-    unsafe fn copy_from_cef(&mut self, buffer: *const u8, width: i32, height: i32) {
+    unsafe fn update_from_cef(
+        &mut self,
+        buffer: *const u8,
+        width: i32,
+        height: i32,
+        dirty_rects: &[Rect],
+    ) {
         let len = (width as usize) * (height as usize) * 4;
-        self.bgra.clear();
-        self.bgra.reserve(len);
-        // SAFETY: caller guarantees `len` readable bytes at `buffer`, and the
-        // vector has just been reserved to hold exactly that many.
-        unsafe {
-            std::ptr::copy_nonoverlapping(buffer, self.bgra.as_mut_ptr(), len);
-            self.bgra.set_len(len);
+        let needs_full_copy =
+            self.width != width || self.height != height || self.bgra.len() != len;
+        self.bgra.resize(len, 0);
+
+        if needs_full_copy || dirty_rects.is_empty() {
+            // SAFETY: caller guarantees `len` readable bytes at `buffer`, and
+            // `resize` made the destination exactly that long.
+            unsafe {
+                std::ptr::copy_nonoverlapping(buffer, self.bgra.as_mut_ptr(), len);
+            }
+        } else {
+            let stride = width as usize * 4;
+            for rect in dirty_rects {
+                let left = rect.x.clamp(0, width);
+                let top = rect.y.clamp(0, height);
+                let right = rect.x.saturating_add(rect.width).clamp(left, width);
+                let bottom = rect.y.saturating_add(rect.height).clamp(top, height);
+                let row_len = (right - left) as usize * 4;
+                if row_len == 0 {
+                    continue;
+                }
+                for row in top..bottom {
+                    let offset = row as usize * stride + left as usize * 4;
+                    // SAFETY: the clamped rectangle keeps this row within the
+                    // full CEF source buffer and equally-sized destination.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            buffer.add(offset),
+                            self.bgra.as_mut_ptr().add(offset),
+                            row_len,
+                        );
+                    }
+                }
+            }
         }
         self.width = width;
         self.height = height;
@@ -95,23 +128,20 @@ struct SurfaceState {
     popup: Plane,
     popup_rect: Rect,
     popup_visible: bool,
-    /// `view` with `popup` composited over it — what the host actually draws.
+    /// `view` with `popup` composited over it. This allocation exists only
+    /// while a popup is visible; the normal path reads `view` directly.
     composited: Plane,
 }
 
 impl SurfaceState {
     fn composite(&mut self) {
-        if self.view.is_empty() {
+        if self.view.is_empty() || !self.popup_visible || self.popup.is_empty() {
+            self.composited = Plane::default();
             return;
         }
         self.composited.width = self.view.width;
         self.composited.height = self.view.height;
-        self.composited.bgra.clear();
-        self.composited.bgra.extend_from_slice(&self.view.bgra);
-
-        if !self.popup_visible || self.popup.is_empty() {
-            return;
-        }
+        self.composited.bgra.clone_from(&self.view.bgra);
         let scale = if self.scale_factor > 0.0 {
             self.scale_factor
         } else {
@@ -210,22 +240,31 @@ impl OsrSurface {
         self.0.generation.load(Ordering::Acquire)
     }
 
-    /// Run `read` against the latest composited BGRA frame
+    /// Run `read` against the latest BGRA frame
     /// (`bytes`, `width`, `height` in physical pixels). Returns `None` until
-    /// the first paint arrives.
+    /// the first paint arrives. The normal path borrows the view plane directly;
+    /// a separate composited allocation is used only while a popup is visible.
     pub fn with_frame<R>(&self, read: impl FnOnce(&[u8], i32, i32) -> R) -> Option<R> {
         let state = self.0.state.lock().ok()?;
-        if state.composited.is_empty() {
+        let frame = if state.popup_visible && !state.composited.is_empty() {
+            &state.composited
+        } else {
+            &state.view
+        };
+        if frame.is_empty() {
             return None;
         }
-        Some(read(
-            &state.composited.bgra,
-            state.composited.width,
-            state.composited.height,
-        ))
+        Some(read(&frame.bgra, frame.width, frame.height))
     }
 
-    fn on_paint(&self, element: PaintElementType, buffer: *const u8, width: i32, height: i32) {
+    fn on_paint(
+        &self,
+        element: PaintElementType,
+        dirty_rects: &[Rect],
+        buffer: *const u8,
+        width: i32,
+        height: i32,
+    ) {
         if buffer.is_null() || width <= 0 || height <= 0 {
             return;
         }
@@ -236,9 +275,13 @@ impl OsrSurface {
         // for the duration of the callback.
         unsafe {
             if element == PaintElementType::POPUP {
-                state.popup.copy_from_cef(buffer, width, height);
+                state
+                    .popup
+                    .update_from_cef(buffer, width, height, dirty_rects);
             } else {
-                state.view.copy_from_cef(buffer, width, height);
+                state
+                    .view
+                    .update_from_cef(buffer, width, height, dirty_rects);
             }
         }
         state.composite();
@@ -326,7 +369,8 @@ wrap_render_handler! {
             width: ::std::os::raw::c_int,
             height: ::std::os::raw::c_int,
         ) {
-            self.surface.on_paint(type_, buffer, width, height);
+            self.surface
+                .on_paint(type_, _dirty_rects.unwrap_or(&[]), buffer, width, height);
         }
     }
 }
@@ -546,19 +590,24 @@ mod tests {
     fn a_view_paint_becomes_the_composited_frame() {
         let surface = OsrSurface::new(2, 2, 1.0);
         let pixels = [7u8; 2 * 2 * 4];
-        surface.on_paint(PaintElementType::VIEW, pixels.as_ptr(), 2, 2);
+        surface.on_paint(PaintElementType::VIEW, &[], pixels.as_ptr(), 2, 2);
         assert_eq!(surface.generation(), 1);
         let (len, w, h) = surface
             .with_frame(|bytes, w, h| (bytes.len(), w, h))
             .expect("a frame was painted");
         assert_eq!((len, w, h), (16, 2, 2));
+        let state = surface.0.state.lock().expect("surface state");
+        assert!(
+            state.composited.is_empty(),
+            "the normal path must not retain a duplicate full-frame buffer"
+        );
     }
 
     #[test]
     fn a_popup_paint_is_composited_over_the_view_at_its_rect() {
         let surface = OsrSurface::new(4, 4, 1.0);
         let view = [0u8; 4 * 4 * 4];
-        surface.on_paint(PaintElementType::VIEW, view.as_ptr(), 4, 4);
+        surface.on_paint(PaintElementType::VIEW, &[], view.as_ptr(), 4, 4);
         surface.set_popup_rect(Rect {
             x: 1,
             y: 1,
@@ -567,7 +616,7 @@ mod tests {
         });
         surface.set_popup_visible(true);
         let popup = [9u8; 2 * 2 * 4];
-        surface.on_paint(PaintElementType::POPUP, popup.as_ptr(), 2, 2);
+        surface.on_paint(PaintElementType::POPUP, &[], popup.as_ptr(), 2, 2);
 
         let bytes = surface
             .with_frame(|bytes, _, _| bytes.to_vec())
@@ -581,16 +630,48 @@ mod tests {
     fn hiding_a_popup_restores_the_view_underneath() {
         let surface = OsrSurface::new(2, 2, 1.0);
         let view = [0u8; 2 * 2 * 4];
-        surface.on_paint(PaintElementType::VIEW, view.as_ptr(), 2, 2);
+        surface.on_paint(PaintElementType::VIEW, &[], view.as_ptr(), 2, 2);
         surface.set_popup_visible(true);
         let popup = [9u8; 2 * 2 * 4];
-        surface.on_paint(PaintElementType::POPUP, popup.as_ptr(), 2, 2);
+        surface.on_paint(PaintElementType::POPUP, &[], popup.as_ptr(), 2, 2);
         surface.set_popup_visible(false);
 
         let bytes = surface
             .with_frame(|bytes, _, _| bytes.to_vec())
             .expect("a frame was painted");
         assert_eq!(bytes, vec![0u8; 16]);
+        let state = surface.0.state.lock().expect("surface state");
+        assert!(state.popup.is_empty());
+        assert!(state.composited.is_empty());
+    }
+
+    #[test]
+    fn dirty_rect_paints_only_update_changed_pixels() {
+        let surface = OsrSurface::new(3, 2, 1.0);
+        let initial = [1u8; 3 * 2 * 4];
+        surface.on_paint(PaintElementType::VIEW, &[], initial.as_ptr(), 3, 2);
+
+        let mut next = [9u8; 3 * 2 * 4];
+        next[0..4].fill(5);
+        surface.on_paint(
+            PaintElementType::VIEW,
+            &[Rect {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 1,
+            }],
+            next.as_ptr(),
+            3,
+            2,
+        );
+
+        let bytes = surface
+            .with_frame(|bytes, _, _| bytes.to_vec())
+            .expect("a frame was painted");
+        assert_eq!(&bytes[0..4], &[1u8; 4]);
+        assert_eq!(&bytes[4..8], &[9u8; 4]);
+        assert_eq!(&bytes[8..], &[1u8; 16]);
     }
 
     #[test]
