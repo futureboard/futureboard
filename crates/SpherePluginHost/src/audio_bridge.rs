@@ -68,7 +68,11 @@ pub struct BuiltinMeterFrame {
 /// Maximum block size (frames) the region can carry. The engine's actual block
 /// must be `<=` this; the region is sized for the worst case so it never
 /// reallocates.
-pub const MAX_BLOCK_FRAMES: usize = 2048;
+///
+/// Defined by the engine, which owns the bridge contract and sizes the device
+/// buffer against it. Aliased rather than duplicated so the two cannot drift
+/// into a silent truncation.
+pub const MAX_BLOCK_FRAMES: usize = DirectAudio::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES;
 /// Channels per audio buffer. The engine still consumes a stereo track today,
 /// but the bridge carries multichannel VSTi output-bus data so no plugin
 /// output channels are silently dropped before the engine-side downmix.

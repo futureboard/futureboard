@@ -474,6 +474,11 @@ pub struct SharedState {
 
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
+    /// Device-level underruns reported by the backend (ALSA xruns and the
+    /// equivalent elsewhere). Distinct from `output_xruns`, which counts the
+    /// *software* monitor ring running dry: this one means the hardware ran out
+    /// of samples, so the user heard a click.
+    pub device_xruns: AtomicU64,
     pub mmcss_active: AtomicBool,
     /// Set by a backend when the audio device disappears mid-stream (USB
     /// unplugged, default device changed, exclusive-mode timeout). Read by the
@@ -551,6 +556,7 @@ impl Default for SharedState {
             dropout_last_reason: AtomicU8::new(DropoutReason::None as u8),
             callback_deadline_us: AtomicU32::new(0),
             glitch_count: AtomicU64::new(0),
+            device_xruns: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
             pdc_enabled: AtomicBool::new(true),
@@ -2688,6 +2694,12 @@ impl EngineInner {
 
         *self.daux_config.lock() = daux_cfg.clone();
         self.glitch_counter.store(0, Ordering::Relaxed);
+        // Counters and the measured latency describe one open stream; a reopen
+        // (device or buffer-size change) must not inherit the previous one's.
+        self.shared.device_xruns.store(0, Ordering::Relaxed);
+        self.shared
+            .output_latency_secs
+            .store(f32_store(0.0), Ordering::Relaxed);
 
         let initial_runtime = self.get_initial_runtime(None);
 
@@ -3487,6 +3499,7 @@ impl EngineInner {
         let st = self.status.lock().clone();
         let daux_cfg = self.daux_config.lock().clone();
         let glitch_count = self.glitch_counter.load(Ordering::Relaxed) as f64;
+        let device_xruns = self.shared.device_xruns.load(Ordering::Relaxed) as f64;
         let mmcss_active = self.shared.mmcss_active.load(Ordering::Relaxed);
         let device_lost = self.shared.device_lost.load(Ordering::Relaxed);
         let running = self.shared.playing.load(Ordering::Relaxed);
@@ -3508,7 +3521,15 @@ impl EngineInner {
             daux_cfg.backend.display_name().to_string()
         };
 
-        let estimated_latency_ms = if st.sample_rate > 0 {
+        // The device's measured callback→playout delay is the real figure and
+        // covers the whole ring; the block-size estimate only ever described
+        // one period, which under-reports wherever the ring holds several
+        // (ALSA). Fall back to the estimate until the first callback lands.
+        let measured_latency_secs =
+            f32_load(self.shared.output_latency_secs.load(Ordering::Relaxed));
+        let estimated_latency_ms = if measured_latency_secs > 0.0 {
+            measured_latency_secs as f64 * 1000.0
+        } else if st.sample_rate > 0 {
             st.buffer_size as f64 / st.sample_rate as f64 * 1000.0
         } else {
             0.0
@@ -3523,6 +3544,7 @@ impl EngineInner {
             buffer_size: st.buffer_size,
             estimated_latency_ms,
             glitch_count,
+            device_xruns,
             mmcss_active,
             last_error: st.last_daux_error.clone(),
             device_lost,

@@ -7,7 +7,8 @@
 //!   - Linux    → ALSA
 //!
 //! On Windows the audio thread gets MMCSS "Pro Audio" priority if
-//! `config.mmcss_priority` is true.
+//! `config.mmcss_priority` is true. On Linux it is promoted to `SCHED_FIFO`
+//! unconditionally (best effort) — see `rt_priority`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -98,32 +99,39 @@ pub(crate) fn open_on_host(
     let default_cfg = default_supported.config();
 
     // Apply requested sample rate / buffer size overrides.
-    let requested_cfg = if config.sample_rate.is_some() || config.buffer_size.is_some() {
-        let mut c = default_cfg.clone();
-        if let Some(sr) = config.sample_rate {
-            c.sample_rate = cpal::SampleRate(sr);
-        }
-        if let Some(bs) = config.buffer_size {
-            let frames = if config.safe_mode { bs.max(512) } else { bs };
-            c.buffer_size = BufferSize::Fixed(frames);
-        }
-        Some(c)
-    } else {
-        None
-    };
+    let requested_period = config
+        .buffer_size
+        .map(|bs| if config.safe_mode { bs.max(512) } else { bs });
 
-    let candidates: Vec<(&str, cpal::StreamConfig)> = {
+    // `(label, cpal config, frames the callback is expected to receive)`.
+    // The third element is what gets reported as the active buffer size: on
+    // ALSA the `Fixed` value is the whole PCM ring, not the callback block, so
+    // the two diverge (see `period_candidates`).
+    let candidates: Vec<(&str, cpal::StreamConfig, u32)> = {
         let mut v = Vec::new();
-        if let Some(rc) = requested_cfg {
-            v.push(("requested", rc));
+        if config.sample_rate.is_some() || requested_period.is_some() {
+            let mut base = default_cfg.clone();
+            if let Some(sr) = config.sample_rate {
+                base.sample_rate = cpal::SampleRate(sr);
+            }
+            match requested_period {
+                Some(period) => {
+                    for (label, fixed_frames, callback_frames) in period_candidates(period) {
+                        let mut c = base.clone();
+                        c.buffer_size = BufferSize::Fixed(fixed_frames);
+                        v.push((label, c, callback_frames));
+                    }
+                }
+                None => v.push(("requested", base, 0)),
+            }
         }
-        v.push(("default", default_cfg));
+        v.push(("default", default_cfg, 0));
         v
     };
 
     let mut last_error = None;
 
-    for (label, stream_config) in &candidates {
+    for (label, stream_config, callback_frames) in &candidates {
         shared
             .sample_rate
             .store(stream_config.sample_rate.0, Ordering::Relaxed);
@@ -141,9 +149,24 @@ pub(crate) fn open_on_host(
             config.mmcss_priority,
         ) {
             Ok(stream) => {
-                let buf_size = match stream_config.buffer_size {
-                    BufferSize::Fixed(f) => f,
-                    BufferSize::Default => 0,
+                // Prefer what the device actually negotiated over what we
+                // predicted. ALSA rounds both the period and the ring to what
+                // the hardware supports, so the request is only ever a request.
+                let buf_size = match stream.negotiated_buffer() {
+                    Some(negotiated) => {
+                        if negotiated.period_frames != *callback_frames {
+                            eprintln!(
+                                "[DAUx cpal] {label}: asked for {callback_frames} frames/callback, \
+                                 device negotiated {} (ring {})",
+                                negotiated.period_frames, negotiated.ring_frames
+                            );
+                        }
+                        negotiated.period_frames
+                    }
+                    None => match stream_config.buffer_size {
+                        BufferSize::Fixed(_) => *callback_frames,
+                        BufferSize::Default => 0,
+                    },
                 };
                 return Ok(CpalStreamHandle {
                     stream,
@@ -163,6 +186,143 @@ pub(crate) fn open_on_host(
     Err(SphereAudioError::StreamOpenFailed(
         last_error.unwrap_or_else(|| "no candidates available".into()),
     ))
+}
+
+// ── Requested-buffer-size candidates ─────────────────────────────────────────
+
+/// Number of periods cpal's ALSA ring is asked to hold.
+///
+/// cpal derives `period = buffer / 4` (`set_period_size_near`) from whatever
+/// `BufferSize::Fixed` it is handed, so a 4-period ring is what makes the
+/// callback block come back equal to the requested period.
+#[cfg(target_os = "linux")]
+const ALSA_PERIODS_PER_BUFFER: u32 = 4;
+
+/// Translate a requested *period* (callback block size, which is what the UI
+/// and every other platform mean by "buffer size") into the `BufferSize::Fixed`
+/// values worth trying, in preference order.
+///
+/// Returns `(label, fixed value handed to cpal, frames the callback receives)`.
+///
+/// On ALSA those last two differ: cpal passes `Fixed` straight to
+/// `snd_pcm_hw_params_set_buffer_size` — the whole PCM ring — and derives the
+/// period as a quarter of it. Requesting 256 there therefore produced 64-frame
+/// wakeups backed by only 5.3 ms of headroom at 48 kHz, roughly a quarter of
+/// the safety margin the same setting buys on WASAPI Shared or CoreAudio.
+#[cfg(target_os = "linux")]
+fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
+    // The callback is handed everything available, which after a late wakeup is
+    // the *entire* ring — measured, not assumed: a 4096-frame ring delivers
+    // 4096-frame blocks. `request_block` clamps at `MAX_BRIDGE_BLOCK_FRAMES`,
+    // so a ring beyond that would silently truncate bridged plugin audio.
+    // Trade periods away rather than exceed it: large buffer sizes still get a
+    // 2- or 1-period ring, which is what they had before.
+    const MAX_RING: u32 = crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES as u32;
+    let periods = (MAX_RING / period.max(1)).clamp(1, ALSA_PERIODS_PER_BUFFER);
+    let ring = period.saturating_mul(periods);
+    vec![
+        // Preferred: as many periods as fit, so the callback block == the
+        // requested period and the rest absorbs scheduling jitter.
+        ("requested (ALSA multi-period ring)", ring, period),
+        // `set_buffer_size` is an *exact* match on ALSA, and dmix / the
+        // PipeWire ALSA plugin routinely refuse the larger ring. Retry with the
+        // bare value — worse headroom, but far better than surrendering to the
+        // device default (25 ms period / 100 ms ring) as the next step would.
+        (
+            "requested (ALSA bare ring)",
+            period,
+            (period / ALSA_PERIODS_PER_BUFFER).max(1),
+        ),
+    ]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
+    vec![("requested", period, period)]
+}
+
+#[cfg(test)]
+mod buffer_size_tests {
+    use super::period_candidates;
+
+    /// The reported buffer size must be the block the callback actually
+    /// receives, not the value handed to cpal — those differ on ALSA.
+    #[test]
+    fn reported_size_is_the_callback_block() {
+        for (_, fixed, callback) in period_candidates(256) {
+            assert!(fixed > 0 && callback > 0, "no candidate may report zero");
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                callback,
+                fixed / super::ALSA_PERIODS_PER_BUFFER,
+                "cpal derives the ALSA period as a quarter of the ring"
+            );
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(callback, fixed, "the two agree off ALSA");
+        }
+    }
+
+    /// The preferred ALSA candidate must ask for a ring four times the
+    /// requested period, so the callback block comes back at the requested
+    /// size instead of a quarter of it. This is the actual stutter fix.
+    ///
+    /// Verified against real hardware: requesting 256 yields a 64-frame period
+    /// and underruns on an idle callback, while requesting 1024 yields the
+    /// 256-frame period we actually want, with none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preferred_alsa_candidate_preserves_the_requested_period() {
+        let (_, fixed, callback) = period_candidates(256)[0];
+        assert_eq!(fixed, 1024, "ring should hold four 256-frame periods");
+        assert_eq!(callback, 256, "callback block should match the request");
+    }
+
+    /// A callback can be handed the whole ring, and `request_block` clamps at
+    /// `MAX_BRIDGE_BLOCK_FRAMES`, so no ring may exceed it — otherwise bridged
+    /// plugin audio loses the tail of every late block.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ring_never_exceeds_what_the_plugin_bridge_can_carry() {
+        let max = crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES as u32;
+        for period in [32, 64, 128, 256, 512, 1024, 2048, 4096] {
+            for (label, fixed, _) in period_candidates(period) {
+                assert!(
+                    fixed <= max.max(period),
+                    "{label}: ring {fixed} exceeds the {max}-frame bridge block \
+                     for a {period}-frame period"
+                );
+            }
+        }
+    }
+
+    /// Large periods must still gain whatever headroom fits rather than being
+    /// forced back to a single-period ring.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_periods_keep_the_headroom_that_fits() {
+        assert_eq!(period_candidates(512)[0].1, 2048, "512 fits four periods");
+        assert_eq!(period_candidates(1024)[0].1, 2048, "1024 fits two");
+        assert_eq!(period_candidates(2048)[0].1, 2048, "2048 fits one");
+    }
+
+    /// A bare-ring retry must still be offered, since `set_buffer_size` is an
+    /// exact match on ALSA and the larger ring is often refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn alsa_falls_back_before_surrendering_to_the_device_default() {
+        let candidates = period_candidates(256);
+        assert_eq!(candidates.len(), 2, "a retry must exist");
+        assert_eq!(candidates[1].1, 256, "retry asks for the bare value");
+    }
+
+    /// Small periods must not report a zero-frame callback block, which would
+    /// zero out the reported latency.
+    #[test]
+    fn tiny_periods_never_report_zero() {
+        for (_, _, callback) in period_candidates(2) {
+            assert!(callback >= 1, "callback frames must stay positive");
+        }
+    }
 }
 
 // ── Stream builders ───────────────────────────────────────────────────────────
@@ -228,6 +388,14 @@ where
     let mut mmcss_set = false;
     #[cfg(not(target_os = "windows"))]
     let mmcss_set = false;
+    // Linux: cpal spawns `cpal_alsa_out` at plain SCHED_OTHER, so the audio
+    // thread is preempted by the compositor, plugin editors and the scanner
+    // like any other thread. The first callback announces its tid and a helper
+    // thread does the promotion — see `rt_priority`.
+    #[cfg(target_os = "linux")]
+    let rt_announcer = rt_priority::spawn_promoter();
+    #[cfg(target_os = "linux")]
+    let mut rt_announced = false;
     // Preallocate before stream start: the callback must never grow this on the
     // audio thread. The requested buffer size is only a *hint* — WASAPI Shared
     // (and some other cpal backends) round the period up to the device's
@@ -239,12 +407,18 @@ where
     // hands back precisely the requested buffer. Preallocate a generous upper
     // bound so realistic shared-mode blocks always fit; the guard below stays
     // only as a last-resort safety net.
-    const DEFAULT_SCRATCH_FRAMES: usize = 8_192;
+    //
+    // The floor is rate-relative rather than a flat 8192 frames because cpal's
+    // ALSA `BufferSize::Default` asks for a 100 ms ring, and the callback is
+    // handed everything available — the whole ring on the first block and after
+    // every xrun recovery. At 96/192 kHz a flat 8192 was smaller than that ring,
+    // so the guard below fired on exactly those blocks and emitted silence.
+    let default_scratch_frames = (output_sample_rate as usize / 5).max(8_192);
     let requested_frames = match config.buffer_size {
         BufferSize::Fixed(frames) => frames as usize,
-        BufferSize::Default => DEFAULT_SCRATCH_FRAMES,
+        BufferSize::Default => default_scratch_frames,
     };
-    let scratch_frames = requested_frames.max(DEFAULT_SCRATCH_FRAMES);
+    let scratch_frames = requested_frames.max(default_scratch_frames);
     let mut local = LocalAudioState::with_monitor_capacity(sr, scratch_frames);
     let mut f32_scratch = vec![0.0f32; scratch_frames.saturating_mul(ch)];
 
@@ -255,7 +429,20 @@ where
     let stream = device
         .build_output_stream::<T, _, _>(
             config,
-            move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                // Publish the device's own callback→playout delay. This is the
+                // true output latency (the whole ring on ALSA, not one period),
+                // and record-stop compensation reads it to line overdubs up.
+                // The legacy callback path already did this; the DAUx path was
+                // dropping `info` on the floor, leaving it stuck at 0.
+                let ts = info.timestamp();
+                if let Some(delay) = ts.playback.duration_since(&ts.callback) {
+                    shared.output_latency_secs.store(
+                        crate::engine::f32_store(delay.as_secs_f32()),
+                        Ordering::Relaxed,
+                    );
+                }
+
                 // ── Set MMCSS on first callback invocation ────────────────────
                 #[cfg(target_os = "windows")]
                 if mmcss_priority && !mmcss_set {
@@ -263,6 +450,12 @@ where
                 }
                 #[cfg(not(target_os = "windows"))]
                 let _ = mmcss_priority; // suppress unused warning
+
+                #[cfg(target_os = "linux")]
+                if !rt_announced {
+                    rt_announced = true;
+                    rt_announcer.announce_current_thread();
+                }
 
                 // ── Drain command queue ───────────────────────────────────────
                 drain_commands(
@@ -297,13 +490,22 @@ where
                 let _ = mmcss_set; // suppress unused (non-windows)
             },
             move |err| {
-                eprintln!("[DAUx cpal] Stream error: {err}");
                 glitch_counter.fetch_add(1, Ordering::Relaxed);
-                // Device vanished mid-stream (unplug / default-device change):
-                // flag it so the control thread can surface DeviceLost and
-                // attempt recovery.
-                if matches!(err, cpal::StreamError::DeviceNotAvailable) {
-                    err_shared.device_lost.store(true, Ordering::Relaxed);
+                match err {
+                    // The device ran dry and recovered. Counted rather than
+                    // logged: underruns arrive in bursts, and one eprintln per
+                    // xrun would itself starve the callback.
+                    cpal::StreamError::Underrun => {
+                        err_shared.device_xruns.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Device vanished mid-stream (unplug / default-device
+                    // change): flag it so the control thread can surface
+                    // DeviceLost and attempt recovery.
+                    cpal::StreamError::DeviceNotAvailable => {
+                        eprintln!("[DAUx cpal] Stream error: {err}");
+                        err_shared.device_lost.store(true, Ordering::Relaxed);
+                    }
+                    _ => eprintln!("[DAUx cpal] Stream error: {err}"),
                 }
             },
             None,
@@ -311,6 +513,276 @@ where
         .map_err(|e| e.to_string())?;
 
     Ok(stream)
+}
+
+// ── Realtime scheduling helper (Linux only) ──────────────────────────────────
+
+/// Promote cpal's ALSA callback thread out of `SCHED_OTHER`.
+///
+/// Windows claims MMCSS "Pro Audio" and macOS joins a CoreAudio workgroup, but
+/// cpal's ALSA backend spawns `cpal_alsa_out` as an ordinary thread
+/// (`external/cpal/src/host/alsa/mod.rs`). At default priority the callback
+/// competes with the GPUI compositor, CEF plugin editors and the plugin
+/// scanner, which is the dominant source of Linux dropouts.
+///
+/// Deliberately not gated on `DauxDeviceConfig::mmcss_priority`: that flag is
+/// Windows-specific and is hardcoded false on the native path
+/// (`native.rs`). Realtime scheduling is what an audio callback needs
+/// regardless, and every step here degrades gracefully when the user has no
+/// realtime budget.
+#[cfg(target_os = "linux")]
+mod rt_priority {
+    use std::time::Duration;
+
+    use crossbeam_channel::{bounded, Sender};
+
+    /// `SCHED_FIFO` priorities to try directly, most preferred first.
+    ///
+    /// 76 clears the GPUI Linux dispatcher's realtime threads (priority 65 in
+    /// `gpui_linux::dispatcher::spawn_realtime`) so UI work can never preempt
+    /// audio. The lower rungs cover partially-provisioned systems.
+    ///
+    /// Kernel RT throttling (`sched_rt_runtime_us`, 95% by default) keeps a
+    /// runaway callback from locking the machine.
+    const FIFO_PRIORITIES: [libc::c_int; 4] = [76, 66, 20, 5];
+
+    /// Nice value requested when no realtime budget is available at all.
+    const FALLBACK_NICE: libc::c_int = -10;
+
+    /// How long the helper waits for the stream to produce its first callback
+    /// before giving up, so a stream that never starts cannot leak the thread.
+    const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Handle the audio thread uses to announce itself for promotion.
+    pub struct Announcer(Sender<libc::pid_t>);
+
+    impl Announcer {
+        /// Realtime-safe: one `gettid` syscall plus a non-blocking send into a
+        /// preallocated single-slot channel. Every part that can block — the
+        /// scheduler syscalls and the RealtimeKit D-Bus round trip — runs on
+        /// the helper thread, never here.
+        pub fn announce_current_thread(&self) {
+            // SAFETY: `SYS_gettid` takes no arguments and cannot fail.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+            let _ = self.0.try_send(tid);
+        }
+    }
+
+    /// Spawn the helper that promotes the audio thread once it announces its
+    /// tid. Returns immediately; the helper exits after a single attempt.
+    pub fn spawn_promoter() -> Announcer {
+        let (tx, rx) = bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("daux-rt-promote".into())
+            .spawn(move || {
+                if let Ok(tid) = rx.recv_timeout(ANNOUNCE_TIMEOUT) {
+                    let _ = promote(tid);
+                }
+            });
+        if let Err(e) = &spawned {
+            eprintln!("[DAUx] could not spawn realtime promoter: {e}");
+        }
+        Announcer(tx)
+    }
+
+    /// What the promotion actually achieved.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Outcome {
+        /// Direct `sched_setscheduler`, using our own `RLIMIT_RTPRIO` budget.
+        Fifo(libc::c_int),
+        /// Granted by RealtimeKit, which always hands out `SCHED_RR`.
+        RoundRobin(i32),
+        /// No realtime budget anywhere; settled for a better nice value.
+        Nice(libc::c_int),
+        /// Still `SCHED_OTHER` — dropouts are expected.
+        Unchanged,
+    }
+
+    fn promote(tid: libc::pid_t) -> Outcome {
+        if let Some(priority) = try_sched_fifo(tid) {
+            eprintln!("[DAUx] audio thread promoted to SCHED_FIFO priority {priority}");
+            return Outcome::Fifo(priority);
+        }
+        // Expected on a stock desktop: RLIMIT_RTPRIO is 0 there, so the direct
+        // syscall above is always refused and RealtimeKit is the only route.
+        match rtkit::promote(tid) {
+            Ok(priority) => {
+                eprintln!(
+                    "[DAUx] audio thread promoted to SCHED_RR priority {priority} \
+                     via RealtimeKit"
+                );
+                return Outcome::RoundRobin(priority);
+            }
+            Err(e) => eprintln!("[DAUx] RealtimeKit promotion unavailable: {e}"),
+        }
+        match try_nice(tid) {
+            Some(nice) => {
+                eprintln!(
+                    "[DAUx] no realtime scheduling available; audio thread running at nice {nice}"
+                );
+                Outcome::Nice(nice)
+            }
+            None => {
+                eprintln!(
+                    "[DAUx] audio thread stuck at default priority — expect dropouts. \
+                     Install the 'realtime-privileges' package and join the 'realtime' \
+                     group, or launch from a desktop session so RealtimeKit can grant it."
+                );
+                Outcome::Unchanged
+            }
+        }
+    }
+
+    /// Returns the priority that was accepted, if any.
+    ///
+    /// Uses `sched_setscheduler` rather than `pthread_setschedparam` so the
+    /// helper thread can promote the audio thread by tid without running any
+    /// of this on the audio thread itself.
+    fn try_sched_fifo(tid: libc::pid_t) -> Option<libc::c_int> {
+        for priority in FIFO_PRIORITIES {
+            // SAFETY: every `sched_param` member is valid zero-initialized.
+            let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+            param.sched_priority = priority;
+            // SAFETY: `tid` names a live thread and `param` is initialized.
+            let rc = unsafe { libc::sched_setscheduler(tid, libc::SCHED_FIFO, &param) };
+            if rc == 0 {
+                return Some(priority);
+            }
+        }
+        None
+    }
+
+    /// Returns the nice value that was accepted, if any.
+    fn try_nice(tid: libc::pid_t) -> Option<libc::c_int> {
+        // Linux departs from POSIX here: `PRIO_PROCESS` with a *thread* id
+        // applies to that thread alone, which is what we want — the control
+        // thread must keep its default niceness.
+        // SAFETY: `tid` names a live thread.
+        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, FALLBACK_NICE) };
+        (rc == 0).then_some(FALLBACK_NICE)
+    }
+
+    /// RealtimeKit hands out `SCHED_FIFO` to unprivileged processes over the
+    /// system bus. It is what a stock PipeWire desktop ships instead of a
+    /// per-user `RLIMIT_RTPRIO`, and is how PipeWire itself gets realtime.
+    mod rtkit {
+        const SERVICE: &str = "org.freedesktop.RealtimeKit1";
+        const PATH: &str = "/org/freedesktop/RealtimeKit1";
+
+        /// RealtimeKit refuses callers that leave `RLIMIT_RTTIME` unlimited —
+        /// the limit is what bounds a runaway realtime thread. Used only when
+        /// the daemon advertises no maximum of its own.
+        const FALLBACK_RTTIME_US: u64 = 200_000;
+
+        pub fn promote(tid: libc::pid_t) -> Result<i32, String> {
+            let conn = zbus::blocking::Connection::system()
+                .map_err(|e| format!("system bus unavailable: {e}"))?;
+            let proxy = zbus::blocking::Proxy::new(&conn, SERVICE, PATH, SERVICE)
+                .map_err(|e| format!("proxy setup failed: {e}"))?;
+
+            // The daemon caps what it will grant; asking above the cap is a
+            // hard error rather than a clamp, so read it first.
+            let max_priority: i32 = proxy
+                .get_property("MaxRealtimePriority")
+                .map_err(|e| format!("daemon not reachable: {e}"))?;
+            if max_priority < 1 {
+                return Err("daemon grants no realtime priority".into());
+            }
+            let rttime_max: i64 = proxy.get_property("RTTimeUSecMax").unwrap_or(0);
+
+            set_rttime_limit(if rttime_max > 0 {
+                rttime_max as u64
+            } else {
+                FALLBACK_RTTIME_US
+            })?;
+
+            // SAFETY: always safe to call.
+            let pid = unsafe { libc::getpid() } as u64;
+            proxy
+                .call_method(
+                    "MakeThreadRealtimeWithPID",
+                    &(pid, tid as u64, max_priority as u32),
+                )
+                .map_err(|e| format!("MakeThreadRealtimeWithPID failed: {e}"))?;
+            Ok(max_priority)
+        }
+
+        /// `setrlimit` is process-wide on Linux, but `RLIMIT_RTTIME` only
+        /// constrains threads that are actually `SCHED_FIFO`/`SCHED_RR`, so
+        /// this does not affect the control or UI threads.
+        fn set_rttime_limit(usec: u64) -> Result<(), String> {
+            let limit = libc::rlimit {
+                rlim_cur: usec,
+                rlim_max: usec,
+            };
+            // SAFETY: `limit` is a fully initialized `rlimit`.
+            let rc = unsafe { libc::setrlimit(libc::RLIMIT_RTTIME, &limit) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "could not set RLIMIT_RTTIME: {}",
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Outcome;
+        use crossbeam_channel::bounded;
+
+        /// Whatever mechanism `promote` reports having used must be the policy
+        /// the kernel actually reports for that thread afterwards.
+        ///
+        /// This is the assertion that matters: an earlier draft claimed
+        /// `SCHED_FIFO` for the RealtimeKit path, but RealtimeKit only ever
+        /// hands out `SCHED_RR`.
+        ///
+        /// `Nice`/`Unchanged` are real outcomes on an unprovisioned machine
+        /// (no `RLIMIT_RTPRIO`, and RealtimeKit's polkit rules grant nothing to
+        /// a process outside a logind session), so they are reported rather
+        /// than failed — there is nothing to promote *with* in that case.
+        #[test]
+        fn reported_outcome_matches_the_kernel_policy() {
+            // Keep a worker alive so there is a real, running tid to promote.
+            let (release_tx, release_rx) = bounded::<()>(0);
+            let (ready_tx, ready_rx) = bounded(1);
+            let worker = std::thread::spawn(move || {
+                // SAFETY: `SYS_gettid` takes no arguments and cannot fail.
+                let tid = unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t };
+                ready_tx.send(tid).expect("test receiver is alive");
+                let _ = release_rx.recv();
+            });
+            let tid = ready_rx.recv().expect("worker should report its tid");
+
+            let outcome = super::promote(tid);
+            // SAFETY: `tid` names the still-parked worker thread.
+            let policy = unsafe { libc::sched_getscheduler(tid) };
+
+            let expected = match outcome {
+                Outcome::Fifo(_) => Some(libc::SCHED_FIFO),
+                Outcome::RoundRobin(_) => Some(libc::SCHED_RR),
+                Outcome::Nice(_) | Outcome::Unchanged => Some(libc::SCHED_OTHER),
+            };
+            assert_eq!(
+                Some(policy),
+                expected,
+                "promote() reported {outcome:?} but the kernel reports policy {policy}"
+            );
+
+            if matches!(outcome, Outcome::Nice(_) | Outcome::Unchanged) {
+                eprintln!(
+                    "note: this machine grants no realtime scheduling ({outcome:?}); \
+                     the promotion path itself was still exercised"
+                );
+            }
+
+            drop(release_tx);
+            worker.join().expect("worker thread panicked");
+        }
+    }
 }
 
 // ── MMCSS helper (Windows only) ───────────────────────────────────────────────

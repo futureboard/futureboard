@@ -1892,7 +1892,6 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "git+https://github.com/futureboard/cpal#113dc59b39c6bb5256c1f1177a148acecbb3d400"
 dependencies = [
  "alsa 0.9.1",
  "asio-sys",
@@ -7458,6 +7457,7 @@ dependencies = [
  "cc",
  "cpal",
  "crossbeam-channel",
+ "libc",
  "memmap2",
  "napi",
  "napi-build",
@@ -7472,6 +7472,7 @@ dependencies = [
  "symphonia",
  "windows 0.61.3",
  "windows-registry 0.5.3",
+ "zbus",
 ]
 
 [[package]]

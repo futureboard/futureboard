@@ -64,6 +64,10 @@ pub struct JsDauxStatus {
     pub estimated_latency_ms: f64,
     /// Number of audio glitches / underruns since the stream was opened.
     pub glitch_count: f64,
+    /// Device-level underruns (ALSA xruns and equivalents) since the stream was
+    /// opened. A subset of `glitch_count`, isolated so a starved audio thread
+    /// is distinguishable from device-lost and other backend errors.
+    pub device_xruns: f64,
     /// MMCSS priority active on audio thread (Windows only).
     pub mmcss_active: bool,
     /// Last backend error (e.g. WASAPI Exclusive failed reason). Cleared on success.
