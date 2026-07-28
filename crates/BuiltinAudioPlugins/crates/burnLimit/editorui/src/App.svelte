@@ -267,6 +267,7 @@
       linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 28%),
       var(--panel);
     box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+    animation: panel-arrive 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   }
 
   .chrome {
@@ -320,6 +321,7 @@
     color: var(--text);
     border-color: rgba(110, 176, 201, 0.5);
     background: rgba(110, 176, 201, 0.14);
+    animation: state-confirm 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .stage {
@@ -388,6 +390,7 @@
   .style.on {
     color: #071018;
     background: var(--steel);
+    animation: state-confirm 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .params {
@@ -396,6 +399,19 @@
     justify-items: center;
     gap: var(--s3);
     min-width: 0;
+  }
+
+  @keyframes panel-arrive {
+    from {
+      opacity: 0;
+      transform: translateY(0.35rem);
+    }
+  }
+
+  @keyframes state-confirm {
+    45% {
+      filter: brightness(1.16);
+    }
   }
 
   @media (max-width: 960px) {

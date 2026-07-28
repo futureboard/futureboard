@@ -66,7 +66,8 @@ body {
     var(--bg);
   color: var(--text);
   font-family:
-    'IBM Plex Sans', 'Segoe UI', Helvetica, Arial, sans-serif;
+    'Mona Sans Variable', 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  font-optical-sizing: auto;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
@@ -87,11 +88,27 @@ button {
   transition:
     color var(--ease),
     background-color var(--ease),
-    border-color var(--ease);
+    border-color var(--ease),
+    transform var(--ease);
+}
+
+button:active {
+  transform: scale(0.96);
 }
 
 button:focus-visible,
 select:focus-visible {
   outline: 1.5px solid var(--steel);
   outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

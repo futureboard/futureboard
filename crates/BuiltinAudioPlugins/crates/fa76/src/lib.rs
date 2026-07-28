@@ -1,11 +1,11 @@
 //! FA-76 — FET / ultra-fast compressor (1176-style).
 //!
-//! Phase 2 (medium). Ratio buttons map to classic 4 / 8 / 12 / 20 / All curves.
-//! Dynamics use `SoftKneeCompressor` (sidechain HPF via [`biquad`]).
+//! Ratio buttons map to classic 4 / 8 / 12 / 20 / All curves. The gain cell
+//! uses the feedback topology and sub-millisecond timing of the hardware.
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect, clamp,
-    db_to_linear, mix, time_constant,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
+    linear_to_db, mix, time_constant,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,9 @@ impl RatioButton {
             Self::R8 => 8.0,
             Self::R12 => 12.0,
             Self::R20 => 20.0,
-            Self::All => 100.0,
+            // The all-buttons curve is not an infinite brick-wall ratio. Its
+            // aggression also comes from the shifted knee and faster recovery.
+            Self::All => 30.0,
         }
     }
 
@@ -162,23 +164,25 @@ impl Meters {
     }
 
     #[inline]
-    fn push(&mut self, input: f32, output: f32) {
-        let in_abs = input.abs();
-        let out_abs = output.abs();
+    fn push(&mut self, input: (f32, f32), output: (f32, f32)) {
+        let in_abs = input.0.abs().max(input.1.abs());
+        let out_abs = output.0.abs().max(output.1.abs());
 
-        self.in_peak = if in_abs > self.in_peak {
+        self.in_peak = if in_abs >= self.in_peak {
             in_abs
         } else {
             self.in_peak * self.peak_coeff
         };
-        self.out_peak = if out_abs > self.out_peak {
+        self.out_peak = if out_abs >= self.out_peak {
             out_abs
         } else {
             self.out_peak * self.peak_coeff
         };
 
-        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * input * input;
-        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * output * output;
+        let in_square = (input.0 * input.0 + input.1 * input.1) * 0.5;
+        let out_square = (output.0 * output.0 + output.1 * output.1) * 0.5;
+        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * in_square;
+        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * out_square;
 
         if in_abs >= CLIP_THRESHOLD {
             self.in_clip = true;
@@ -291,12 +295,132 @@ pub fn descriptor() -> PluginDescriptor {
     }
 }
 
+/// Stereo-linked feedback FET gain cell.
+///
+/// The static curve is the closed-form solution of the hardware feedback loop;
+/// solving it directly avoids the unstable one-sample control-loop delay that
+/// a literal digital feedback model creates at 20 µs attack and high ratios.
+/// Each sidechain channel is high-passed before rectification: filtering an
+/// already-rectified stereo maximum would turn bass into DC/harmonics and make
+/// the sidechain HPF ineffective.
+#[derive(Debug, Clone)]
+struct FetCell {
+    sample_rate: f32,
+    threshold_db: f32,
+    ratio: f32,
+    knee_db: f32,
+    attack_coeff: f32,
+    release_coeff: f32,
+    gain_reduction_db: f32,
+    sidechain_coeff: f32,
+    sidechain_x1: [f32; 2],
+    sidechain_y1: [f32; 2],
+}
+
+impl FetCell {
+    fn new(sample_rate: f32) -> Self {
+        let mut cell = Self {
+            sample_rate: sample_rate.max(1.0),
+            threshold_db: -24.0,
+            ratio: 4.0,
+            knee_db: 4.0,
+            attack_coeff: 0.0,
+            release_coeff: 0.0,
+            gain_reduction_db: 0.0,
+            sidechain_coeff: 0.0,
+            sidechain_x1: [0.0; 2],
+            sidechain_y1: [0.0; 2],
+        };
+        cell.set_model(-24.0, 4.0, 4.0, 20.0, 100.0, 60.0);
+        cell
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    fn set_model(
+        &mut self,
+        threshold_db: f32,
+        ratio: f32,
+        knee_db: f32,
+        attack_us: f32,
+        release_ms: f32,
+        sidechain_hpf_hz: f32,
+    ) {
+        self.threshold_db = threshold_db;
+        self.ratio = ratio.max(1.0);
+        self.knee_db = knee_db.max(0.0);
+        self.attack_coeff = time_constant(self.sample_rate, attack_us * 1.0e-6);
+        self.release_coeff = time_constant(self.sample_rate, release_ms * 0.001);
+        let cutoff = clamp(sidechain_hpf_hz, 0.0, self.sample_rate * 0.45);
+        self.sidechain_coeff = if cutoff < 10.0 {
+            0.0
+        } else {
+            (-std::f32::consts::TAU * cutoff / self.sample_rate).exp()
+        };
+    }
+
+    fn reset(&mut self) {
+        self.gain_reduction_db = 0.0;
+        self.sidechain_x1 = [0.0; 2];
+        self.sidechain_y1 = [0.0; 2];
+    }
+
+    #[inline]
+    fn high_pass(&mut self, input: f32, channel: usize) -> f32 {
+        if self.sidechain_coeff == 0.0 {
+            return input;
+        }
+        let output = self.sidechain_coeff
+            * (self.sidechain_y1[channel] + input - self.sidechain_x1[channel]);
+        self.sidechain_x1[channel] = input;
+        self.sidechain_y1[channel] = output;
+        output
+    }
+
+    #[inline]
+    fn target_reduction_db(&self, level_db: f32) -> f32 {
+        let over = level_db - self.threshold_db;
+        let half_knee = self.knee_db * 0.5;
+        let curved_over = if over <= -half_knee {
+            0.0
+        } else if over >= half_knee {
+            over
+        } else {
+            let t = over + half_knee;
+            t * t / (2.0 * self.knee_db.max(1.0e-6))
+        };
+        // Closed-form gain reduction for the selected input/output ratio. It
+        // is equivalent to solving the static feedback loop without inserting
+        // a destabilising sample of delay into that loop.
+        curved_over * (1.0 - 1.0 / self.ratio)
+    }
+
+    #[inline]
+    fn process_stereo_linked(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let sc_l = self.high_pass(left, 0).abs();
+        let sc_r = self.high_pass(right, 1).abs();
+        let level_db = linear_to_db(sc_l.max(sc_r).max(1.0e-12));
+        let target = self.target_reduction_db(level_db);
+        let coeff = if target > self.gain_reduction_db {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gain_reduction_db = coeff * self.gain_reduction_db + (1.0 - coeff) * target;
+        let gain = db_to_linear(-self.gain_reduction_db);
+        (left * gain, right * gain)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Dsp {
     params: Params,
-    compressor: SoftKneeCompressor,
+    compressor: FetCell,
     input_gain: f32,
     output_gain: f32,
+    input_color: f32,
     meters: Meters,
 }
 
@@ -305,9 +429,10 @@ impl Dsp {
         let sr = sample_rate.max(1.0);
         let mut dsp = Self {
             params: default_params(),
-            compressor: SoftKneeCompressor::new(sr),
+            compressor: FetCell::new(sr),
             input_gain: 1.0,
             output_gain: 1.0,
+            input_color: 0.0,
             meters: Meters::new(sr),
         };
         dsp.apply_params();
@@ -319,7 +444,7 @@ impl Dsp {
     }
 
     pub fn gain_reduction_db(&self) -> f32 {
-        self.compressor.gain_reduction_db()
+        self.compressor.gain_reduction_db
     }
 
     pub fn set_params(&mut self, params: Params) {
@@ -340,7 +465,7 @@ impl Dsp {
             // Reported even while bypassed would be a lie: the cell is not in
             // the path, so it is taking nothing off.
             gain_reduction_db: if self.params.power {
-                self.compressor.gain_reduction_db().max(0.0)
+                self.compressor.gain_reduction_db.max(0.0)
             } else {
                 0.0
             },
@@ -376,33 +501,38 @@ impl Dsp {
         }
     }
 
-    /// FA-76 is a feed-forward peak compressor with no lookahead, so it adds
-    /// no latency for the graph to compensate.
+    /// FA-76 solves its feedback curve without lookahead, so it adds no
+    /// latency for the graph to compensate.
     pub fn latency_samples(&self) -> usize {
         0
     }
 
     fn apply_params(&mut self) {
         // FET units are threshold-fixed; "input" drives into a fixed knee.
-        let threshold_db = if self.params.ratio == RatioButton::All {
-            -18.0
-        } else {
-            -24.0
-        };
-        self.compressor.set_curve(
+        let all_buttons = self.params.ratio == RatioButton::All;
+        let threshold_db = if all_buttons { -26.0 } else { -24.0 };
+        let attack_us = self.params.attack_us * if all_buttons { 0.65 } else { 1.0 };
+        let release_ms = self.params.release_ms * if all_buttons { 0.55 } else { 1.0 };
+        self.compressor.set_model(
             threshold_db,
             self.params.ratio.ratio(),
             self.params.ratio.knee_db(),
-            0.0,
+            attack_us,
+            release_ms,
+            self.params.sidechain_hpf_hz,
         );
-        self.compressor.set_timing(
-            self.params.attack_us * 1.0e-6,
-            self.params.release_ms * 0.001,
-        );
-        self.compressor
-            .set_sidechain_hpf(self.params.sidechain_hpf_hz);
         self.input_gain = db_to_linear(self.params.input_db);
         self.output_gain = db_to_linear(self.params.output_db);
+        self.input_color = 0.03 + 0.09 * ((self.params.input_db + 12.0) / 48.0);
+    }
+
+    /// Gentle input-amplifier/transformer curvature. The transfer remains
+    /// monotonic and keeps unity small-signal gain, avoiding an aliased hard
+    /// clip while still adding the odd harmonics expected when Input is driven.
+    #[inline]
+    fn apply_input_stage(sample: f32, color: f32) -> f32 {
+        let squared = sample * sample;
+        sample - color * sample * squared / (1.0 + squared)
     }
 }
 
@@ -422,20 +552,19 @@ impl StereoEffect for Dsp {
     fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
         // Metered on both sides of the cell even while bypassed: the editor's
         // meter is how you set gain staging *before* engaging it.
-        let in_sum = (left + right) * 0.5;
         if !self.params.power {
-            self.meters.push(in_sum, in_sum);
+            self.meters.push((left, right), (left, right));
             return (left, right);
         }
-        let driven_l = left * self.input_gain;
-        let driven_r = right * self.input_gain;
+        let driven_l = Self::apply_input_stage(left * self.input_gain, self.input_color);
+        let driven_r = Self::apply_input_stage(right * self.input_gain, self.input_color);
         let (mut wet_l, mut wet_r) = self.compressor.process_stereo_linked(driven_l, driven_r);
         wet_l *= self.output_gain;
         wet_r *= self.output_gain;
         let amount = self.params.mix / 100.0;
         let out_l = mix(left, wet_l, amount);
         let out_r = mix(right, wet_r, amount);
-        self.meters.push(in_sum, (out_l + out_r) * 0.5);
+        self.meters.push((left, right), (out_l, out_r));
         (out_l, out_r)
     }
 }
@@ -455,9 +584,51 @@ mod tests {
         dsp.meter_frame()
     }
 
+    fn run_sine(dsp: &mut Dsp, amplitude: f32, frequency: f32, samples: usize) -> MeterFrame {
+        let increment = std::f32::consts::TAU * frequency / 48_000.0;
+        for n in 0..samples {
+            let x = (n as f32 * increment).sin() * amplitude;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite());
+        }
+        dsp.meter_frame()
+    }
+
     #[test]
     fn all_buttons_has_highest_ratio() {
         assert!(RatioButton::All.ratio() > RatioButton::R20.ratio());
+    }
+
+    #[test]
+    fn all_buttons_is_more_aggressive_than_twenty_to_one() {
+        let mut params = default_params();
+        params.input_db = 12.0;
+        params.output_db = -12.0;
+        params.ratio = RatioButton::R20;
+        let mut r20 = Dsp::new(48_000.0);
+        r20.set_params(params.clone());
+        let r20_gr = run_tone(&mut r20, 0.35, 24_000).gain_reduction_db;
+
+        params.ratio = RatioButton::All;
+        let mut all = Dsp::new(48_000.0);
+        all.set_params(params);
+        let all_gr = run_tone(&mut all, 0.35, 24_000).gain_reduction_db;
+
+        assert!(
+            all_gr > r20_gr + 1.0,
+            "all-buttons must clamp harder: {r20_gr} vs {all_gr}"
+        );
+    }
+
+    #[test]
+    fn input_stage_preserves_small_signals_and_stays_monotonic() {
+        let quiet = Dsp::apply_input_stage(0.001, 0.12);
+        assert!((quiet - 0.001).abs() < 1.0e-8);
+
+        let one = Dsp::apply_input_stage(1.0, 0.12);
+        let two = Dsp::apply_input_stage(2.0, 0.12);
+        assert!(two > one);
+        assert!(two < 2.0, "driven input stage must add curvature");
     }
 
     #[test]
@@ -499,8 +670,37 @@ mod tests {
         params.output_db = -18.0;
         dsp.set_params(params);
         let frame = run_tone(&mut dsp, 0.8, 2_000);
-        assert!(frame.gain_reduction_db >= 0.0);
+        assert!(frame.gain_reduction_db > 3.0);
+        assert!(
+            frame.gain_reduction_db < 60.0,
+            "control loop over-compressed: {} dB",
+            frame.gain_reduction_db
+        );
         assert!(frame.in_rms > 0.0);
+    }
+
+    #[test]
+    fn sidechain_hpf_rejects_bass_before_rectification() {
+        let mut flat = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.input_db = 18.0;
+        params.sidechain_hpf_hz = 0.0;
+        flat.set_params(params.clone());
+        let flat_gr = run_sine(&mut flat, 0.25, 40.0, 48_000).gain_reduction_db;
+
+        let mut filtered = Dsp::new(48_000.0);
+        params.sidechain_hpf_hz = 500.0;
+        filtered.set_params(params);
+        let filtered_gr = run_sine(&mut filtered, 0.25, 40.0, 48_000).gain_reduction_db;
+
+        assert!(
+            flat_gr > 3.0,
+            "test tone must drive the detector: {flat_gr}"
+        );
+        assert!(
+            filtered_gr + 3.0 < flat_gr,
+            "HPF must reduce bass-driven compression: {flat_gr} vs {filtered_gr}"
+        );
     }
 
     #[test]
@@ -524,5 +724,21 @@ mod tests {
         assert!(dsp.apply_ui_param("power", 0.0));
         let frame = run_tone(&mut dsp, 0.9, 256);
         assert_eq!(frame.gain_reduction_db, 0.0);
+    }
+
+    #[test]
+    fn meters_do_not_cancel_antiphase_stereo() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.power = false;
+        dsp.set_params(params);
+        for _ in 0..24_000 {
+            let _ = dsp.process_stereo(0.5, -0.5);
+        }
+        let frame = dsp.meter_frame();
+        assert!(frame.in_peak >= 0.5);
+        assert!(frame.in_rms > 0.3);
+        assert!(frame.out_peak >= 0.5);
+        assert!(frame.out_rms > 0.3);
     }
 }

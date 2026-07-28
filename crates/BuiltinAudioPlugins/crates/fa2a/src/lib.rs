@@ -127,23 +127,25 @@ impl Meters {
     }
 
     #[inline]
-    fn push(&mut self, input: f32, output: f32) {
-        let in_abs = input.abs();
-        let out_abs = output.abs();
+    fn push(&mut self, input: (f32, f32), output: (f32, f32)) {
+        let in_abs = input.0.abs().max(input.1.abs());
+        let out_abs = output.0.abs().max(output.1.abs());
 
-        self.in_peak = if in_abs > self.in_peak {
+        self.in_peak = if in_abs >= self.in_peak {
             in_abs
         } else {
             self.in_peak * self.peak_coeff
         };
-        self.out_peak = if out_abs > self.out_peak {
+        self.out_peak = if out_abs >= self.out_peak {
             out_abs
         } else {
             self.out_peak * self.peak_coeff
         };
 
-        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * input * input;
-        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * output * output;
+        let in_square = (input.0 * input.0 + input.1 * input.1) * 0.5;
+        let out_square = (output.0 * output.0 + output.1 * output.1) * 0.5;
+        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * in_square;
+        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * out_square;
 
         if in_abs >= CLIP_THRESHOLD {
             self.in_clip = true;
@@ -190,17 +192,16 @@ pub struct OpticalModel {
     pub attack_sec: f32,
     pub release_sec: f32,
     pub release_tail_sec: f32,
+    /// High-frequency boost in the detector path.
+    pub emphasis_db: f32,
 }
 
 pub fn optical_model_from_params(params: &Params) -> OpticalModel {
     let amount = clamp(params.peak_reduction, 0.0, 100.0) / 100.0;
     let emphasis = clamp(params.emphasis, 0.0, 100.0) / 100.0;
-    let sc_cut = clamp(params.sidechain_low_cut_hz, 20.0, 500.0);
-    let sc_relief = ((sc_cut - 20.0) / 480.0) * 5.5;
-    let emphasis_push = (emphasis - 0.5) * 7.0;
     let limit = params.mode == Mode::Limit;
     let threshold_db = clamp(
-        peak_reduction_to_threshold_db(params.peak_reduction) - emphasis_push + sc_relief,
+        peak_reduction_to_threshold_db(params.peak_reduction),
         -54.0,
         -3.0,
     );
@@ -225,6 +226,9 @@ pub fn optical_model_from_params(params: &Params) -> OpticalModel {
         // amount of reduction in `OpticalCell::process_stereo_linked`.
         release_sec: 0.060 + amount * 0.020,
         release_tail_sec: (if limit { 1.4 } else { 0.8 }) + amount * if limit { 6.6 } else { 4.2 },
+        // The original emphasis network changes detector sensitivity with
+        // frequency; it must not act as a global threshold offset.
+        emphasis_db: emphasis * 10.0,
     }
 }
 
@@ -340,6 +344,9 @@ struct OpticalCell {
     sidechain_coeff: f32,
     sidechain_x1: [f32; 2],
     sidechain_y1: [f32; 2],
+    emphasis_coeff: f32,
+    emphasis_gain: f32,
+    emphasis_low: [f32; 2],
 }
 
 impl OpticalCell {
@@ -362,6 +369,9 @@ impl OpticalCell {
             sidechain_coeff: 0.0,
             sidechain_x1: [0.0; 2],
             sidechain_y1: [0.0; 2],
+            emphasis_coeff: 0.0,
+            emphasis_gain: 1.0,
+            emphasis_low: [0.0; 2],
         };
         cell.set_model(
             OpticalModel {
@@ -371,6 +381,7 @@ impl OpticalCell {
                 attack_sec: 0.010,
                 release_sec: 0.060,
                 release_tail_sec: 2.0,
+                emphasis_db: 4.5,
             },
             90.0,
         );
@@ -396,6 +407,8 @@ impl OpticalCell {
 
         let cutoff = clamp(sidechain_cutoff_hz, 20.0, self.sample_rate * 0.45);
         self.sidechain_coeff = (-2.0 * std::f32::consts::PI * cutoff / self.sample_rate).exp();
+        self.emphasis_coeff = 1.0 - (-std::f32::consts::TAU * 1_500.0 / self.sample_rate).exp();
+        self.emphasis_gain = db_to_linear(model.emphasis_db);
     }
 
     fn reset(&mut self) {
@@ -404,6 +417,7 @@ impl OpticalCell {
         self.slow_gr_db = 0.0;
         self.sidechain_x1 = [0.0; 2];
         self.sidechain_y1 = [0.0; 2];
+        self.emphasis_low = [0.0; 2];
     }
 
     #[inline]
@@ -420,6 +434,13 @@ impl OpticalCell {
         self.sidechain_x1[channel] = input;
         self.sidechain_y1[channel] = output;
         output
+    }
+
+    #[inline]
+    fn emphasize(&mut self, input: f32, channel: usize) -> f32 {
+        self.emphasis_low[channel] += self.emphasis_coeff * (input - self.emphasis_low[channel]);
+        let high = input - self.emphasis_low[channel];
+        self.emphasis_low[channel] + high * self.emphasis_gain
     }
 
     #[inline]
@@ -457,8 +478,10 @@ impl OpticalCell {
         // makeup gain. Use the previous sample's cell gain to avoid an
         // algebraic loop while retaining feedback behaviour.
         let cell_gain = db_to_linear(-self.gain_reduction_db());
-        let sc_l = self.high_pass(left * cell_gain, 0).abs();
-        let sc_r = self.high_pass(right * cell_gain, 1).abs();
+        let hp_l = self.high_pass(left * cell_gain, 0);
+        let hp_r = self.high_pass(right * cell_gain, 1);
+        let sc_l = self.emphasize(hp_l, 0).abs();
+        let sc_r = self.emphasize(hp_r, 1).abs();
         let detected = sc_l.max(sc_r);
         let detector_coeff = if detected > self.detector_envelope {
             self.detector_attack_coeff
@@ -562,9 +585,8 @@ impl Dsp {
         if !ipc::apply_wire_param(&mut self.params, wire_index, value) {
             return false;
         }
-        // Every continuous parameter feeds the optical model (peak reduction,
-        // emphasis and the sidechain corner all move the threshold), so there
-        // is nothing to gain from fanning out per index.
+        // Every continuous parameter feeds the optical model or its detector
+        // filters, so there is nothing to gain from fanning out per index.
         self.apply_params();
         true
     }
@@ -619,9 +641,8 @@ impl StereoEffect for Dsp {
     fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
         // Metered on both sides of the cell even while bypassed: the editor's
         // meter is how you set gain staging *before* engaging it.
-        let in_sum = (left + right) * 0.5;
         if !self.params.power {
-            self.meters.push(in_sum, in_sum);
+            self.meters.push((left, right), (left, right));
             return (left, right);
         }
         let (mut wet_l, mut wet_r) = self.compressor.process_stereo_linked(left, right);
@@ -631,7 +652,7 @@ impl StereoEffect for Dsp {
         let amount = self.params.mix / 100.0;
         let out_l = mix(left, wet_l, amount);
         let out_r = mix(right, wet_r, amount);
-        self.meters.push(in_sum, (out_l + out_r) * 0.5);
+        self.meters.push((left, right), (out_l, out_r));
         (out_l, out_r)
     }
 }
@@ -645,6 +666,16 @@ mod tests {
     fn run_tone(dsp: &mut Dsp, amplitude: f32, samples: usize) -> MeterFrame {
         for n in 0..samples {
             let x = (n as f32 * 0.05).sin() * amplitude;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite());
+        }
+        dsp.meter_frame()
+    }
+
+    fn run_sine(dsp: &mut Dsp, amplitude: f32, frequency: f32, samples: usize) -> MeterFrame {
+        let increment = std::f32::consts::TAU * frequency / 48_000.0;
+        for n in 0..samples {
+            let x = (n as f32 * increment).sin() * amplitude;
             let (l, r) = dsp.process_stereo(x, x);
             assert!(l.is_finite() && r.is_finite());
         }
@@ -697,6 +728,34 @@ mod tests {
         let l = optical_model_from_params(&limit);
         assert!(l.ratio > c.ratio);
         assert!(l.knee_db < c.knee_db);
+    }
+
+    #[test]
+    fn emphasis_weights_treble_without_moving_the_global_threshold() {
+        let mut flat_params = default_params();
+        flat_params.peak_reduction = 55.0;
+        flat_params.emphasis = 0.0;
+        flat_params.sidechain_low_cut_hz = 20.0;
+        flat_params.color = 0.0;
+
+        let mut emphasized_params = flat_params.clone();
+        emphasized_params.emphasis = 100.0;
+        assert_eq!(
+            optical_model_from_params(&flat_params).threshold_db,
+            optical_model_from_params(&emphasized_params).threshold_db
+        );
+
+        let mut flat = Dsp::new(48_000.0);
+        flat.set_params(flat_params);
+        let flat_gr = run_sine(&mut flat, 0.12, 8_000.0, 48_000).gain_reduction_db;
+
+        let mut emphasized = Dsp::new(48_000.0);
+        emphasized.set_params(emphasized_params);
+        let emphasized_gr = run_sine(&mut emphasized, 0.12, 8_000.0, 48_000).gain_reduction_db;
+        assert!(
+            emphasized_gr > flat_gr + 2.0,
+            "emphasis must increase treble detection: {flat_gr} vs {emphasized_gr}"
+        );
     }
 
     #[test]
@@ -774,6 +833,22 @@ mod tests {
         dsp.clear_clip();
         assert!(!dsp.meter_frame().in_clip);
         assert!(!dsp.meter_frame().out_clip);
+    }
+
+    #[test]
+    fn meters_do_not_cancel_antiphase_stereo() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.power = false;
+        dsp.set_params(params);
+        for _ in 0..24_000 {
+            let _ = dsp.process_stereo(0.5, -0.5);
+        }
+        let frame = dsp.meter_frame();
+        assert!(frame.in_peak >= 0.5);
+        assert!(frame.in_rms > 0.3);
+        assert!(frame.out_peak >= 0.5);
+        assert!(frame.out_rms > 0.3);
     }
 
     #[test]

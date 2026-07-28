@@ -5,6 +5,10 @@
     levelNorm,
     type HistorySample,
   } from '../meter'
+  import {
+    createWaveRenderer,
+    type WaveRenderer,
+  } from './waveRenderer'
 
   type PeakTag = {
     x: number
@@ -21,12 +25,15 @@
 
   const { history, ceilingDb, live, tags = [] }: Props = $props()
 
-  let canvas: HTMLCanvasElement | undefined = $state()
+  let gpuCanvas: HTMLCanvasElement | undefined = $state()
+  let fallbackCanvas: HTMLCanvasElement | undefined = $state()
+  let renderer: WaveRenderer | null = $state(null)
+  let webGpuUnavailable = $state(false)
   let width = $state(0)
   let height = $state(0)
 
   $effect(() => {
-    const el = canvas
+    const el = gpuCanvas
     if (!el) return
     const parent = el.parentElement
     if (!parent) return
@@ -35,19 +42,54 @@
       if (!box) return
       width = Math.max(1, Math.floor(box.width * devicePixelRatio))
       height = Math.max(1, Math.floor(box.height * devicePixelRatio))
-      el.width = width
-      el.height = height
     })
     ro.observe(parent)
     return () => ro.disconnect()
   })
 
   $effect(() => {
-    const el = canvas
-    if (!el || width === 0 || height === 0) return
+    const el = gpuCanvas
+    if (!el) return
+    let cancelled = false
+    createWaveRenderer(el)
+      .then((next) => {
+        if (cancelled) {
+          next.destroy()
+          return
+        }
+        renderer = next
+        webGpuUnavailable = false
+      })
+      .catch(() => {
+        if (!cancelled) webGpuUnavailable = true
+      })
+    return () => {
+      cancelled = true
+      renderer?.destroy()
+      renderer = null
+    }
+  })
+
+  $effect(() => {
+    const current = renderer
+    if (!current || width === 0 || height === 0) return
+    current.resize(width, height)
     void history
     void ceilingDb
     void live
+    current.render(history, ceilingDb, live)
+  })
+
+  $effect(() => {
+    const el = fallbackCanvas
+    if (
+      !webGpuUnavailable ||
+      !el ||
+      width === 0 ||
+      height === 0
+    ) return
+    el.width = width
+    el.height = height
     const ctx = el.getContext('2d')
     if (!ctx) return
     draw(ctx, width, height, history, ceilingDb, live)
@@ -148,7 +190,18 @@
 </script>
 
 <div class="wave" class:dark={!live}>
-  <canvas bind:this={canvas} aria-hidden="true"></canvas>
+  <canvas
+    class="gpu"
+    class:hidden={webGpuUnavailable}
+    bind:this={gpuCanvas}
+    aria-hidden="true"
+  ></canvas>
+  <canvas
+    class="fallback"
+    class:visible={webGpuUnavailable}
+    bind:this={fallbackCanvas}
+    aria-hidden="true"
+  ></canvas>
   <div class="scale" aria-hidden="true">
     {#each STAGE_TICKS_DB as tick}
       <span style="top: {(levelNorm(tick) * 100).toFixed(2)}%">{tick}</span>
@@ -178,9 +231,23 @@
   }
 
   canvas {
+    position: absolute;
+    inset: 0;
     display: block;
     width: 100%;
     height: 100%;
+  }
+
+  canvas.hidden {
+    visibility: hidden;
+  }
+
+  canvas.fallback {
+    visibility: hidden;
+  }
+
+  canvas.fallback.visible {
+    visibility: visible;
   }
 
   .scale {
@@ -212,5 +279,19 @@
     letter-spacing: 0.01em;
     pointer-events: none;
     white-space: nowrap;
+    animation: tag-arrive 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  @keyframes tag-arrive {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -80%) scale(0.92);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tag {
+      animation: none;
+    }
   }
 </style>

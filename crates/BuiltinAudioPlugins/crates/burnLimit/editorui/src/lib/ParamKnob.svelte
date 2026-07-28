@@ -124,7 +124,10 @@
         transform="rotate(135 40 40)"
       />
       <circle cx="40" cy="40" r="22" fill="url(#{uid}-body)" class="body" />
-      <g style="transform: rotate({pointerAngle}deg); transform-origin: 40px 40px">
+      <g
+        class="pointer-group"
+        style="transform: rotate({pointerAngle}deg); transform-origin: 40px 40px"
+      >
         <rect class="pointer" x="39" y="14" width="2" height="10" rx="1" />
       </g>
     </svg>
@@ -173,6 +176,7 @@
     stroke: var(--steel);
     stroke-width: 4;
     stroke-linecap: round;
+    transition: stroke-dasharray var(--ease);
   }
 
   .body {
@@ -182,6 +186,11 @@
 
   .pointer {
     fill: var(--text);
+  }
+
+  .pointer,
+  .pointer-group {
+    transition: transform var(--ease);
   }
 
   .knob.dragging .fill {

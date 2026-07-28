@@ -14,3 +14,7 @@ bun install
 bun run build
 bun test
 ```
+
+`cargo build -p burnlimit` also performs a frozen Bun install and builds the
+single-file editor into Cargo's `OUT_DIR` before embedding it. A clean checkout
+therefore does not need a pre-existing `editorui/dist` directory.

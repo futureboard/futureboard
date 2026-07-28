@@ -186,6 +186,7 @@
     border-radius: inherit;
     background: linear-gradient(180deg, #8ec8dc, var(--steel) 55%, var(--steel-deep));
     pointer-events: none;
+    transition: height var(--ease);
   }
 
   .thumb {
@@ -199,10 +200,18 @@
     border: 2px solid #0e1216;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
     pointer-events: none;
+    transition:
+      bottom var(--ease),
+      border-color var(--ease);
   }
 
   .fader.dragging .thumb {
     border-color: var(--steel);
+  }
+
+  .fader.dragging .fill,
+  .fader.dragging .thumb {
+    transition-duration: 0ms;
   }
 
   .caption {

@@ -19,9 +19,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [build-dependencies]
-# Build-time only: turns `editorui/dist` into the embedded asset table. Must
-# stay pointed at the dependency-free `builtin_ui_embed`, never at the
-# `BuiltinAudioPlugins` umbrella — see rodharerist's manifest for why.
+# Build-time only: `build.rs` compiles the editor into Cargo's OUT_DIR, then
+# turns that bundle into the embedded asset table. Keep this pointed at the
+# dependency-free generator, never the `BuiltinAudioPlugins` umbrella.
 builtin-ui-embed = { workspace = true, features = ["generate"] }
 
 [lints]

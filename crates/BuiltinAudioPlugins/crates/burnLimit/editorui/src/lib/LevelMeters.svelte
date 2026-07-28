@@ -121,6 +121,7 @@
     bottom: 0;
     left: 0;
     border-radius: inherit;
+    transition: height 50ms linear;
   }
 
   .fill.in {
@@ -148,6 +149,7 @@
 
   .clip-led.on {
     background: var(--clip);
+    animation: clip-confirm 420ms ease-out;
   }
 
   .label {
@@ -189,5 +191,11 @@
     color: var(--text-muted);
     font-size: 0.6rem;
     font-weight: 600;
+  }
+
+  @keyframes clip-confirm {
+    35% {
+      transform: translateX(-50%) scale(1.45);
+    }
   }
 </style>

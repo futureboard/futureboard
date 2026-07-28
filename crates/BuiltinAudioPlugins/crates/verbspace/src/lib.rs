@@ -415,10 +415,10 @@ impl TankLine {
         };
         let whole = delay.floor();
         let frac = delay - whole;
-        let older = (self.write + len - whole as usize) % len;
-        let newer = (older + 1) % len;
-        // `older` is further back in time than `newer`; `frac` walks the read
-        // point from the integer tap toward the older sample.
+        let newer = (self.write + len - whole as usize) % len;
+        let older = (newer + len - 1) % len;
+        // The integer tap is the newer endpoint. The fractional part walks
+        // backward toward the sample one frame older.
         self.buffer[newer] * (1.0 - frac) + self.buffer[older] * frac
     }
 
@@ -460,8 +460,12 @@ impl PreDelay {
     fn process(&mut self, left: f32, right: f32, delay: usize) -> (f32, f32) {
         let len = self.left.len();
         let delay = delay.min(len - 1);
-        let read = (self.write + len - delay) % len;
-        let out = (self.left[read], self.right[read]);
+        let out = if delay == 0 {
+            (left, right)
+        } else {
+            let read = (self.write + len - delay) % len;
+            (self.left[read], self.right[read])
+        };
         self.left[self.write] = left;
         self.right[self.write] = right;
         self.write += 1;
@@ -1024,5 +1028,24 @@ mod tests {
         assert_eq!(dsp.params().decay_sec, 6.0);
         assert!(!dsp.apply_wire_param(u32::MAX, 0.0));
         assert!(!dsp.apply_wire_param(ipc::DECAY_INDEX, f32::NAN));
+    }
+
+    #[test]
+    fn zero_predelay_is_sample_accurate_and_does_not_wrap_the_ring() {
+        let mut predelay = PreDelay::new(8);
+        assert_eq!(predelay.process(0.75, -0.25, 0), (0.75, -0.25));
+        for _ in 0..8 {
+            assert_eq!(predelay.process(0.0, 0.0, 0), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn fractional_delay_interpolates_between_the_correct_samples() {
+        let mut line = TankLine::new(16);
+        for sample in 0..12 {
+            line.write_sample(sample as f32);
+        }
+        // At this point the 2- and 3-sample-old values are 10 and 9.
+        assert!((line.read(2.25) - 9.75).abs() < 1.0e-6);
     }
 }
