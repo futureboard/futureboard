@@ -1784,7 +1784,7 @@ impl Render for Timeline {
 
             let x: f32 = event.position.x.into();
             let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-            let factor = (1.0024_f32).powf(-delta.1);
+            let factor = wheel_zoom_factor(delta.1);
             this.state.zoom_by(factor, anchor);
             let (max_x, max_y) = this.max_scroll_offsets(window);
             this.state.clamp_scroll(max_x, max_y);
@@ -2328,6 +2328,23 @@ pub(crate) fn horizontal_scrollbar(
 /// the engine or marks the project dirty. Spans the affected tracks vertically
 /// and the selected beat span horizontally. Non-interactive so it does not
 /// intercept lane drags. Returns `None` when no range is active.
+/// Per-pixel zoom rate for Ctrl + wheel on the arrangement.
+const WHEEL_ZOOM_BASE: f32 = 1.0024;
+
+/// Map a wheel delta onto a multiplicative zoom factor.
+///
+/// Wheel up is a *positive* delta on every platform, and the zoom helpers
+/// multiply by this factor, so wheel up must yield a factor above 1 (zoom in).
+/// The exponent is therefore deliberately **not** negated — doing so inverted
+/// the gesture, making Ctrl + wheel up zoom out.
+///
+/// This is the opposite of the pan path, which does subtract the delta: panning
+/// maps wheel motion onto the content origin (opposite by definition), whereas
+/// zooming maps it onto a scale, where up simply means more.
+pub(crate) fn wheel_zoom_factor(delta_y: f32) -> f32 {
+    WHEEL_ZOOM_BASE.powf(delta_y)
+}
+
 /// Resolve a pen-draw gesture's `(start_beat, end_beat)` into the final
 /// `(clip_start, length_beats)` that will be committed. Both endpoints are
 /// already resolved by the shared musical snap source (or Shift-bypassed), so
@@ -2847,6 +2864,46 @@ mod midi_clip_draw_tests {
     use crate::components::timeline::timeline_state::{
         DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
     };
+
+    /// Ctrl + wheel up must zoom *in*. Regression guard: the exponent was
+    /// negated, so wheel up produced a factor below 1 and zoomed out.
+    #[test]
+    fn ctrl_wheel_up_zooms_in_and_down_zooms_out() {
+        assert!(
+            wheel_zoom_factor(30.0) > 1.0,
+            "wheel up must zoom in, got {}",
+            wheel_zoom_factor(30.0)
+        );
+        assert!(
+            wheel_zoom_factor(-30.0) < 1.0,
+            "wheel down must zoom out, got {}",
+            wheel_zoom_factor(-30.0)
+        );
+        assert_eq!(wheel_zoom_factor(0.0), 1.0, "no delta must not zoom");
+    }
+
+    /// The factor has to actually move `pixels_per_second` the right way, not
+    /// merely sit on the right side of 1.0.
+    #[test]
+    fn ctrl_wheel_up_increases_pixels_per_second() {
+        let mut state = TimelineState::default();
+        let before = state.viewport.pixels_per_second;
+        state.zoom_by(wheel_zoom_factor(30.0), 0.0);
+        assert!(
+            state.viewport.pixels_per_second > before,
+            "wheel up should widen the timeline: {before} -> {}",
+            state.viewport.pixels_per_second
+        );
+
+        let mut state = TimelineState::default();
+        let before = state.viewport.pixels_per_second;
+        state.zoom_by(wheel_zoom_factor(-30.0), 0.0);
+        assert!(
+            state.viewport.pixels_per_second < before,
+            "wheel down should narrow the timeline: {before} -> {}",
+            state.viewport.pixels_per_second
+        );
+    }
 
     #[test]
     fn drag_span_supports_both_directions() {
