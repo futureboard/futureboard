@@ -7,6 +7,7 @@ import {
   type EqParams,
   type SpectrumFrame,
 } from './bridge'
+import { DEFAULT_SAMPLE_RATE } from './lib/eq'
 import { BandChips } from './components/BandChips'
 import { ControlRack } from './components/ControlRack'
 import { Header } from './components/Header'
@@ -28,6 +29,11 @@ function App() {
   const [showBandCurves, setShowBandCurves] = useState(true)
   const [showSpectrum, setShowSpectrum] = useState(true)
   const [preset, setPreset] = useState<number | null>(0)
+  /// The rate the host is actually running at, threaded into the curve maths.
+  /// Drawing at a fixed 48 kHz made the picture disagree with what you hear on
+  /// any other rate, most visibly at the top of the range where the bilinear
+  /// transform warps hardest.
+  const [sampleRate, setRate] = useState(DEFAULT_SAMPLE_RATE)
 
   /// Analyser frames land in a ref, never in state: at ~30 Hz a `setState` per
   /// frame would rerender every curve, node and label in the editor to repaint
@@ -50,6 +56,7 @@ function App() {
         (frame) => {
           spectrum.current = frame
         },
+        (rate) => setRate(rate),
       ),
     [],
   )
@@ -164,6 +171,7 @@ function App() {
 
       <section className="stage">
         <ResponseGraph
+          sampleRate={sampleRate}
           bands={params.bands}
           selected={selected}
           bypassed={!params.power}

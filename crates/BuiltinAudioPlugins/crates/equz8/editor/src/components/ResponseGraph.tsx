@@ -62,6 +62,10 @@ export type ResponseGraphProps = {
   spectrumRef: RefObject<SpectrumFrame | null>
   /// Band currently auditioned alone, or `SOLO_NONE`.
   soloBand: number
+  /// Rate the host is running at. Not read directly — the curve helpers take it
+  /// from module state — but listed as a memo dependency so a rate change
+  /// redraws instead of leaving a curve computed for the previous rate.
+  sampleRate: number
   onSelect: (index: number) => void
   onBandChange: (index: number, patch: Partial<Band>) => void
   onToggleSolo: (index: number) => void
@@ -76,6 +80,7 @@ export function ResponseGraph({
   showSpectrum,
   spectrumRef,
   soloBand,
+  sampleRate,
   onSelect,
   onBandChange,
   onToggleSolo,
@@ -112,24 +117,26 @@ export function ResponseGraph({
 
   const { width, height } = size
   const sumPath = useMemo(
-    () => sumCurvePath(bands, width, height),
-    [bands, height, width],
+    () => sumCurvePath(bands, width, height, sampleRate),
+    [bands, height, width, sampleRate],
   )
   const perBandPaths = useMemo(
     () =>
       showBandCurves
         ? bands.map((band, index) =>
             band.active && index !== selected
-              ? bandCurvePath(band, width, height)
+              ? bandCurvePath(band, width, height, sampleRate)
               : null,
           )
         : null,
-    [bands, height, selected, showBandCurves, width],
+    [bands, height, selected, showBandCurves, width, sampleRate],
   )
   const selectedPath = useMemo(() => {
     const band = bands[selected]
-    return band?.active ? bandCurvePath(band, width, height) : null
-  }, [bands, height, selected, width])
+    return band?.active
+      ? bandCurvePath(band, width, height, sampleRate)
+      : null
+  }, [bands, height, selected, width, sampleRate])
 
   /// Client coordinates mapped into the same viewBox space the curves, grid and
   /// nodes are drawn in, so a stale measurement can never make drawing and
@@ -336,7 +343,7 @@ export function ResponseGraph({
           <line x1={cursor.x} x2={cursor.x} y1={0} y2={height} />
           <text x={width - 9} y={16}>
             {formatFrequency(cursorFreq)} Hz{' '}
-            {formatGain(sumDbAt(bands, cursorFreq))} dB
+            {formatGain(sumDbAt(bands, cursorFreq, sampleRate))} dB
           </text>
         </g>
       )}
