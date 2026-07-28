@@ -11,9 +11,10 @@ fn main() {
     stage_exclusive_sources();
     download_onnxruntime();
 
-    // Keep the local Discord application id out of source control while still
-    // making it available to `option_env!` in the native binary. An explicit
-    // build environment value wins for CI/distribution builds.
+    // Optional override for the Discord application id. Futureboard's own is
+    // compiled into `sphere_discord_rpc` (`DEFAULT_APPLICATION_ID`), so this
+    // only matters for a fork or a build that targets a different Discord
+    // application. An explicit build environment value wins over the file.
     if std::env::var_os("FUTUREBOARD_DISCORD_CLIENT_ID").is_none() {
         if let Ok(application_id) = std::fs::read_to_string("../../../.discordrpcsecret") {
             let application_id = application_id.trim();

@@ -13,6 +13,19 @@ use thiserror::Error;
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_LARGE_TEXT: &str = "Futureboard Studio";
 
+/// Futureboard's own Discord application ID.
+///
+/// Baked in rather than sourced from a file or environment variable so a plain
+/// checkout builds with Rich Presence working. Previously it came only from
+/// `.discordrpcsecret` or `FUTUREBOARD_DISCORD_CLIENT_ID`, and a build without
+/// either silently shipped with Discord integration switched off.
+///
+/// This is not a credential. A Discord application ID is a public identifier —
+/// it is sent in the RPC handshake and is visible to anyone running the app.
+/// The client *secret* and bot tokens are the sensitive values, and neither is
+/// used here: Rich Presence over local IPC needs no authentication.
+pub const DEFAULT_APPLICATION_ID: &str = "1517963140170649640";
+
 /// Runtime configuration for the Discord IPC worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscordRpcConfig {
@@ -24,14 +37,16 @@ pub struct DiscordRpcConfig {
 }
 
 impl DiscordRpcConfig {
-    /// Builds configuration from the Futureboard Discord environment flags.
+    /// Builds configuration from the Futureboard Discord environment flags,
+    /// falling back to [`DEFAULT_APPLICATION_ID`].
     ///
-    /// `FUTUREBOARD_DISCORD_CLIENT_ID` can be supplied at build time for a
-    /// distributable binary or at runtime for development. Runtime wins.
+    /// Resolution order, most specific first: a runtime
+    /// `FUTUREBOARD_DISCORD_CLIENT_ID`, the same name baked in at build time,
+    /// then the built-in default. The overrides exist so a fork or a CI build
+    /// can point at its own Discord application; nothing has to be configured
+    /// for the shipped one to work.
     pub fn from_env(app_version: impl Into<String>) -> Option<Self> {
-        let application_id = non_empty_env("FUTUREBOARD_DISCORD_CLIENT_ID")
-            .or_else(|| option_env!("FUTUREBOARD_DISCORD_CLIENT_ID").and_then(non_empty))?;
-        Self::from_application_id(application_id, app_version)
+        Self::from_application_id(resolve_application_id(), app_version)
     }
 
     /// Builds configuration around an application ID supplied by the native
@@ -310,6 +325,16 @@ fn unix_time_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+/// The Discord application ID this build should use.
+///
+/// Always yields something, so Rich Presence no longer depends on the build
+/// host having a `.discordrpcsecret` or an exported environment variable.
+pub fn resolve_application_id() -> String {
+    non_empty_env("FUTUREBOARD_DISCORD_CLIENT_ID")
+        .or_else(|| option_env!("FUTUREBOARD_DISCORD_CLIENT_ID").and_then(non_empty))
+        .unwrap_or_else(|| DEFAULT_APPLICATION_ID.to_string())
+}
+
 fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().and_then(|value| non_empty(&value))
 }
@@ -335,6 +360,50 @@ fn debug_log(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rich Presence has to work from a plain checkout. This used to return
+    /// `None` unless the build host had a `.discordrpcsecret` or an exported
+    /// `FUTUREBOARD_DISCORD_CLIENT_ID`, which silently shipped the app with
+    /// Discord integration switched off.
+    #[test]
+    fn config_resolves_without_any_local_configuration() {
+        // Not `set_var`: the resolver reads the process environment, and tests
+        // share it. This asserts the fallback, which is what has no override.
+        let config =
+            DiscordRpcConfig::from_env("2026.7.2").expect("an application id must always resolve");
+        assert!(!config.application_id.trim().is_empty());
+        config
+            .validate()
+            .expect("the resolved config must be startable");
+    }
+
+    /// The baked-in id has to be a plausible Discord snowflake — a typo here
+    /// would fail only at runtime, as a handshake Discord silently ignores.
+    #[test]
+    fn default_application_id_is_a_snowflake() {
+        assert!(
+            DEFAULT_APPLICATION_ID.len() >= 17 && DEFAULT_APPLICATION_ID.len() <= 20,
+            "unexpected length: {DEFAULT_APPLICATION_ID}"
+        );
+        assert!(
+            DEFAULT_APPLICATION_ID
+                .chars()
+                .all(|character| character.is_ascii_digit()),
+            "must be all digits: {DEFAULT_APPLICATION_ID}"
+        );
+    }
+
+    #[test]
+    fn an_empty_application_id_is_still_rejected() {
+        let config = DiscordRpcConfig {
+            application_id: "  ".to_string(),
+            ..config(false)
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(DiscordRpcStartError::MissingApplicationId)
+        ));
+    }
 
     fn config(show_project_name: bool) -> DiscordRpcConfig {
         DiscordRpcConfig {
