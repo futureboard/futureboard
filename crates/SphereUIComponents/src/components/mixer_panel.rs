@@ -1130,35 +1130,29 @@ fn sends_section(
     callbacks: &MixerCallbacks,
     height_px: f32,
 ) -> impl IntoElement {
-    // Routing tracks (bus/return) don't themselves carry an aux-send rack in
-    // this slice — they are send *targets*. Show an empty placeholder.
-    let is_routing = track.track_type.is_routing()
-        && !crate::components::timeline::timeline_state::is_vsti_output_child_track_id(&track.id);
+    // Bus/return strips carry an aux-send rack so chained send/return paths
+    // (bus → return, return → bus) are available from the mixer.
     let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
-    if is_routing {
-        chips = chips.child(empty_slot());
-    } else {
-        for (send_index, send) in track.sends.iter().enumerate() {
-            // Resolve the live target name (handles renames) with the stored
-            // label as a fallback.
-            let target_name = all_tracks
-                .iter()
-                .find(|t| t.id == send.target_track_id)
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| send.target_name.clone());
-            chips = chips.child(send_chip(
-                &track.id,
-                send_index,
-                send,
-                &target_name,
-                callbacks,
-            ));
-        }
-        if !track.sends.is_empty() {
-            chips = chips.child(send_drop_end(&track.id, track.sends.len(), callbacks));
-        }
-        chips = chips.child(add_send_button(&track.id, callbacks));
+    for (send_index, send) in track.sends.iter().enumerate() {
+        // Resolve the live target name (handles renames) with the stored
+        // label as a fallback.
+        let target_name = all_tracks
+            .iter()
+            .find(|t| t.id == send.target_track_id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| send.target_name.clone());
+        chips = chips.child(send_chip(
+            &track.id,
+            send_index,
+            send,
+            &target_name,
+            callbacks,
+        ));
     }
+    if !track.sends.is_empty() {
+        chips = chips.child(send_drop_end(&track.id, track.sends.len(), callbacks));
+    }
+    chips = chips.child(add_send_button(&track.id, callbacks));
 
     div()
         .flex()

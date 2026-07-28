@@ -16,7 +16,8 @@ pub struct RuntimeLatencyGraph {
     pub track_plugin_latency: Vec<u32>,
     /// Latency at each track's output tap (includes upstream feed for routing tracks).
     pub track_output_latency: Vec<u32>,
-    /// Delay applied to post-fader output before sends / main routing.
+    /// Delay applied to post-fader **main output** after sends, so dry/wet
+    /// paths that diverge through return FX still align at the master bus.
     pub track_pdc_delay: Vec<u32>,
     /// Maximum path latency to the master summing bus (before master inserts).
     pub max_path_latency_samples: u32,
@@ -133,7 +134,46 @@ fn effective_path_to_master(
     id_to_index: &HashMap<String, usize>,
     master_index: Option<usize>,
 ) -> u32 {
-    let mut path = resolve_output_target_index(track_index, tracks, id_to_index)
+    let mut path = main_path_to_master(
+        track_index,
+        tracks,
+        output_latency,
+        plugin_latency,
+        id_to_index,
+        master_index,
+    );
+
+    for send in &tracks[track_index].sends {
+        if !send.enabled {
+            continue;
+        }
+        if let Some(&ret_idx) = id_to_index.get(&send.return_track_id) {
+            let via_return = path_to_master_sum(
+                ret_idx,
+                tracks,
+                output_latency,
+                plugin_latency,
+                id_to_index,
+                master_index,
+            );
+            path = path.max(via_return);
+        }
+    }
+    path
+}
+
+/// Latency of the track's main-output (dry) path only — excludes send/return
+/// branches. Used for PDC delay amounts so dry can catch up to wet without
+/// delaying the send feed itself.
+fn main_path_to_master(
+    track_index: usize,
+    tracks: &[RuntimeTrack],
+    output_latency: &[u32],
+    plugin_latency: &[u32],
+    id_to_index: &HashMap<String, usize>,
+    master_index: Option<usize>,
+) -> u32 {
+    resolve_output_target_index(track_index, tracks, id_to_index)
         .filter(|&target| is_routing_track_type(&tracks[target].track_type))
         .map(|target| {
             path_to_master_sum(
@@ -154,25 +194,7 @@ fn effective_path_to_master(
                 id_to_index,
                 master_index,
             )
-        });
-
-    for send in &tracks[track_index].sends {
-        if !send.enabled {
-            continue;
-        }
-        if let Some(&ret_idx) = id_to_index.get(&send.return_track_id) {
-            let via_return = path_to_master_sum(
-                ret_idx,
-                tracks,
-                output_latency,
-                plugin_latency,
-                id_to_index,
-                master_index,
-            );
-            path = path.max(via_return);
-        }
-    }
-    path
+        })
 }
 
 /// Build latency metadata and per-track PDC delays from runtime tracks and the
@@ -215,6 +237,10 @@ pub fn plan_runtime_latency_graph(
                     feed_max = feed_max.max(output_latency[src_idx]);
                 }
             }
+            // Main-output → bus/return feeds also contribute upstream latency.
+            if resolve_output_target_index(src_idx, tracks, &id_to_index) == Some(idx) {
+                feed_max = feed_max.max(output_latency[src_idx]);
+            }
         }
         output_latency[idx] = plugin_latency[idx].saturating_add(feed_max);
     }
@@ -244,7 +270,9 @@ pub fn plan_runtime_latency_graph(
             if Some(idx) == master_index || is_master_track_type(&tracks[idx].track_type) {
                 continue;
             }
-            let path = effective_path_to_master(
+            // PDC delay is relative to the *main/dry* path so return-FX latency
+            // can pull dry forward without also delaying the send feed.
+            let path = main_path_to_master(
                 idx,
                 tracks,
                 &output_latency,
@@ -384,6 +412,10 @@ mod tests {
         let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
         assert_eq!(latency.track_output_latency[1], 128 + 256);
         assert_eq!(latency.max_path_latency_samples, 128 + 256);
+        // Dry main path is 128; wet via return is 384. PDC delays dry by 256
+        // (applied after the send tap) so dry and wet meet at the master.
+        assert_eq!(latency.track_pdc_delay[0], 256);
+        assert_eq!(latency.track_pdc_delay[1], 0);
     }
 
     #[test]

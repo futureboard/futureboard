@@ -99,6 +99,27 @@ pub fn is_routing_track_type(track_type: &str) -> bool {
     matches!(track_type, "bus" | "return" | "group")
 }
 
+/// True when adding `src → tgt` would close a cycle in the current adjacency.
+fn edge_would_cycle(adjacency: &[Vec<usize>], src: usize, tgt: usize) -> bool {
+    if src == tgt {
+        return true;
+    }
+    // Reachability from tgt back to src means src→tgt closes a loop.
+    let mut stack = vec![tgt];
+    let mut seen = vec![false; adjacency.len()];
+    while let Some(node) = stack.pop() {
+        if node == src {
+            return true;
+        }
+        if seen[node] {
+            continue;
+        }
+        seen[node] = true;
+        stack.extend(adjacency[node].iter().copied());
+    }
+    false
+}
+
 pub fn is_master_track_type(track_type: &str) -> bool {
     track_type == "master"
 }
@@ -211,12 +232,12 @@ pub fn plan_runtime_audio_graph(
                 });
                 continue;
             }
-            if src_routing && tgt_idx <= src_idx {
+            if src_routing && edge_would_cycle(&adjacency, src_idx, tgt_idx) {
                 rejected_routes.push(GraphRouteIssue {
                     from_track_id: track.id.clone(),
                     to_track_id: send.return_track_id.clone(),
                     kind: GraphRouteKind::Send,
-                    reason: "routing source may only send forward in graph order".to_string(),
+                    reason: "send would create a routing cycle".to_string(),
                 });
                 continue;
             }
@@ -254,12 +275,12 @@ pub fn plan_runtime_audio_graph(
                 });
                 continue;
             }
-            if src_routing && tgt_idx <= src_idx {
+            if src_routing && edge_would_cycle(&adjacency, src_idx, tgt_idx) {
                 rejected_routes.push(GraphRouteIssue {
                     from_track_id: track.id.clone(),
                     to_track_id: output_id.to_string(),
                     kind: GraphRouteKind::MainOutput,
-                    reason: "routing source may only target later routing tracks".to_string(),
+                    reason: "output route would create a routing cycle".to_string(),
                 });
                 continue;
             }
@@ -449,16 +470,39 @@ mod tests {
     }
 
     #[test]
-    fn rejects_backward_bus_send_before_cycle_dfs() {
+    fn rejects_cyclic_bus_send() {
         let tracks = vec![
             track("a", "bus", vec![send("s1", "b")], Some("b")),
             track("b", "return", vec![send("s2", "a")], None),
         ];
         let graph = plan_runtime_audio_graph(&tracks).unwrap();
-        assert_eq!(graph.pass2_routing_indices, vec![0, 1]);
+        // a→b is accepted; b→a closes a cycle and is rejected.
         assert!(graph.rejected_routes.iter().any(|r| {
             r.from_track_id == "b" && r.to_track_id == "a" && r.kind == GraphRouteKind::Send
         }));
+        let ids: Vec<_> = graph
+            .pass2_routing_indices
+            .iter()
+            .map(|&i| tracks[i].id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn accepts_reverse_index_bus_chain_without_cycle() {
+        // Return created before bus (lower index), bus sends into return.
+        let tracks = vec![
+            track("ret", "return", vec![], None),
+            track("bus", "bus", vec![send("s", "ret")], None),
+        ];
+        let graph = plan_runtime_audio_graph(&tracks).unwrap();
+        assert!(graph.rejected_routes.is_empty());
+        let ids: Vec<_> = graph
+            .pass2_routing_indices
+            .iter()
+            .map(|&i| tracks[i].id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["bus", "ret"]);
     }
 
     #[test]

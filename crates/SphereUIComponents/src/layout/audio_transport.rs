@@ -675,6 +675,11 @@ impl StudioLayout {
         }
         let meter_changed = self.apply_engine_meters(cx);
 
+        // Drain hardware MIDI input on the UI/control poll (never the audio
+        // thread). Opens/refreshes enabled ports, then routes into the same
+        // preview + recording path as the virtual keyboard.
+        self.poll_hardware_midi_input(cx);
+
         // Realtime recording waveform preview (Part 1) — grow the preview clip
         // and append streamed peaks. Self-contained; notifies the timeline.
         self.update_recording_preview(cx);

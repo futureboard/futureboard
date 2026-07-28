@@ -1,10 +1,12 @@
 use gpui::{App, Context};
 
 use crate::components;
-use crate::components::timeline::timeline_state::TrackType;
+use crate::components::timeline::timeline_state::{
+    MidiChannel, TrackMidiInputRouting, TrackType,
+};
 use sphere_midi_service::{
-    MidiInputEvent, MidiInputRouteStatus, MidiInputRouter, MidiInputSource, MidiInputTarget,
-    VirtualKeyboardEvent,
+    HardwareMidiInputMessage, MidiInputEvent, MidiInputRouteStatus, MidiInputRouter,
+    MidiInputSource, MidiInputTarget, VirtualKeyboardEvent,
 };
 
 use super::StudioLayout;
@@ -281,6 +283,111 @@ impl StudioLayout {
         route_result(result)
     }
 
+    /// Sync enabled hardware MIDI input ports and route pending messages into
+    /// armed/selected instrument tracks (and the active MIDI recording take).
+    pub(super) fn poll_hardware_midi_input(&mut self, cx: &mut Context<Self>) {
+        let devices = {
+            let settings = self.settings.read(cx);
+            settings.current.hardware.midi.devices.clone()
+        };
+        // Re-resolve against the live scan so connected flags stay current even
+        // when Preferences is closed.
+        let detected = crate::device_registry::cached_midi_devices();
+        let resolved = sphere_midi_service::resolve_midi_devices(&devices, &detected);
+        self.hardware_midi_input.sync_enabled_devices(&resolved);
+
+        let messages = self.hardware_midi_input.drain(64);
+        if messages.is_empty() {
+            return;
+        }
+        for message in messages {
+            self.route_hardware_midi_message(message, cx);
+        }
+    }
+
+    fn route_hardware_midi_message(
+        &mut self,
+        message: HardwareMidiInputMessage,
+        cx: &mut Context<Self>,
+    ) {
+        let channel = match &message.event {
+            MidiInputEvent::NoteOn { channel, .. }
+            | MidiInputEvent::NoteOff { channel, .. }
+            | MidiInputEvent::ControlChange { channel, .. } => Some(*channel),
+            MidiInputEvent::AllNotesOff | MidiInputEvent::Panic => None,
+        };
+        let targets = self.resolve_hardware_midi_targets(
+            &message.device_id,
+            &message.device_name,
+            channel,
+            cx,
+        );
+        if targets.is_empty() {
+            return;
+        }
+        for target in targets {
+            let _ = self.route_midi_input_event(
+                MidiInputSource::Hardware,
+                target,
+                message.event.clone(),
+                cx,
+            );
+        }
+    }
+
+    fn resolve_hardware_midi_targets(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        channel: Option<u8>,
+        cx: &App,
+    ) -> Vec<MidiInputTarget> {
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+        let mut targets = Vec::new();
+
+        for track in &state.tracks {
+            if !is_keyboard_target_candidate(track) {
+                continue;
+            }
+            if !track_accepts_hardware_midi(&track.routing.midi_input, device_id, device_name) {
+                continue;
+            }
+            if let Some(ch) = channel {
+                let midi_ch = MidiChannel::from_raw(ch);
+                if !track.routing.midi_input_filter.accepts(midi_ch) {
+                    continue;
+                }
+            }
+            // Prefer armed tracks; also accept the selected track so live play
+            // works without arming (same as the virtual keyboard).
+            let selected = state.selection.selected_track_id.as_deref() == Some(track.id.as_str());
+            if !track.armed && !selected {
+                continue;
+            }
+            if let Some(target) = hardware_midi_target_for_track(track) {
+                targets.push(target);
+            }
+        }
+
+        // If nothing matched via arm/selection but a single AllInputs armed
+        // path exists above, we're done. If still empty, fall back to the
+        // virtual-keyboard resolver so an instrument track with default
+        // AllInputs still receives notes when selected.
+        if targets.is_empty() {
+            if let Some(target) = self.resolve_virtual_keyboard_target(cx).target {
+                // Re-check the fallback track still accepts this device.
+                if let Some(track) = state.find_track(&target.track_id) {
+                    if track_accepts_hardware_midi(&track.routing.midi_input, device_id, device_name)
+                    {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
+        targets
+    }
+
     pub(super) fn resolve_virtual_keyboard_target(&self, cx: &App) -> VirtualKeyboardTargetStatus {
         let timeline = self.timeline.read(cx);
         let state = &timeline.state;
@@ -365,6 +472,55 @@ fn route_result<E: std::fmt::Display>(result: Result<(), E>) -> MidiInputRouteSt
 
 fn is_keyboard_target_candidate(track: &components::timeline::timeline_state::TrackState) -> bool {
     matches!(track.track_type, TrackType::Instrument | TrackType::Midi)
+}
+
+fn track_accepts_hardware_midi(
+    routing: &TrackMidiInputRouting,
+    device_id: &str,
+    device_name: &str,
+) -> bool {
+    match routing {
+        TrackMidiInputRouting::None => false,
+        TrackMidiInputRouting::AllInputs => true,
+        TrackMidiInputRouting::MidiDevice {
+            device_id: route_id,
+        } => route_id == device_id || route_id == device_name,
+    }
+}
+
+fn hardware_midi_target_for_track(
+    track: &components::timeline::timeline_state::TrackState,
+) -> Option<MidiInputTarget> {
+    let plugin_instance_id = track
+        .instrument_plugin_instance_id
+        .clone()
+        .or_else(|| first_instrument_insert_id(track));
+    if plugin_instance_id.is_some() {
+        return Some(MidiInputTarget {
+            track_id: track.id.clone(),
+            plugin_instance_id,
+        });
+    }
+    if track.builtin_soundfont_player
+        && track
+            .soundfont_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+    {
+        return Some(MidiInputTarget {
+            track_id: track.id.clone(),
+            plugin_instance_id: None,
+        });
+    }
+    // MIDI tracks without an instrument still accept input while recording
+    // (notes land in the take buffer via capture_midi_record_event).
+    if track.track_type == TrackType::Midi {
+        return Some(MidiInputTarget {
+            track_id: track.id.clone(),
+            plugin_instance_id: None,
+        });
+    }
+    None
 }
 
 fn first_instrument_insert_id(

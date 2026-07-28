@@ -1762,8 +1762,22 @@ impl Render for Timeline {
                 // the timeline offsets describe the content origin. Invert at
                 // this boundary so wheel/trackpad motion follows the direction
                 // users see, matching the middle-button grab-pan behavior.
-                let next_x = this.state.viewport.scroll_x - scroll_x;
-                let next_y = this.state.viewport.scroll_y - scroll_y;
+                // Preferences → Editing → Natural Scroll flips that mapping.
+                let natural = cx
+                    .try_global::<crate::settings::GlobalSettingsModel>()
+                    .map(|g| g.0.read(cx).current.editing.mouse.natural_scroll)
+                    .unwrap_or(false);
+                let (next_x, next_y) = if natural {
+                    (
+                        this.state.viewport.scroll_x + scroll_x,
+                        this.state.viewport.scroll_y + scroll_y,
+                    )
+                } else {
+                    (
+                        this.state.viewport.scroll_x - scroll_x,
+                        this.state.viewport.scroll_y - scroll_y,
+                    )
+                };
                 this.state
                     .set_scroll_immediate(next_x, next_y, max_x, max_y);
                 if scroll_x.abs() > 0.5 || scroll_y.abs() > 0.5 {

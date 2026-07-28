@@ -31,6 +31,8 @@ pub(crate) struct InsertPickerWindow {
     snapshot: InsertPickerSnapshot,
     focus_handle: FocusHandle,
     scroll: PluginPickerScrollHandles,
+    /// Focus the search field once the dialog's own window is live.
+    needs_search_focus: bool,
 }
 
 #[derive(Clone)]
@@ -56,11 +58,20 @@ impl InsertPickerWindow {
             snapshot,
             focus_handle: cx.focus_handle(),
             scroll: PluginPickerScrollHandles::default(),
+            needs_search_focus: true,
         }
     }
 
     fn set_snapshot(&mut self, snapshot: InsertPickerSnapshot) {
         self.snapshot = snapshot;
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.snapshot
+            .search_input
+            .focus_handle
+            .focus(window, cx);
+        self.needs_search_focus = false;
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -122,6 +133,9 @@ impl InsertPickerWindow {
 impl Render for InsertPickerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let build_started = picker_perf_debug().then(std::time::Instant::now);
+        if self.needs_search_focus {
+            self.focus_search(window, cx);
+        }
         let target = cx.entity().clone();
         let snapshot = self.snapshot.clone();
         let search_focused = snapshot.search_input.is_focused(window);
@@ -394,7 +408,11 @@ impl StudioLayout {
     ) {
         if let Some(handle) = self.plugin_picker_window.clone() {
             if handle
-                .update(cx, |_picker, window, _cx| window.activate_window())
+                .update(cx, |picker, window, cx| {
+                    picker.needs_search_focus = true;
+                    picker.focus_search(window, cx);
+                    window.activate_window();
+                })
                 .is_ok()
             {
                 self.notify_insert_picker_window(cx);

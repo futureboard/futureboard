@@ -4573,6 +4573,11 @@ impl PianoRoll {
             return;
         }
         let max_scroll_x = self.max_scroll_x(cx);
+        let natural = cx
+            .try_global::<crate::settings::GlobalSettingsModel>()
+            .map(|g| g.0.read(cx).current.editing.mouse.natural_scroll)
+            .unwrap_or(false);
+        let (dx, dy) = if natural { (-dx, -dy) } else { (dx, dy) };
         if event.modifiers.shift {
             self.scroll_x = (self.scroll_x - dy - dx).clamp(0.0, max_scroll_x);
         } else {

@@ -127,14 +127,20 @@ pub fn menu_dropdown(
         panel_left = submenu_left(panel_left, current_width, child_width, viewport_width);
     }
 
-    // Click-blocking backdrop behind every panel.
+    // Click-blocking backdrop behind every panel. Starts below the titlebar so
+    // a second click on the open menu label (or another menu title) reaches the
+    // menubar toggle instead of closing-then-reopening via event fallthrough.
     let backdrop_close = on_close.clone();
     let backdrop = div()
         .absolute()
-        .inset_0()
+        .top(px(TITLEBAR_HEIGHT))
+        .left_0()
+        .right_0()
+        .bottom_0()
         .id("menu-dropdown-backdrop")
         .on_mouse_down(gpui::MouseButton::Left, move |_, w, cx| {
             backdrop_close(&(), w, cx);
+            cx.stop_propagation();
         });
 
     div().absolute().inset_0().child(backdrop).children(panels)

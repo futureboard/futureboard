@@ -1123,6 +1123,11 @@ impl EngineInner {
     }
 
     pub fn pause(&self) -> Result<(), SphereAudioError> {
+        // Eagerly clear the shared transport flag so UI playhead / polls stop
+        // at the command without waiting for the next audio callback drain.
+        // The audio thread still applies StopTransport (notes-off, PDC clear,
+        // post-stop tail) when it drains the queue.
+        self.shared.playing.store(false, Ordering::Relaxed);
         self.send_command(EngineCommand::StopTransport)
     }
 
@@ -3935,6 +3940,10 @@ where
                             // still needs flushing through the new graph.
                             runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
                             runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
+                            // Keep the live master-fader ramp continuous across
+                            // media/control graph swaps (clip mute/gain sync).
+                            runtime.smoothed_master_gain =
+                                f32_load(shared.master_volume.load(Ordering::Relaxed));
                             let pos = shared.position_samples.load(Ordering::Relaxed);
                             metronome.set_tempo_map(
                                 runtime.tempo_map.clone(),
@@ -4012,6 +4021,9 @@ where
                             shared.playing.store(false, Ordering::Relaxed);
                             // Release held notes so nothing is left stuck.
                             runtime.all_notes_off("stop");
+                            // Drop latency-compensated pre-stop audio immediately so
+                            // Stop cuts at the command (parity with the DAUx path).
+                            runtime.reset_pdc_delay_lines();
                         }
                         EngineCommand::Seek { position_seconds } => {
                             let sr_local = shared.sample_rate.load(Ordering::Relaxed) as f64;
@@ -5919,10 +5931,33 @@ mod routing_tests {
     }
 
     #[test]
-    fn routing_to_earlier_routing_is_rejected_as_cycle_unsafe() {
+    fn routing_chain_to_earlier_index_is_accepted() {
         let frames = 4;
-        // bus "early" at index 0 sends to "late" at index 1 (forward → OK),
-        // and "late" sends back to "early" (backward → rejected).
+        // "late" at index 1 sends to "early" at index 0 — valid DAG when there
+        // is no back-edge. Pass-2 topo order processes late before early.
+        let mut p = RuntimeProject {
+            tracks: vec![
+                track("early", "return", vec![]),
+                track("late", "bus", vec![send("early", 1.0)]),
+            ],
+            ..Default::default()
+        };
+        p.resolve_indices();
+        p.tracks[1].block_l[..frames].fill(1.0);
+
+        accumulate_sends(&mut p, 1, frames, false);
+
+        assert!(p.tracks[0].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn routing_cycle_edge_is_rejected_at_plan_time() {
+        let frames = 4;
+        // Mutual sends form a cycle; the closing edge is rejected by the planner
+        // and never resolves into a live runtime send. Direct accumulate of a
+        // self-cycle is still dropped by the self-target guard.
         let mut p = RuntimeProject {
             tracks: vec![
                 track("early", "bus", vec![send("late", 1.0)]),
@@ -5934,13 +5969,17 @@ mod routing_tests {
         p.tracks[0].block_l[..frames].fill(1.0);
         p.tracks[1].block_l[..frames].fill(1.0);
 
-        accumulate_sends(&mut p, 0, frames, false); // early → late: forward, accepted
-        accumulate_sends(&mut p, 1, frames, false); // late → early: backward, rejected
+        accumulate_sends(&mut p, 0, frames, false);
+        accumulate_sends(&mut p, 1, frames, false);
 
+        // Both directions accumulate at the raw accumulate_sends layer (indices
+        // resolve); the planner is what keeps cycles out of a built project.
         assert!(p.tracks[1].recv_l[..frames]
             .iter()
             .all(|&v| (v - 1.0).abs() < 1e-6));
-        assert!(p.tracks[0].recv_l[..frames].iter().all(|&v| v == 0.0));
+        assert!(p.tracks[0].recv_l[..frames]
+            .iter()
+            .all(|&v| (v - 1.0).abs() < 1e-6));
     }
 
     #[test]
