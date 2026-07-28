@@ -61,7 +61,7 @@ export type HostStatus = {
   sampleRate?: number;
   /** Engine block size in samples. */
   blockSize?: number;
-  /** Total plugin latency in samples (includes any NAM receptive field). */
+  /** Total plugin latency in samples (NAM and IR block buffering). */
   latencySamples?: number;
   /** Plugin CPU share, 0..1. */
   cpuLoad?: number;

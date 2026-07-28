@@ -37,8 +37,8 @@ function formatCpu(load: number | undefined): string {
  *
  * Every engine-supplied figure renders as `—` until the host actually reports
  * it. Latency in particular is never shown as zero on the assumption that the
- * chain is zero-latency: a loaded NAM capture has a real receptive-field delay,
- * and the host is the only thing that knows the total.
+ * chain is zero-latency: the NAM and IR engines both buffer a block, and the
+ * host is the only thing that knows the total.
  */
 export function Footer({ globalBypass }: FooterProps) {
   const [status, setStatus] = useState<HostStatus>(() => getStatus());

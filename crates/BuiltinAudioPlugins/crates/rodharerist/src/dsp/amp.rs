@@ -44,7 +44,7 @@ const INVERTER_COUPLING_SCALE: f32 = 0.42;
 #[inline]
 fn finite(x: f32) -> f32 {
     if x.is_finite() {
-        x.clamp(-8.0, 8.0)
+        super::flush_denormal(x.clamp(-8.0, 8.0))
     } else {
         0.0
     }

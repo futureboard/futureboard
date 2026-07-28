@@ -79,7 +79,9 @@ impl Allpass1 {
     fn run(&mut self, x: f32) -> f32 {
         let y = self.x1 + self.a * (x - self.y1);
         self.x1 = x;
-        self.y1 = y;
+        // The allpass feeds `y1` back, so a decaying tail parks it in the
+        // subnormal range and the whole oversampler slows down with it.
+        self.y1 = super::flush_denormal(y);
         y
     }
 }

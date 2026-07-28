@@ -186,7 +186,7 @@ export function ModuleEditor({
               >
                 {namStatus.kind === "loading" && `Loading “${namStatus.name}”…`}
                 {namStatus.kind === "loaded" &&
-                  `Loaded “${namStatus.name}” (${namStatus.receptiveField} sample latency)`}
+                  `Loaded “${namStatus.name}” (${namStatus.receptiveField} sample receptive field)`}
                 {namStatus.kind === "error" &&
                   `“${namStatus.name}” failed: ${namStatus.message}`}
               </div>
