@@ -24,7 +24,18 @@ pub const BAND_FREQ: u32 = 2;
 pub const BAND_GAIN: u32 = 3;
 pub const BAND_Q: u32 = 4;
 
-pub const PARAM_COUNT: usize = BAND_BASE_INDEX as usize + BAND_COUNT * BAND_STRIDE as usize;
+/// Which band is auditioned in isolation, or [`SOLO_NONE`].
+///
+/// Deliberately appended *after* the per-band block rather than inserted next
+/// to the other globals: band wire indices are derived from
+/// [`BAND_BASE_INDEX`], so inserting ahead of them would renumber every band
+/// and silently repoint in-flight edits.
+pub const SOLO_INDEX: u32 = BAND_BASE_INDEX + BAND_COUNT as u32 * BAND_STRIDE;
+
+/// `solo_band` value meaning "no band is soloed".
+pub const SOLO_NONE: i32 = -1;
+
+pub const PARAM_COUNT: usize = SOLO_INDEX as usize + 1;
 
 pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "power",
@@ -70,6 +81,7 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "band8_freq",
     "band8_gainDb",
     "band8_q",
+    "soloBand",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,10 +139,27 @@ pub fn decode_band_wire(index: u32) -> Option<(usize, u32)> {
 pub fn sanitize_params(params: &mut Params) {
     params.output_db = clamp(params.output_db, -24.0, 12.0);
     params.mix = clamp(params.mix, 0.0, 100.0);
+    if params.solo_band < 0 || params.solo_band >= BAND_COUNT as i32 {
+        params.solo_band = SOLO_NONE;
+    }
     for band in &mut params.bands {
         band.freq = clamp(band.freq, 20.0, 20_000.0);
         band.gain_db = clamp(band.gain_db, -18.0, 18.0);
         band.q = clamp(band.q, 0.1, 12.0);
+    }
+}
+
+/// Decode a wire `soloBand` value into a validated band index.
+///
+/// Anything outside `0..BAND_COUNT` clears solo rather than being rejected, so
+/// a UI can turn solo off by sending `-1` and can never wedge the DSP into
+/// auditioning a band that does not exist.
+pub fn decode_solo_band(value: f32) -> i32 {
+    let index = value.round() as i32;
+    if index < 0 || index >= BAND_COUNT as i32 {
+        SOLO_NONE
+    } else {
+        index
     }
 }
 
@@ -144,6 +173,7 @@ pub fn apply_wire_param(params: &mut Params, index: u32, value: f32) -> bool {
         POWER_INDEX => params.power = value >= 0.5,
         MIX_INDEX => params.mix = clamp(value, 0.0, 100.0),
         OUTPUT_INDEX => params.output_db = clamp(value, -24.0, 12.0),
+        SOLO_INDEX => params.solo_band = decode_solo_band(value),
         _ => {
             let Some((band_index, field)) = decode_band_wire(index) else {
                 return false;
@@ -183,6 +213,7 @@ pub fn ui_values(params: &Params) -> Vec<(&'static str, f32)> {
         values.push((UI_PARAM_IDS[base + 3], band.gain_db));
         values.push((UI_PARAM_IDS[base + 4], band.q));
     }
+    values.push(("soloBand", params.solo_band as f32));
     values
 }
 
@@ -206,6 +237,42 @@ mod tests {
         let json = Equz8State::new(params).to_json().unwrap();
         let decoded = Equz8State::from_json(&json).unwrap();
         assert_eq!(decoded.params.bands[3].gain_db, -4.5);
+    }
+
+    /// Projects saved before band solo existed have no `soloBand` field. They
+    /// must still load, with solo off rather than failing to deserialize.
+    #[test]
+    fn state_without_solo_band_still_loads() {
+        let json = Equz8State::new(default_params()).to_json().unwrap();
+        let stripped = json
+            .replace(",\"soloBand\":-1", "")
+            .replace("\"soloBand\":-1,", "");
+        assert!(
+            !stripped.contains("soloBand"),
+            "the field should be gone for this test to mean anything"
+        );
+        let decoded = Equz8State::from_json(&stripped).expect("legacy state must load");
+        assert_eq!(decoded.params.solo_band, SOLO_NONE);
+    }
+
+    /// Adding solo must not have renumbered the band block.
+    #[test]
+    fn solo_is_appended_after_the_band_block() {
+        assert_eq!(BAND_BASE_INDEX, 3, "globals still occupy 0..3");
+        assert_eq!(band_wire_index(0, BAND_ENABLED), 3);
+        assert_eq!(band_wire_index(BAND_COUNT - 1, BAND_Q), SOLO_INDEX - 1);
+        assert_eq!(ui_param_index("soloBand"), Some(SOLO_INDEX));
+    }
+
+    #[test]
+    fn solo_index_is_validated_not_trusted() {
+        let mut params = default_params();
+        assert!(apply_wire_param(&mut params, SOLO_INDEX, 3.0));
+        assert_eq!(params.solo_band, 3);
+        for bogus in [-5.0, BAND_COUNT as f32, 999.0] {
+            assert!(apply_wire_param(&mut params, SOLO_INDEX, bogus));
+            assert_eq!(params.solo_band, SOLO_NONE, "{bogus} should clear solo");
+        }
     }
 
     #[test]

@@ -241,6 +241,9 @@ pub fn make_eq_coefficients(
         "lowpass" | "lp" => Type::LowPass,
         "highpass" | "hp" => Type::HighPass,
         "notch" => Type::Notch,
+        // Not an EQ band shape — used to audition one band's frequency region
+        // in isolation (see Equz8's band solo).
+        "bandpass" | "bp" => Type::BandPass,
         _ => return None,
     };
     Coefficients::<f32>::from_params(filter_type, fs.hz(), f0.hz(), q).ok()

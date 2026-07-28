@@ -17,11 +17,16 @@ export type Band = {
   q: number
 }
 
+/// `soloBand` value meaning "no band is soloed". Mirrors `ipc::SOLO_NONE`.
+export const SOLO_NONE = -1
+
 export type EqParams = {
   power: boolean
   outputDb: number
   mix: number
   bands: Band[]
+  /// Index of the band being auditioned in isolation, or [`SOLO_NONE`].
+  soloBand: number
 }
 
 type Binding = {
@@ -117,7 +122,17 @@ function parseParams(state: unknown): EqParams | null {
   ) {
     return null
   }
-  return params as EqParams
+  // Optional on purpose: state saved before band solo existed has no
+  // `soloBand`, and rejecting it here would make those projects fail to load
+  // rather than simply opening with solo off. Rust applies the same default.
+  const soloBand =
+    typeof params.soloBand === 'number' &&
+    Number.isInteger(params.soloBand) &&
+    params.soloBand >= 0 &&
+    params.soloBand < params.bands.length
+      ? params.soloBand
+      : SOLO_NONE
+  return { ...(params as EqParams), soloBand }
 }
 
 export function connectBridge(

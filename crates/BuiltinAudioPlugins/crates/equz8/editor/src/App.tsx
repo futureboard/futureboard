@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  SOLO_NONE,
   connectBridge,
   postParam,
   type Band,
@@ -64,6 +65,62 @@ function App() {
     postBandPatch(index, patch)
   }, [])
 
+  /// Audition one band's frequency region on its own, FabFilter-style.
+  ///
+  /// Soloing is exclusive and self-clearing: clicking the lit band turns it
+  /// off, and clicking another moves the audition rather than stacking. It is
+  /// deliberately kept out of `updateGlobal`/preset state — see `presets.ts`.
+  const toggleSolo = useCallback((index: number) => {
+    setParams((current) => {
+      const next = current.soloBand === index ? SOLO_NONE : index
+      postParam('soloBand', next)
+      return { ...current, soloBand: next }
+    })
+  }, [])
+
+  /// Set solo outright rather than toggling.
+  ///
+  /// The momentary right-drag audition needs this: it has to force solo on at
+  /// gesture start and put back whatever was there on release, neither of which
+  /// a toggle can express. No-ops when already on the requested band so a drag
+  /// does not post a parameter per frame.
+  const setSolo = useCallback((index: number) => {
+    setParams((current) => {
+      if (current.soloBand === index) return current
+      postParam('soloBand', index)
+      return { ...current, soloBand: index }
+    })
+  }, [])
+
+  /// Solo is an audition, not a setting: leaving the EQ silently stuck
+  /// bandpassing one band would be a nasty surprise, so it drops on Escape and
+  /// on unmount (closing the editor window) alike. The ref exists purely so the
+  /// unmount cleanup can see the latest value without resubscribing per change.
+  const soloRef = useRef(params.soloBand)
+  useEffect(() => {
+    soloRef.current = params.soloBand
+  }, [params.soloBand])
+
+  const clearSolo = useCallback(() => {
+    setParams((current) => {
+      if (current.soloBand === SOLO_NONE) return current
+      postParam('soloBand', SOLO_NONE)
+      return { ...current, soloBand: SOLO_NONE }
+    })
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') clearSolo()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      // The component is going away, so only the DSP-side release matters here.
+      if (soloRef.current !== SOLO_NONE) postParam('soloBand', SOLO_NONE)
+    }
+  }, [clearSolo])
+
   const updateGlobal = useCallback(
     (patch: Partial<Pick<EqParams, 'power' | 'outputDb' | 'mix'>>) => {
       setParams((current) => ({ ...current, ...patch }))
@@ -113,8 +170,11 @@ function App() {
           showBandCurves={showBandCurves}
           showSpectrum={showSpectrum}
           spectrumRef={spectrum}
+          soloBand={params.soloBand}
           onSelect={setSelected}
           onBandChange={updateBand}
+          onToggleSolo={toggleSolo}
+          onSetSolo={setSolo}
         />
 
         <div className="stage-overlay">
@@ -162,8 +222,10 @@ function App() {
         selected={selected}
         outputDb={params.outputDb}
         mix={params.mix}
+        soloed={params.soloBand === selected}
         onBandChange={(patch) => updateBand(selected, patch)}
         onGlobalChange={updateGlobal}
+        onToggleSolo={() => toggleSolo(selected)}
       />
     </main>
   )
