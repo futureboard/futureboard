@@ -26,6 +26,7 @@ pub use equz8;
 pub use fa2a;
 pub use fa76;
 pub use meowsyn;
+pub use wrapsynth;
 
 use builtin_dsp_core::PluginDescriptor;
 
@@ -39,6 +40,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         fa76::descriptor(),
         c1073::descriptor(),
         meowsyn::descriptor(),
+        wrapsynth::descriptor(),
     ]
 }
 
@@ -57,6 +59,7 @@ mod tests {
         assert!(ids.contains(&fa76::PLUGIN_ID));
         assert!(ids.contains(&c1073::PLUGIN_ID));
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
+        assert!(ids.contains(&wrapsynth::PLUGIN_ID));
     }
 
     #[test]
@@ -87,5 +90,13 @@ mod tests {
         syn.note_on(60, 100);
         let (l, r) = syn.process_stereo();
         assert!(l.is_finite() && r.is_finite());
+    }
+
+    #[test]
+    fn wrapsynth_instrument_smoke() {
+        let mut synth = wrapsynth::Dsp::new(48_000.0);
+        synth.note_on(60, 100);
+        let (left, right) = synth.process_stereo();
+        assert!(left.is_finite() && right.is_finite());
     }
 }

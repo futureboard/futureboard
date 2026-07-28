@@ -37,6 +37,7 @@ pub const BUILTIN_PLUGIN_CRATES: &[&str] = &[
     "meowsyn",
     "rodharerist",
     "verbspace",
+    "wrapsynth",
 ];
 
 /// The platform-correct dynamic-library file names every built-in plugin is
@@ -102,6 +103,40 @@ pub fn embeds_editor_ui(crate_dir: &Path) -> bool {
 /// for embedding. Missing dist before the UI build is a normal, recoverable state.
 pub fn editor_ui_built(crate_dir: &Path) -> bool {
     editor_ui_dir(crate_dir).is_some_and(|dir| dir.join("dist").join("index.html").is_file())
+}
+
+/// Install dependencies and build the selected plugin editor frontends.
+///
+/// The package.json script discovers each plugin's `editorui` / `editor`
+/// package and always runs its frozen install before its build. This must
+/// happen before any Cargo build that can run the plugin `build.rs`, otherwise
+/// Cargo embeds an empty asset table for a missing `dist/`.
+pub fn build_editor_uis(workspace: &Path, packages: &[String]) -> Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+
+    let bun = std::env::var("BUN").unwrap_or_else(|_| "bun".to_string());
+    let package_json = workspace.join("package.json");
+    if !package_json.is_file() {
+        bail!(
+            "workspace package.json not found: {}",
+            package_json.display()
+        );
+    }
+
+    let status = Command::new(&bun)
+        .current_dir(workspace)
+        .arg("run")
+        .arg("build:plugin-editors")
+        .arg("--")
+        .args(packages)
+        .status()
+        .with_context(|| format!("failed to spawn `{bun} run build:plugin-editors`"))?;
+    if !status.success() {
+        bail!("plugin editor dependency install/build failed with {status}");
+    }
+    Ok(())
 }
 
 /// Classify a Cargo artifact: returns `(name, path)` when it is a plugin dynamic

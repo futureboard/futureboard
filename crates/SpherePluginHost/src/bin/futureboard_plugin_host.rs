@@ -26,10 +26,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use builtin_dsp_core::StereoEffect;
+use builtin_dsp_core::{Instrument, StereoEffect};
 use SpherePluginHost::audio_bridge::{
-    bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES,
-    MAX_CHANNELS,
+    bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, AUDIO_BUF_LEN,
+    MAX_BLOCK_FRAMES, MAX_CHANNELS,
 };
 use SpherePluginHost::ipc::{self, HostCommand, HostEvent, PROTOCOL_VERSION};
 use SpherePluginHost::native_editor::{self, EmbedRegion};
@@ -248,6 +248,7 @@ enum BuiltinDsp {
     Echospace(echospace::Dsp),
     Fa2a(fa2a::Dsp),
     Fa76(fa76::Dsp),
+    WrapSynth(wrapsynth::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -294,6 +295,7 @@ impl BuiltinHostProcessor {
             "echospace" => Some(Self::echospace(sample_rate, state_json)),
             "fa2a" => Some(Self::fa2a(sample_rate, state_json)),
             "fa76" => Some(Self::fa76(sample_rate, state_json)),
+            "wrapsynth" => Some(Self::wrapsynth(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -469,6 +471,26 @@ impl BuiltinHostProcessor {
         }
     }
 
+    fn wrapsynth(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = wrapsynth::Dsp::new(sr);
+        if let Some(json) = state_json {
+            match wrapsynth::ipc::WrapSynthState::from_json(json) {
+                Ok(state) => dsp.set_params(state.params),
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] WrapSynth state rejected: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::WrapSynth(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         match unsafe { &mut *self.dsp.get() } {
@@ -512,6 +534,13 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Fa76(dsp) => {
                 for i in 0..frames {
                     let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
+            BuiltinDsp::WrapSynth(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo();
                     interleaved[i * 2] = l;
                     interleaved[i * 2 + 1] = r;
                 }
@@ -579,7 +608,10 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
-            BuiltinDsp::Equz8(_) | BuiltinDsp::Verbspace(_) | BuiltinDsp::Echospace(_) => None,
+            BuiltinDsp::Equz8(_)
+            | BuiltinDsp::Verbspace(_)
+            | BuiltinDsp::Echospace(_)
+            | BuiltinDsp::WrapSynth(_) => None,
         }
     }
 
@@ -597,6 +629,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Fa2a(dsp) => dsp.latency_samples(),
             BuiltinDsp::Fa76(dsp) => dsp.latency_samples(),
             BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
+            BuiltinDsp::WrapSynth(_) => 0,
         }
     }
 
@@ -629,6 +662,23 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Fa76(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
+            BuiltinDsp::WrapSynth(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+        }
+    }
+
+    /// Deliver one MIDI event to an instrument built-in. The event has already
+    /// been routed through this exact instance's bounded shared-memory ring.
+    fn apply_midi(&self, event: SharedMidiEvent) {
+        let BuiltinDsp::WrapSynth(dsp) = (unsafe { &mut *self.dsp.get() }) else {
+            return;
+        };
+        match event.status & 0xf0 {
+            0x90 if event.data2 > 0 => dsp.note_on(event.data1, event.data2),
+            0x80 | 0x90 => dsp.note_off(event.data1),
+            0xb0 if matches!(event.data1, 120 | 123) => dsp.all_notes_off(),
+            _ => {}
         }
     }
 }
@@ -710,6 +760,28 @@ mod builtin_processor_tests {
             );
         }
         assert!(BuiltinHostProcessor::new("compresser", 48_000, None).is_none());
+    }
+
+    #[test]
+    fn wrapsynth_consumes_instance_midi_and_renders_audio() {
+        let processor = BuiltinHostProcessor::wrapsynth(48_000, None);
+        processor.apply_midi(SharedMidiEvent {
+            status: 0x90,
+            data1: 60,
+            data2: 110,
+            ..SharedMidiEvent::default()
+        });
+        let silence = [0.0f32; 256];
+        let mut output = [0.0f32; 512];
+        processor.process_block(&silence, &silence, &mut output, 256);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().any(|sample| sample.abs() > 1.0e-4));
+
+        processor.apply_midi(SharedMidiEvent {
+            status: 0x80,
+            data1: 60,
+            ..SharedMidiEvent::default()
+        });
     }
 
     /// EQ-Z8 shapes the signal rather than passing it: a band with real gain
@@ -1205,7 +1277,9 @@ fn service_audio_bridge(
     // broadcast to every loaded plugin.
     let mut midi_count = 0u32;
     while let Some(ev) = bridge.midi.try_pop() {
-        if builtin.is_none() {
+        if let Some(builtin) = builtin {
+            builtin.apply_midi(ev);
+        } else {
             dsp.apply_shared_midi(plugin_instance_id, ev);
         }
         midi_count += 1;

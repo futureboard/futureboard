@@ -35,10 +35,10 @@ members = [
     "crates/BuiltinAudioPlugins/crates/fa76",
     "crates/BuiltinAudioPlugins/crates/c1073",
     "crates/BuiltinAudioPlugins/crates/meowsyn",
+    "crates/BuiltinAudioPlugins/crates/wrapsynth",
     "crates/BuiltinAudioPlugins/crates/rodharerist",
     "crates/BuiltinAudioPlugins/crates/verbspace",
-
-    "xtask", "crates/WhiteSharp",
+    "xtask"
 ]
 
 exclude = [
@@ -101,6 +101,7 @@ echospace = { path = "crates/BuiltinAudioPlugins/crates/echospace" }
 fa76 = { path = "crates/BuiltinAudioPlugins/crates/fa76" }
 c1073 = { path = "crates/BuiltinAudioPlugins/crates/c1073" }
 meowsyn = { path = "crates/BuiltinAudioPlugins/crates/meowsyn" }
+wrapsynth = { path = "crates/BuiltinAudioPlugins/crates/wrapsynth" }
 rodharerist = { path = "crates/BuiltinAudioPlugins/crates/rodharerist" }
 verbspace = { path = "crates/BuiltinAudioPlugins/crates/verbspace" }
 

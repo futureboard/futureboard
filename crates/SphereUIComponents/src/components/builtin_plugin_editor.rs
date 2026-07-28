@@ -77,6 +77,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         echospace::ui::UI_ORIGIN => echospace::ui_param_index(param_id),
         fa2a::ui::UI_ORIGIN => fa2a::ui_param_index(param_id),
         fa76::ui::UI_ORIGIN => fa76::ui_param_index(param_id),
+        wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -117,6 +118,7 @@ mod state_mirror {
         Echospace(Box<echospace::Params>),
         Fa2a(Box<fa2a::Params>),
         Fa76(Box<fa76::Params>),
+        WrapSynth(Box<wrapsynth::Params>),
     }
 
     impl BuiltinParams {
@@ -128,6 +130,7 @@ mod state_mirror {
                 Self::Echospace(_) => echospace::ui::UI_ORIGIN,
                 Self::Fa2a(_) => fa2a::ui::UI_ORIGIN,
                 Self::Fa76(_) => fa76::ui::UI_ORIGIN,
+                Self::WrapSynth(_) => wrapsynth::ui::UI_ORIGIN,
             }
         }
 
@@ -146,6 +149,9 @@ mod state_mirror {
                 }
                 fa2a::ui::UI_ORIGIN => Some(Self::Fa2a(Box::new(fa2a::default_params()))),
                 fa76::ui::UI_ORIGIN => Some(Self::Fa76(Box::new(fa76::default_params()))),
+                wrapsynth::ui::UI_ORIGIN => {
+                    Some(Self::WrapSynth(Box::new(wrapsynth::default_params())))
+                }
                 _ => None,
             }
         }
@@ -186,6 +192,7 @@ mod state_mirror {
             echospace::ui::UI_ORIGIN => echospace::ui_param_id(wire_index).is_some(),
             fa2a::ui::UI_ORIGIN => fa2a::ui_param_id(wire_index).is_some(),
             fa76::ui::UI_ORIGIN => fa76::ui_param_id(wire_index).is_some(),
+            wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_id(wire_index).is_some(),
             _ => false,
         };
         if !known {
@@ -214,6 +221,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::Fa76(params)) => {
                 let _ = fa76::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::WrapSynth(params)) => {
+                let _ = wrapsynth::ipc::apply_wire_param(params, wire_index, value);
             }
             None => {}
         }
@@ -247,6 +257,9 @@ mod state_mirror {
             fa76::ui::UI_ORIGIN => fa76::ipc::Fa76State::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::Fa76(Box::new(state.params))),
+            wrapsynth::ui::UI_ORIGIN => wrapsynth::ipc::WrapSynthState::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::WrapSynth(Box::new(state.params))),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -298,6 +311,11 @@ mod state_mirror {
             }
             BuiltinParams::Fa76(params) if origin == fa76::ui::UI_ORIGIN => {
                 fa76::ipc::Fa76State::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            BuiltinParams::WrapSynth(params) if origin == wrapsynth::ui::UI_ORIGIN => {
+                wrapsynth::ipc::WrapSynthState::new((**params).clone())
                     .to_json()
                     .ok()?
             }
@@ -353,6 +371,12 @@ mod state_mirror {
                 fa76::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| fa76::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::WrapSynth(params)) if origin == wrapsynth::ui::UI_ORIGIN => {
+                wrapsynth::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| wrapsynth::ui_param_index(id).map(|i| (i, value)))
                     .collect()
             }
             _ => Vec::new(),
@@ -740,6 +764,7 @@ mod imp {
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::resolve_ui_asset(path)?,
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::resolve_ui_asset(path)?,
             fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::resolve_ui_asset(path)?,
+            wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -761,6 +786,7 @@ mod imp {
                 | echospace::ui::UI_ORIGIN
                 | fa2a::ui::UI_ORIGIN
                 | fa76::ui::UI_ORIGIN
+                | wrapsynth::ui::UI_ORIGIN
         )
     }
 
@@ -773,6 +799,7 @@ mod imp {
             echospace::ui::UI_ORIGIN => echospace::ui::EchospaceUi::is_embedded(),
             fa2a::ui::UI_ORIGIN => fa2a::ui::Fa2aUi::is_embedded(),
             fa76::ui::UI_ORIGIN => fa76::ui::Fa76Ui::is_embedded(),
+            wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::is_embedded(),
             _ => false,
         }
     }

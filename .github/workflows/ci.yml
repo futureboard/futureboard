@@ -115,12 +115,7 @@ jobs:
         if: hashFiles('build/cef/150.0.11/**/archive.json') == ''
         run: cargo run -p SphereWebView --example install_cef --features installer
 
-      - name: Install built-in plugin editor dependencies
-        run: |
-          bun install --frozen-lockfile
-          bun install --cwd crates/BuiltinAudioPlugins/crates/equz8/editor --frozen-lockfile
-
-      - name: Build embedded built-in plugin editors
+      - name: Install and build built-in plugin editors
         run: bun run build:plugin-editors
 
       - name: cargo clippy (Community Edition)

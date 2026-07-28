@@ -23,6 +23,7 @@ echospace.workspace = true
 fa76.workspace = true
 c1073.workspace = true
 meowsyn.workspace = true
+wrapsynth.workspace = true
 
 [lints]
 workspace = true

@@ -31,6 +31,7 @@ builtin-plugin-editor = [
     "dep:echospace",
     "dep:fa2a",
     "dep:fa76",
+    "dep:wrapsynth",
     "dep:builtin-ui-embed",
 ]
 
@@ -66,6 +67,7 @@ verbspace = { workspace = true, optional = true }
 echospace = { workspace = true, optional = true }
 fa2a = { workspace = true, optional = true }
 fa76 = { workspace = true, optional = true }
+wrapsynth = { workspace = true, optional = true }
 builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true

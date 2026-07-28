@@ -101,6 +101,13 @@ const CATALOG: &[BuiltinEntry] = &[
         kind: PluginKind::Instrument,
         has_editor: false,
     },
+    BuiltinEntry {
+        stem: "wrapsynth",
+        name: "WrapSynth",
+        category: "Instrument",
+        kind: PluginKind::Instrument,
+        has_editor: true,
+    },
 ];
 
 const VENDOR: &str = "Futureboard";
@@ -156,8 +163,15 @@ pub fn is_builtin_ref(id: &str) -> bool {
 /// Must stay in sync with `BuiltinHostProcessor::new` in the host binary — the
 /// two are covered by [`tests::bridge_supported_builtins_are_catalogued`] here
 /// and by the host's own construction test.
-pub const AUDIO_BRIDGE_STEMS: &[&str] =
-    &["rodharerist", "equz8", "verbspace", "echospace", "fa2a", "fa76"];
+pub const AUDIO_BRIDGE_STEMS: &[&str] = &[
+    "rodharerist",
+    "equz8",
+    "verbspace",
+    "echospace",
+    "fa2a",
+    "fa76",
+    "wrapsynth",
+];
 
 /// Whether this built-in currently has an out-of-process audio DSP runtime.
 pub fn builtin_audio_bridge_supported(id: &str) -> bool {
@@ -290,6 +304,7 @@ mod tests {
     #[test]
     fn stem_round_trips() {
         assert_eq!(builtin_stem(&builtin_id("meowsyn")), Some("meowsyn"));
+        assert_eq!(builtin_stem(&builtin_id("wrapsynth")), Some("wrapsynth"));
         assert!(builtin_stem("clap:foo").is_none());
     }
 
@@ -307,6 +322,8 @@ mod tests {
         assert!(builtin_audio_bridge_supported("builtin:fa2a"));
         assert!(builtin_audio_bridge_supported("fa76"));
         assert!(builtin_audio_bridge_supported("builtin:fa76"));
+        assert!(builtin_audio_bridge_supported("wrapsynth"));
+        assert!(builtin_audio_bridge_supported("builtin:wrapsynth"));
         // Catalogued, but the host has no DSP for it — must keep its old path.
         assert!(!builtin_audio_bridge_supported("compresser"));
         assert!(!builtin_audio_bridge_supported("vst3:whatever"));
@@ -334,6 +351,7 @@ mod tests {
         assert_eq!(builtin_display_name("echospace"), Some("EchoSpace"));
         assert_eq!(builtin_display_name("builtin:fa2a"), Some("FA-2A"));
         assert_eq!(builtin_display_name("builtin:fa76"), Some("FA-76"));
+        assert_eq!(builtin_display_name("builtin:wrapsynth"), Some("WrapSynth"));
         assert_eq!(builtin_display_name("vst3:whatever"), None);
     }
 

@@ -179,9 +179,10 @@ To wire a plugin's editor UI (e.g. `rodharerist`):
 
 The editor UI is built into a single self-contained `dist/index.html` (Vite +
 `vite-plugin-singlefile` inlines all JS/CSS/assets), so a plugin embeds just one
-asset. Build it first (`bun install && bun run build` in `editorui/`). The Rust
-crate can still compile with an empty table, but `xtask package --plugin ...`
-rejects that incomplete release package.
+asset. `xtask package --plugin ...` discovers each selected plugin's editor,
+runs its frozen `bun install`, and then builds the frontend before Cargo starts.
+The Rust crate can still compile directly with an empty table, while packaging
+rejects any incomplete editor bundle.
 
 At runtime the shared CEF host loads the editor via the `mikoplugin://` custom
 scheme — `mikoplugin://<plugin>/index.html` — and resolves it through the loaded

@@ -9,9 +9,8 @@
       "crates/*",
       "plugins/*",
       "extensions/template",
-      "crates/BuiltinAudioPlugins/crates/meowsyn/editor",
-      "crates/BuiltinAudioPlugins/crates/opensampler/editor",
-      "crates/BuiltinAudioPlugins/crates/rodharerist/editorui"
+      "crates/BuiltinAudioPlugins/crates/*/editor",
+      "crates/BuiltinAudioPlugins/crates/*/editorui"
     ],
     "catalog": {
       "@dnd-kit/core": "^6.3.1",
@@ -53,9 +52,9 @@
     "cargo:fmt": "cargo fmt --all",
     "cargo:fmt:check": "cargo fmt --all -- --check",
     "cargo:clean": "cargo clean",
-    "build:plugin-editors": "bun run --cwd crates/BuiltinAudioPlugins/crates/equz8/editor build && bun run --cwd crates/BuiltinAudioPlugins/crates/meowsyn/editor build && bun run --cwd crates/BuiltinAudioPlugins/crates/opensampler/editor build && bun run --cwd crates/BuiltinAudioPlugins/crates/rodharerist/editorui build && bun run --cwd crates/BuiltinAudioPlugins/crates/verbspace/editorui build && bun run --cwd crates/BuiltinAudioPlugins/crates/echospace/editorui build && bun run --cwd crates/BuiltinAudioPlugins/crates/fa2a/editorui build",
-    "build:native": "bun run build:plugin-editors && cargo run -p xtask -- package --profile release --edition community --plugin all",
-    "build:native:debug": "bun run build:plugin-editors && cargo run -p xtask -- package --profile dev --edition community --plugin all",
+    "build:plugin-editors": "bun run scripts/build.ts",
+    "build:native": "cargo run -p xtask -- package --profile release --edition community --plugin all",
+    "build:native:debug": "cargo run -p xtask -- package --profile dev --edition community --plugin all",
     "bundle:native:mac": "bash packaging/native/bundle-macos.sh",
     "bundle:native:mac:dmg": "bash packaging/native/bundle-macos.sh && bash packaging/native/bundle-macos-dmg.sh",
     "bundle:native:win": "pwsh -File packaging/windows/build-installer.ps1",

@@ -78,6 +78,40 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         None => host_target().context("could not determine host target triple")?,
     };
     let workspace = workspace_root();
+    let discovered = if options.plugins.is_enabled() {
+        plugin_packages()?
+    } else {
+        Vec::new()
+    };
+    // Resolve plugin selection before building the app: the native build can
+    // compile plugin crates, whose build.rs must see frontend dist assets.
+    let selected: Vec<&DiscoveredPlugin> = match &options.plugins {
+        PluginSelection::None => Vec::new(),
+        PluginSelection::All => discovered.iter().collect(),
+        PluginSelection::Only(names) => {
+            for requested in names {
+                if !discovered.iter().any(|plugin| &plugin.name == requested) {
+                    eprintln!(
+                        "[xtask] warning: requested plugin `{requested}` is not a \
+                         Built-in Plugin cdylib crate - skipping"
+                    );
+                }
+            }
+            discovered
+                .iter()
+                .filter(|plugin| names.iter().any(|name| name == &plugin.name))
+                .collect()
+        }
+    };
+    if !selected.is_empty() {
+        let package_names = selected
+            .iter()
+            .map(|plugin| plugin.name.clone())
+            .collect::<Vec<_>>();
+        eprintln!("[xtask] installing and building editor frontends for selected plugins");
+        plugins::build_editor_uis(&workspace, &package_names)?;
+    }
+
     let cef_dist = cef::prepare_cef_dist(&workspace, &target_triple)
         .context("failed to prepare the CEF distribution")?;
     if options.stage_cef && cef_dist.is_none() {
@@ -158,27 +192,6 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
 
     // 4b. Optionally build and stage Built-in Plugin dynamic libraries.
     if options.plugins.is_enabled() {
-        let discovered = plugin_packages()?;
-        // Resolve the requested selection to actual discovered packages.
-        let selected: Vec<&DiscoveredPlugin> = match &options.plugins {
-            PluginSelection::None => Vec::new(),
-            PluginSelection::All => discovered.iter().collect(),
-            PluginSelection::Only(names) => {
-                for requested in names {
-                    if !discovered.iter().any(|p| &p.name == requested) {
-                        eprintln!(
-                            "[xtask] warning: requested plugin `{requested}` is not a \
-                             Built-in Plugin cdylib crate — skipping"
-                        );
-                    }
-                }
-                discovered
-                    .iter()
-                    .filter(|p| names.iter().any(|n| n == &p.name))
-                    .collect()
-            }
-        };
-
         // A plugin that embeds its editor is not release-ready when the static
         // bundle is absent: compiling it would silently embed an empty asset
         // table. A plugin that merely *ships* a bundle nothing consumes yet is
