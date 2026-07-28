@@ -209,7 +209,10 @@ impl SoftKneeCompressor {
             return;
         }
         let fs = self.sample_rate.hz();
-        let f0 = self.sc_cutoff_hz.min(self.sample_rate * 0.45).hz();
+        let f0 = self
+            .sc_cutoff_hz
+            .min(max_filter_frequency(self.sample_rate))
+            .hz();
         let Ok(coeffs) = Coefficients::<f32>::from_params(Type::HighPass, fs, f0, 0.707) else {
             self.sidechain_hpf = None;
             return;
@@ -218,12 +221,32 @@ impl SoftKneeCompressor {
     }
 }
 
+/// Fraction of the sample rate a filter's centre frequency may reach.
+///
+/// The bilinear transform degenerates as `f0` approaches Nyquist — `sin(w0)`
+/// goes to zero and with it `alpha`, so the coefficients lose all resolution —
+/// hence a guard band rather than `0.5` outright.
+///
+/// It was `0.45`, which is below 20 kHz at 44.1 kHz: the top of the audio band
+/// was unreachable at the most common sample rate, so an EQ band dragged to
+/// 20 kHz silently sat at 19,845 Hz instead. `0.49` clears 20 kHz at 44.1 kHz
+/// with ~440 Hz still in hand, and stays comfortably stable — at the extreme
+/// (`Q = 12`, ±18 dB) the poles sit at a radius near 0.998.
+pub const MAX_FILTER_FREQUENCY_RATIO: f32 = 0.49;
+
+/// Highest centre frequency a filter may be tuned to at `sample_rate`.
+pub fn max_filter_frequency(sample_rate: f32) -> f32 {
+    sample_rate.max(1.0) * MAX_FILTER_FREQUENCY_RATIO
+}
+
 /// Build biquad coefficients from common EQ band kinds.
 ///
 /// Prefer this over [`make_eq_biquad`] for a filter that is already running:
 /// coefficients can be handed to `Biquad::update_coefficients`, which retunes
 /// in place, whereas installing a fresh `DirectForm1` also installs its zeroed
 /// history and steps the signal.
+///
+/// The centre frequency is clamped to [`max_filter_frequency`].
 pub fn make_eq_coefficients(
     kind: &str,
     freq_hz: f32,
@@ -232,7 +255,7 @@ pub fn make_eq_coefficients(
     sample_rate: f32,
 ) -> Option<Coefficients<f32>> {
     let fs = sample_rate.max(1.0);
-    let f0 = clamp(freq_hz, 10.0, fs * 0.45);
+    let f0 = clamp(freq_hz, 10.0, max_filter_frequency(fs));
     let q = clamp(q, 0.1, 12.0);
     let filter_type = match kind {
         "bell" | "peak" | "peaking" => Type::PeakingEQ(gain_db),
@@ -285,5 +308,66 @@ mod tests {
     fn eq_biquad_builds() {
         assert!(make_eq_biquad("bell", 1_000.0, 3.0, 1.0, 48_000.0).is_some());
         assert!(make_eq_biquad("highpass", 80.0, 0.0, 0.7, 48_000.0).is_some());
+    }
+
+    /// The top of the audio band has to be reachable at every supported rate.
+    /// The old 0.45 ratio put the ceiling at 19,845 Hz on 44.1 kHz, so a band
+    /// asked for 20 kHz quietly sat below it.
+    #[test]
+    fn twenty_kilohertz_is_reachable_at_every_common_rate() {
+        for rate in [44_100.0, 48_000.0, 88_200.0, 96_000.0, 192_000.0] {
+            assert!(
+                max_filter_frequency(rate) >= 20_000.0,
+                "{rate} Hz caps filters at {} Hz, below the audio band",
+                max_filter_frequency(rate)
+            );
+        }
+    }
+
+    /// ...but never at or above Nyquist, where the bilinear transform collapses.
+    #[test]
+    fn the_ceiling_stays_below_nyquist() {
+        for rate in [8_000.0, 44_100.0, 48_000.0, 192_000.0] {
+            assert!(max_filter_frequency(rate) < rate * 0.5);
+        }
+    }
+
+    /// A filter built right at the ceiling must stay stable and finite under
+    /// the worst-case settings, not just be constructible.
+    #[test]
+    fn filters_at_the_ceiling_stay_stable() {
+        for rate in [44_100.0f32, 48_000.0, 96_000.0] {
+            let ceiling = max_filter_frequency(rate);
+            for kind in [
+                "bell",
+                "lowshelf",
+                "highshelf",
+                "lowpass",
+                "highpass",
+                "notch",
+            ] {
+                for gain in [-18.0f32, 0.0, 18.0] {
+                    let mut filter = make_eq_biquad(kind, ceiling, gain, 12.0, rate)
+                        .unwrap_or_else(|| panic!("{kind} at {ceiling} Hz should build"));
+                    // Drive it hard, then confirm it settles rather than running away.
+                    let mut peak = 0.0f32;
+                    for i in 0..4_000 {
+                        let input = if i % 2 == 0 { 1.0 } else { -1.0 };
+                        let out = filter.run(input);
+                        assert!(
+                            out.is_finite(),
+                            "{kind} {gain} dB at {rate} Hz produced {out}"
+                        );
+                        if i > 2_000 {
+                            peak = peak.max(out.abs());
+                        }
+                    }
+                    assert!(
+                        peak < 100.0,
+                        "{kind} {gain} dB at {rate} Hz ran away to {peak}"
+                    );
+                }
+            }
+        }
     }
 }

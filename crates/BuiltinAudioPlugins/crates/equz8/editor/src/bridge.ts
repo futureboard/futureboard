@@ -69,6 +69,17 @@ type SpectrumMessage = SpectrumFrame & {
   instanceId: string
 }
 
+/// Low-rate (~1 Hz) host telemetry. Only `sampleRate` is consumed here — the
+/// response curve has to be drawn against the rate the audio actually runs at.
+type HostStatusMessage = {
+  type: 'futureboard.hostStatus'
+  protocolVersion: number
+  instanceId: string
+  sampleRate: number
+  blockSize: number
+  latencySamples: number
+}
+
 let binding: Binding | null = null
 const pending = new Map<string, number>()
 let scheduled = false
@@ -139,6 +150,7 @@ export function connectBridge(
   onParams: (params: EqParams) => void,
   onConnection: (connected: boolean) => void,
   onSpectrum?: (frame: SpectrumFrame) => void,
+  onSampleRate?: (sampleRate: number) => void,
 ) {
   post({
     type: 'futureboard.bridgeReady',
@@ -152,6 +164,7 @@ export function connectBridge(
       | SelectInstanceMessage
       | InstanceRemovedMessage
       | SpectrumMessage
+      | HostStatusMessage
       | undefined
     if (!message || typeof message !== 'object') return
 
@@ -167,6 +180,18 @@ export function connectBridge(
         ceilDb: message.ceilDb,
         bins: message.bins,
       })
+      return
+    }
+
+    // The response curve is computed against the rate the audio actually runs
+    // at, so the picture matches what the DSP is doing rather than assuming
+    // 48 kHz. It matters most at the top of the range, where the bilinear
+    // transform warps hardest.
+    if (message.type === 'futureboard.hostStatus') {
+      if (binding?.instanceId !== message.instanceId) return
+      if (typeof message.sampleRate === 'number' && message.sampleRate > 0) {
+        onSampleRate?.(message.sampleRate)
+      }
       return
     }
 

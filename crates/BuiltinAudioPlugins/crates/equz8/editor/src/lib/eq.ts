@@ -9,7 +9,20 @@ export const MIN_Q = 0.1
 export const MAX_Q = 12
 export const OUTPUT_MIN_DB = -24
 export const OUTPUT_MAX_DB = 12
-export const SAMPLE_RATE = 48_000
+/// Rate assumed before the host reports the real one, and the fallback in a
+/// plain browser where no host is bound.
+export const DEFAULT_SAMPLE_RATE = 48_000
+
+/// Highest centre frequency a filter can be tuned to at `sampleRate`.
+///
+/// Mirrors `builtin_dsp_core::MAX_FILTER_FREQUENCY_RATIO`. The DSP clamps to
+/// this, so the curve has to as well or it would draw a band where the audio
+/// cannot actually put one.
+export const MAX_FILTER_FREQUENCY_RATIO = 0.49
+
+export function maxFilterFrequency(sampleRate: number) {
+  return sampleRate * MAX_FILTER_FREQUENCY_RATIO
+}
 
 /// The graph's two axes, as single shared d3 scales.
 ///
@@ -209,8 +222,17 @@ type Coefficients = {
   a2: number
 }
 
-export function bandCoefficients(band: Band): Coefficients {
-  const w0 = (2 * Math.PI * clamp(band.freq, MIN_FREQ, MAX_FREQ)) / SAMPLE_RATE
+export function bandCoefficients(
+  band: Band,
+  sampleRate: number,
+): Coefficients {
+  // Clamped the same way the DSP clamps it, so the drawn curve cannot show a
+  // band sitting somewhere the filter is not able to go.
+  const f0 = Math.min(
+    clamp(band.freq, MIN_FREQ, MAX_FREQ),
+    maxFilterFrequency(sampleRate),
+  )
+  const w0 = (2 * Math.PI * f0) / sampleRate
   const cos = Math.cos(w0)
   const sin = Math.sin(w0)
   const alpha = sin / (2 * clamp(band.q, MIN_Q, MAX_Q))
@@ -279,8 +301,12 @@ export function bandCoefficients(band: Band): Coefficients {
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
 }
 
-function magnitudeDb(coeff: Coefficients, frequency: number) {
-  const w = (2 * Math.PI * frequency) / SAMPLE_RATE
+function magnitudeDb(
+  coeff: Coefficients,
+  frequency: number,
+  sampleRate: number,
+) {
+  const w = (2 * Math.PI * frequency) / sampleRate
   const c1 = Math.cos(w)
   const s1 = Math.sin(w)
   const c2 = Math.cos(2 * w)
@@ -321,22 +347,41 @@ function tracePath(
   return curveBuilder(points) ?? ''
 }
 
-export function sumCurvePath(bands: Band[], width: number, height: number) {
+export function sumCurvePath(
+  bands: Band[],
+  width: number,
+  height: number,
+  sampleRate: number,
+) {
   const active = bands
     .filter((band) => band.active)
-    .map((band) => bandCoefficients(band))
+    .map((band) => bandCoefficients(band, sampleRate))
   return tracePath(width, height, (frequency) =>
-    active.reduce((sum, coeff) => sum + magnitudeDb(coeff, frequency), 0),
+    active.reduce(
+      (sum, coeff) => sum + magnitudeDb(coeff, frequency, sampleRate),
+      0,
+    ),
   )
 }
 
-export function bandCurvePath(band: Band, width: number, height: number) {
-  const coeff = bandCoefficients(band)
-  return tracePath(width, height, (frequency) => magnitudeDb(coeff, frequency))
+export function bandCurvePath(
+  band: Band,
+  width: number,
+  height: number,
+  sampleRate: number,
+) {
+  const coeff = bandCoefficients(band, sampleRate)
+  return tracePath(width, height, (frequency) =>
+    magnitudeDb(coeff, frequency, sampleRate),
+  )
 }
 
-export function sumDbAt(bands: Band[], frequency: number) {
+export function sumDbAt(bands: Band[], frequency: number, sampleRate: number) {
   return bands
     .filter((band) => band.active)
-    .reduce((sum, band) => sum + magnitudeDb(bandCoefficients(band), frequency), 0)
+    .reduce(
+      (sum, band) =>
+        sum + magnitudeDb(bandCoefficients(band, sampleRate), frequency, sampleRate),
+      0,
+    )
 }
