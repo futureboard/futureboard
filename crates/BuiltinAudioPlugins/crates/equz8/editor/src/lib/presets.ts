@@ -1,4 +1,4 @@
-import { postParam, type Band, type EqParams } from '../bridge'
+import { SOLO_NONE, postParam, type Band, type EqParams } from '../bridge'
 import { filterKind } from './eq'
 
 /// Mirrors `default_params()` in the Rust DSP crate. Rust stays authoritative:
@@ -17,6 +17,7 @@ export const DEFAULT_PARAMS: EqParams = {
     { active: true, bandType: 'highshelf', freq: 8000, gainDb: 1.5, q: 0.8 },
     { active: true, bandType: 'lowpass', freq: 16000, gainDb: 0, q: 0.7 },
   ],
+  soloBand: SOLO_NONE,
 }
 
 export type FactoryPreset = {
@@ -40,6 +41,9 @@ function preset(
         ...band,
         ...(bands[index] ?? {}),
       })),
+      // Solo is an audition state, never part of a preset: loading a preset
+      // while listening to one band must not leave the EQ stuck in solo.
+      soloBand: SOLO_NONE,
     },
   }
 }
@@ -140,6 +144,7 @@ export function postAllParams(params: EqParams) {
   postParam('power', params.power ? 1 : 0)
   postParam('outputDb', params.outputDb)
   postParam('mix', params.mix)
+  postParam('soloBand', params.soloBand)
   params.bands.forEach((band, index) => {
     const prefix = `band${index + 1}_`
     postParam(`${prefix}enabled`, band.active ? 1 : 0)

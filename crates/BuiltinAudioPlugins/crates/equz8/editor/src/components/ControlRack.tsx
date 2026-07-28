@@ -17,6 +17,8 @@ import {
   formatQ,
   freqToProgress,
   progressToFreq,
+  progressToQ,
+  qToProgress,
 } from '../lib/eq'
 import { Knob } from './Knob'
 
@@ -26,10 +28,12 @@ export type ControlRackProps = {
   selected: number
   outputDb: number
   mix: number
+  soloed: boolean
   onBandChange: (patch: Partial<Band>) => void
   onGlobalChange: (
     patch: Partial<Pick<EqParams, 'outputDb' | 'mix'>>,
   ) => void
+  onToggleSolo: () => void
 }
 
 export function ControlRack({
@@ -38,8 +42,10 @@ export function ControlRack({
   selected,
   outputDb,
   mix,
+  soloed,
   onBandChange,
   onGlobalChange,
+  onToggleSolo,
 }: ControlRackProps) {
   const kind = filterKind(band.bandType)
   const canGain = bandHasGain(band.bandType)
@@ -56,6 +62,23 @@ export function ControlRack({
             <strong>Band {selected + 1}</strong>
             <span>{kind.label}</span>
           </div>
+          <button
+            type="button"
+            className={`band-solo${soloed ? ' is-on' : ''}`}
+            aria-pressed={soloed}
+            aria-label={`Listen to band ${selected + 1} alone`}
+            title={
+              soloed
+                ? 'Stop listening (Esc)'
+                : "Listen to this band's frequency range alone"
+            }
+            onClick={onToggleSolo}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
+              <path d="M4 14h3v5H5a1 1 0 0 1-1-1zM20 14h-3v5h2a1 1 0 0 0 1-1z" />
+            </svg>
+          </button>
           <button
             type="button"
             className={`band-toggle${band.active ? ' is-on' : ''}`}
@@ -125,6 +148,8 @@ export function ControlRack({
           step={0.01}
           format={formatQ}
           defaultValue={defaultBand.q}
+          toProgress={qToProgress}
+          fromProgress={progressToQ}
           onChange={(q) => onBandChange({ q })}
         />
       </div>

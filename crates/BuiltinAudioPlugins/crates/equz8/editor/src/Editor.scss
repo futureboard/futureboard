@@ -438,6 +438,17 @@ select:focus-visible,
     opacity: 0.3;
   }
 
+  /// A soloed band is muting everything else, so its node keeps a permanent lit
+  /// halo rather than the hover-only one — the graph has to show *why* the EQ
+  /// suddenly sounds like a bandpass, even when the pointer is elsewhere.
+  &.is-soloed {
+    opacity: 1;
+
+    .node-halo {
+      opacity: 0.42;
+    }
+  }
+
   .node-halo {
     fill: var(--band);
     opacity: 0;
@@ -569,11 +580,52 @@ select:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 
+/// Audition toggle. Sits before the enable dot and takes the `margin-left:auto`
+/// that used to push that dot to the end, so the pair stays right-aligned.
+.band-solo {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.35rem;
+  height: 1.35rem;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+
+  svg {
+    width: 0.85rem;
+    height: 0.85rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  &:hover {
+    color: var(--text-primary);
+    border-color: var(--text-faint);
+  }
+
+  /// Soloing mutes everything else, so it has to be unmistakable at a glance —
+  /// this is the one control in the rack that changes what you are hearing
+  /// without changing the curve.
+  &.is-on {
+    color: #0b0e13;
+    border-color: var(--band);
+    background: var(--band);
+  }
+}
+
 .band-toggle {
   flex: none;
   width: 0.65rem;
   height: 0.65rem;
-  margin-left: auto;
   border: 1px solid var(--text-faint);
   border-radius: 50%;
   cursor: pointer;

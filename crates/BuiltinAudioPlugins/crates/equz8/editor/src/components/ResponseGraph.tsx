@@ -18,9 +18,7 @@ import {
   GRID_GAINS,
   LABELLED_FREQUENCIES,
   MAX_FREQ,
-  MAX_Q,
   MIN_FREQ,
-  MIN_Q,
   bandCurvePath,
   bandHasGain,
   clamp,
@@ -30,6 +28,7 @@ import {
   formatQ,
   frequencyToX,
   gainToY,
+  scaleQ,
   sumCurvePath,
   sumDbAt,
   xToFrequency,
@@ -38,6 +37,17 @@ import {
 
 const READOUT_WIDTH = 148
 const READOUT_HEIGHT = 30
+
+/// One wheel notch in `deltaY` units, matching a conventional mouse detent.
+/// Trackpads and high-resolution wheels report smaller values and so produce
+/// correspondingly smaller, smooth steps.
+const WHEEL_NOTCH = 100
+
+/// Q multiplier per wheel notch. 1.15 is roughly two notches per semitone-ish
+/// step of bandwidth — brisk enough to cross the range in a short gesture, fine
+/// enough to place a value without overshooting.
+const Q_WHEEL_COARSE = 1.15
+const Q_WHEEL_FINE = 1.03
 
 type Size = { width: number; height: number }
 
@@ -50,8 +60,12 @@ export type ResponseGraphProps = {
   /// Live handle on the analyser frame — see [`SpectrumLayer`] for why this is
   /// a ref rather than a value.
   spectrumRef: RefObject<SpectrumFrame | null>
+  /// Band currently auditioned alone, or `SOLO_NONE`.
+  soloBand: number
   onSelect: (index: number) => void
   onBandChange: (index: number, patch: Partial<Band>) => void
+  onToggleSolo: (index: number) => void
+  onSetSolo: (index: number) => void
 }
 
 export function ResponseGraph({
@@ -61,11 +75,18 @@ export function ResponseGraph({
   showBandCurves,
   showSpectrum,
   spectrumRef,
+  soloBand,
   onSelect,
   onBandChange,
+  onToggleSolo,
+  onSetSolo,
 }: ResponseGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const dragging = useRef<number | null>(null)
+  /// Solo state to put back when a momentary right-drag audition ends, or
+  /// `null` when the gesture in progress is not an audition. `SOLO_NONE` is a
+  /// meaningful value to restore, hence `null` rather than `-1` as the sentinel.
+  const auditionRestore = useRef<number | null>(null)
   const [size, setSize] = useState<Size>({ width: 960, height: 420 })
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
   const [dragged, setDragged] = useState<number | null>(null)
@@ -133,6 +154,12 @@ export function ResponseGraph({
       const patch: Partial<Band> = {
         freq: clamp(xToFrequency(point.x, width), MIN_FREQ, MAX_FREQ),
       }
+      // The audition drag moves the band exactly like a normal drag, both axes.
+      // An earlier revision locked it to frequency on the theory that gain is
+      // inaudible while soloed and would therefore be changed blindly — but the
+      // point of the gesture is to place the band *while* listening, and half a
+      // drag is not that. The node keeps tracking the cursor, so the gain being
+      // dialled in stays visible on the curve even when it is not audible.
       if (bandHasGain(band.bandType)) {
         patch.gainDb = clamp(yToGain(point.y, height), -GAIN_RANGE, GAIN_RANGE)
       }
@@ -145,11 +172,57 @@ export function ResponseGraph({
     event.preventDefault()
     const band = bands[index]
     if (!band) return
-    const scale = event.shiftKey ? 0.02 : 0.12
-    onBandChange(index, {
-      q: clamp(band.q - Math.sign(event.deltaY) * scale, MIN_Q, MAX_Q),
-    })
+    // Ratio per notch rather than a fixed amount, so a notch is the same
+    // perceived step at Q 0.3 as at Q 8. Notches are also accumulated by
+    // magnitude instead of `Math.sign`, which threw away how far the wheel
+    // actually moved and made every gesture exactly one step regardless.
+    const notches = clamp(event.deltaY / WHEEL_NOTCH, -4, 4)
+    const perNotch = event.shiftKey ? Q_WHEEL_FINE : Q_WHEEL_COARSE
+    onBandChange(index, { q: scaleQ(band.q, Math.pow(perNotch, -notches)) })
   }
+
+  /// End any drag, releasing a momentary audition if one was running.
+  ///
+  /// Every teardown path routes through here — pointer up, cancel and the
+  /// window-level safety net below — because a missed release would leave the
+  /// EQ silently stuck bandpassing one band.
+  const endGesture = useCallback(() => {
+    dragging.current = null
+    setDragged(null)
+    if (auditionRestore.current !== null) {
+      onSetSolo(auditionRestore.current)
+      auditionRestore.current = null
+    }
+  }, [onSetSolo])
+
+  /// Drive the drag from the window rather than from the SVG's own handlers.
+  ///
+  /// The right-button gesture cannot rely on pointer capture or on the SVG
+  /// staying the event target: opening a context menu makes Blink fire
+  /// `pointercancel`, which drops capture and would strand a half-finished
+  /// drag. Window listeners see the move regardless of capture, target, or
+  /// whether the pointer wandered outside the graph, which is also what makes
+  /// a release outside the window release the audition instead of latching it.
+  useEffect(() => {
+    const onWindowMove = (event: globalThis.PointerEvent) => {
+      if (dragging.current === null) return
+      dragBand(dragging.current, event.clientX, event.clientY)
+      setCursor(null)
+    }
+    const onWindowUp = () => {
+      if (dragging.current !== null || auditionRestore.current !== null) {
+        endGesture()
+      }
+    }
+    window.addEventListener('pointermove', onWindowMove)
+    window.addEventListener('pointerup', onWindowUp)
+    window.addEventListener('blur', onWindowUp)
+    return () => {
+      window.removeEventListener('pointermove', onWindowMove)
+      window.removeEventListener('pointerup', onWindowUp)
+      window.removeEventListener('blur', onWindowUp)
+    }
+  }, [dragBand, endGesture])
 
   const cursorFreq = cursor ? xToFrequency(cursor.x, width) : null
   const zeroY = gainToY(0, height)
@@ -163,25 +236,26 @@ export function ResponseGraph({
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
       onPointerMove={(event: ReactPointerEvent<SVGSVGElement>) => {
-        if (dragging.current !== null) {
-          dragBand(dragging.current, event.clientX, event.clientY)
-          setCursor(null)
-          return
-        }
+        // Dragging is handled window-side (see above); this only feeds the
+        // hover readout, which is meaningless mid-drag.
+        if (dragging.current !== null) return
         setCursor(toGraphPoint(event.clientX, event.clientY))
       }}
       onPointerLeave={() => setCursor(null)}
+      // The audition gesture is driven by the right button, whose context menu
+      // would otherwise pop up over the graph mid-drag.
+      onContextMenu={(event) => event.preventDefault()}
       onPointerUp={(event) => {
-        dragging.current = null
-        setDragged(null)
+        endGesture()
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
           event.currentTarget.releasePointerCapture(event.pointerId)
         }
       }}
-      onPointerCancel={() => {
-        dragging.current = null
-        setDragged(null)
-      }}
+      // Deliberately not wired to `endGesture`: Blink fires `pointercancel`
+      // when it opens a context menu, and treating that as "gesture over"
+      // would kill the right-button drag the instant it starts. The
+      // window-level `pointerup` above is the real end of the gesture.
+      onPointerCancel={() => setCursor(null)}
     >
       <defs>
         <linearGradient id="graph-shade" x1="0" x2="1" y1="0" y2="0">
@@ -305,7 +379,7 @@ export function ResponseGraph({
         return (
           <g
             key={index}
-            className={`node${isSelected ? ' is-selected' : ''}${band.active ? '' : ' is-off'}`}
+            className={`node${isSelected ? ' is-selected' : ''}${band.active ? '' : ' is-off'}${soloBand === index ? ' is-soloed' : ''}`}
             transform={`translate(${x} ${y})`}
             style={{ '--band': BAND_COLORS[index] } as CSSProperties}
             role="slider"
@@ -317,11 +391,31 @@ export function ResponseGraph({
             aria-valuetext={`${formatFrequency(band.freq)} hertz, ${formatGain(band.gainDb)} decibel`}
             onPointerDown={(event) => {
               onSelect(index)
+              // Alt-click latches the audition on and off, for when you want to
+              // keep listening with both hands free.
+              if (event.altKey && event.button === 0) {
+                event.preventDefault()
+                onToggleSolo(index)
+                return
+              }
+              // Right-button *hold* is the momentary audition: solo engages for
+              // as long as the button is down and the band drags normally
+              // underneath it, so you can sweep the frequency and hear the
+              // range follow. Releasing restores whatever solo state was there
+              // before, which is what makes it safe to reach for mid-mix.
+              if (event.button === 2) {
+                event.preventDefault()
+                auditionRestore.current = soloBand
+                onSetSolo(index)
+              }
               dragging.current = index
               setDragged(index)
               setCursor(null)
               svgRef.current?.setPointerCapture(event.pointerId)
             }}
+            // Also suppressed on the node itself, not just the SVG: the menu
+            // must be cancelled before it can interrupt the drag it starts.
+            onContextMenu={(event) => event.preventDefault()}
             onDoubleClick={() => onBandChange(index, { gainDb: 0, q: 1 })}
             onWheel={(event) => onNodeWheel(event, index)}
             onKeyDown={(event) => {
@@ -367,6 +461,10 @@ export function ResponseGraph({
                 </text>
               </g>
             )}
+            <title>
+              {`Band ${index + 1} — drag to move, wheel for Q, ` +
+                'hold right-button to sweep and listen, Alt-click to keep listening'}
+            </title>
             <circle className="node-halo" r={isSelected ? 19 : 15} />
             <circle className="node-ring" r={isSelected ? 11 : 9} />
             <text textAnchor="middle" dominantBaseline="central">

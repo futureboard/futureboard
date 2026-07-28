@@ -148,6 +148,35 @@ export function progressToFreq(progress: number) {
   return xToFrequency(clamp(progress, 0, 1), 1)
 }
 
+/// Q is perceptually *multiplicative*: 0.5 -> 1 is the same musical step as
+/// 4 -> 8. Laying 0.1..12 out linearly therefore crams the entire useful range
+/// into the bottom fifth of the control — most of the travel is spent between
+/// 3 and 12, where a whole unit of Q is barely audible, while the region people
+/// actually work in gets almost no resolution. That is what made the control
+/// feel like it needed a long drag before anything happened.
+///
+/// A log mapping gives every octave of Q the same distance, matching how the
+/// frequency axis already behaves.
+const qScale = scaleLog().domain([MIN_Q, MAX_Q]).range([0, 1])
+
+export function qToProgress(q: number) {
+  return clamp(qScale(clamp(q, MIN_Q, MAX_Q)), 0, 1)
+}
+
+export function progressToQ(progress: number) {
+  return clamp(qScale.invert(clamp(progress, 0, 1)), MIN_Q, MAX_Q)
+}
+
+/// Scale Q by a ratio, for wheel/scroll gestures.
+///
+/// Multiplying keeps each notch the same *perceived* step anywhere in the
+/// range. The previous additive step of 0.12 meant a notch more than doubled Q
+/// at the bottom of the range while moving it by 1% at the top, so widening a
+/// narrow band took a handful of notches and narrowing a wide one took dozens.
+export function scaleQ(q: number, ratio: number) {
+  return clamp(clamp(q, MIN_Q, MAX_Q) * ratio, MIN_Q, MAX_Q)
+}
+
 /// Log ticks straight from the scale — every multiple inside each decade, so a
 /// zoomed-out grid still reads as logarithmic instead of evenly spaced.
 export const GRID_FREQUENCIES = freqScale

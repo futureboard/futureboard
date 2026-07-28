@@ -95,6 +95,16 @@ pub struct Params {
     pub output_db: f32,
     pub mix: f32,
     pub bands: [BandParams; BAND_COUNT],
+    /// Index of the band being auditioned in isolation, or [`ipc::SOLO_NONE`].
+    ///
+    /// `serde(default)` so projects saved before band solo existed still load —
+    /// they deserialize with solo off, which is the pre-existing behavior.
+    #[serde(default = "solo_none")]
+    pub solo_band: i32,
+}
+
+fn solo_none() -> i32 {
+    ipc::SOLO_NONE
 }
 
 pub fn default_params() -> Params {
@@ -160,6 +170,7 @@ pub fn default_params() -> Params {
                 q: 0.7,
             },
         ],
+        solo_band: ipc::SOLO_NONE,
     }
 }
 
@@ -205,8 +216,20 @@ pub struct Dsp {
     params: Params,
     left: [Option<DirectForm1<f32>>; BAND_COUNT],
     right: [Option<DirectForm1<f32>>; BAND_COUNT],
+    /// Audition bandpass for the soloed band, per channel. `None` when no band
+    /// is soloed — built on the control thread so the audio path only runs it.
+    solo_left: Option<DirectForm1<f32>>,
+    solo_right: Option<DirectForm1<f32>>,
     output_gain: f32,
 }
+
+/// Q used to audition band shapes that have no meaningful centre width.
+///
+/// Shelves and pass filters are broad by construction, so reusing their own Q
+/// would open an audition window either far too wide to isolate anything or so
+/// narrow it sits on a slope. A moderate fixed Q gives a consistent "what lives
+/// around this corner frequency" listen.
+const SOLO_WIDE_Q: f32 = 0.9;
 
 impl Dsp {
     pub fn new(sample_rate: f32) -> Self {
@@ -215,6 +238,8 @@ impl Dsp {
             params: default_params(),
             left: [None, None, None, None, None, None, None, None],
             right: [None, None, None, None, None, None, None, None],
+            solo_left: None,
+            solo_right: None,
             output_gain: 1.0,
         };
         dsp.rebuild();
@@ -247,9 +272,16 @@ impl Dsp {
             ipc::OUTPUT_INDEX => {
                 self.output_gain = db_to_linear(self.params.output_db);
             }
+            ipc::SOLO_INDEX => self.rebuild_solo(),
             _ => {
                 if let Some((band, _)) = ipc::decode_band_wire(wire_index) {
                     self.rebuild_band(band);
+                    // Editing the soloed band must retune what you are hearing,
+                    // otherwise the audition window stays where the band used
+                    // to be while you drag it.
+                    if self.params.solo_band == band as i32 {
+                        self.rebuild_solo();
+                    }
                 }
             }
         }
@@ -261,6 +293,24 @@ impl Dsp {
         for i in 0..BAND_COUNT {
             self.rebuild_band(i);
         }
+        self.rebuild_solo();
+    }
+
+    /// Build the audition bandpass for the soloed band, if any.
+    fn rebuild_solo(&mut self) {
+        let index = self.params.solo_band;
+        let filter = if index >= 0 && (index as usize) < BAND_COUNT {
+            let band = self.params.bands[index as usize];
+            let q = match band.band_type {
+                BandType::Bell | BandType::Notch => band.q,
+                _ => SOLO_WIDE_Q,
+            };
+            make_eq_biquad("bandpass", band.freq, 0.0, q, self.sample_rate)
+        } else {
+            None
+        };
+        self.solo_left = filter;
+        self.solo_right = filter;
     }
 
     fn rebuild_band(&mut self, index: usize) {
@@ -290,6 +340,9 @@ impl StereoEffect for Dsp {
         for filter in self.right.iter_mut().flatten() {
             filter.reset_state();
         }
+        for filter in self.solo_left.iter_mut().chain(self.solo_right.iter_mut()) {
+            filter.reset_state();
+        }
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -300,6 +353,18 @@ impl StereoEffect for Dsp {
     fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
         if !self.params.power {
             return (left, right);
+        }
+
+        // Band solo replaces the chain rather than adding to it, and
+        // deliberately ignores Mix: auditioning a band means hearing that
+        // frequency region alone, so blending the dry signal back in would
+        // defeat the point. Output level still applies so the audition can be
+        // matched in loudness.
+        if let (Some(solo_l), Some(solo_r)) = (self.solo_left.as_mut(), self.solo_right.as_mut()) {
+            return (
+                solo_l.run(left) * self.output_gain,
+                solo_r.run(right) * self.output_gain,
+            );
         }
 
         let mut wet_l = left;
@@ -341,6 +406,121 @@ mod tests {
         let mut dsp = Dsp::new(48_000.0);
         let (l, r) = dsp.process_stereo(0.5, -0.5);
         assert!(l.is_finite() && r.is_finite());
+    }
+
+    /// Measure output level at one frequency by running a sine through the DSP.
+    fn level_at(dsp: &mut Dsp, freq_hz: f32) -> f32 {
+        dsp.reset();
+        let sr = 48_000.0f32;
+        let step = std::f32::consts::TAU * freq_hz / sr;
+        // Settle the filter state before measuring.
+        for i in 0..4_000 {
+            let _ = dsp.process_stereo((i as f32 * step).sin(), 0.0);
+        }
+        let mut peak = 0.0f32;
+        for i in 4_000..8_000 {
+            let (l, _) = dsp.process_stereo((i as f32 * step).sin(), 0.0);
+            peak = peak.max(l.abs());
+        }
+        peak
+    }
+
+    #[test]
+    fn solo_isolates_the_band_frequency_region() {
+        let mut params = default_params();
+        // A bell at 1 kHz, soloed. Everything far from it must drop away.
+        params.bands[4].band_type = BandType::Bell;
+        params.bands[4].freq = 1_000.0;
+        params.bands[4].q = 2.0;
+        params.solo_band = 4;
+
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+
+        let in_band = level_at(&mut dsp, 1_000.0);
+        let below = level_at(&mut dsp, 100.0);
+        let above = level_at(&mut dsp, 10_000.0);
+
+        assert!(
+            in_band > 0.5,
+            "the soloed region must pass through, got {in_band}"
+        );
+        assert!(
+            below < in_band * 0.2,
+            "content an octave-plus below must be rejected: {below} vs {in_band}"
+        );
+        assert!(
+            above < in_band * 0.2,
+            "content well above must be rejected: {above} vs {in_band}"
+        );
+    }
+
+    #[test]
+    fn solo_ignores_mix_so_the_dry_signal_cannot_mask_it() {
+        let mut params = default_params();
+        params.bands[4].band_type = BandType::Bell;
+        params.bands[4].freq = 1_000.0;
+        params.bands[4].q = 2.0;
+        params.solo_band = 4;
+        // Fully dry would normally bypass the chain entirely.
+        params.mix = 0.0;
+
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+        let below = level_at(&mut dsp, 100.0);
+        assert!(
+            below < 0.2,
+            "solo must still reject out-of-band content at mix=0, got {below}"
+        );
+    }
+
+    #[test]
+    fn clearing_solo_restores_the_full_chain() {
+        let mut params = default_params();
+        params.solo_band = 2;
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+        assert!(level_at(&mut dsp, 10_000.0) < 0.2, "soloed: highs rejected");
+
+        assert!(dsp.apply_wire_param(ipc::SOLO_INDEX, ipc::SOLO_NONE as f32));
+        assert!(
+            level_at(&mut dsp, 10_000.0) > 0.5,
+            "clearing solo must let the full chain through again"
+        );
+    }
+
+    /// Dragging the soloed band has to retune what you hear, or the audition
+    /// window stays where the band used to be.
+    #[test]
+    fn editing_the_soloed_band_retunes_the_audition() {
+        let mut params = default_params();
+        params.bands[4].band_type = BandType::Bell;
+        params.bands[4].freq = 1_000.0;
+        params.bands[4].q = 2.0;
+        params.solo_band = 4;
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+        assert!(
+            level_at(&mut dsp, 5_000.0) < 0.2,
+            "5 kHz starts out rejected"
+        );
+
+        assert!(dsp.apply_wire_param(ipc::band_wire_index(4, ipc::BAND_FREQ), 5_000.0));
+        assert!(
+            level_at(&mut dsp, 5_000.0) > 0.5,
+            "moving the soloed band to 5 kHz must move the audition with it"
+        );
+    }
+
+    #[test]
+    fn out_of_range_solo_index_clears_instead_of_wedging() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.apply_wire_param(ipc::SOLO_INDEX, 99.0));
+        assert_eq!(dsp.params().solo_band, ipc::SOLO_NONE);
+        assert!(
+            level_at(&mut dsp, 10_000.0) > 0.5,
+            "no band should be soloed"
+        );
     }
 
     #[test]
