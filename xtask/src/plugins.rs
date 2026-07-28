@@ -110,9 +110,10 @@ pub fn editor_ui_built(crate_dir: &Path) -> bool {
 /// The package.json script discovers each plugin's `editorui` / `editor`
 /// package and always runs its frozen install before its build. This must
 /// happen before any Cargo build that can run the plugin `build.rs`, otherwise
-/// Cargo embeds an empty asset table for a missing `dist/`.
-pub fn build_editor_uis(workspace: &Path, packages: &[String]) -> Result<()> {
-    if packages.is_empty() {
+/// Cargo embeds an empty asset table for a missing `dist/`. `editor_directories`
+/// contains crate-directory names, which may differ from Cargo package names.
+pub fn build_editor_uis(workspace: &Path, editor_directories: &[String]) -> Result<()> {
+    if editor_directories.is_empty() {
         return Ok(());
     }
 
@@ -130,7 +131,7 @@ pub fn build_editor_uis(workspace: &Path, packages: &[String]) -> Result<()> {
         .arg("run")
         .arg("build:plugin-editors")
         .arg("--")
-        .args(packages)
+        .args(editor_directories)
         .status()
         .with_context(|| format!("failed to spawn `{bun} run build:plugin-editors`"))?;
     if !status.success() {

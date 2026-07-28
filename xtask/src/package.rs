@@ -103,13 +103,13 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
                 .collect()
         }
     };
-    if !selected.is_empty() {
-        let package_names = selected
-            .iter()
-            .map(|plugin| plugin.name.clone())
-            .collect::<Vec<_>>();
+    let editor_directory_names = selected_editor_directory_names(&selected);
+    if !editor_directory_names.is_empty() {
+        // scripts/build.ts discovers editors by their directory names. Those
+        // names are not required to match Cargo package names (for example,
+        // `67Clipper` contains the `clipper67` package).
         eprintln!("[xtask] installing and building editor frontends for selected plugins");
-        plugins::build_editor_uis(&workspace, &package_names)?;
+        plugins::build_editor_uis(&workspace, &editor_directory_names)?;
     }
 
     let cef_dist = cef::prepare_cef_dist(&workspace, &target_triple)
@@ -291,6 +291,15 @@ struct DiscoveredPlugin {
     crate_dir: PathBuf,
 }
 
+fn selected_editor_directory_names(selected: &[&DiscoveredPlugin]) -> Vec<String> {
+    selected
+        .iter()
+        .filter(|plugin| plugins::has_editor_ui(&plugin.crate_dir))
+        .filter_map(|plugin| plugin.crate_dir.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Workspace member packages that build a Built-in Plugin dynamic library
 /// (`cdylib`/`dylib`) and live under `crates/BuiltinAudioPlugins/crates`.
 fn plugin_packages() -> Result<Vec<DiscoveredPlugin>> {
@@ -359,7 +368,9 @@ fn host_target() -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::PluginSelection;
+    use std::fs;
+
+    use super::{DiscoveredPlugin, PluginSelection, selected_editor_directory_names};
 
     #[test]
     fn plugin_selection_all_and_none() {
@@ -405,6 +416,23 @@ mod tests {
         assert_eq!(
             PluginSelection::parse(Some("none"), true),
             PluginSelection::None
+        );
+    }
+
+    #[test]
+    fn editor_build_uses_directory_name_instead_of_cargo_package_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let crate_dir = temp.path().join("67Clipper");
+        fs::create_dir_all(crate_dir.join("editorui")).unwrap();
+        fs::write(crate_dir.join("editorui/package.json"), "{}").unwrap();
+        let clipper = DiscoveredPlugin {
+            name: "clipper67".to_string(),
+            crate_dir,
+        };
+
+        assert_eq!(
+            selected_editor_directory_names(&[&clipper]),
+            vec!["67Clipper".to_string()]
         );
     }
 }
