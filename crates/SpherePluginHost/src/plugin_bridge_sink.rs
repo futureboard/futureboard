@@ -369,6 +369,98 @@ mod tests {
         );
     }
 
+    /// Manual scheduler/xrun stress probe. It drives the exact shared-region
+    /// request/response path while CPU competitors yield and spin alongside
+    /// the synthetic producer. Keep it ignored in the default suite because
+    /// its miss count is intentionally machine/load dependent.
+    ///
+    /// Run with:
+    /// `cargo test -p sphere-plugin-host realtime_bridge_under_cpu_contention -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual realtime scheduler/xrun stress probe"]
+    fn realtime_bridge_under_cpu_contention() {
+        const BLOCKS: u32 = 5_000;
+        const FRAMES: usize = 64;
+
+        let region = Arc::new(SharedAudioRegion::new_in_process());
+        region.bridge().init_header(48_000, FRAMES as u32, 2);
+        let sink = SharedRegionSink::new(region.clone());
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let producer_region = region.clone();
+        let producer_running = running.clone();
+        let producer = std::thread::spawn(move || {
+            let output = [0.25f32; FRAMES * 2];
+            let mut last = 0;
+            while producer_running.load(Ordering::Relaxed) {
+                let request = producer_region.bridge().request_seq.load(Ordering::Acquire);
+                if request != last {
+                    // SAFETY: this is the only producer and publication occurs
+                    // after the full fixed-size write.
+                    unsafe {
+                        producer_region
+                            .bridge()
+                            .audio_out
+                            .write_interleaved(&output)
+                    };
+                    producer_region
+                        .bridge()
+                        .done_seq
+                        .store(request, Ordering::Release);
+                    last = request;
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+
+        let mut competitors = Vec::new();
+        for _ in 0..2 {
+            let running = running.clone();
+            competitors.push(std::thread::spawn(move || {
+                let mut value = 1u64;
+                while running.load(Ordering::Relaxed) {
+                    value = value
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    std::hint::black_box(value);
+                    if value & 0x3fff == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+            }));
+        }
+
+        let mut completed = 0u32;
+        let mut left = [0.0f32; FRAMES];
+        let mut right = [0.0f32; FRAMES];
+        for _ in 0..BLOCKS {
+            sink.request_block(FRAMES as u32);
+            if sink.read_output(&mut left, &mut right, FRAMES) == FRAMES {
+                completed += 1;
+                assert!(left.iter().all(|sample| *sample == 0.25));
+                assert!(right.iter().all(|sample| *sample == 0.25));
+            }
+        }
+
+        running.store(false, Ordering::Relaxed);
+        producer.join().expect("synthetic producer panicked");
+        for competitor in competitors {
+            competitor.join().expect("CPU competitor panicked");
+        }
+
+        let xruns = region.bridge().xrun_count.load(Ordering::Relaxed);
+        eprintln!(
+            "realtime bridge stress os={} blocks={BLOCKS} completed={completed} xruns={xruns}",
+            std::env::consts::OS
+        );
+        assert_eq!(
+            completed.saturating_add(xruns),
+            BLOCKS,
+            "every block must be either fresh output or an explicitly counted xrun"
+        );
+    }
+
     #[test]
     fn sink_push_midi_lands_in_ring() {
         let region = Arc::new(SharedAudioRegion::new_in_process());

@@ -370,6 +370,8 @@ impl HardwareMidiPlaybackConfig {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct HardwareMidiProfilerSnapshot {
+    /// Platform whose scheduler produced this measurement.
+    pub platform: &'static str,
     pub events_per_second: u32,
     pub max_jitter_us: u32,
 }
@@ -1056,6 +1058,7 @@ impl HardwareMidiProfiler {
             .unwrap_or(0.0)
             .max(0.001);
         HardwareMidiProfilerSnapshot {
+            platform: std::env::consts::OS,
             events_per_second: (self.events_total.load(std::sync::atomic::Ordering::Relaxed) as f64
                 / elapsed)
                 .round()
@@ -1098,6 +1101,8 @@ struct MidiThreadScope;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 impl MidiThreadScope {
     fn enter() -> Self {
+        #[cfg(target_os = "linux")]
+        promote_linux_midi_thread();
         Self
     }
 }
@@ -1106,29 +1111,113 @@ impl MidiThreadScope {
 fn wait_for_midi_tick(duration: Duration) {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        CreateWaitableTimerW, SetWaitableTimer, WaitForSingleObject,
+        CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS,
     };
 
+    struct HighResolutionTimer(windows::Win32::Foundation::HANDLE);
+
+    impl Drop for HighResolutionTimer {
+        fn drop(&mut self) {
+            // SAFETY: this wrapper uniquely owns the handle.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    thread_local! {
+        // One timer per MIDI scheduler thread. Reusing it avoids a kernel
+        // handle create/close pair on every 1 ms scheduling slice.
+        static TIMER: Option<HighResolutionTimer> = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                None,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+            .ok()
+            .map(HighResolutionTimer)
+        };
+    }
+
     let due_100ns = -(duration.as_nanos().min(i64::MAX as u128 / 100) as i64 / 100).max(-1);
-    unsafe {
-        let Ok(timer) = CreateWaitableTimerW(None, true, None) else {
-            std::thread::sleep(duration);
-            return;
+    let waited = TIMER.with(|timer| {
+        let Some(timer) = timer else {
+            return false;
         };
         let mut due = due_100ns;
-        if SetWaitableTimer(timer, &mut due, 0, None, None, false).is_ok() {
-            let _ = WaitForSingleObject(timer, u32::MAX) == WAIT_OBJECT_0;
-        } else {
-            std::thread::sleep(duration);
+        // SAFETY: the timer remains alive for the entire TLS closure and the
+        // due-time pointer is valid for the call.
+        unsafe {
+            SetWaitableTimer(timer.0, &mut due, 0, None, None, false).is_ok()
+                && WaitForSingleObject(timer.0, u32::MAX) == WAIT_OBJECT_0
         }
-        let _ = CloseHandle(timer);
+    });
+    if !waited {
+        // Rare old-Windows / resource-exhaustion fallback. `park_timeout`
+        // avoids returning to `thread::sleep` while retaining cancellation
+        // checks at the caller's bounded 1 ms cadence.
+        std::thread::park_timeout(duration);
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(unix)]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn wait_for_midi_tick(duration: Duration) {
-    std::thread::sleep(duration);
+    // POSIX nanosleep is backed by the platform's high-resolution monotonic
+    // timer and preserves the remaining interval across signal interruption.
+    // The caller recomputes the musical deadline after every bounded wait, so
+    // it cannot accumulate drift.
+    let mut request = libc::timespec {
+        tv_sec: duration.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
+        tv_nsec: duration.subsec_nanos() as libc::c_long,
+    };
+    loop {
+        let mut remaining = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: both pointers reference initialized timespec values.
+        if unsafe { libc::nanosleep(&request, &mut remaining) } == 0 {
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+        request = remaining;
+    }
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+fn wait_for_midi_tick(duration: Duration) {
+    std::thread::park_timeout(duration);
+}
+
+#[cfg(target_os = "linux")]
+fn promote_linux_midi_thread() {
+    const FIFO_PRIORITIES: [libc::c_int; 3] = [60, 20, 5];
+    const FALLBACK_NICE: libc::c_int = -8;
+    for priority in FIFO_PRIORITIES {
+        // SAFETY: the structure is fully initialized and pid 0 is the calling
+        // thread on Linux.
+        let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+        param.sched_priority = priority;
+        if unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) } == 0 {
+            eprintln!("[midi-output] scheduler=SCHED_FIFO priority={priority}");
+            return;
+        }
+    }
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, FALLBACK_NICE) } == 0 {
+        eprintln!(
+            "[midi-output] realtime permission denied; scheduler=SCHED_OTHER nice={FALLBACK_NICE}"
+        );
+    } else {
+        eprintln!(
+            "[midi-output] realtime permission denied and nice fallback unavailable: {}",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
