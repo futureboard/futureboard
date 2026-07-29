@@ -545,29 +545,40 @@ pub async fn run_import_pipeline(
     }
 }
 
-/// After a project load, hydrate waveform caches from `Cache/Waveforms/` and
-/// schedule background regeneration for missing peak files.
-pub fn schedule_project_waveform_restore(
-    project: &crate::project::FutureboardProject,
-    project_root: PathBuf,
-    timeline: Entity<Timeline>,
-    layout: Entity<StudioLayout>,
-    cx: &mut Context<StudioLayout>,
-) {
-    use std::collections::HashSet;
+/// Resolve an asset's on-disk audio path for waveform restore.
+///
+/// Native projects store a project-relative path; DAW imports (Cubase XML,
+/// etc.) store an absolute media path and leave `relative_path` empty —
+/// both must resolve, otherwise clips stay stuck on `Queued`.
+fn resolve_asset_audio_path(
+    asset: &crate::project::ProjectAsset,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    if let Some(rel) = asset.relative_path.as_ref() {
+        Some(project_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+    } else {
+        asset.absolute_path.clone()
+    }
+}
 
+/// Collect `(asset_id, optional audio path)` for every audio asset / clip.
+///
+/// When an asset is registered without a path (import with only
+/// `absolute_path` later filled from the clip), clip `source_path` fills the
+/// gap rather than being skipped.
+pub(crate) fn collect_waveform_restore_entries(
+    project: &crate::project::FutureboardProject,
+    project_root: &Path,
+) -> Vec<(String, Option<PathBuf>)> {
     use crate::project::ClipSource;
 
-    let mut seen = HashSet::new();
-    let mut jobs: Vec<(String, PathBuf)> = Vec::new();
     let mut entries: Vec<(String, Option<PathBuf>)> = Vec::new();
 
     for asset in &project.assets {
-        let audio_path = asset
-            .relative_path
-            .as_ref()
-            .map(|rel| project_root.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)));
-        entries.push((asset.id.clone(), audio_path));
+        entries.push((
+            asset.id.clone(),
+            resolve_asset_audio_path(asset, project_root),
+        ));
     }
 
     for track in &project.tracks {
@@ -584,12 +595,39 @@ pub fn schedule_project_waveform_restore(
                 } => (asset_id, Some(source_path.clone())),
                 _ => continue,
             };
-            if entries.iter().any(|(id, _)| id == asset_id) {
+            if let Some((_, path)) = entries.iter_mut().find(|(id, _)| id == asset_id) {
+                if path.is_none() {
+                    *path = source_path;
+                }
                 continue;
             }
             entries.push((asset_id.clone(), source_path));
         }
     }
+
+    entries
+}
+
+/// After a project load, hydrate waveform caches from `Cache/Waveforms/` and
+/// schedule background regeneration for missing peak files.
+///
+/// `persist_peaks` is true for saved Futureboard projects (read/write peak
+/// files under the project folder and eager-copy media). Foreign imports that
+/// bind as untitled pass `false` so media next to a Cubase XML is never copied
+/// or peak-cached into the archive folder — waveforms are built in memory.
+pub fn schedule_project_waveform_restore(
+    project: &crate::project::FutureboardProject,
+    project_root: PathBuf,
+    persist_peaks: bool,
+    timeline: Entity<Timeline>,
+    layout: Entity<StudioLayout>,
+    cx: &mut Context<StudioLayout>,
+) {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut jobs: Vec<(String, PathBuf)> = Vec::new();
+    let entries = collect_waveform_restore_entries(project, &project_root);
 
     for (asset_id, audio_path) in entries {
         if !seen.insert(asset_id.clone()) {
@@ -598,6 +636,16 @@ pub fn schedule_project_waveform_restore(
         if let Some(path) = audio_path.as_ref().filter(|p| p.exists()) {
             eprintln!("[ProjectLoad] audio asset resolved path={}", path.display());
         }
+
+        if !persist_peaks {
+            // Untitled DAW import: no project cache folder to read or write.
+            eprintln!("[WaveformCache] import session disk miss asset_id={asset_id}");
+            if let Some(path) = audio_path.filter(|p| p.exists()) {
+                jobs.push((asset_id, path));
+            }
+            continue;
+        }
+
         let peak_rel = project
             .assets
             .iter()
@@ -665,13 +713,14 @@ pub fn schedule_project_waveform_restore(
 
     let timeline_weak = timeline.downgrade();
     let layout_weak = layout.downgrade();
-    let root = project_root;
+    // Only a real Futureboard project folder may receive peak files / copies.
+    let persist_root = persist_peaks.then_some(project_root);
     cx.spawn(async move |_layout, cx| {
         for (asset_id, path) in jobs {
             run_import_pipeline(
                 asset_id,
                 path,
-                Some(root.clone()),
+                persist_root.clone(),
                 timeline_weak.clone(),
                 Some(layout_weak.clone()),
                 cx,
@@ -746,4 +795,153 @@ pub fn spawn_timeline_import_from_layout(
         .await;
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{
+        ClipSource, FutureboardProject, ProjectAsset, ProjectClip, ProjectTrack, ProjectTrackType,
+    };
+
+    fn audio_asset(id: &str, absolute: Option<PathBuf>, relative: Option<&str>) -> ProjectAsset {
+        ProjectAsset {
+            id: id.to_string(),
+            original_filename: "kick.wav".into(),
+            relative_path: relative.map(str::to_string),
+            absolute_path: absolute,
+            duration_secs: Some(1.0),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            source_fingerprint: None,
+            waveform_peak_relative_path: None,
+            duration_samples: Some(44_100),
+        }
+    }
+
+    fn audio_clip(asset_id: &str, source: Option<PathBuf>) -> ProjectClip {
+        ProjectClip {
+            id: "clip".into(),
+            name: "clip".into(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Audio {
+                asset_id: asset_id.into(),
+                source_path: source,
+            },
+            stretch: Default::default(),
+        }
+    }
+
+    #[test]
+    fn restore_entries_use_absolute_path_when_relative_is_absent() {
+        // Cubase XML import stores absolute media paths and no project-relative
+        // copy — the resolve step must still surface the file so clips leave
+        // `Queued`.
+        let media = PathBuf::from("/tmp/cubase_archive/Audio/kick.wav");
+        let mut project = FutureboardProject::new("imported");
+        project.assets.push(audio_asset("a1", Some(media.clone()), None));
+        project.tracks.push(ProjectTrack {
+            id: "t1".into(),
+            name: "KICK".into(),
+            track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
+            color_hex: "#000000".into(),
+            volume_norm: 0.75,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_arm: false,
+            input_monitor: Default::default(),
+            routing: Default::default(),
+            inserts: Vec::new(),
+            automation_lanes: Vec::new(),
+            clips: vec![audio_clip("a1", Some(media.clone()))],
+            row_height_px: None,
+            soundfont: None,
+            volume_automation_read: true,
+        });
+
+        let entries = collect_waveform_restore_entries(&project, Path::new("/tmp/unused"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "a1");
+        assert_eq!(entries[0].1.as_deref(), Some(media.as_path()));
+    }
+
+    #[test]
+    fn restore_entries_prefer_relative_path_for_native_projects() {
+        let mut project = FutureboardProject::new("native");
+        project.assets.push(audio_asset(
+            "a1",
+            Some(PathBuf::from("/elsewhere/kick.wav")),
+            Some("Assets/Audio/kick.wav"),
+        ));
+        project.tracks.push(ProjectTrack {
+            id: "t1".into(),
+            name: "KICK".into(),
+            track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
+            color_hex: "#000000".into(),
+            volume_norm: 0.75,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_arm: false,
+            input_monitor: Default::default(),
+            routing: Default::default(),
+            inserts: Vec::new(),
+            automation_lanes: Vec::new(),
+            clips: vec![audio_clip(
+                "a1",
+                Some(PathBuf::from("/elsewhere/kick.wav")),
+            )],
+            row_height_px: None,
+            soundfont: None,
+            volume_automation_read: true,
+        });
+
+        let root = PathBuf::from("/proj");
+        let entries = collect_waveform_restore_entries(&project, &root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].1.as_deref(),
+            Some(root.join("Assets/Audio/kick.wav").as_path())
+        );
+    }
+
+    #[test]
+    fn restore_entries_fill_path_from_clip_when_asset_has_neither() {
+        let media = PathBuf::from("/media/kick.wav");
+        let mut project = FutureboardProject::new("gap");
+        project.assets.push(audio_asset("a1", None, None));
+        project.tracks.push(ProjectTrack {
+            id: "t1".into(),
+            name: "KICK".into(),
+            track_type: ProjectTrackType::Audio,
+            parent_group_id: None,
+            group_collapsed: false,
+            color_hex: "#000000".into(),
+            volume_norm: 0.75,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            record_arm: false,
+            input_monitor: Default::default(),
+            routing: Default::default(),
+            inserts: Vec::new(),
+            automation_lanes: Vec::new(),
+            clips: vec![audio_clip("a1", Some(media.clone()))],
+            row_height_px: None,
+            soundfont: None,
+            volume_automation_read: true,
+        });
+
+        let entries = collect_waveform_restore_entries(&project, Path::new("/tmp"));
+        assert_eq!(entries[0].1.as_deref(), Some(media.as_path()));
+    }
 }
