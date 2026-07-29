@@ -224,6 +224,13 @@ pub struct CefRuntimeConfig {
     /// decides this once, at `cef_initialize`, so a runtime that may ever need
     /// off-screen rendering must opt in before any browser is created.
     pub windowless_rendering: bool,
+    /// Let the embedding application schedule `cef_do_message_loop_work`
+    /// through `BrowserProcessHandler::on_schedule_message_pump_work`.
+    ///
+    /// Callers must install that callback on the `CefApp` passed to
+    /// [`CefRuntime::initialize`]. This remains disabled by default so existing
+    /// Windows and Linux integrations are unchanged.
+    pub external_message_pump: bool,
 }
 
 /// Pixel bounds in the native parent's client coordinate space.
@@ -365,12 +372,7 @@ impl CefRuntime {
         let settings = cef::Settings {
             no_sandbox: 1,
             multi_threaded_message_loop: 0,
-            // Futureboard owns the AppKit/GPUI event loop and calls
-            // CefDoMessageLoopWork on that main thread. The pinned cef-rs OSR
-            // sample enables the external pump for this integration model;
-            // leaving it disabled installs CEF's standalone run-loop observer
-            // and traps once NSApplication::run begins.
-            external_message_pump: 0,
+            external_message_pump: i32::from(config.external_message_pump),
             windowless_rendering_enabled: i32::from(config.windowless_rendering),
             cache_path: cef_path(config.cache_path.as_ref()),
             root_cache_path: cef_path(config.root_cache_path.as_ref()),

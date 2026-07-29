@@ -78,7 +78,10 @@ name = "SphereWebView"
 version = "0.1.0"
 dependencies = [
  "cef",
+ "dispatch2",
  "download-cef 2.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "gpui",
+ "gpui_macos",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
  "thiserror 2.0.18",

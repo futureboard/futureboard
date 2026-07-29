@@ -30,10 +30,12 @@ use cef::rc::Rc as _;
 // blocks, so every one of these traits has to be nameable here.
 use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
-    App, CefString, CefStringUtf16, ImplApp, ImplPostData, ImplPostDataElement, ImplRequest,
-    ImplResourceHandler, ImplResponse, ImplSchemeHandlerFactory, ImplSchemeRegistrar,
-    ResourceHandler, SchemeHandlerFactory, SchemeOptions, WrapApp, WrapResourceHandler,
-    WrapSchemeHandlerFactory, wrap_app, wrap_resource_handler, wrap_scheme_handler_factory,
+    wrap_app, wrap_browser_process_handler, wrap_resource_handler, wrap_scheme_handler_factory,
+    App, BrowserProcessHandler, CefString, CefStringUtf16, ImplApp, ImplBrowserProcessHandler,
+    ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler, ImplResponse,
+    ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler, SchemeHandlerFactory,
+    SchemeOptions, WrapApp, WrapBrowserProcessHandler, WrapResourceHandler,
+    WrapSchemeHandlerFactory,
 };
 
 /// Scheme built-in plugin editors are served under. Must match
@@ -199,11 +201,29 @@ pub type SchemeResolver = Arc<dyn Fn(&str, &str) -> Option<SchemeAsset> + Send +
 /// later, non-realtime drain (see `builtin_plugin_editor::take_inbound`).
 pub type BridgeSink = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
 
+/// Receives CEF external-message-pump scheduling requests. CEF may invoke this
+/// callback from any thread; the receiver is responsible for marshalling work
+/// to the browser-process main thread.
+pub type MessagePumpSchedule = Arc<dyn Fn(i64) + Send + Sync>;
+
+wrap_browser_process_handler! {
+    pub struct PluginBrowserProcessHandler {
+        schedule: MessagePumpSchedule,
+    }
+
+    impl BrowserProcessHandler {
+        fn on_schedule_message_pump_work(&self, delay_ms: i64) {
+            (self.schedule)(delay_ms);
+        }
+    }
+}
+
 // Declares the plugin scheme in every CEF process. (`wrap_app!` matches on
 // `$vis:vis struct`, so the description cannot be a doc comment here.)
 wrap_app! {
     pub struct PluginSchemeApp {
         _lifetime: ObjectLifetime,
+        browser_process_handler: Option<BrowserProcessHandler>,
     }
 
     impl App {
@@ -235,6 +255,10 @@ wrap_app! {
                     std::thread::current().id()
                 );
             }
+        }
+
+        fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
+            self.browser_process_handler.clone()
         }
     }
 }
@@ -646,7 +670,7 @@ pub fn plugin_scheme_app() -> Result<App, crate::runtime::CefRuntimeError> {
     // the first generated CEF wrapper call invalid.
     crate::runtime::prepare_process()?;
     let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
-    let app = PluginSchemeApp::new(ObjectLifetime::new("cef_app_t", object_id));
+    let app = PluginSchemeApp::new(ObjectLifetime::new("cef_app_t", object_id), None);
     if cef_diagnostics_enabled() {
         eprintln!(
             "[cef-ref] object_type=cef_app_t object_id={object_id} event=return_to_caller has_one_ref={}",
@@ -654,6 +678,22 @@ pub fn plugin_scheme_app() -> Result<App, crate::runtime::CefRuntimeError> {
         );
     }
     Ok(app)
+}
+
+/// Build the plugin-scheme app with the pinned CEF external-pump callback.
+///
+/// The same object must still be passed to process dispatch and browser
+/// initialization. This is exposed for the macOS integration probe; production
+/// startup uses the integrated pump through [`plugin_scheme_app`].
+pub fn plugin_scheme_app_with_message_pump(
+    schedule: MessagePumpSchedule,
+) -> Result<App, crate::runtime::CefRuntimeError> {
+    crate::runtime::prepare_process()?;
+    let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+    Ok(PluginSchemeApp::new(
+        ObjectLifetime::new("cef_app_t", object_id),
+        Some(PluginBrowserProcessHandler::new(schedule)),
+    ))
 }
 
 /// Install the handler that serves plugin assets. Call once, after

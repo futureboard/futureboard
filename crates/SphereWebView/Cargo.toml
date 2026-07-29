@@ -13,6 +13,10 @@ name = "sphere_webview"
 name = "install_cef"
 required-features = ["installer"]
 
+[[example]]
+name = "cef_gpui_macos_probe"
+required-features = ["cef-runtime"]
+
 [dependencies]
 cef = { workspace = true, optional = true }
 download-cef = { workspace = true, optional = true }
@@ -28,6 +32,11 @@ x11-dl = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true, features = ["NSGeometry"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+dispatch2 = "0.3.1"
+gpui.workspace = true
+gpui_macos.workspace = true
 
 [features]
 default = []
