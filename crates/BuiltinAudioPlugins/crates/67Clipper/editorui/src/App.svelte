@@ -319,7 +319,7 @@
 
   .readout-chip {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 0.3rem;
     height: var(--chrome-h);
     padding: 0 0.65rem;
@@ -490,33 +490,4 @@
     }
   }
 
-  @media (max-width: 960px) {
-    .chrome {
-      grid-template-columns: 1fr;
-      justify-items: start;
-      gap: var(--s2);
-    }
-
-    .chrome-actions {
-      justify-content: flex-start;
-    }
-
-    .stage {
-      grid-template-columns: 1fr;
-    }
-
-    .side {
-      display: none;
-    }
-
-    .control-panel {
-      flex-wrap: wrap;
-      right: var(--s3);
-    }
-
-    .footer {
-      flex-direction: column;
-      align-items: stretch;
-    }
-  }
 </style>
