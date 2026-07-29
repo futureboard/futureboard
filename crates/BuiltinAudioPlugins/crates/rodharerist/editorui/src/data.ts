@@ -1017,7 +1017,7 @@ export const models: Record<CategoryId, Model[]> = {
       id: "molam_swirl",
       name: "Molam Swirl",
       short: "Molam",
-      sub: "4-stage, regeneration wide open — big vowel sweep",
+      sub: "Slow Uni-Vibe throb with vowels — Isan / luk-thung lead swirl",
     },
     {
       id: "phin_vibe",
@@ -1041,7 +1041,7 @@ export const models: Record<CategoryId, Model[]> = {
       id: "isan_jet",
       name: "Isan Jet",
       short: "IsanJet",
-      sub: "6-stage, hard regeneration — fast and narrow up top",
+      sub: "6-stage, hard regeneration — lively jet, not a helicopter",
     },
   ],
   delay: [
@@ -1455,35 +1455,36 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "wah_res", name: "Resonance", min: 0, max: 10, val: 5.0, unit: "" },
     { id: "wah_sens", name: "Sensitivity", min: 0, max: 10, val: 5.0, unit: "" },
   ],
-  // Mix now reaches its deepest notch at 100% (it used to peak mid-travel and
-  // fade out at the top), so these defaults sit high on purpose.
+  // Mix reaches its deepest notch at 100%. Rate defaults sit mid-slow: the DSP
+  // curve is cubic and voice-scaled, so these knobs land in the pedal swirl
+  // range rather than a jet.
   phaser: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.0, unit: "" },
-    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.5, unit: "" },
-    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 55, unit: "%" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 60, unit: "%" },
   ],
   molam_swirl: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 2.2, unit: "" },
-    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.0, unit: "" },
-    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 65, unit: "%" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.0, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.5, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 70, unit: "%" },
   ],
   phin_vibe: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 4.5, unit: "" },
-    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.5, unit: "" },
     { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 75, unit: "%" },
   ],
   khaen_swirl: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 1.8, unit: "" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 2.5, unit: "" },
     { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.5, unit: "" },
-    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 60, unit: "%" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 65, unit: "%" },
   ],
   bi_lam: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 1.2, unit: "" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 2.0, unit: "" },
     { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 8.0, unit: "" },
     { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 55, unit: "%" },
   ],
   isan_jet: [
-    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 7.0, unit: "" },
     { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.5, unit: "" },
     { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 65, unit: "%" },
   ],

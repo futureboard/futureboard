@@ -62,8 +62,18 @@ impl PluginBridgeSink for OfflineBridgeSink {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let got = self.live.read_output(l, r, frames);
-            if got > 0 || !self.wait_step(deadline) {
-                return got;
+            // Require a full block. A short read would wet|dry-splice in
+            // `apply_bridge_insert_output` and click in the bounce file.
+            if got >= frames {
+                return frames;
+            }
+            if got > 0 {
+                // Freshness already consumed; refuse the partial rather than
+                // waiting forever for a second copy that will never arrive.
+                return 0;
+            }
+            if !self.wait_step(deadline) {
+                return 0;
             }
         }
     }
@@ -77,8 +87,14 @@ impl PluginBridgeSink for OfflineBridgeSink {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let got = self.live.read_output_for_channels(l, r, frames, enabled);
-            if got > 0 || !self.wait_step(deadline) {
-                return got;
+            if got >= frames {
+                return frames;
+            }
+            if got > 0 {
+                return 0;
+            }
+            if !self.wait_step(deadline) {
+                return 0;
             }
         }
     }
@@ -88,9 +104,15 @@ impl PluginBridgeSink for OfflineBridgeSink {
     fn read_output_multichannel(&self, out: &mut [f32], frames: usize) -> (usize, usize) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let got = self.live.read_output_multichannel(out, frames);
-            if got.0 > 0 || !self.wait_step(deadline) {
-                return got;
+            let (got, channels) = self.live.read_output_multichannel(out, frames);
+            if got >= frames {
+                return (frames, channels);
+            }
+            if got > 0 {
+                return (0, 0);
+            }
+            if !self.wait_step(deadline) {
+                return (0, 0);
             }
         }
     }
@@ -375,18 +397,17 @@ fn render_offline_impl(
             }
         }
 
-        let in_warmup = produced < write_start;
-
-        // Clamp this block to the next phase boundary so warmup / content / tail
-        // never straddle a single block (keeps discard + tail logic exact).
-        let boundary = if in_warmup {
-            write_start
-        } else if produced < content_end {
-            content_end
-        } else {
-            produce_cap
+        // Always drive the kernel + plugin bridge at the negotiated full block
+        // size. Shrinking the last warmup/content/tail block used to change
+        // `block_frames` on the shared-memory handshake; the host then wrote a
+        // short wet block into `audio_out` without clearing the rest, and the
+        // next full-size read pulled a stale wet tail — audible as stutter /
+        // overlapping doubles in the bounce (and only on the export path).
+        let this_block = block;
+        let write_limit = match request.tail {
+            ExportTailMode::None => content_end,
+            _ => produce_cap,
         };
-        let this_block = block.min((boundary - produced) as usize).max(1);
 
         let stereo_slice = &mut stereo[..this_block * 2];
         for s in stereo_slice.iter_mut() {
@@ -419,36 +440,54 @@ fn render_offline_impl(
             break;
         }
         let frames_u64 = frames as u64;
+        let block_end = produced.saturating_add(frames_u64);
 
-        if !in_warmup {
-            // Fold to the requested channel layout, apply normalization gain, and
-            // measure peak. Warmup frames are dropped: they hold the latency ramp,
-            // not audible content.
+        // Emit only the portion that lands in [write_start, write_limit). Full
+        // blocks may straddle warmup→content or content→tail; we slice here
+        // instead of shrinking the DSP/bridge exchange.
+        let emit_from_abs = produced.max(write_start);
+        let emit_to_abs = block_end.min(write_limit);
+        if emit_to_abs > emit_from_abs {
+            let emit_from = (emit_from_abs - produced) as usize;
+            let emit_to = (emit_to_abs - produced) as usize;
+            let emit_len = emit_to.saturating_sub(emit_from);
             let mut block_peak = 0.0f32;
-            let out_slice = &mut out[..frames * channels];
-            for f in 0..frames {
+            let out_slice = &mut out[..emit_len * channels];
+            for (out_i, f) in (emit_from..emit_to).enumerate() {
                 let l = stereo_slice[f * 2] * gain;
                 let r = stereo_slice[f * 2 + 1] * gain;
                 block_peak = block_peak.max(l.abs()).max(r.abs());
                 if channels == 1 {
-                    out_slice[f] = (l + r) * 0.5;
+                    out_slice[out_i] = (l + r) * 0.5;
                 } else {
-                    out_slice[f * channels] = l;
-                    out_slice[f * channels + 1] = r;
+                    out_slice[out_i * channels] = l;
+                    out_slice[out_i * channels + 1] = r;
                     for c in 2..channels {
-                        out_slice[f * channels + c] = 0.0;
+                        out_slice[out_i * channels + c] = 0.0;
                     }
                 }
             }
             peak = peak.max(block_peak);
             on_block(out_slice)?;
             if capture_tracks {
-                on_track_block(&track_taps, frames)?;
+                if emit_from > 0 {
+                    for tap in &mut track_taps {
+                        let src = emit_from * 2;
+                        let len = emit_len * 2;
+                        if tap.len() >= src + len {
+                            tap.copy_within(src..src + len, 0);
+                        }
+                    }
+                }
+                on_track_block(&track_taps, emit_len)?;
             }
-            written = written.saturating_add(frames_u64);
+            written = written.saturating_add(emit_len as u64);
 
-            // UntilSilence: stop early once a tail block has decayed below threshold.
+            // UntilSilence: stop after this block once content is done and the
+            // emitted peak has decayed below threshold.
             if produced >= content_end && until_silence && block_peak < silence_threshold {
+                produced = produced.saturating_add(frames_u64);
+                pos = pos.saturating_add(frames_u64);
                 break;
             }
         }
@@ -659,6 +698,21 @@ mod tests {
         let lg = RuntimeLatencyGraph::default();
         assert_eq!(export_warmup_frames(&lg, true), 0);
         assert_eq!(export_warmup_frames(&lg, false), 0);
+    }
+
+    #[test]
+    fn emit_slice_math_keeps_full_bridge_block_across_warmup() {
+        // Warmup of 100 with block 256: first exchange stays 256 frames; only
+        // the emitted file slice is trimmed. Shrinking the exchange used to
+        // leave stale wet in shared memory for the next full-size read.
+        let write_start = 100u64;
+        let produced = 0u64;
+        let frames = 256u64;
+        let block_end = produced + frames;
+        let emit_from = produced.max(write_start);
+        let emit_to = block_end;
+        assert_eq!(emit_to - emit_from, 156);
+        assert_eq!(frames, 256, "bridge block size must stay full");
     }
 
     #[test]

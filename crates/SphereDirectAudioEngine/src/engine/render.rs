@@ -1546,8 +1546,10 @@ fn push_vst3_midi_to_sink(
 /// realtime **bypass policy** when the host produced no fresh block (`got == 0`,
 /// e.g. its service thread is stalled behind a plugin load or editor open):
 ///
-/// * an **effect** leaves `block_l`/`block_r` untouched — the dry input passes
-///   through (bypass), stale plugin output is never replayed;
+/// * an **effect** replaces the dry block only when the host delivered a **full**
+///   block (`got == frames`). A partial wet|dry splice clicks and reads as a
+///   stutter / doubled image in both live playback and offline WAV/MP3 bounce —
+///   so a short read is treated like a miss and dry passes through;
 /// * an **instrument** adds only the `0..got` frames it actually received, so a
 ///   not-ready instrument contributes silence.
 ///
@@ -1569,15 +1571,27 @@ pub(crate) fn apply_bridge_insert_output(
         || crate::runtime::midi_verbose_enabled();
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
-    if is_effect && got > 0 {
-        block_l[..got].copy_from_slice(&scratch_l[..got]);
-        block_r[..got].copy_from_slice(&scratch_r[..got]);
+    let frames = block_l.len().min(block_r.len());
+    // Effects: all-or-nothing. Partial replace left a wet head and dry tail.
+    let effect_frames = if is_effect && got >= frames && frames > 0 {
+        frames
+    } else {
+        0
+    };
+    if is_effect && effect_frames > 0 {
+        block_l[..effect_frames].copy_from_slice(&scratch_l[..effect_frames]);
+        block_r[..effect_frames].copy_from_slice(&scratch_r[..effect_frames]);
         if need_peaks {
-            peak_l = scratch_l[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
-            peak_r = scratch_r[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+            peak_l = scratch_l[..effect_frames]
+                .iter()
+                .fold(0.0f32, |p, s| p.max(s.abs()));
+            peak_r = scratch_r[..effect_frames]
+                .iter()
+                .fold(0.0f32, |p, s| p.max(s.abs()));
         }
     } else if !is_effect {
-        for i in 0..got {
+        let n = got.min(frames);
+        for i in 0..n {
             block_l[i] += scratch_l[i];
             block_r[i] += scratch_r[i];
             if need_peaks {
@@ -2965,12 +2979,9 @@ mod bridge_bypass_tests {
         let mut block_r = vec![1.0, 1.0, 1.0, 1.0];
         let scratch_l = vec![0.5, 0.25, 0.0, -0.75];
         let scratch_r = vec![-0.5, 0.0, 0.25, 0.75];
-        let (pl, pr) =
-            apply_bridge_insert_output(true, 4, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
+        apply_bridge_insert_output(true, 4, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
         assert_eq!(block_l, scratch_l, "effect output replaces the dry block");
         assert_eq!(block_r, scratch_r);
-        assert_eq!(pl, 0.75);
-        assert_eq!(pr, 0.75);
     }
 
     #[test]
@@ -3019,7 +3030,7 @@ mod bridge_bypass_tests {
         let mut block_r = vec![0.1, 0.1, 0.1];
         let scratch_l = vec![0.5, -0.3, 0.0];
         let scratch_r = vec![0.0, 0.4, -0.6];
-        let (pl, pr) = apply_bridge_insert_output(
+        apply_bridge_insert_output(
             false,
             3,
             &mut block_l,
@@ -3030,20 +3041,28 @@ mod bridge_bypass_tests {
         let approx = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
         assert!(approx(&block_l, &[0.7, -0.1, 0.2]), "got {block_l:?}");
         assert!(approx(&block_r, &[0.1, 0.5, -0.5]), "got {block_r:?}");
-        assert_eq!(pl, 0.5);
-        assert_eq!(pr, 0.6);
     }
 
     #[test]
-    fn partial_block_only_touches_read_frames() {
-        // got < frames: only the frames the host actually produced are folded;
-        // the tail of the block is left untouched (dry for effect / accumulator).
+    fn effect_partial_block_keeps_full_dry() {
+        // got < frames: refuse the wet|dry splice — leave the whole dry block.
         let mut block_l = vec![1.0, 1.0, 1.0, 1.0];
         let mut block_r = vec![1.0, 1.0, 1.0, 1.0];
         let scratch_l = vec![0.5, 0.5, 0.0, 0.0];
         let scratch_r = vec![0.5, 0.5, 0.0, 0.0];
         apply_bridge_insert_output(true, 2, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
-        assert_eq!(block_l, vec![0.5, 0.5, 1.0, 1.0], "tail beyond got is dry");
-        assert_eq!(block_r, vec![0.5, 0.5, 1.0, 1.0]);
+        assert_eq!(block_l, vec![1.0, 1.0, 1.0, 1.0], "partial effect must not splice");
+        assert_eq!(block_r, vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn instrument_partial_block_only_sums_read_frames() {
+        let mut block_l = vec![1.0, 1.0, 1.0, 1.0];
+        let mut block_r = vec![1.0, 1.0, 1.0, 1.0];
+        let scratch_l = vec![0.5, 0.5, 9.0, 9.0];
+        let scratch_r = vec![0.25, 0.25, 9.0, 9.0];
+        apply_bridge_insert_output(false, 2, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
+        assert_eq!(block_l, vec![1.5, 1.5, 1.0, 1.0]);
+        assert_eq!(block_r, vec![1.25, 1.25, 1.0, 1.0]);
     }
 }

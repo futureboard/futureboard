@@ -23,13 +23,18 @@
 //! symmetry and stereo spread. All state is fixed-size; nothing here
 //! allocates or branches on unbounded data.
 
-use builtin_dsp_core::mix;
+use builtin_dsp_core::{mix, time_constant};
 
 use super::Lfo;
 use super::smooth::Smoothed;
 
 /// Glide time for depth/mix edits (see `smooth.rs`).
 const SMOOTH_SECONDS: f32 = 0.010;
+
+/// Soften allpass-coefficient jumps when the LFO / skew curve moves the corner
+/// quickly — a ~1.5 ms one-pole is enough to kill zipper clicks without
+/// smearing a musical sweep.
+const FREQ_SMOOTH_SECONDS: f32 = 0.001_5;
 
 /// Largest cascade any voice uses (six notches).
 const MAX_STAGES: usize = 12;
@@ -61,8 +66,8 @@ fn finite(x: f32) -> f32 {
 pub(super) enum PhaserVoice {
     /// "Vibe Phase 90" — the original four-stage script pedal.
     Phase90,
-    /// "Molam Swirl" — four stages with the regeneration wide open, for the
-    /// big vowel-like sweep that carries an Isan lead line.
+    /// "Molam Swirl" — Uni-Vibe-style staggered throb with regeneration, for the
+    /// slow vowel sweep under an Isan / luk-thung lead.
     MolamSwirl,
     /// "Phin Vibe" — staggered stages and no feedback at all: a throb rather
     /// than a notch sweep, sitting under a phin-style melody.
@@ -90,88 +95,118 @@ struct Profile {
     /// LFO shape exponent. 1.0 is a plain sine; above it the sweep dwells at
     /// the bottom and snaps back, which is the lopsided Univibe throb.
     skew: f32,
-    /// Right-channel LFO offset in cycles. 0.5 is fully counter-phase.
+    /// Right-channel LFO offset in cycles. Pedal-authentic voices keep this
+    /// near zero — independent L/R sweeps read as a doubled/ghosted guitar,
+    /// especially after a stereo bounce or offline render.
     spread: f32,
     /// Multiplies the rate knob, so a "fast" voice reaches further.
     rate_scale: f32,
     /// Ceiling on the wet blend. Only the vibe voice sits below a full sum.
     max_blend: f32,
+    /// True = process a mono sum through one cascade and copy to both outs
+    /// (real stompbox behaviour). False = linked stereo LFOs with `spread`.
+    mono: bool,
+}
+
+/// Map the shared 0..10 Rate knob onto Hertz for a phaser voice.
+///
+/// Cubic bias keeps most of the travel in the musical pedal range (~0.1–1.5 Hz).
+/// The previous square curve put mid-knob near 2 Hz and full throw at 8 Hz, which
+/// reads as a jet rather than a Phase-90 / Uni-Vibe swirl — and is why the Molam
+/// voices felt like they were spinning.
+#[inline]
+fn rate_hz_from_knob(rate: f32, scale: f32) -> f32 {
+    let t = (rate / 10.0).clamp(0.0, 1.0);
+    (0.05 + t * t * t * 3.95) * scale
 }
 
 impl PhaserVoice {
     fn profile(self) -> Profile {
         match self {
             // Two notches, moderate regeneration: present without swamping
-            // the note. The original build ran this at 0.35 feedback and a
-            // blend that reached full wet, which is why it read as a faint
-            // wobble instead of a phaser.
+            // the note. Rate is pedal-slow so the default knob lands near a
+            // script Phase 90's "musical" region rather than a jet.
             Self::Phase90 => Profile {
                 stages: 4,
                 feedback: 0.50,
-                sweep_lo: 220.0,
-                sweep_hi: 2_600.0,
+                sweep_lo: 200.0,
+                sweep_hi: 2_200.0,
                 stagger: 1.0,
                 skew: 1.0,
-                spread: 0.25,
-                rate_scale: 1.0,
-                max_blend: MAX_BLEND,
-            },
-            Self::MolamSwirl => Profile {
-                stages: 4,
-                feedback: 0.62,
-                sweep_lo: 190.0,
-                sweep_hi: 2_400.0,
-                stagger: 1.0,
-                skew: 1.0,
-                spread: 0.25,
+                spread: 0.0,
                 rate_scale: 0.85,
                 max_blend: MAX_BLEND,
+                // Mono cascade like a real Phase 90 — dual L/R sweeps read as
+                // ghosted / stuttering doubles in headphones and stereo bounces.
+                mono: true,
+            },
+            // Molam / luk-thung lead swirl: Uni-Vibe DNA (mild stagger + soft
+            // asymmetric throb) through a single mono cascade — a real pedal
+            // does not run two independent L/R sweeps, and that dual path was
+            // what read as "ซ้อน" / stutter under playback and offline render.
+            Self::MolamSwirl => Profile {
+                stages: 4,
+                feedback: 0.42,
+                sweep_lo: 160.0,
+                sweep_hi: 1_900.0,
+                stagger: 1.28,
+                skew: 1.28,
+                spread: 0.0,
+                rate_scale: 0.55,
+                max_blend: MAX_BLEND,
+                mono: true,
             },
             // No feedback and widely staggered corners: the nulls never line
-            // up, so nothing "swooshes" — it pulses.
+            // up, so nothing "swooshes" — it pulses. Still mono: a dual-LFO
+            // throb under a phin line is the ghosted-double complaint.
             Self::PhinVibe => Profile {
                 stages: 4,
                 feedback: 0.0,
-                sweep_lo: 320.0,
-                sweep_hi: 1_700.0,
-                stagger: 1.80,
-                skew: 1.40,
-                spread: 0.28,
-                rate_scale: 1.15,
+                sweep_lo: 280.0,
+                sweep_hi: 1_600.0,
+                stagger: 1.65,
+                skew: 1.35,
+                spread: 0.0,
+                rate_scale: 0.90,
                 max_blend: 0.44,
+                mono: true,
             },
             Self::KhaenSwirl => Profile {
                 stages: 8,
-                feedback: 0.52,
-                sweep_lo: 230.0,
-                sweep_hi: 3_000.0,
-                stagger: 1.0,
-                skew: 1.0,
-                spread: 0.28,
-                rate_scale: 0.75,
+                feedback: 0.48,
+                sweep_lo: 200.0,
+                sweep_hi: 2_600.0,
+                stagger: 1.12,
+                skew: 1.15,
+                spread: 0.0,
+                rate_scale: 0.55,
                 max_blend: MAX_BLEND,
+                mono: true,
             },
             Self::BiLam => Profile {
                 stages: 12,
-                feedback: 0.38,
-                sweep_lo: 210.0,
-                sweep_hi: 2_800.0,
-                stagger: 1.0,
-                skew: 1.0,
-                spread: 0.33,
-                rate_scale: 0.50,
+                feedback: 0.34,
+                sweep_lo: 180.0,
+                sweep_hi: 2_400.0,
+                stagger: 1.08,
+                skew: 1.12,
+                spread: 0.0,
+                rate_scale: 0.40,
                 max_blend: MAX_BLEND,
+                mono: true,
             },
+            // Intentionally the fast stereo jet — tiny linked spread only.
             Self::IsanJet => Profile {
                 stages: 6,
-                feedback: 0.62,
-                sweep_lo: 450.0,
-                sweep_hi: 4_000.0,
+                feedback: 0.55,
+                sweep_lo: 400.0,
+                sweep_hi: 3_600.0,
                 stagger: 1.0,
                 skew: 1.0,
-                spread: 0.20,
-                rate_scale: 1.70,
+                spread: 0.06,
+                rate_scale: 1.35,
                 max_blend: MAX_BLEND,
+                mono: false,
             },
         }
     }
@@ -235,8 +270,8 @@ pub(super) struct Phaser {
     profile: Profile,
     /// Per-stage corner multipliers, resolved on the control path.
     stagger: [f32; MAX_STAGES],
-    lfo_l: Lfo,
-    lfo_r: Lfo,
+    /// One shared LFO — L/R read as a locked pair via [`Lfo::tick_stereo`].
+    lfo: Lfo,
     left: Channel,
     right: Channel,
     depth: Smoothed,
@@ -248,6 +283,10 @@ pub(super) struct Phaser {
     /// dragging the whole sweep up off the floor.
     centre_hz: f32,
     span: f32,
+    /// One-pole on the sweep corners so allpass coefficients never jump.
+    freq_smooth_l: f32,
+    freq_smooth_r: f32,
+    freq_smooth_coeff: f32,
 }
 
 impl Phaser {
@@ -259,8 +298,7 @@ impl Phaser {
             voice,
             profile: voice.profile(),
             stagger: [1.0; MAX_STAGES],
-            lfo_l: Lfo::new(),
-            lfo_r: Lfo::new(),
+            lfo: Lfo::new(),
             left: Channel::default(),
             right: Channel::default(),
             depth: Smoothed::new(sr, SMOOTH_SECONDS, 0.7),
@@ -268,6 +306,9 @@ impl Phaser {
             makeup: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
             centre_hz: 800.0,
             span: 1.0,
+            freq_smooth_l: 800.0,
+            freq_smooth_r: 800.0,
+            freq_smooth_coeff: time_constant(sr, FREQ_SMOOTH_SECONDS),
         };
         phaser.adopt(voice);
         phaser
@@ -279,17 +320,18 @@ impl Phaser {
         self.depth.set_time(sr, SMOOTH_SECONDS);
         self.blend.set_time(sr, SMOOTH_SECONDS);
         self.makeup.set_time(sr, SMOOTH_SECONDS);
+        self.freq_smooth_coeff = time_constant(sr, FREQ_SMOOTH_SECONDS);
     }
 
     pub(super) fn reset(&mut self) {
         self.left.reset();
         self.right.reset();
-        self.lfo_l.reset();
-        self.lfo_r.reset();
-        self.lfo_r.set_phase(self.profile.spread);
+        self.lfo.reset();
         self.depth.snap();
         self.blend.snap();
         self.makeup.snap();
+        self.freq_smooth_l = self.centre_hz;
+        self.freq_smooth_r = self.centre_hz;
     }
 
     /// Resolve everything about a voice that does not change per sample.
@@ -309,7 +351,8 @@ impl Phaser {
         }
         self.centre_hz = (p.sweep_lo * p.sweep_hi).sqrt();
         self.span = p.sweep_hi / p.sweep_lo;
-        self.lfo_r.set_phase(p.spread);
+        self.freq_smooth_l = self.centre_hz;
+        self.freq_smooth_r = self.centre_hz;
     }
 
     /// `rate` and `depth` are 0..10; `mix` is 0..100 %.
@@ -321,12 +364,11 @@ impl Phaser {
             self.left.reset();
             self.right.reset();
         }
-        // 0.05 Hz → 8 Hz over the knob, biased slow like a pedal, then scaled
-        // by the voice.
-        let t = (rate / 10.0).clamp(0.0, 1.0);
-        let rate_hz = (0.05 + t * t * 7.95) * self.profile.rate_scale;
-        self.lfo_l.set_rate(rate_hz, self.sample_rate);
-        self.lfo_r.set_rate(rate_hz, self.sample_rate);
+        // Pedal-biased rate: cubic curve + per-voice scale. Mid-knob sits in
+        // the 0.1–1 Hz swirl range; full throw still reaches a lively jet on
+        // IsanJet without the old 8 Hz helicopter.
+        let rate_hz = rate_hz_from_knob(rate, self.profile.rate_scale);
+        self.lfo.set_rate(rate_hz, self.sample_rate);
         self.depth.set_target((depth / 10.0).clamp(0.0, 1.0));
         // Mix reaches the deepest sum and stops. Past an equal blend the nulls
         // fill back in, so letting the knob run to bare wet would make the
@@ -335,8 +377,8 @@ impl Phaser {
         self.blend.set_target(blend);
         // Where the loop returns in phase the cascade reaches 1/(1 - feedback),
         // so the summed path peaks at (1 - blend) + blend/(1 - feedback). Undo
-        // all but a decibel of that. Never above unity: at Mix 0 the dry signal
-        // has to pass through untouched.
+        // all but a decibel of that. Never above unity: at Mix at zero the dry
+        // signal has to pass through untouched.
         let peak = (1.0 - blend) + blend / (1.0 - self.profile.feedback).max(0.05);
         self.makeup
             .set_target((PEAK_TARGET / peak.max(1.0e-3)).min(1.0));
@@ -363,36 +405,68 @@ impl Phaser {
     }
 
     #[inline]
+    fn shape_freq(&self, raw: f32, depth: f32) -> f32 {
+        let p = self.profile;
+        let unit = (raw * 0.5 + 0.5).clamp(0.0, 1.0);
+        let skewed = if p.skew == 1.0 {
+            unit
+        } else {
+            unit.powf(p.skew)
+        };
+        self.centre_hz * self.span.powf((skewed - 0.5) * depth)
+    }
+
+    #[inline]
+    fn smooth_freq(current: &mut f32, target: f32, coeff: f32) -> f32 {
+        *current = target + (*current - target) * coeff;
+        *current
+    }
+
+    #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
         let depth = self.depth.tick();
         let blend = self.blend.tick();
         let makeup = self.makeup.tick();
         let p = self.profile;
+        let coeff = self.freq_smooth_coeff;
 
-        // Sweep symmetrically about the voice's centre, so turning Depth down
-        // narrows the sweep instead of parking it on the bottom of the range.
-        let shape = |raw: f32| {
-            let unit = (raw * 0.5 + 0.5).clamp(0.0, 1.0);
-            let skewed = if p.skew == 1.0 {
-                unit
-            } else {
-                unit.powf(p.skew)
-            };
-            self.centre_hz * self.span.powf((skewed - 0.5) * depth)
+        let (raw_l, raw_r) = self.lfo.tick_stereo(p.spread);
+        let target_l = self.shape_freq(raw_l, depth);
+        let target_r = if p.mono {
+            target_l
+        } else {
+            self.shape_freq(raw_r, depth)
         };
-        let freq_l = shape(self.lfo_l.tick());
-        let freq_r = shape(self.lfo_r.tick());
+        let freq_l = Self::smooth_freq(&mut self.freq_smooth_l, target_l, coeff);
+        let freq_r = if p.mono {
+            self.freq_smooth_r = freq_l;
+            freq_l
+        } else {
+            Self::smooth_freq(&mut self.freq_smooth_r, target_r, coeff)
+        };
 
         let mut coeffs = [0.0f32; MAX_STAGES];
-        self.coeffs_for(freq_l, &mut coeffs);
-        let wet_l = self.left.run(left, &coeffs, p.stages, p.feedback);
-        self.coeffs_for(freq_r, &mut coeffs);
-        let wet_r = self.right.run(right, &coeffs, p.stages, p.feedback);
-
-        (
-            finite(mix(left, wet_l, blend) * makeup),
-            finite(mix(right, wet_r, blend) * makeup),
-        )
+        if p.mono {
+            // Real stompbox: one cascade on the mid, copy to both outs. Dual
+            // independent L/R sweeps were the "ซ้อน / กระตุก" under headphones
+            // and offline stereo renders.
+            let mid = 0.5 * (left + right);
+            self.coeffs_for(freq_l, &mut coeffs);
+            let wet = self.left.run(mid, &coeffs, p.stages, p.feedback);
+            // Keep the unused channel's state from going stale / denormal.
+            self.right.feedback = self.left.feedback;
+            let out = finite(mix(mid, wet, blend) * makeup);
+            (out, out)
+        } else {
+            self.coeffs_for(freq_l, &mut coeffs);
+            let wet_l = self.left.run(left, &coeffs, p.stages, p.feedback);
+            self.coeffs_for(freq_r, &mut coeffs);
+            let wet_r = self.right.run(right, &coeffs, p.stages, p.feedback);
+            (
+                finite(mix(left, wet_l, blend) * makeup),
+                finite(mix(right, wet_r, blend) * makeup),
+            )
+        }
     }
 }
 
@@ -609,5 +683,63 @@ mod tests {
             previous = y;
         }
         assert!(worst < 0.5, "voice change clicked: {worst}");
+    }
+
+    /// Rate at a typical musical knob setting must stay in the pedal range —
+    /// the bug report that drove the cubic remap was "หมุนไวมาก" (spins too fast).
+    #[test]
+    fn mid_knob_rate_is_a_pedal_not_a_helicopter() {
+        let phase90 = rate_hz_from_knob(5.0, PhaserVoice::Phase90.profile().rate_scale);
+        let molam = rate_hz_from_knob(5.0, PhaserVoice::MolamSwirl.profile().rate_scale);
+        let jet = rate_hz_from_knob(10.0, PhaserVoice::IsanJet.profile().rate_scale);
+        assert!(
+            phase90 < 0.8,
+            "Phase90 at Rate 5 is {phase90:.2} Hz — still too fast for a script pedal"
+        );
+        assert!(
+            molam < 0.5,
+            "MolamSwirl at Rate 5 is {molam:.2} Hz — molam swirl should be slow"
+        );
+        assert!(
+            jet < 6.0,
+            "IsanJet at Rate 10 is {jet:.2} Hz — jet, not helicopter"
+        );
+        assert!(
+            PhaserVoice::MolamSwirl.profile().stagger > 1.2,
+            "MolamSwirl must stagger stages (Uni-Vibe DNA), not run a linear Phase-90 cascade"
+        );
+        assert!(
+            PhaserVoice::MolamSwirl.profile().skew > 1.15,
+            "MolamSwirl needs an asymmetric LFO throb"
+        );
+        assert!(
+            PhaserVoice::MolamSwirl.profile().mono,
+            "MolamSwirl must be mono-cascade — dual L/R sweeps were the stutter/ghost complaint"
+        );
+    }
+
+    /// Mono pedal voices must keep L == R for a centred input, otherwise a
+    /// stereo bounce / offline render hears two overlapping sweeps.
+    #[test]
+    fn mono_voices_do_not_ghost_a_centred_input() {
+        for voice in [
+            PhaserVoice::Phase90,
+            PhaserVoice::MolamSwirl,
+            PhaserVoice::PhinVibe,
+            PhaserVoice::KhaenSwirl,
+            PhaserVoice::BiLam,
+        ] {
+            let mut p = Phaser::new(48_000.0);
+            p.configure(voice, 4.0, 7.0, 100.0);
+            p.reset();
+            for n in 0..8_000 {
+                let x = (n as f32 * 0.03).sin() * 0.4;
+                let (l, r) = p.process(x, x);
+                assert!(
+                    (l - r).abs() < 1.0e-5,
+                    "{voice:?} split a mono input: L={l} R={r}"
+                );
+            }
+        }
     }
 }

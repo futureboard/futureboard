@@ -404,7 +404,7 @@ pub enum ModModel {
     Flanger,
     /// "Opto Tremolo" — amp-style amplitude modulation.
     Tremolo,
-    /// "Molam Swirl" — four stages with the regeneration wide open.
+    /// "Molam Swirl" — Uni-Vibe-style staggered throb for Isan / luk-thung leads.
     MolamSwirl,
     /// "Phin Vibe" — staggered, feedback-free Univibe-style throb.
     PhinVibe,
@@ -2171,12 +2171,22 @@ impl Lfo {
     /// Advance and return a sine in [-1, 1].
     #[inline]
     pub(crate) fn tick(&mut self) -> f32 {
-        let value = (self.phase * std::f32::consts::TAU).sin();
+        let (left, _) = self.tick_stereo(0.0);
+        left
+    }
+
+    /// Advance once and return linked L/R sines. Using one phase accumulator
+    /// keeps the stereo offset locked — two independent LFOs can drift and
+    /// read as a doubled / stuttering image under slow rates.
+    #[inline]
+    pub(crate) fn tick_stereo(&mut self, spread01: f32) -> (f32, f32) {
+        let left = (self.phase * std::f32::consts::TAU).sin();
+        let right = ((self.phase + spread01) * std::f32::consts::TAU).sin();
         self.phase += self.increment;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        value
+        (left, right)
     }
 
     pub(crate) fn reset(&mut self) {

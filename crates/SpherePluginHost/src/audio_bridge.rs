@@ -201,7 +201,9 @@ unsafe impl Sync for SharedAudioBuffer {}
 
 impl SharedAudioBuffer {
     /// Copy `src` (interleaved, `<= AUDIO_BUF_LEN`) into the buffer. The caller
-    /// must own the buffer per the seq handshake (no concurrent reader).
+    /// must own the buffer per the seq handshake (no concurrent reader). Any
+    /// samples beyond `src.len()` are zeroed so a later larger read never pulls
+    /// a stale wet tail from a previous shorter block.
     ///
     /// # Safety
     /// SPSC contract: only the producing side may call this, and only while it
@@ -212,6 +214,9 @@ impl SharedAudioBuffer {
         let dst = self.samples.as_ptr() as *mut f32;
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), dst, n);
+            if n < AUDIO_BUF_LEN {
+                std::ptr::write_bytes(dst.add(n), 0, AUDIO_BUF_LEN - n);
+            }
         }
     }
 
@@ -1464,6 +1469,23 @@ mod tests {
         let mut dst = vec![0.0f32; AUDIO_BUF_LEN];
         unsafe { buf.read_interleaved(&mut dst, AUDIO_BUF_LEN) };
         assert_eq!(src, dst);
+    }
+
+    #[test]
+    fn audio_buffer_short_write_zeros_stale_tail() {
+        let region = SharedAudioRegion::new_in_process();
+        let buf = &region.bridge().audio_out;
+        let poison: Vec<f32> = (0..AUDIO_BUF_LEN).map(|i| (i + 1) as f32).collect();
+        unsafe { buf.write_interleaved(&poison) };
+        let short = [1.0f32, 2.0, 3.0, 4.0];
+        unsafe { buf.write_interleaved(&short) };
+        let mut dst = vec![0.0f32; AUDIO_BUF_LEN];
+        unsafe { buf.read_interleaved(&mut dst, AUDIO_BUF_LEN) };
+        assert_eq!(&dst[..4], &short);
+        assert!(
+            dst[4..].iter().all(|&s| s == 0.0),
+            "tail after a short write must be cleared"
+        );
     }
 
     #[test]
