@@ -334,10 +334,13 @@ impl StudioLayout {
         );
     }
 
-    /// Opens/activates the Add Track external window without reading/updating the Timeline.
+    /// Opens/activates the Add Track external window using precomputed
+    /// track-count context (so callers from Timeline events do not need a nested
+    /// `timeline.update(...)`).
     ///
-    /// This is critical for callbacks originating from Timeline events: Timeline may already be
-    /// mid-update, and calling `self.timeline.update(...)` would panic (GPUI re-entrancy guard).
+    /// Callers that originate from a Timeline `cx.listener` must still defer via
+    /// [`StudioLayout::defer_update_in_window`]: this path reads Timeline for bus
+    /// output targets and will panic on a nested lease.
     pub(super) fn open_add_track_external_window_with_context(
         &mut self,
         kind: AddTrackKind,

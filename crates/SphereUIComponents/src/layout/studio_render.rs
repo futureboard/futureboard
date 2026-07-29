@@ -604,11 +604,12 @@ impl Render for StudioLayout {
 
         let on_add_track: components::timeline::timeline::TimelineAddTrackCb = {
             let this = cx.entity().clone();
-            std::sync::Arc::new(move |request, _w, cx| {
+            std::sync::Arc::new(move |request, window, cx| {
                 let request = *request;
-                let _ = this.update(cx, |this, cx| {
-                    // Timeline requests originate while Timeline may already be mid-update.
-                    // Use the request context to avoid a nested `timeline.update(...)`.
+                // Timeline's Add button fires while Timeline is mid-update
+                // (`cx.listener`). Opening the dialog must not `timeline.read`
+                // until that lease ends — defer like automation-control.
+                StudioLayout::defer_update_in_window(&this, window, cx, move |this, _window, cx| {
                     this.open_add_track_external_window_with_context(
                         AddTrackKind::Audio,
                         request.track_count,
