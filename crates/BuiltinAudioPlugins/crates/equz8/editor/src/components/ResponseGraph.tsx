@@ -137,6 +137,24 @@ export function ResponseGraph({
       ? bandCurvePath(band, width, height, sampleRate)
       : null
   }, [bands, height, selected, width, sampleRate])
+  /// Ghost of the fully-triggered dynamic gain (gain + range), Pro-Q style.
+  const selectedDynamicExtentPath = useMemo(() => {
+    const band = bands[selected]
+    if (
+      !band?.active ||
+      !band.dynamic ||
+      !bandHasGain(band.bandType) ||
+      Math.abs(band.rangeDb) < 0.01
+    ) {
+      return null
+    }
+    return bandCurvePath(
+      { ...band, gainDb: band.gainDb + band.rangeDb },
+      width,
+      height,
+      sampleRate,
+    )
+  }, [bands, height, selected, width, sampleRate])
 
   /// Client coordinates mapped into the same viewBox space the curves, grid and
   /// nodes are drawn in, so a stale measurement can never make drawing and
@@ -357,6 +375,14 @@ export function ResponseGraph({
             style={{ '--band': BAND_COLORS[index] } as CSSProperties}
           />
         ) : null,
+      )}
+
+      {selectedDynamicExtentPath && (
+        <path
+          d={selectedDynamicExtentPath}
+          className="band-curve is-dynamic-extent"
+          style={{ '--band': BAND_COLORS[selected] } as CSSProperties}
+        />
       )}
 
       {selectedPath && (
