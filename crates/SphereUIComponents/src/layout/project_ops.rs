@@ -921,12 +921,16 @@ impl StudioLayout {
     }
 
     pub(super) fn session_autosave_flush_payload(
-        &self,
+        &mut self,
         cx: &mut Context<Self>,
     ) -> (Option<PathBuf>, Option<FutureboardProject>) {
         if !self.project_session.is_dirty {
             return (None, None);
         }
+        // Project-switch shutdown bypasses the normal Save/Autosave entry
+        // points, so capture live plugin state before building its recovery
+        // snapshot too.
+        self.refresh_bridge_plugin_states(cx);
         (
             Some(self.autosave_project_path()),
             Some(self.project_snapshot(cx)),

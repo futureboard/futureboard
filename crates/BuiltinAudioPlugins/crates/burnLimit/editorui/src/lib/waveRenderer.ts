@@ -1,48 +1,110 @@
 import {
-  STAGE_TICKS_DB,
+  HISTORY_LENGTH,
+  STAGE_FLOOR_DB,
   grNorm,
   levelNorm,
   type HistorySample,
 } from '../meter'
 
-const FLOATS_PER_VERTEX = 6
-const MAX_VERTICES = 4096
+const FLOATS_PER_SAMPLE = 4
+const UNIFORM_FLOATS = 8
 
 const SHADER = /* wgsl */ `
-struct VertexInput {
-  @location(0) position: vec2f,
-  @location(1) color: vec4f,
+struct FrameParams {
+  sample_count: u32,
+  live: u32,
+  width: f32,
+  height: f32,
+  ceiling_y: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
 }
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
-  @location(0) color: vec4f,
+  @location(0) uv: vec2f,
+}
+
+@group(0) @binding(0)
+var<storage, read> history: array<vec4f>;
+
+@group(0) @binding(1)
+var<uniform> frame: FrameParams;
+
+const GRID_Y = array<f32, 8>(
+  0.0625, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0
+);
+
+fn over(base: vec4f, top: vec4f) -> vec4f {
+  return vec4f(mix(base.rgb, top.rgb, top.a), 1.0);
 }
 
 @vertex
-fn vertex_main(input: VertexInput) -> VertexOutput {
+fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+  var positions = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f( 3.0, -1.0),
+    vec2f(-1.0,  3.0)
+  );
+  let position = positions[vertex_index];
   var output: VertexOutput;
-  output.position = vec4f(input.position, 0.0, 1.0);
-  output.color = input.color;
+  output.position = vec4f(position, 0.0, 1.0);
+  output.uv = vec2f(
+    (position.x + 1.0) * 0.5,
+    1.0 - (position.y + 1.0) * 0.5
+  );
   return output;
 }
 
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
-  return input.color;
+  let uv = clamp(input.uv, vec2f(0.0), vec2f(1.0));
+  let pixel_y = 1.0 / max(frame.height, 1.0);
+  var color = vec4f(0.006, 0.008, 0.010, 1.0);
+
+  for (var tick = 0u; tick < 8u; tick += 1u) {
+    if (abs(uv.y - GRID_Y[tick]) <= pixel_y * 0.55) {
+      color = over(color, vec4f(1.0, 1.0, 1.0, 0.035));
+    }
+  }
+  if (uv.y <= pixel_y * 0.75) {
+    color = over(color, vec4f(1.0, 1.0, 1.0, 0.10));
+  }
+
+  let x_pixel = u32(floor(uv.x * frame.width));
+  if (abs(uv.y - frame.ceiling_y) <= pixel_y * 0.65 &&
+      (x_pixel % 9u) < 5u) {
+    color = over(color, vec4f(0.91, 0.77, 0.35, 0.65));
+  }
+
+  if (frame.live != 0u && frame.sample_count >= 2u) {
+    let last = frame.sample_count - 1u;
+    let history_x = uv.x * f32(last);
+    let index = min(u32(floor(history_x)), last - 1u);
+    let amount = fract(history_x);
+    let sample = mix(history[index], history[index + 1u], amount);
+
+    if (uv.y >= sample.x) {
+      let depth = clamp((uv.y - sample.x) / max(1.0 - sample.x, pixel_y), 0.0, 1.0);
+      let top = vec4f(0.52, 0.68, 0.76, 0.55);
+      let bottom = vec4f(0.12, 0.20, 0.26, 0.10);
+      color = over(color, mix(top, bottom, depth));
+    }
+    if (abs(uv.y - sample.y) <= pixel_y * 1.15) {
+      color = over(color, vec4f(0.91, 0.77, 0.35, 0.72));
+    }
+    if (uv.y <= sample.z) {
+      color = over(color, vec4f(0.91, 0.28, 0.23, 0.72));
+    }
+    if (abs(uv.y - sample.z) <= pixel_y * 1.5) {
+      color = over(color, vec4f(1.0, 0.42, 0.36, 1.0));
+    }
+  }
+
+  return color;
 }
 `
-
-type Color = readonly [number, number, number, number]
-
-const GRID: Color = [1, 1, 1, 0.035]
-const ZERO: Color = [1, 1, 1, 0.1]
-const CEILING: Color = [0.91, 0.77, 0.35, 0.65]
-const INPUT_TOP: Color = [0.52, 0.68, 0.76, 0.55]
-const INPUT_BOTTOM: Color = [0.12, 0.2, 0.26, 0.1]
-const RMS: Color = [0.91, 0.77, 0.35, 0.72]
-const GR_FILL: Color = [0.91, 0.28, 0.23, 0.72]
-const GR_LINE: Color = [1, 0.42, 0.36, 1]
 
 export type WaveRenderer = {
   resize(width: number, height: number): void
@@ -51,10 +113,14 @@ export type WaveRenderer = {
 }
 
 class GpuWaveRenderer implements WaveRenderer {
-  private readonly vertices = new Float32Array(
-    MAX_VERTICES * FLOATS_PER_VERTEX,
+  private readonly historyData = new Float32Array(
+    HISTORY_LENGTH * FLOATS_PER_SAMPLE,
   )
-  private vertexCount = 0
+  private readonly uniformData = new ArrayBuffer(
+    UNIFORM_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+  )
+  private readonly uniformFloats = new Float32Array(this.uniformData)
+  private readonly uniformU32 = new Uint32Array(this.uniformData)
   private width = 1
   private height = 1
   private destroyed = false
@@ -64,70 +130,47 @@ class GpuWaveRenderer implements WaveRenderer {
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
     private readonly pipeline: GPURenderPipeline,
-    private readonly vertexBuffer: GPUBuffer,
-  ) {}
+    private readonly bindGroup: GPUBindGroup,
+    private readonly historyBuffer: GPUBuffer,
+    private readonly uniformBuffer: GPUBuffer,
+  ) {
+    void device.lost.then(() => {
+      this.destroyed = true
+    })
+  }
 
   resize(width: number, height: number) {
-    this.width = Math.max(1, width)
-    this.height = Math.max(1, height)
+    const nextWidth = Math.max(1, width)
+    const nextHeight = Math.max(1, height)
+    if (nextWidth === this.width && nextHeight === this.height) return
+    this.width = nextWidth
+    this.height = nextHeight
     this.canvas.width = this.width
     this.canvas.height = this.height
   }
 
   render(samples: HistorySample[], ceilingDb: number, live: boolean) {
     if (this.destroyed) return
-    this.vertexCount = 0
-
-    for (const tick of STAGE_TICKS_DB) {
-      if (tick === 0) continue
-      this.line(0, levelNorm(tick), 1, levelNorm(tick), 1, GRID)
+    const count = Math.min(samples.length, HISTORY_LENGTH)
+    const start = samples.length - count
+    for (let index = 0; index < count; index++) {
+      const sample = samples[start + index]!
+      const offset = index * FLOATS_PER_SAMPLE
+      this.historyData[offset] = levelNorm(live ? sample.inDb : STAGE_FLOOR_DB)
+      this.historyData[offset + 1] = levelNorm(
+        live ? sample.rmsDb : STAGE_FLOOR_DB,
+      )
+      this.historyData[offset + 2] = grNorm(live ? sample.grDb : 0) * 0.52
+      this.historyData[offset + 3] = 0
     }
-    this.line(0, 0, 1, 0, 1, ZERO)
-    this.dashedLine(levelNorm(ceilingDb), CEILING)
+    this.device.queue.writeBuffer(this.historyBuffer, 0, this.historyData)
 
-    if (samples.length >= 2) {
-      const denominator = Math.max(samples.length - 1, 1)
-      for (let index = 0; index < samples.length - 1; index++) {
-        const next = index + 1
-        const x0 = index / denominator
-        const x1 = next / denominator
-        const input0 = levelNorm(live ? samples[index]!.inDb : -48)
-        const input1 = levelNorm(live ? samples[next]!.inDb : -48)
-        this.area(x0, input0, x1, input1, 1, INPUT_TOP, INPUT_BOTTOM)
-
-        const gr0 = grNorm(live ? samples[index]!.grDb : 0) * 0.52
-        const gr1 = grNorm(live ? samples[next]!.grDb : 0) * 0.52
-        this.area(x0, gr0, x1, gr1, 0, GR_FILL, GR_FILL)
-      }
-
-      for (let index = 0; index < samples.length - 1; index++) {
-        const next = index + 1
-        const x0 = index / denominator
-        const x1 = next / denominator
-        this.line(
-          x0,
-          levelNorm(live ? samples[index]!.rmsDb : -48),
-          x1,
-          levelNorm(live ? samples[next]!.rmsDb : -48),
-          1.15,
-          RMS,
-        )
-        this.line(
-          x0,
-          grNorm(live ? samples[index]!.grDb : 0) * 0.52,
-          x1,
-          grNorm(live ? samples[next]!.grDb : 0) * 0.52,
-          1.5,
-          GR_LINE,
-        )
-      }
-    }
-
-    const used = this.vertices.subarray(
-      0,
-      this.vertexCount * FLOATS_PER_VERTEX,
-    )
-    this.device.queue.writeBuffer(this.vertexBuffer, 0, used)
+    this.uniformU32[0] = count
+    this.uniformU32[1] = live ? 1 : 0
+    this.uniformFloats[2] = this.width
+    this.uniformFloats[3] = this.height
+    this.uniformFloats[4] = levelNorm(ceilingDb)
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData)
 
     const encoder = this.device.createCommandEncoder({
       label: 'BurnLimit wave encoder',
@@ -144,107 +187,19 @@ class GpuWaveRenderer implements WaveRenderer {
       ],
     })
     pass.setPipeline(this.pipeline)
-    pass.setVertexBuffer(0, this.vertexBuffer)
-    pass.draw(this.vertexCount)
+    pass.setBindGroup(0, this.bindGroup)
+    pass.draw(3)
     pass.end()
     this.device.queue.submit([encoder.finish()])
   }
 
   destroy() {
+    if (this.destroyed) return
     this.destroyed = true
-    this.vertexBuffer.destroy()
-  }
-
-  private vertex(x: number, y: number, color: Color) {
-    if (this.vertexCount >= MAX_VERTICES) return
-    const offset = this.vertexCount * FLOATS_PER_VERTEX
-    this.vertices[offset] = x * 2 - 1
-    this.vertices[offset + 1] = 1 - y * 2
-    this.vertices[offset + 2] = color[0]
-    this.vertices[offset + 3] = color[1]
-    this.vertices[offset + 4] = color[2]
-    this.vertices[offset + 5] = color[3]
-    this.vertexCount += 1
-  }
-
-  private triangle(
-    a: readonly [number, number],
-    b: readonly [number, number],
-    c: readonly [number, number],
-    colors: readonly [Color, Color, Color],
-  ) {
-    this.vertex(a[0], a[1], colors[0])
-    this.vertex(b[0], b[1], colors[1])
-    this.vertex(c[0], c[1], colors[2])
-  }
-
-  private area(
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    baseline: number,
-    curveColor: Color,
-    baseColor: Color,
-    curve0 = y0,
-    curve1 = y1,
-  ) {
-    this.triangle(
-      [x0, curve0],
-      [x0, baseline],
-      [x1, baseline],
-      [curveColor, baseColor, baseColor],
-    )
-    this.triangle(
-      [x0, curve0],
-      [x1, baseline],
-      [x1, curve1],
-      [curveColor, baseColor, curveColor],
-    )
-  }
-
-  private line(
-    x0: number,
-    y0: number,
-    x1: number,
-    y1: number,
-    thicknessPx: number,
-    color: Color,
-  ) {
-    const dx = (x1 - x0) * this.width
-    const dy = (y1 - y0) * this.height
-    const length = Math.hypot(dx, dy)
-    if (length <= Number.EPSILON) return
-    const half = thicknessPx * 0.5
-    const ox = (-dy / length) * (half / this.width)
-    const oy = (dx / length) * (half / this.height)
-    this.triangle(
-      [x0 + ox, y0 + oy],
-      [x0 - ox, y0 - oy],
-      [x1 - ox, y1 - oy],
-      [color, color, color],
-    )
-    this.triangle(
-      [x0 + ox, y0 + oy],
-      [x1 - ox, y1 - oy],
-      [x1 + ox, y1 + oy],
-      [color, color, color],
-    )
-  }
-
-  private dashedLine(y: number, color: Color) {
-    const dashPx = 5
-    const gapPx = 4
-    for (let x = 0; x < this.width; x += dashPx + gapPx) {
-      this.line(
-        x / this.width,
-        y,
-        Math.min(x + dashPx, this.width) / this.width,
-        y,
-        1,
-        color,
-      )
-    }
+    this.historyBuffer.destroy()
+    this.uniformBuffer.destroy()
+    this.context.unconfigure()
+    this.device.destroy()
   }
 }
 
@@ -273,49 +228,43 @@ export async function createWaveRenderer(
     vertex: {
       module,
       entryPoint: 'vertex_main',
-      buffers: [
-        {
-          arrayStride: FLOATS_PER_VERTEX * Float32Array.BYTES_PER_ELEMENT,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: 'float32x2' },
-            {
-              shaderLocation: 1,
-              offset: 2 * Float32Array.BYTES_PER_ELEMENT,
-              format: 'float32x4',
-            },
-          ],
-        },
-      ],
     },
     fragment: {
       module,
       entryPoint: 'fragment_main',
-      targets: [
-        {
-          format,
-          blend: {
-            color: {
-              srcFactor: 'src-alpha',
-              dstFactor: 'one-minus-src-alpha',
-            },
-            alpha: {
-              srcFactor: 'one',
-              dstFactor: 'one-minus-src-alpha',
-            },
-          },
-        },
-      ],
+      targets: [{ format }],
     },
     primitive: { topology: 'triangle-list' },
   })
-  const vertexBuffer = device.createBuffer({
-    label: 'BurnLimit wave vertices',
+  const historyBuffer = device.createBuffer({
+    label: 'BurnLimit history',
     size:
-      MAX_VERTICES *
-      FLOATS_PER_VERTEX *
+      HISTORY_LENGTH *
+      FLOATS_PER_SAMPLE *
       Float32Array.BYTES_PER_ELEMENT,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  })
+  const uniformBuffer = device.createBuffer({
+    label: 'BurnLimit frame uniforms',
+    size: UNIFORM_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  })
+  const bindGroup = device.createBindGroup({
+    label: 'BurnLimit wave bind group',
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: historyBuffer } },
+      { binding: 1, resource: { buffer: uniformBuffer } },
+    ],
   })
 
-  return new GpuWaveRenderer(canvas, device, context, pipeline, vertexBuffer)
+  return new GpuWaveRenderer(
+    canvas,
+    device,
+    context,
+    pipeline,
+    bindGroup,
+    historyBuffer,
+    uniformBuffer,
+  )
 }

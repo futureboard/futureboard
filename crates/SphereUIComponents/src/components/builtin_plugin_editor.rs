@@ -776,6 +776,10 @@ mod imp {
         static COMMANDS: RefCell<HashMap<ViewId, PendingViewCommands>> = RefCell::new(HashMap::new());
         static EVENTS: RefCell<HashMap<ViewId, Vec<ViewEvent>>> = RefCell::new(HashMap::new());
         static PUMPING: Cell<bool> = const { Cell::new(false) };
+        /// Editor windows tick independently, but CEF owns one process-wide
+        /// message loop. Coalesce near-simultaneous calls so N open plugin
+        /// types do not pump Chromium N times and starve GPUI input handling.
+        static LAST_CEF_PUMP: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
     }
 
     struct PumpGuard;
@@ -1408,6 +1412,22 @@ mod imp {
         let Some(_guard) = PumpGuard::enter() else {
             return;
         };
+        const MIN_PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+        let should_pump = LAST_CEF_PUMP.with(|last| {
+            let now = std::time::Instant::now();
+            if last
+                .get()
+                .is_some_and(|previous| now.duration_since(previous) < MIN_PUMP_INTERVAL)
+            {
+                false
+            } else {
+                last.set(Some(now));
+                true
+            }
+        });
+        if !should_pump {
+            return;
+        }
         let commands = COMMANDS.with(|commands| std::mem::take(&mut *commands.borrow_mut()));
         let mut completed = Vec::new();
 

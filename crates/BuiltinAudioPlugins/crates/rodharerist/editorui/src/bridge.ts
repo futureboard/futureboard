@@ -79,15 +79,42 @@ export type HostStatus = {
 
 const pendingEdits = new Map<string, number>();
 let flushScheduled = false;
+let scheduledAnimationFrame: number | null = null;
+let scheduledFallback: ReturnType<typeof setTimeout> | null = null;
+
+// CEF can throttle or temporarily stop requestAnimationFrame while DevTools,
+// another native window, or a resize/focus transition owns the compositor.
+// The timeout is a hard upper bound, not a second flush: whichever callback
+// runs first cancels the other one.
+const MAX_FLUSH_DELAY_MS = 32;
+
+function cancelScheduledFlush(): void {
+  if (
+    scheduledAnimationFrame !== null &&
+    typeof cancelAnimationFrame === "function"
+  ) {
+    cancelAnimationFrame(scheduledAnimationFrame);
+  }
+  if (scheduledFallback !== null) {
+    clearTimeout(scheduledFallback);
+  }
+  scheduledAnimationFrame = null;
+  scheduledFallback = null;
+  flushScheduled = false;
+}
 
 // Edits queued against an instance must die with its binding — a new
 // `selectInstance` or an `instanceRemoved` clears the buffer.
 onParamBindingReset(() => {
   pendingEdits.clear();
+  // Reset the scheduling latch as well. Without this, a throttled RAF from the
+  // old binding can leave `flushScheduled=true` indefinitely and prevent every
+  // edit for the newly-bound instance from scheduling its own flush.
+  cancelScheduledFlush();
 });
 
 function flushPendingEdits(): void {
-  flushScheduled = false;
+  cancelScheduledFlush();
   if (pendingEdits.size === 0) return;
   const batch = Array.from(pendingEdits, ([id, value]) => ({ id, value }));
   pendingEdits.clear();
@@ -98,16 +125,22 @@ function scheduleFlush(): void {
   if (flushScheduled) return;
   flushScheduled = true;
   if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => flushPendingEdits());
-  } else {
-    setTimeout(() => flushPendingEdits(), 16);
+    scheduledAnimationFrame = requestAnimationFrame(flushPendingEdits);
   }
+  scheduledFallback = setTimeout(flushPendingEdits, MAX_FLUSH_DELAY_MS);
 }
 
-/** Test-only: synchronously flush whatever is queued. */
-export function __flushParamEditsForTest(): void {
+/**
+ * Commit all queued edits synchronously. Discrete UI actions call this after
+ * queuing their complete model/bypass/path transaction; continuous knob drags
+ * deliberately stay frame-coalesced.
+ */
+export function flushParamEditsNow(): void {
   flushPendingEdits();
 }
+
+/** Backward-compatible test hook. */
+export const __flushParamEditsForTest = flushParamEditsNow;
 
 /** Forward a continuous parameter edit (knob) to the native DSP. */
 export function postParam(id: string, value: number): void {
@@ -280,7 +313,8 @@ export function postModel(category: string, modelId: string): void {
       if (i !== undefined) postParam("wah_model", i);
       return;
     }
-    case "verb": {
+    case "verb":
+    case "reverb": {
       const i = REVERB_MODEL_INDEX[modelId];
       if (i !== undefined) postParam("reverb_model", i);
       return;
@@ -355,6 +389,7 @@ export function subscribeIrLoadResult(sink: (result: IrLoadResult) => void): () 
  * wire param — the DSP treats `clear_clip` as an action, not a value. */
 export function postClearClip(): void {
   postParam("clear_clip", 1);
+  flushParamEditsNow();
 }
 
 /**

@@ -118,12 +118,67 @@ describe("model-select wire values", () => {
     expect(batches).toEqual([[{ id: "delay_model", value: 3 }]]);
   });
 
+  test("postModel accepts the reverb node id used by the editor", () => {
+    const batches = captureBatches();
+    postModel("reverb", "room");
+    __flushParamEditsForTest();
+    postModel("reverb", "hall");
+    __flushParamEditsForTest();
+    postModel("reverb", "shimmer");
+    __flushParamEditsForTest();
+    expect(batches).toEqual([
+      [{ id: "reverb_model", value: 1 }],
+      [{ id: "reverb_model", value: 2 }],
+      [{ id: "reverb_model", value: 3 }],
+    ]);
+  });
+
   test("tone engine indices match ToneEngineKind", () => {
     expect(TONE_ENGINE_INDEX).toEqual({ classic: 0, nam_capture: 1, bypass: 2 });
   });
 });
 
 describe("param edit coalescing", () => {
+  test("timeout fallback flushes even when CEF animation frames stall", async () => {
+    const batches = captureBatches();
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (() => 42) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = (() => {}) as typeof cancelAnimationFrame;
+    try {
+      postParam("drive_gain", 6.4);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(batches).toEqual([[{ id: "drive_gain", value: 6.4 }]]);
+    } finally {
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+      __flushParamEditsForTest();
+    }
+  });
+
+  test("rebinding cancels a stalled frame and lets the new instance schedule", async () => {
+    const batches = captureBatches();
+    const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+    const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (() => 42) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = (() => {}) as typeof cancelAnimationFrame;
+    try {
+      postParam("drive_gain", 3.3);
+      setActiveParamBinding({
+        pluginId: "rodharerist",
+        instanceId: "track-2::insert-7",
+        bindingGeneration: 2,
+      });
+      postParam("drive_gain", 8.8);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(batches).toEqual([[{ id: "drive_gain", value: 8.8 }]]);
+    } finally {
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+      __flushParamEditsForTest();
+    }
+  });
+
   test("repeated edits to one id flush as a single last-value entry", () => {
     const batches = captureBatches();
     postParam("drive_gain", 1.0);

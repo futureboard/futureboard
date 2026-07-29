@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client";
 import {
   categories,
   chainOrder,
+  completeParameters,
   defaultPath,
   models,
   parameterDefaults,
@@ -22,6 +23,7 @@ import {
 } from "./data";
 import { Layout } from "./Layout";
 import {
+  flushParamEditsNow,
   hasNativeBridge,
   postEnabled,
   postLoadNamCapture,
@@ -165,6 +167,9 @@ function applySnapshotToDsp(snap: RigSnapshot) {
       postParam(param.id, param.val);
     }
   }
+  // A snapshot is one logical transaction. Do not leave it waiting on a CEF
+  // animation frame (which may be throttled while the window is rebinding).
+  flushParamEditsNow();
 }
 
 function factorySnapshot(id: string): RigSnapshot | null {
@@ -220,7 +225,7 @@ export function RodhareistEditor({
   );
   const [parameters, setParameters] = useState<Record<string, Param[]>>(() =>
     boundSnapshot
-      ? cloneParameters(boundSnapshot.parameters)
+      ? completeParameters(boundSnapshot.parameters)
       : parametersForPreset(initial),
   );
   const [globals, setGlobals] = useState<GlobalState>(
@@ -328,7 +333,8 @@ export function RodhareistEditor({
     [currentPresetId],
   );
 
-  const params = parameters[activeModelId] ?? [];
+  const params =
+    parameters[activeModelId] ?? parameterDefaults[activeModelId] ?? [];
 
   useEffect(() => {
     applyCategoryTheme(activeCat);
@@ -426,7 +432,7 @@ export function RodhareistEditor({
       setStageModels(snap.stageModels);
       setPathOrder(snap.pathOrder);
       setBypassed(snap.bypassed);
-      setParameters(cloneParameters(snap.parameters));
+      setParameters(completeParameters(snap.parameters));
       setGlobals({ ...snap.globals });
       setModified(isDirty);
       applySnapshotToDsp(snap);
@@ -614,7 +620,6 @@ export function RodhareistEditor({
         liveRef.current.stageModels[cat] || models[cat]?.[0]?.id;
       if (!modelId) return;
       setActiveModelId(modelId);
-      postModel(categories[cat].node, modelId);
     },
     [],
   );
@@ -622,12 +627,20 @@ export function RodhareistEditor({
   const selectModel = useCallback(
     (id: string) => {
       const cat = liveRef.current.activeCat;
+      const selectedParams =
+        liveRef.current.parameters[id] ??
+        parameterDefaults[id]?.map((param) => ({ ...param })) ??
+        [];
       setActiveModelId(id);
       setStageModels((prev) => ({ ...prev, [cat]: id }));
+      if (liveRef.current.parameters[id] === undefined && selectedParams.length > 0) {
+        setParameters((prev) => ({ ...prev, [id]: selectedParams }));
+      }
       postModel(categories[cat].node, id);
-      for (const param of liveRef.current.parameters[id] ?? []) {
+      for (const param of selectedParams) {
         postParam(param.id, param.val);
       }
+      flushParamEditsNow();
       markDirty();
     },
     [markDirty],
@@ -635,11 +648,17 @@ export function RodhareistEditor({
 
   const toggleBypassFor = useCallback(
     (cat: CategoryId) => {
-      setBypassed((prev) => {
-        const nextBypass = !prev[cat];
-        postEnabled(categories[cat].node, !nextBypass);
-        return { ...prev, [cat]: nextBypass };
-      });
+      const nextBypass = !liveRef.current.bypassed[cat];
+      const nextBypassed = {
+        ...liveRef.current.bypassed,
+        [cat]: nextBypass,
+      };
+      // Mirror synchronously so two rapid clicks cannot both derive from the
+      // same pre-render value.
+      liveRef.current.bypassed = nextBypassed;
+      setBypassed(nextBypassed);
+      postEnabled(categories[cat].node, !nextBypass);
+      flushParamEditsNow();
       markDirty();
     },
     [markDirty],
@@ -651,11 +670,14 @@ export function RodhareistEditor({
   );
 
   const toggleGlobalBypass = useCallback(() => {
-    setGlobals((prev) => {
-      const next = { ...prev, globalBypass: !prev.globalBypass };
-      postParam(POWER_PARAM_ID, next.globalBypass ? 0 : 1);
-      return next;
-    });
+    const next = {
+      ...liveRef.current.globals,
+      globalBypass: !liveRef.current.globals.globalBypass,
+    };
+    liveRef.current.globals = next;
+    setGlobals(next);
+    postParam(POWER_PARAM_ID, next.globalBypass ? 0 : 1);
+    flushParamEditsNow();
     markDirty();
   }, [markDirty]);
 
@@ -698,11 +720,13 @@ export function RodhareistEditor({
     setStageModels((prev) => ({ ...prev, cab: "ir" }));
     if (liveRef.current.activeCat === "cab") setActiveModelId("ir");
     postModel(categories.cab.node, "ir");
+    flushParamEditsNow();
     markDirty();
   }, [markDirty]);
 
   const bypassCab = useCallback(() => {
     postEnabled(categories.cab.node, false);
+    flushParamEditsNow();
     setBypassed((prev) => ({ ...prev, cab: true }));
     markDirty();
   }, [markDirty]);
@@ -725,6 +749,7 @@ export function RodhareistEditor({
           }
         }
       }
+      flushParamEditsNow();
     },
     [markDirty],
   );
@@ -735,7 +760,7 @@ export function RodhareistEditor({
       markDirty();
       const modelId = liveRef.current.activeModelId;
       setParameters((prev) => {
-        const modelParams = prev[modelId];
+        const modelParams = prev[modelId] ?? parameterDefaults[modelId];
         if (!modelParams) return prev;
         return {
           ...prev,
@@ -780,6 +805,7 @@ export function RodhareistEditor({
 
       postModel(categories[cat].node, clip.modelId);
       for (const p of clip.params) postParam(p.id, p.val);
+      flushParamEditsNow();
       markDirty();
     },
     [clipboard, markDirty],
@@ -797,6 +823,7 @@ export function RodhareistEditor({
         [modelId]: defaults.map((p) => ({ ...p })),
       }));
       for (const p of defaults) postParam(p.id, p.val);
+      flushParamEditsNow();
       markDirty();
     },
     [markDirty],

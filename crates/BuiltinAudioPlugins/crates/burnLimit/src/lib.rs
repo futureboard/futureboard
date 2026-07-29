@@ -1,7 +1,7 @@
 //! BurnLimit — modern brickwall limiter (Pro-L / Ozone–inspired).
 //!
-//! Lookahead peak limiting with style curves. True Peak adds a fixed ISP-style
-//! headroom margin (not full oversampled inter-sample peak detection).
+//! Lookahead peak limiting with style curves and a 4× cubic inter-sample peak
+//! detector. The audio path remains allocation-free and bounded.
 
 use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
@@ -20,11 +20,14 @@ const CLIP_THRESHOLD: f32 = 1.0;
 const RMS_WINDOW_SECONDS: f32 = 0.300;
 const PEAK_FALL_SECONDS: f32 = 0.400;
 
-/// Maximum lookahead buffer. 10 ms at 96 kHz is 960 samples; pad for safety.
-const MAX_LOOKAHEAD_SAMPLES: usize = 1_024;
-
-/// Extra headroom when True Peak is engaged (approximation of ISP margin).
-const TRUE_PEAK_MARGIN_DB: f32 = 1.0;
+/// Maximum lookahead buffer. Covers the declared 10 ms range through 384 kHz.
+const MAX_LOOKAHEAD_SAMPLES: usize = 4_096;
+const TRUE_PEAK_PHASES: [f32; 3] = [0.25, 0.5, 0.75];
+/// Four-point cubic interpolation needs one future sample. Three samples of
+/// latency ensure the complete cubic support is known before its first sample
+/// exits the delay line.
+const TRUE_PEAK_MIN_DELAY_SAMPLES: usize = 3;
+const TRUE_PEAK_GAIN_HOLD_SAMPLES: usize = 4;
 
 /// Limiter character. Wire order is the persisted contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,9 +145,9 @@ impl Meters {
     }
 
     #[inline]
-    fn push(&mut self, input: f32, output: f32) {
-        let in_abs = input.abs();
-        let out_abs = output.abs();
+    fn push_stereo(&mut self, in_l: f32, in_r: f32, out_l: f32, out_r: f32) {
+        let in_abs = in_l.abs().max(in_r.abs());
+        let out_abs = out_l.abs().max(out_r.abs());
 
         self.in_peak = if in_abs > self.in_peak {
             in_abs
@@ -157,8 +160,10 @@ impl Meters {
             self.out_peak * self.peak_coeff
         };
 
-        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * input * input;
-        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * output * output;
+        let input_ms = (in_l * in_l + in_r * in_r) * 0.5;
+        let output_ms = (out_l * out_l + out_r * out_r) * 0.5;
+        self.in_ms = self.rms_coeff * self.in_ms + (1.0 - self.rms_coeff) * input_ms;
+        self.out_ms = self.rms_coeff * self.out_ms + (1.0 - self.rms_coeff) * output_ms;
 
         if in_abs >= CLIP_THRESHOLD {
             self.in_clip = true;
@@ -166,6 +171,47 @@ impl Meters {
         if out_abs >= CLIP_THRESHOLD {
             self.out_clip = true;
         }
+    }
+}
+
+/// Streaming 4× inter-sample peak estimator. Once four samples are present,
+/// Catmull-Rom interpolation evaluates the interval between the middle pair.
+/// No buffers grow and no work depends on signal content.
+#[derive(Debug, Clone, Copy, Default)]
+struct TruePeakDetector {
+    history: [f32; 4],
+    filled: usize,
+}
+
+impl TruePeakDetector {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    fn push(&mut self, sample: f32) -> f32 {
+        self.history.rotate_left(1);
+        self.history[3] = sample;
+        self.filled = (self.filled + 1).min(4);
+        if self.filled < 4 {
+            return sample.abs();
+        }
+
+        let [p0, p1, p2, p3] = self.history;
+        let mut peak = p1.abs().max(p2.abs());
+        for phase in TRUE_PEAK_PHASES {
+            // Catmull-Rom cubic through p1..p2. This is a detector only; audio
+            // is not resampled, so it adds no coloration to the signal path.
+            let phase2 = phase * phase;
+            let phase3 = phase2 * phase;
+            let interpolated = 0.5
+                * ((2.0 * p1)
+                    + (-p0 + p2) * phase
+                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * phase2
+                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * phase3);
+            peak = peak.max(interpolated.abs());
+        }
+        peak
     }
 }
 
@@ -343,6 +389,12 @@ pub struct Dsp {
     envelope_l: f32,
     envelope_r: f32,
     gr_db: f32,
+    true_peak_l: TruePeakDetector,
+    true_peak_r: TruePeakDetector,
+    true_peak_gain_l: f32,
+    true_peak_gain_r: f32,
+    true_peak_hold_l: usize,
+    true_peak_hold_r: usize,
     delay: LookaheadLine,
     meters: Meters,
 }
@@ -361,6 +413,12 @@ impl Dsp {
             envelope_l: 0.0,
             envelope_r: 0.0,
             gr_db: 0.0,
+            true_peak_l: TruePeakDetector::default(),
+            true_peak_r: TruePeakDetector::default(),
+            true_peak_gain_l: 1.0,
+            true_peak_gain_r: 1.0,
+            true_peak_hold_l: 0,
+            true_peak_hold_r: 0,
             delay: LookaheadLine::new(),
             meters: Meters::new(sr),
         };
@@ -429,13 +487,19 @@ impl Dsp {
         self.release_coeff = time_constant(self.sample_rate, self.params.release_ms * 0.001);
         self.input_gain = db_to_linear(self.params.gain_db);
 
-        let mut ceiling_db = self.params.ceiling_db;
-        if self.params.true_peak {
-            ceiling_db -= TRUE_PEAK_MARGIN_DB;
-        }
-        self.ceiling_linear = db_to_linear(ceiling_db);
+        self.ceiling_linear = db_to_linear(self.params.ceiling_db);
 
-        let delay = ((self.params.lookahead_ms * 0.001) * self.sample_rate).round() as usize;
+        let mut delay = ((self.params.lookahead_ms * 0.001) * self.sample_rate).round() as usize;
+        if self.params.true_peak {
+            delay = delay.max(TRUE_PEAK_MIN_DELAY_SAMPLES);
+        } else {
+            self.true_peak_l.reset();
+            self.true_peak_r.reset();
+            self.true_peak_gain_l = 1.0;
+            self.true_peak_gain_r = 1.0;
+            self.true_peak_hold_l = 0;
+            self.true_peak_hold_r = 0;
+        }
         self.delay.set_delay(delay.min(MAX_LOOKAHEAD_SAMPLES - 1));
     }
 
@@ -446,18 +510,19 @@ impl Dsp {
             return 1.0;
         }
         let ceiling = self.ceiling_linear.max(1.0e-6);
-        let over_db = linear_to_db(level) - linear_to_db(ceiling);
-        if over_db <= 0.0 {
+        let level_db = linear_to_db(level);
+        let threshold_db = linear_to_db(ceiling);
+        let knee = self.knee_db.max(1.0e-6);
+        let knee_start = threshold_db - knee * 0.5;
+        if level_db <= knee_start {
             return 1.0;
         }
-        let half_knee = self.knee_db * 0.5;
-        let gr_db = if over_db >= half_knee {
-            // Brickwall: take everything above the ceiling off.
-            over_db
+        let knee_end = threshold_db + knee * 0.5;
+        let gr_db = if level_db >= knee_end {
+            level_db - threshold_db
         } else {
-            // Soft approach into the brickwall.
-            let t = over_db + half_knee;
-            (t * t) / (2.0 * self.knee_db.max(1.0e-6))
+            let into_knee = level_db - knee_start;
+            (into_knee * into_knee) / (2.0 * knee)
         };
         db_to_linear(-gr_db)
     }
@@ -467,6 +532,18 @@ impl Dsp {
         let coeff = if target > *envelope { attack } else { release };
         *envelope = coeff * *envelope + (1.0 - coeff) * target;
     }
+
+    #[inline]
+    fn smooth_safety_gain(gain: &mut f32, hold: &mut usize, target: f32, release: f32) {
+        if target <= *gain {
+            *gain = target;
+            *hold = TRUE_PEAK_GAIN_HOLD_SAMPLES;
+        } else if *hold > 0 {
+            *hold -= 1;
+        } else {
+            *gain = release * *gain + (1.0 - release) * target;
+        }
+    }
 }
 
 impl StereoEffect for Dsp {
@@ -474,6 +551,12 @@ impl StereoEffect for Dsp {
         self.envelope_l = 0.0;
         self.envelope_r = 0.0;
         self.gr_db = 0.0;
+        self.true_peak_l.reset();
+        self.true_peak_r.reset();
+        self.true_peak_gain_l = 1.0;
+        self.true_peak_gain_r = 1.0;
+        self.true_peak_hold_l = 0;
+        self.true_peak_hold_r = 0;
         self.delay.reset();
         self.meters.reset();
     }
@@ -485,19 +568,65 @@ impl StereoEffect for Dsp {
     }
 
     fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let in_sum = (left + right) * 0.5;
+        // The delay always carries the unprocessed signal. This keeps bypass
+        // and dry/wet mixing aligned with the latency reported to the host.
+        let (delayed_l, delayed_r) = self.delay.push_read(left, right);
         if !self.params.power {
-            self.meters.push(in_sum, in_sum);
+            self.meters.push_stereo(left, right, delayed_l, delayed_r);
+            self.envelope_l = 0.0;
+            self.envelope_r = 0.0;
             self.gr_db = 0.0;
-            return (left, right);
+            self.true_peak_l.reset();
+            self.true_peak_r.reset();
+            self.true_peak_gain_l = 1.0;
+            self.true_peak_gain_r = 1.0;
+            self.true_peak_hold_l = 0;
+            self.true_peak_hold_r = 0;
+            return (delayed_l, delayed_r);
         }
 
         let driven_l = left * self.input_gain;
         let driven_r = right * self.input_gain;
 
         // Detect on the undelayed path so GR can start before the peak exits.
-        let peak_l = driven_l.abs();
-        let peak_r = driven_r.abs();
+        let peak_l = if self.params.true_peak {
+            self.true_peak_l.push(driven_l)
+        } else {
+            driven_l.abs()
+        };
+        let peak_r = if self.params.true_peak {
+            self.true_peak_r.push(driven_r)
+        } else {
+            driven_r.abs()
+        };
+        if self.params.true_peak {
+            let safety_l = (self.ceiling_linear / peak_l.max(1.0e-12)).min(1.0);
+            let safety_r = (self.ceiling_linear / peak_r.max(1.0e-12)).min(1.0);
+            if self.params.stereo_link {
+                let linked = safety_l.min(safety_r);
+                Self::smooth_safety_gain(
+                    &mut self.true_peak_gain_l,
+                    &mut self.true_peak_hold_l,
+                    linked,
+                    self.release_coeff,
+                );
+                self.true_peak_gain_r = self.true_peak_gain_l;
+                self.true_peak_hold_r = self.true_peak_hold_l;
+            } else {
+                Self::smooth_safety_gain(
+                    &mut self.true_peak_gain_l,
+                    &mut self.true_peak_hold_l,
+                    safety_l,
+                    self.release_coeff,
+                );
+                Self::smooth_safety_gain(
+                    &mut self.true_peak_gain_r,
+                    &mut self.true_peak_hold_r,
+                    safety_r,
+                    self.release_coeff,
+                );
+            }
+        }
         if self.params.stereo_link {
             let linked = peak_l.max(peak_r);
             Self::smooth_envelope(
@@ -524,22 +653,37 @@ impl StereoEffect for Dsp {
 
         let gain_l = self.compute_gain(self.envelope_l);
         let gain_r = self.compute_gain(self.envelope_r);
-        let gain = if self.params.stereo_link {
-            gain_l.min(gain_r)
+        let delayed_driven_l = delayed_l * self.input_gain;
+        let delayed_driven_r = delayed_r * self.input_gain;
+        // A final sample-peak safety gain makes ceiling compliance independent
+        // of style attack. The lookahead envelope still supplies the musical
+        // shape; this guard only catches what would otherwise overshoot.
+        let safety_l = (self.ceiling_linear / delayed_driven_l.abs().max(1.0e-12)).min(1.0);
+        let safety_r = (self.ceiling_linear / delayed_driven_r.abs().max(1.0e-12)).min(1.0);
+        let (applied_l, applied_r) = if self.params.stereo_link {
+            let linked = gain_l
+                .min(gain_r)
+                .min(self.true_peak_gain_l)
+                .min(self.true_peak_gain_r)
+                .min(safety_l)
+                .min(safety_r);
+            (linked, linked)
         } else {
-            // Still report the deeper of the two for the GR meter.
-            gain_l.min(gain_r)
+            (
+                gain_l.min(self.true_peak_gain_l).min(safety_l),
+                gain_r.min(self.true_peak_gain_r).min(safety_r),
+            )
         };
-        self.gr_db = -linear_to_db(gain.max(1.0e-12));
+        let deepest_gain = applied_l.min(applied_r);
+        self.gr_db = -linear_to_db(deepest_gain.max(1.0e-12));
 
-        let (delayed_l, delayed_r) = self.delay.push_read(driven_l, driven_r);
-        let wet_l = delayed_l * if self.params.stereo_link { gain } else { gain_l };
-        let wet_r = delayed_r * if self.params.stereo_link { gain } else { gain_r };
+        let wet_l = delayed_driven_l * applied_l;
+        let wet_r = delayed_driven_r * applied_r;
 
         let amount = self.params.mix / 100.0;
-        let out_l = mix(left, wet_l, amount);
-        let out_r = mix(right, wet_r, amount);
-        self.meters.push(in_sum, (out_l + out_r) * 0.5);
+        let out_l = mix(delayed_l, wet_l, amount);
+        let out_r = mix(delayed_r, wet_r, amount);
+        self.meters.push_stereo(driven_l, driven_r, out_l, out_r);
         (out_l, out_r)
     }
 }
@@ -602,10 +746,35 @@ mod tests {
         }
         let ceiling = db_to_linear(-1.0);
         assert!(
-            peak <= ceiling * 1.05,
+            peak <= ceiling * 1.000_01,
             "peak {peak} exceeded ceiling {ceiling}"
         );
         assert!(dsp.gain_reduction_db() > 1.0);
+    }
+
+    #[test]
+    fn transient_ceiling_is_strict_for_every_style() {
+        for style in [Style::Clean, Style::Punch, Style::Modern, Style::Clip] {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut params = default_params();
+            params.style = style;
+            params.gain_db = 24.0;
+            params.ceiling_db = -3.0;
+            params.true_peak = true;
+            params.lookahead_ms = 0.0;
+            params.mix = 100.0;
+            dsp.set_params(params);
+
+            let ceiling = db_to_linear(-3.0);
+            for index in 0..512 {
+                let sample = if index % 31 == 0 { 1.0 } else { -0.91 };
+                let (left, right) = dsp.process_stereo(sample, -sample);
+                assert!(
+                    left.abs().max(right.abs()) <= ceiling * 1.000_01,
+                    "{style:?} exceeded ceiling at sample {index}: {left}, {right}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -615,6 +784,89 @@ mod tests {
         params.lookahead_ms = 5.0;
         dsp.set_params(params);
         assert_eq!(dsp.latency_samples(), 240);
+    }
+
+    #[test]
+    fn true_peak_has_detector_latency_but_does_not_lower_the_user_ceiling() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.lookahead_ms = 0.0;
+        params.true_peak = true;
+        params.ceiling_db = -1.0;
+        dsp.set_params(params);
+        assert_eq!(dsp.latency_samples(), TRUE_PEAK_MIN_DELAY_SAMPLES);
+        assert!((dsp.ceiling_linear - db_to_linear(-1.0)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn true_peak_detector_catches_intersample_overshoot() {
+        let mut detector = TruePeakDetector::default();
+        let peak = [-1.0, 1.0, 1.0, -1.0]
+            .into_iter()
+            .fold(0.0_f32, |peak, sample| peak.max(detector.push(sample)));
+        assert!(peak > 1.2, "expected cubic overshoot, measured {peak}");
+    }
+
+    #[test]
+    fn true_peak_output_holds_reconstructed_signal_under_ceiling() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.style = Style::Clip;
+        params.gain_db = 0.0;
+        params.ceiling_db = -1.0;
+        params.lookahead_ms = 0.0;
+        params.true_peak = true;
+        params.mix = 100.0;
+        dsp.set_params(params);
+
+        // The samples themselves are below -1 dBFS, but Catmull-Rom
+        // reconstruction reaches roughly +0.5 dBFS without TP limiting.
+        let pattern = [-0.85, 0.85, 0.85, -0.85];
+        let mut output_detector = TruePeakDetector::default();
+        let mut reconstructed_peak = 0.0_f32;
+        for index in 0..1_024 {
+            let sample = pattern[index % pattern.len()];
+            let (left, _) = dsp.process_stereo(sample, sample);
+            reconstructed_peak = reconstructed_peak.max(output_detector.push(left));
+        }
+
+        let ceiling = db_to_linear(-1.0);
+        assert!(
+            reconstructed_peak <= ceiling * 1.001,
+            "reconstructed peak {reconstructed_peak} exceeded ceiling {ceiling}"
+        );
+    }
+
+    #[test]
+    fn dry_wet_paths_are_latency_aligned() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.gain_db = 0.0;
+        params.lookahead_ms = 1.0;
+        params.true_peak = false;
+        params.mix = 50.0;
+        dsp.set_params(params);
+
+        let delay = dsp.latency_samples();
+        for index in 0..=delay {
+            let input = if index == 0 { 0.25 } else { 0.0 };
+            let (left, right) = dsp.process_stereo(input, input);
+            let expected = if index == delay { 0.25 } else { 0.0 };
+            assert!((left - expected).abs() < 1.0e-6);
+            assert!((right - expected).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn anti_phase_input_does_not_cancel_the_meters() {
+        let mut dsp = Dsp::new(48_000.0);
+        for _ in 0..512 {
+            let _ = dsp.process_stereo(0.75, -0.75);
+        }
+        let frame = dsp.meter_frame();
+        assert!(frame.in_peak >= 0.74);
+        assert!(frame.in_rms > 0.0);
+        assert!(frame.out_peak > 0.0);
     }
 
     #[test]

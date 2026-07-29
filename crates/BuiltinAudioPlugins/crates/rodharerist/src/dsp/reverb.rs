@@ -35,8 +35,6 @@ const MAX_PREDELAY_S: f32 = 0.060;
 
 const FIXED_GAIN: f32 = 0.015;
 const SCALE_DAMP: f32 = 0.4;
-const ALLPASS_FEEDBACK: f32 = 0.5;
-
 /// Per-voicing tuning. A model switch re-targets these; nothing reallocates.
 #[derive(Debug, Clone, Copy)]
 struct Voicing {
@@ -51,6 +49,12 @@ struct Voicing {
     fb_scale: f32,
     /// Comb damping (HF loss per pass): darker tails at higher values.
     damp: f32,
+    /// Stereo input folded toward mono before entering the late field.
+    crossfeed: f32,
+    /// Series-allpass regeneration; higher values produce a denser tail.
+    diffusion: f32,
+    /// Level of the explicit early-reflection tap cluster.
+    early_gain: f32,
 }
 
 impl Voicing {
@@ -63,6 +67,9 @@ impl Voicing {
                 fb_offset: 0.70,
                 fb_scale: 0.28,
                 damp: 0.28,
+                crossfeed: 0.30,
+                diffusion: 0.68,
+                early_gain: 0.08,
             },
             // Short, damped, early — a tight tracking room.
             ReverbModel::Room => Self {
@@ -71,6 +78,9 @@ impl Voicing {
                 fb_offset: 0.64,
                 fb_scale: 0.24,
                 damp: 0.55,
+                crossfeed: 0.08,
+                diffusion: 0.42,
+                early_gain: 0.38,
             },
             // Long predelay, long tail, gentle damping — a large hall.
             ReverbModel::Hall => Self {
@@ -79,6 +89,9 @@ impl Voicing {
                 fb_offset: 0.74,
                 fb_scale: 0.245,
                 damp: 0.36,
+                crossfeed: 0.42,
+                diffusion: 0.58,
+                early_gain: 0.18,
             },
             // Hall-sized bed with an octave-up voice regenerating in the tail.
             ReverbModel::Shimmer => Self {
@@ -87,6 +100,9 @@ impl Voicing {
                 fb_offset: 0.74,
                 fb_scale: 0.235,
                 damp: 0.40,
+                crossfeed: 0.34,
+                diffusion: 0.62,
+                early_gain: 0.14,
             },
         }
     }
@@ -258,10 +274,10 @@ impl Allpass {
     }
 
     #[inline]
-    fn process(&mut self, input: f32) -> f32 {
+    fn process(&mut self, input: f32, feedback: f32) -> f32 {
         let buffered = self.buffer[self.index];
         let output = -input + buffered;
-        self.buffer[self.index] = input + buffered * ALLPASS_FEEDBACK;
+        self.buffer[self.index] = input + buffered * feedback;
         self.index += 1;
         if self.index >= self.buffer.len() {
             self.index = 0;
@@ -288,11 +304,15 @@ pub(super) struct PlateReverb {
     mix: Smoothed,
     damp: Smoothed,
     size: Smoothed,
+    crossfeed: Smoothed,
+    diffusion: Smoothed,
+    early_gain: Smoothed,
     shimmer: Smoothed,
     predelay_samples: Smoothed,
     /// Octave-up energy carried into the next block's comb input, so the
     /// transposed voice regenerates. Bounded to keep the shimmer loop stable.
-    shimmer_fb: f32,
+    shimmer_fb_l: f32,
+    shimmer_fb_r: f32,
 }
 
 impl PlateReverb {
@@ -315,9 +335,13 @@ impl PlateReverb {
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 0.55),
             damp: Smoothed::new(sr, SMOOTH_SECONDS, base.damp),
             size: Smoothed::new(sr, SMOOTH_SECONDS, base.size),
+            crossfeed: Smoothed::new(sr, SMOOTH_SECONDS, base.crossfeed),
+            diffusion: Smoothed::new(sr, SMOOTH_SECONDS, base.diffusion),
+            early_gain: Smoothed::new(sr, SMOOTH_SECONDS, base.early_gain),
             shimmer: Smoothed::new(sr, SMOOTH_SECONDS, 0.0),
             predelay_samples: Smoothed::new(sr, PREDELAY_SMOOTH_SECONDS, 1.0),
-            shimmer_fb: 0.0,
+            shimmer_fb_l: 0.0,
+            shimmer_fb_r: 0.0,
         };
         reverb.rebuild();
         reverb
@@ -329,6 +353,9 @@ impl PlateReverb {
         self.mix.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.damp.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.size.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.crossfeed.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.diffusion.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.early_gain.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.shimmer.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.predelay_samples
             .set_time(self.sample_rate, PREDELAY_SMOOTH_SECONDS);
@@ -348,11 +375,15 @@ impl PlateReverb {
         self.predelay_r.clear();
         self.shimmer_l.clear();
         self.shimmer_r.clear();
-        self.shimmer_fb = 0.0;
+        self.shimmer_fb_l = 0.0;
+        self.shimmer_fb_r = 0.0;
         self.feedback.snap();
         self.mix.snap();
         self.damp.snap();
         self.size.snap();
+        self.crossfeed.snap();
+        self.diffusion.snap();
+        self.early_gain.snap();
         self.shimmer.snap();
         self.predelay_samples.snap();
     }
@@ -399,6 +430,9 @@ impl PlateReverb {
         self.mix.set_target((mix / 100.0).clamp(0.0, 1.0));
         self.damp.set_target(v.damp);
         self.size.set_target(v.size);
+        self.crossfeed.set_target(v.crossfeed);
+        self.diffusion.set_target(v.diffusion);
+        self.early_gain.set_target(v.early_gain);
         self.shimmer.set_target(if model == ReverbModel::Shimmer {
             (shimmer / 100.0).clamp(0.0, 1.0)
         } else {
@@ -414,37 +448,60 @@ impl PlateReverb {
         let mix_amount = self.mix.tick();
         let damp = self.damp.tick();
         let size = self.size.tick().clamp(0.2, 1.0);
+        let crossfeed = self.crossfeed.tick().clamp(0.0, 0.5);
+        let diffusion = self.diffusion.tick().clamp(0.0, 0.75);
+        let early_gain = self.early_gain.tick().clamp(0.0, 0.5);
         let shimmer = self.shimmer.tick();
         let predelay = self.predelay_samples.tick();
 
         let damp1 = damp * SCALE_DAMP;
         let damp2 = 1.0 - damp1;
 
-        // Predelay the dry sum before the reverb bank; the shimmer voice's
-        // octave-up energy from the previous sample re-enters here.
+        // Keep the channels independent before controlled crossfeed. Summing
+        // L+R here used to erase anti-phase and wide stereo material from the
+        // wet path entirely.
         self.predelay_l.push(left);
         self.predelay_r.push(right);
         let pd_l = self.predelay_l.read(predelay);
         let pd_r = self.predelay_r.read(predelay);
-        let input = (pd_l + pd_r) * FIXED_GAIN + self.shimmer_fb;
+        let mono = (pd_l + pd_r) * 0.5;
+        let input_l =
+            (pd_l * (1.0 - crossfeed) + mono * crossfeed) * FIXED_GAIN + self.shimmer_fb_l;
+        let input_r =
+            (pd_r * (1.0 - crossfeed) + mono * crossfeed) * FIXED_GAIN + self.shimmer_fb_r;
+
+        // A short asymmetric tap cluster gives Room a real early-reflection
+        // algorithm instead of merely shortening the same late tail. The other
+        // voicings retain a quieter amount for spatial definition.
+        let sr = self.sample_rate;
+        let early_l = self.predelay_l.read(sr * 0.0031) * 0.44
+            + self.predelay_r.read(sr * 0.0053) * 0.28
+            - self.predelay_l.read(sr * 0.0117) * 0.18
+            + self.predelay_r.read(sr * 0.0179) * 0.10;
+        let early_r = self.predelay_r.read(sr * 0.0037) * 0.44
+            + self.predelay_l.read(sr * 0.0061) * 0.28
+            - self.predelay_r.read(sr * 0.0131) * 0.18
+            + self.predelay_l.read(sr * 0.0193) * 0.10;
 
         let mut wet_l = 0.0;
         for (comb, &base) in self.combs_l.iter_mut().zip(self.comb_base_l.iter()) {
             let read_len = ((base as f32 * size) as usize).max(1);
-            wet_l += comb.process(input, read_len, feedback, damp1, damp2);
+            wet_l += comb.process(input_l, read_len, feedback, damp1, damp2);
         }
         let mut wet_r = 0.0;
         for (comb, &base) in self.combs_r.iter_mut().zip(self.comb_base_r.iter()) {
             let read_len = ((base as f32 * size) as usize).max(1);
-            wet_r += comb.process(input, read_len, feedback, damp1, damp2);
+            wet_r += comb.process(input_r, read_len, feedback, damp1, damp2);
         }
 
         for allpass in &mut self.allpass_l {
-            wet_l = allpass.process(wet_l);
+            wet_l = allpass.process(wet_l, diffusion);
         }
         for allpass in &mut self.allpass_r {
-            wet_r = allpass.process(wet_r);
+            wet_r = allpass.process(wet_r, diffusion);
         }
+        wet_l += early_l * early_gain;
+        wet_r += early_r * early_gain;
 
         // Shimmer: transpose the diffused tail an octave up and carry it into
         // the next sample's comb input, so the shifted voice regenerates and
@@ -452,11 +509,18 @@ impl PlateReverb {
         // and scaled well below unity so the second loop can only sustain, not
         // run away, on top of the comb bank's own sub-unity feedback.
         if shimmer > 1.0e-4 {
-            let up = (self.shimmer_l.process(wet_l) + self.shimmer_r.process(wet_r)) * 0.5;
-            let fb = (up * shimmer * FIXED_GAIN * 8.0).clamp(-4.0, 4.0);
-            self.shimmer_fb = if fb.is_finite() { fb } else { 0.0 };
+            let up_l = self.shimmer_l.process(wet_l);
+            let up_r = self.shimmer_r.process(wet_r);
+            // This is a second feedback loop around the already-regenerating
+            // comb bank, so its small-signal gain must remain conservative.
+            // tanh bounds pathological buildup without hard-clipping the tail.
+            let fb_l = (up_l * shimmer * FIXED_GAIN * 0.75).tanh();
+            let fb_r = (up_r * shimmer * FIXED_GAIN * 0.75).tanh();
+            self.shimmer_fb_l = if fb_l.is_finite() { fb_l } else { 0.0 };
+            self.shimmer_fb_r = if fb_r.is_finite() { fb_r } else { 0.0 };
         } else {
-            self.shimmer_fb = 0.0;
+            self.shimmer_fb_l = 0.0;
+            self.shimmer_fb_r = 0.0;
         }
 
         (mix(left, wet_l, mix_amount), mix(right, wet_r, mix_amount))

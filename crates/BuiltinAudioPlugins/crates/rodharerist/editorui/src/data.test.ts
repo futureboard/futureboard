@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  completeParameters,
   models,
   parameterDefaults,
   presetsData,
@@ -65,5 +66,46 @@ describe("factory presets", () => {
         );
       }
     }
+  });
+});
+
+describe("model parameter schema", () => {
+  test("every reverb model exposes its usable controls", () => {
+    expect(parameterDefaults.plate!.map((param) => param.id)).toEqual([
+      "reverb_decay",
+      "reverb_mix",
+    ]);
+    expect(parameterDefaults.room!.map((param) => param.id)).toEqual([
+      "reverb_decay",
+      "reverb_mix",
+    ]);
+    expect(parameterDefaults.hall!.map((param) => param.id)).toEqual([
+      "reverb_decay",
+      "reverb_mix",
+    ]);
+    expect(parameterDefaults.shimmer!.map((param) => param.id)).toEqual([
+      "reverb_decay",
+      "reverb_mix",
+      "reverb_shimmer",
+    ]);
+  });
+
+  test("legacy snapshots are completed before another model is selected", () => {
+    const legacy = {
+      plate: parameterDefaults.plate!.map((param) => ({ ...param, val: 3 })),
+      shimmer: parameterDefaults.shimmer!
+        .filter((param) => param.id !== "reverb_shimmer")
+        .map((param) => ({ ...param })),
+    };
+    const completed = completeParameters(legacy);
+
+    expect(completed.room).toEqual(parameterDefaults.room);
+    expect(completed.hall).toEqual(parameterDefaults.hall);
+    expect(completed.shimmer!.map((param) => param.id)).toEqual([
+      "reverb_decay",
+      "reverb_mix",
+      "reverb_shimmer",
+    ]);
+    expect(completed.plate!.every((param) => param.val === 3)).toBe(true);
   });
 });

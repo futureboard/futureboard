@@ -802,6 +802,54 @@ mod builtin_processor_tests {
         assert!(output.iter().any(|sample| sample.abs() > 1.0e-6));
     }
 
+    #[test]
+    fn rodhareist_reverb_model_wire_reaches_distinct_algorithms() {
+        let mut params = rodharerist::default_params();
+        params.stage_order = [None; rodharerist::PATH_SLOTS];
+        params.stage_order[0] = Some(rodharerist::StageKind::Reverb);
+        params.reverb_mix = 100.0;
+        params.reverb_decay_s = 4.0;
+        let state = rodharerist::RodhareistState::new(params)
+            .to_json()
+            .expect("state serializes");
+        let model_param =
+            rodharerist::ui_param_index("reverb_model").expect("reverb model in wire table");
+
+        let render = |model_index: f32| {
+            let processor = BuiltinHostProcessor::rodhareist(48_000, Some(&state));
+            processor.apply_param(model_param, model_index);
+            let mut rendered = Vec::with_capacity(32_768 * 2);
+            for block in 0..128 {
+                let mut in_l = [0.0f32; 256];
+                let mut in_r = [0.0f32; 256];
+                if block == 0 {
+                    in_l[0] = 1.0;
+                    in_r[0] = 0.25;
+                }
+                let mut output = [0.0f32; 512];
+                processor.process_block(&in_l, &in_r, &mut output, 256);
+                rendered.extend_from_slice(&output);
+            }
+            rendered
+        };
+
+        let room = render(1.0);
+        let hall = render(2.0);
+        let difference = room
+            .iter()
+            .zip(hall.iter())
+            .map(|(room, hall)| {
+                let delta = room - hall;
+                delta * delta
+            })
+            .sum::<f32>()
+            / room.len() as f32;
+        assert!(
+            difference.sqrt() > 1.0e-4,
+            "reverb_model wire did not switch the hosted DSP algorithm"
+        );
+    }
+
     /// Wire-index params reach the DSP: powering the unit off through the
     /// shared table's index mutes the output; out-of-range indices are no-ops.
     #[test]
@@ -1270,24 +1318,38 @@ mod builtin_processor_tests {
             .expect("state serializes");
 
         let restored = BuiltinHostProcessor::burnlimit(48_000, Some(&json));
-        let in_l = [0.25f32; 32];
-        let in_r = [-0.5f32; 32];
-        let mut output = [0.0f32; 64];
-        restored.process_block(&in_l, &in_r, &mut output, 32);
-        for i in 0..32 {
-            assert_eq!(output[i * 2], in_l[i], "restored power-off must bypass");
-            assert_eq!(output[i * 2 + 1], in_r[i], "restored power-off must bypass");
+        let latency = restored.latency_samples();
+        let frames = latency + 32;
+        let in_l = vec![0.25f32; frames];
+        let in_r = vec![-0.5f32; frames];
+        let mut output = vec![0.0f32; frames * 2];
+        restored.process_block(&in_l, &in_r, &mut output, frames);
+        for i in 0..latency {
+            assert_eq!(output[i * 2], 0.0, "bypass must preserve host latency");
+            assert_eq!(output[i * 2 + 1], 0.0, "bypass must preserve host latency");
+        }
+        for i in latency..frames {
+            assert_eq!(
+                output[i * 2],
+                in_l[i - latency],
+                "restored power-off must bypass after latency"
+            );
+            assert_eq!(
+                output[i * 2 + 1],
+                in_r[i - latency],
+                "restored power-off must bypass after latency"
+            );
         }
         let frame = restored.meter_frame().expect("frame is published");
         assert_eq!(frame.gain_reduction_db, 0.0);
 
         restored.apply_param(u32::MAX, 1.0);
         restored.apply_param(burnlimit::UI_PARAM_IDS.len() as u32, 1.0);
-        restored.process_block(&in_l, &in_r, &mut output, 32);
+        restored.process_block(&in_l, &in_r, &mut output, frames);
         assert!(output.iter().all(|sample| sample.is_finite()));
 
         let fallback = BuiltinHostProcessor::burnlimit(48_000, Some("not json"));
-        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        fallback.process_block(&in_l, &in_r, &mut output, frames);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
 

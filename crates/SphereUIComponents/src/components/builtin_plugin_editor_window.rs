@@ -331,6 +331,8 @@ enum InboundMsg {
     },
     #[serde(rename = "futureboard.requestSelectInstance", rename_all = "camelCase")]
     RequestSelectInstance { instance_id: String },
+    #[serde(rename = "futureboard.globalCommand", rename_all = "camelCase")]
+    GlobalCommand { command_id: String },
     /// Batched live parameter edits for the currently bound instance. Stale
     /// generations and mismatched instance ids are rejected, same as
     /// `instanceReady` — a message referencing a superseded selection must
@@ -409,6 +411,9 @@ enum InboundMsg {
 /// handle this window deliberately does not.
 pub type BuiltinParamForwarder = std::sync::Arc<dyn Fn(&PluginInstanceKey, u32, f32)>;
 
+pub type BuiltinGlobalCommandDispatcher =
+    std::sync::Arc<dyn Fn(&'static str, &mut gpui::App) + Send + Sync>;
+
 /// A validated `.nam` load request on its way to the plugin-host process.
 #[derive(Debug, Clone)]
 pub struct BuiltinNamLoadRequest {
@@ -461,6 +466,7 @@ pub type BuiltinSpectrumSource = std::sync::Arc<
 #[derive(Clone, Default)]
 pub struct BuiltinEditorHostOps {
     pub forward_param: Option<BuiltinParamForwarder>,
+    pub dispatch_global_command: Option<BuiltinGlobalCommandDispatcher>,
     pub load_nam_capture: Option<BuiltinNamLoadForwarder>,
     pub load_ir: Option<BuiltinIrLoadForwarder>,
     pub meter_source: Option<BuiltinMeterSource>,
@@ -471,6 +477,7 @@ pub struct BuiltinEditorHostOps {
 impl BuiltinEditorHostOps {
     fn is_empty(&self) -> bool {
         self.forward_param.is_none()
+            && self.dispatch_global_command.is_none()
             && self.load_nam_capture.is_none()
             && self.load_ir.is_none()
             && self.meter_source.is_none()
@@ -789,6 +796,43 @@ impl BuiltinPluginEditorWindow {
         self.post_to_view(&msg);
     }
 
+    /// Install the Studio shortcut bridge without requiring every embedded
+    /// editor bundle to duplicate it. Text/editable controls retain Space.
+    fn install_global_shortcut_bridge(&self) {
+        host::send_to_view(
+            self.view_id,
+            r#"
+(() => {
+  if (window.__futureboardGlobalShortcutsInstalled) return;
+  window.__futureboardGlobalShortcutsInstalled = true;
+  window.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const tag = target && target.tagName;
+    const editing = !!(target && (
+      target.isContentEditable ||
+      tag === "INPUT" ||
+      tag === "TEXTAREA" ||
+      tag === "SELECT"
+    ));
+    if (!editing && !event.repeat && event.code === "Space" &&
+        !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void fetch("/__bridge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "futureboard.globalCommand",
+          commandId: "transport:play-pause"
+        })
+      });
+    }
+  }, true);
+})();
+"#,
+        );
+    }
+
     fn post_to_view(&self, msg: &impl serde::Serialize) {
         let Ok(json) = serde_json::to_string(msg) else {
             return;
@@ -809,6 +853,7 @@ impl BuiltinPluginEditorWindow {
                 // unrelated crash.
                 self.attached_at = None;
                 self.bridge_ready_retries = 0;
+                self.install_global_shortcut_bridge();
                 self.push_selected_instance();
             }
             InboundMsg::InstanceReady {
@@ -846,6 +891,18 @@ impl BuiltinPluginEditorWindow {
                 };
                 self.select_instance(key, cx);
             }
+            InboundMsg::GlobalCommand { command_id } => {
+                let Some(dispatch) = self.host_ops.dispatch_global_command.as_ref() else {
+                    return;
+                };
+                match command_id.as_str() {
+                    "transport:play-pause" => dispatch("transport:play-pause", cx),
+                    _ => eprintln!(
+                        "[plugin-bridge] rejected global command plugin={} command={command_id}",
+                        self.plugin_id
+                    ),
+                }
+            }
             InboundMsg::SetParams {
                 instance_id,
                 binding_generation,
@@ -860,14 +917,14 @@ impl BuiltinPluginEditorWindow {
                     );
                     return;
                 }
-                let Some(active) = self.active_instance.as_ref() else {
+                let Some(active) = self.active_instance.clone() else {
                     return;
                 };
-                if wire_instance_id(active) != instance_id {
+                if wire_instance_id(&active) != instance_id {
                     eprintln!(
                         "[plugin-bridge] setParams instance mismatch plugin={} got={instance_id} active={}",
                         self.plugin_id,
-                        wire_instance_id(active)
+                        wire_instance_id(&active)
                     );
                     return;
                 }
@@ -878,12 +935,23 @@ impl BuiltinPluginEditorWindow {
                 };
                 for edit in &params {
                     match host::builtin_param_index(&self.plugin_id, &edit.id) {
-                        Some(index) => forwarder(active, index, edit.value),
+                        Some(index) => forwarder(&active, index, edit.value),
                         None => eprintln!(
                             "[plugin-bridge] setParams unknown param plugin={} id={}",
                             self.plugin_id, edit.id
                         ),
                     }
+                }
+                // Page reload/selectInstance must receive edits made since the
+                // window opened, not the descriptor's original stale blob.
+                if let Some(descriptor) = self
+                    .instances
+                    .iter_mut()
+                    .find(|descriptor| descriptor.instance_key == active)
+                {
+                    descriptor.state_bytes =
+                        host::builtin_state_bytes(&self.plugin_id, &active.insert_id)
+                            .map(std::sync::Arc::new);
                 }
             }
             InboundMsg::ListFiles { kind, .. } => {
@@ -2227,6 +2295,18 @@ mod tests {
                 assert_eq!(instance_id, "track-3::insert-9");
             }
             other => panic!("expected RequestSelectInstance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbound_global_command_parses_by_tag() {
+        let raw = br#"{"type":"futureboard.globalCommand","commandId":"transport:play-pause"}"#;
+        let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
+        match msg {
+            InboundMsg::GlobalCommand { command_id } => {
+                assert_eq!(command_id, "transport:play-pause");
+            }
+            other => panic!("expected GlobalCommand, got {other:?}"),
         }
     }
 

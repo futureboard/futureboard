@@ -2666,6 +2666,93 @@ mod tests {
         }
     }
 
+    fn render_reverb_impulse(model: ReverbModel, left: f32, right: f32) -> Vec<(f32, f32)> {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.stage_order = [None; PATH_SLOTS];
+        p.stage_order[0] = Some(StageKind::Reverb);
+        p.reverb_on = true;
+        p.reverb_model = model;
+        p.reverb_decay_s = 4.0;
+        p.reverb_mix = 100.0;
+        p.reverb_shimmer = 72.0;
+        dsp.set_params(p);
+        // Snap all smoothed topology controls to the selected model so this
+        // measures that model, not the short transition from the default Plate.
+        dsp.reset();
+
+        let mut output = Vec::with_capacity(48_000);
+        for index in 0..48_000 {
+            let input_l = if index == 0 { left } else { 0.0 };
+            let input_r = if index == 0 { right } else { 0.0 };
+            output.push(dsp.process_stereo(input_l, input_r));
+        }
+        output
+    }
+
+    #[test]
+    fn every_reverb_model_is_selectable_audible_and_distinct() {
+        let ids = [
+            ("plate", ReverbModel::Plate),
+            ("room", ReverbModel::Room),
+            ("hall", ReverbModel::Hall),
+            ("shimmer", ReverbModel::Shimmer),
+        ];
+        let mut rendered = Vec::with_capacity(ids.len());
+
+        for (id, expected) in ids {
+            let mut selected = Dsp::new(48_000.0);
+            assert!(selected.select_model("reverb", id), "`{id}` was rejected");
+            assert_eq!(selected.params().reverb_model, expected);
+
+            let output = render_reverb_impulse(expected, 1.0, 0.25);
+            let energy: f32 = output.iter().map(|(l, r)| l * l + r * r).sum();
+            assert!(
+                energy > 1.0e-4,
+                "{expected:?} produced no usable wet impulse response"
+            );
+            assert!(
+                output.iter().all(|(l, r)| l.is_finite() && r.is_finite()),
+                "{expected:?} produced non-finite output"
+            );
+            rendered.push((expected, output));
+        }
+
+        for left in 0..rendered.len() {
+            for right in (left + 1)..rendered.len() {
+                let difference: f32 = rendered[left]
+                    .1
+                    .iter()
+                    .zip(rendered[right].1.iter())
+                    .map(|(&(ll, lr), &(rl, rr))| {
+                        let dl = ll - rl;
+                        let dr = lr - rr;
+                        dl * dl + dr * dr
+                    })
+                    .sum::<f32>()
+                    / rendered[left].1.len() as f32;
+                assert!(
+                    difference.sqrt() > 1.0e-4,
+                    "{:?} and {:?} collapsed to the same algorithm",
+                    rendered[left].0,
+                    rendered[right].0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reverb_wet_path_does_not_cancel_wide_antiphase_input() {
+        for &model in ReverbModel::ALL {
+            let output = render_reverb_impulse(model, 1.0, -1.0);
+            let energy: f32 = output.iter().map(|(l, r)| l * l + r * r).sum();
+            assert!(
+                energy > 1.0e-4,
+                "{model:?} erased anti-phase stereo input from its wet path"
+            );
+        }
+    }
+
     /// Every delay voicing must survive maximum feedback through the full
     /// chain, and `select_model("delay", …)` must reach each of them.
     #[test]

@@ -1771,6 +1771,26 @@ export function cloneParameters(): Record<string, Param[]> {
   return out;
 }
 
+/** Overlay saved values onto the current complete model schema.
+ * Legacy presets may omit inactive models or controls added in newer builds. */
+export function completeParameters(
+  source: Record<string, Param[]>,
+): Record<string, Param[]> {
+  const out = cloneParameters();
+  for (const [modelId, saved] of Object.entries(source)) {
+    const current = out[modelId];
+    if (!current) {
+      out[modelId] = saved.map((param) => ({ ...param }));
+      continue;
+    }
+    out[modelId] = current.map((fallback) => {
+      const loaded = saved.find((param) => param.id === fallback.id);
+      return loaded ? { ...fallback, val: loaded.val } : fallback;
+    });
+  }
+  return out;
+}
+
 /** Complete per-stage model selection for a factory preset. */
 export function stageModelsForPreset(
   preset: Preset,

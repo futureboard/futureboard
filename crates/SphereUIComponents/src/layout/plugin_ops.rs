@@ -2038,9 +2038,10 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         use crate::components::builtin_plugin_editor_window::{
-            BuiltinEditorHostOps, BuiltinHostStatusSource, BuiltinIrLoadForwarder,
-            BuiltinIrLoadRequest, BuiltinMeterSource, BuiltinNamLoadForwarder,
-            BuiltinNamLoadRequest, BuiltinParamForwarder, BuiltinSpectrumSource, PluginInstanceKey,
+            BuiltinEditorHostOps, BuiltinGlobalCommandDispatcher, BuiltinHostStatusSource,
+            BuiltinIrLoadForwarder, BuiltinIrLoadRequest, BuiltinMeterSource,
+            BuiltinNamLoadForwarder, BuiltinNamLoadRequest, BuiltinParamForwarder,
+            BuiltinSpectrumSource, PluginInstanceKey,
         };
 
         let target = PluginInstanceKey {
@@ -2165,8 +2166,17 @@ impl StudioLayout {
                     .and_then(|bridge| bridge.builtin_host_status(&key.insert_id))
             }) as BuiltinHostStatusSource
         });
+        let command_owner = cx.entity().clone();
+        let dispatch_global_command: Option<BuiltinGlobalCommandDispatcher> =
+            Some(std::sync::Arc::new(move |command_id, cx| {
+                let _ = command_owner.update(cx, |layout, cx| {
+                    layout.dispatch_command_id(command_id, cx);
+                    cx.notify();
+                });
+            }));
         let host_ops = BuiltinEditorHostOps {
             forward_param,
+            dispatch_global_command,
             load_nam_capture,
             load_ir,
             meter_source,
@@ -4106,6 +4116,35 @@ impl StudioLayout {
         // state mirror from the previous document must not leak across.
         // Entries for the incoming project reseed from the loaded blobs.
         crate::components::builtin_plugin_editor::builtin_state_clear();
+        // Seed the incoming project's mirror before either the host runtime or
+        // an editor window can observe defaults.
+        let persisted_builtin_states: Vec<(String, String, std::sync::Arc<Vec<u8>>)> = {
+            let state = &self.timeline.read(cx).state;
+            state
+                .tracks
+                .iter()
+                .flat_map(|track| track.inserts.iter())
+                .chain(state.master.inserts.iter())
+                .filter_map(|slot| {
+                    let plugin_id = slot.plugin_id.as_deref()?;
+                    if !SpherePluginHost::builtin_audio_bridge_supported(plugin_id) {
+                        return None;
+                    }
+                    Some((
+                        plugin_id.to_string(),
+                        slot.id.clone(),
+                        slot.vst3_state.clone()?,
+                    ))
+                })
+                .collect()
+        };
+        for (plugin_id, insert_id, state) in persisted_builtin_states {
+            crate::components::builtin_plugin_editor::builtin_state_seed(
+                &plugin_id,
+                &insert_id,
+                state.as_slice(),
+            );
+        }
         if !super::plugin_bridge_runtime::bridge_enabled() {
             eprintln!(
                 "[PluginRestore] in-process path — engine sync will instantiate native inserts"
