@@ -73,6 +73,8 @@ pub struct MixerSnapshot {
     pub tracks: Vec<TrackState>,
     pub master: MasterBusState,
     pub selected_track_id: Option<String>,
+    /// Multi-select set (Ctrl/Cmd additive, Shift range). Highlight uses this.
+    pub selected_track_ids: Vec<String>,
     pub mixer_scroll_x: f32,
     /// Shared insert viewport height (clamped by the owner).
     pub mixer_insert_section_px: f32,
@@ -151,6 +153,7 @@ impl Render for MixerWindow {
             tracks,
             master,
             selected_track_id,
+            selected_track_ids,
             mixer_scroll_x,
             mixer_insert_section_px,
             mixer_send_section_px,
@@ -234,6 +237,7 @@ impl Render for MixerWindow {
                         &tracks,
                         &master,
                         selected_track_id.as_deref(),
+                        &selected_track_ids,
                         mixer_callbacks,
                         &collapsed_vsti_output_groups,
                         &hidden_mixer_channels,

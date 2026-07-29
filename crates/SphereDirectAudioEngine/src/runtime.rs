@@ -1127,10 +1127,18 @@ impl RuntimeProject {
     /// Arc clones only — no allocation.
     pub fn resolve_bridge_sinks(&mut self) {
         let sinks = &self.plugin_bridge_sinks;
+        let min_scratch = DEFAULT_AUDIO_BLOCK_CAPACITY
+            .max(crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES);
         for track in &mut self.tracks {
             for insert in &mut track.inserts {
                 if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
                     insert.bridge_sink = sinks.get(&insert.id).cloned();
+                    // Pre-size on the control thread so the audio callback never
+                    // has to grow scratch for a bridged insert mid-block.
+                    if insert.scratch_l.len() < min_scratch {
+                        insert.scratch_l.resize(min_scratch, 0.0);
+                        insert.scratch_r.resize(min_scratch, 0.0);
+                    }
                 }
             }
         }
@@ -1265,9 +1273,24 @@ impl RuntimeProject {
         let pdc_buffer_frames = self.latency_graph.max_path_latency_samples.max(1) as usize
             + DEFAULT_AUDIO_BLOCK_CAPACITY;
         for track in &mut self.tracks {
-            track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
-            track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
-            track.pdc_write_pos = 0;
+            let old_len = track.pdc_delay_l.len();
+            if old_len < pdc_buffer_frames {
+                // Growing the ring invalidates the write cursor — reset so we
+                // never read uninitialized slots. Same-size refreshes (common
+                // when bridge latency reports tick) must leave the cursor alone
+                // or mid-playback compensation clicks.
+                track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
+                track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
+                track.pdc_write_pos = 0;
+            } else if old_len > pdc_buffer_frames {
+                track.pdc_delay_l.truncate(pdc_buffer_frames);
+                track.pdc_delay_r.truncate(pdc_buffer_frames);
+                if pdc_buffer_frames > 0 {
+                    track.pdc_write_pos %= pdc_buffer_frames;
+                } else {
+                    track.pdc_write_pos = 0;
+                }
+            }
         }
     }
 
