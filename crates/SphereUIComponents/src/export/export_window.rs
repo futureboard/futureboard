@@ -27,11 +27,8 @@ use DirectAudio::{
 use crate::components::form::select::{select, SelectOption};
 use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
 use crate::components::title_bar::external_window_titlebar_compact;
-#[cfg(target_os = "windows")]
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::theme::{self, Colors};
-// `AppContext` (for `cx.new`) is only used by the Windows window-open path below.
-#[cfg(target_os = "windows")]
 use gpui::AppContext;
 
 use super::export_settings::{
@@ -1292,7 +1289,6 @@ fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
 // ── Opener ───────────────────────────────────────────────────────────────────
 
 /// Open the external Export Arrangement window centered over `owner_bounds`.
-#[cfg(target_os = "windows")]
 pub fn open_export_arrangement_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     project_name: String,
@@ -1335,18 +1331,4 @@ pub fn open_export_arrangement_window(
         })
     })
     .map_err(|e| e.to_string())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn open_export_arrangement_window(
-    _owner_bounds: Option<Bounds<gpui::Pixels>>,
-    _project_name: String,
-    _snapshot: EngineProjectSnapshot,
-    _bridge_sinks: PluginBridgeSinkMap,
-    _audio_engine: Option<DirectAudio::AudioEngine>,
-    _defaults: ExportProjectDefaults,
-    _default_output: Option<PathBuf>,
-    _cx: &mut App,
-) -> Result<WindowHandle<ExportArrangementWindow>, String> {
-    Err("native export window is only available on Windows".to_string())
 }

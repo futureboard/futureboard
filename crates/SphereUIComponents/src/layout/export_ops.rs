@@ -60,9 +60,9 @@ impl StudioLayout {
             .as_ref()
             .map(|engine| engine.plugin_bridge_sinks())
             .unwrap_or_default();
-        // Export renders plugins in-process from the saved VST3 state captured by
-        // refresh_bridge_plugin_states above — the isolated offline graph has no
-        // out-of-process bridge host attached.
+        // Export detaches the live bridge sinks and drives them from the offline
+        // worker; the snapshot must keep external-bridge inserts (not in-process
+        // native-plugin stubs) so effects/built-ins render through the real DSP.
         let snapshot = build_engine_project_snapshot_for_export(
             &tl_state,
             sample_rate,
