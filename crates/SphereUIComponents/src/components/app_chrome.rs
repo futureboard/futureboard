@@ -288,7 +288,7 @@ fn bpm_display(
 
 /// Per-(logical)-pixel BPM sensitivity for a given modifier combination.
 /// DAW-style feel: normal ≈ 1 BPM / 10 px, Shift = fine, Ctrl/Alt = coarse.
-/// Because the BPM drag now warps the OS cursor (Windows), the per-pixel feel
+/// Because the BPM drag now warps the OS cursor (Windows/macOS/Linux X11), the per-pixel feel
 /// is screen-height independent — the cursor never reaches the screen edge.
 pub fn bpm_drag_sensitivity(shift: bool, coarse: bool) -> f32 {
     if shift {

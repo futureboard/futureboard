@@ -105,6 +105,11 @@ unicode-segmentation.workspace = true
 windows = { workspace = true }
 windows-core = { workspace = true }
 
+# X11 for screen-edge-independent BPM scrubbing (cursor query/warp). Works on
+# X11 and XWayland; pure Wayland falls back to window-relative deltas.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl.workspace = true
+
 # Real MIDI port enumeration (WinMM on Windows, ALSA on Linux) for the device
 # registry that replaces the Preferences mock lists. Scoped to non-macOS because
 # midir's macOS backend (coremidi) pulls core-foundation 0.10.1, which conflicts

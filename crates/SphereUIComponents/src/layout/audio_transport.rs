@@ -1921,11 +1921,13 @@ impl StudioLayout {
         }
     }
 
-    /// Apply a BPM drag sample. The drag is screen-edge independent: on Windows
-    /// the OS cursor is warped back to a fixed anchor every move, so vertical
-    /// dragging accumulates unbounded relative motion (true DAW-style infinite
-    /// scrubbing). Tempo safety: when automation exists the drag edits the
-    /// active tempo marker at the playhead instead of the fixed project BPM.
+    /// Apply a BPM drag sample. The drag is screen-edge independent: on
+    /// Windows/macOS/Linux (X11 or Wayland+XWayland) the OS cursor is warped
+    /// back to a fixed anchor every move, so vertical dragging accumulates
+    /// unbounded relative motion (true DAW-style infinite scrubbing). Pure
+    /// Wayland without XWayland falls back to window-relative deltas. Tempo
+    /// safety: when automation exists the drag edits the active tempo marker
+    /// at the playhead instead of the fixed project BPM.
     pub(super) fn apply_bpm_drag_sample(
         &mut self,
         sample: components::BpmDragSample,
@@ -2879,10 +2881,156 @@ fn set_cursor_pos_phys(x: i32, y: i32) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn cursor_pos_phys() -> Option<(i32, i32)> {
+    x11_cursor::query()
+}
+
+#[cfg(target_os = "linux")]
+fn set_cursor_pos_phys(x: i32, y: i32) {
+    x11_cursor::warp(x, y);
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_pos_phys() -> Option<(i32, i32)> {
+    macos_cursor::query()
+}
+
+#[cfg(target_os = "macos")]
+fn set_cursor_pos_phys(x: i32, y: i32) {
+    macos_cursor::warp(x, y);
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn cursor_pos_phys() -> Option<(i32, i32)> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn set_cursor_pos_phys(_x: i32, _y: i32) {}
+
+/// Cached X11 connection for BPM cursor query/warp. Opened once.
+///
+/// Works on native X11 and on Wayland-with-XWayland (`DISPLAY` set). Pure
+/// Wayland without XWayland leaves the connection unavailable; callers then
+/// fall back to window-relative deltas (full Wayland pointer-lock needs gpui
+/// compositor integration and is not wired here).
+#[cfg(target_os = "linux")]
+mod x11_cursor {
+    use std::sync::{Mutex, OnceLock};
+    use x11_dl::xlib::{self, Display, Window as XWindow};
+
+    struct Conn {
+        xlib: xlib::Xlib,
+        display: *mut Display,
+        root: XWindow,
+    }
+
+    // Serialized behind a Mutex; UI-thread BPM scrub is the only consumer.
+    unsafe impl Send for Conn {}
+
+    fn conn() -> Option<&'static Mutex<Conn>> {
+        static CONN: OnceLock<Option<Mutex<Conn>>> = OnceLock::new();
+        CONN.get_or_init(|| {
+            let xlib = xlib::Xlib::open().ok()?;
+            unsafe {
+                let display = (xlib.XOpenDisplay)(std::ptr::null());
+                if display.is_null() {
+                    return None;
+                }
+                let root = (xlib.XDefaultRootWindow)(display);
+                Some(Mutex::new(Conn { xlib, display, root }))
+            }
+        })
+        .as_ref()
+    }
+
+    pub(super) fn query() -> Option<(i32, i32)> {
+        let conn = conn()?.lock().ok()?;
+        unsafe {
+            let mut root_return = 0;
+            let mut child_return = 0;
+            let mut root_x = 0;
+            let mut root_y = 0;
+            let mut win_x = 0;
+            let mut win_y = 0;
+            let mut mask = 0u32;
+            let ok = (conn.xlib.XQueryPointer)(
+                conn.display,
+                conn.root,
+                &mut root_return,
+                &mut child_return,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            );
+            if ok == xlib::False {
+                None
+            } else {
+                Some((root_x, root_y))
+            }
+        }
+    }
+
+    pub(super) fn warp(x: i32, y: i32) {
+        let Some(lock) = conn() else {
+            return;
+        };
+        let Ok(conn) = lock.lock() else {
+            return;
+        };
+        unsafe {
+            (conn.xlib.XWarpPointer)(conn.display, 0, conn.root, 0, 0, 0, 0, x, y);
+            (conn.xlib.XFlush)(conn.display);
+        }
+    }
+}
+
+/// CoreGraphics cursor query/warp for edge-independent BPM scrubbing on macOS.
+#[cfg(target_os = "macos")]
+mod macos_cursor {
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+        fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+        fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+
+    pub(super) fn query() -> Option<(i32, i32)> {
+        unsafe {
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                return None;
+            }
+            let point = CGEventGetLocation(event);
+            CFRelease(event);
+            Some((point.x.round() as i32, point.y.round() as i32))
+        }
+    }
+
+    pub(super) fn warp(x: i32, y: i32) {
+        unsafe {
+            // Keep OS mouse events flowing after a warp (otherwise macOS can
+            // suppress the next few moves and the scrub feels sticky).
+            let _ = CGAssociateMouseAndMouseCursorPosition(true);
+            let _ = CGWarpMouseCursorPosition(CGPoint {
+                x: f64::from(x),
+                y: f64::from(y),
+            });
+        }
+    }
+}

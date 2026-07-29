@@ -138,7 +138,9 @@ fn default_audio_driver_type() -> String {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        "ALSA".to_string()
+        // Match the engine's platform default (`BackendKind::Auto` → cpal/ALSA,
+        // including PipeWire's ALSA plugin). Explicit "ALSA" remains selectable.
+        "Auto".to_string()
     }
 }
 
@@ -146,6 +148,19 @@ fn default_audio_driver_type() -> String {
 /// Audio Driver dropdown so a Community Edition process never keeps an
 /// Exclusive-only selection (notably `"ASIO"`) alive after settings load.
 pub fn available_audio_driver_types() -> Vec<String> {
+    // Prefer the engine's platform inventory so Settings cannot advertise a
+    // backend DAUx cannot open. Labels stay the short UI names users already
+    // know (not the longer `DAUx …` display names).
+    let from_engine: Vec<String> = DirectAudio::backend::list_available_backends()
+        .into_iter()
+        .filter(|backend| backend.available)
+        .filter_map(|backend| ui_label_for_backend_id(&backend.id))
+        .collect();
+    if !from_engine.is_empty() {
+        return from_engine;
+    }
+
+    // Defensive fallback if the engine list is empty (should not happen).
     #[cfg(target_os = "windows")]
     {
         let mut backends = vec![
@@ -165,6 +180,21 @@ pub fn available_audio_driver_types() -> Vec<String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         vec!["Auto".to_string(), "ALSA".to_string()]
+    }
+}
+
+fn ui_label_for_backend_id(id: &str) -> Option<String> {
+    match id {
+        "auto" => Some("Auto".to_string()),
+        "wasapi-shared" => Some("WASAPI Shared".to_string()),
+        "wasapi-exclusive" => Some("WASAPI Exclusive".to_string()),
+        "wdm-ks" => Some("WDM-KS".to_string()),
+        "asio" => Some("ASIO".to_string()),
+        "coreaudio" => Some("CoreAudio".to_string()),
+        "alsa" => Some("ALSA".to_string()),
+        // Legacy MME stays engine-only unless product UI asks for it.
+        "mme" => None,
+        _ => None,
     }
 }
 

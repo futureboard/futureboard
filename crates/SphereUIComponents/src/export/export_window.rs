@@ -1279,9 +1279,13 @@ fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
     {
         std::process::Command::new("explorer").arg(dir).spawn()?;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = dir;
+        std::process::Command::new("open").arg(dir).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(dir).spawn()?;
     }
     Ok(())
 }

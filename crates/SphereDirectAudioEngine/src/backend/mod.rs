@@ -239,7 +239,8 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
         name: "Auto".into(),
         available: true,
         is_default: true,
-        description: "Platform default (WASAPI Shared / CoreAudio / ALSA)".into(),
+        description: "Platform default (WASAPI Shared / CoreAudio / ALSA; PipeWire via ALSA)"
+            .into(),
     }];
 
     #[cfg(target_os = "windows")]
@@ -302,7 +303,8 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
             name: "DAUx ALSA".into(),
             available: true,
             is_default: false,
-            description: "ALSA PCM — native Linux audio, configurable period/buffer size".into(),
+            description: "ALSA PCM — native Linux path (works with PipeWire's ALSA plugin)"
+                .into(),
         });
     }
 

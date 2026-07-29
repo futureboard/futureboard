@@ -1861,8 +1861,24 @@ fn publish_studio_main_hwnd(window: &Window) {
     }
 }
 
+/// Publish the studio window's X11 id as the plugin-host owner/DPI reference.
+/// Matches `studio_native_hwnd` in plugin_ops: X11/XWayland only; pure Wayland
+/// leaves the published handle unset.
 #[cfg(not(target_os = "windows"))]
-fn publish_studio_main_hwnd(_window: &Window) {}
+fn publish_studio_main_hwnd(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let id = match handle.as_raw() {
+        RawWindowHandle::Xcb(w) => Some(w.window.get() as isize),
+        RawWindowHandle::Xlib(w) => Some(w.window as isize),
+        _ => None,
+    };
+    if let Some(id) = id {
+        SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(id);
+    }
+}
 
 /// `FUTUREBOARD_DEBUG_ACTIVE_PANEL=1` — draw the active-panel debug pill.
 /// Cached so the root render doesn't hit the OS env store every frame
