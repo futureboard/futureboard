@@ -80,6 +80,9 @@ impl Render for TrackDragPreview {
             .child(
                 div()
                     .ml(px(7.0))
+                    .max_w(px(220.0))
+                    .overflow_hidden()
+                    .truncate()
                     .text_size(px(10.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(Colors::text_primary())
@@ -482,12 +485,16 @@ pub fn track_header(
                         .items_center()
                         .justify_between()
                         .w_full()
+                        .min_w(px(0.0))
                         .child(
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap(px(6.0))
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
                                 .id(("track-drag-zone", id_num))
                                 .cursor(gpui::CursorStyle::PointingHand)
                                 .on_drag(
@@ -528,13 +535,17 @@ pub fn track_header(
                                     div()
                                         .flex()
                                         .flex_col()
+                                        .flex_1()
                                         .min_w(px(0.0))
+                                        .overflow_hidden()
                                         .child(
                                             div()
                                                 .flex()
                                                 .flex_row()
                                                 .items_center()
                                                 .gap(px(4.0))
+                                                .min_w(px(0.0))
+                                                .w_full()
                                                 .when(is_group, |row| {
                                                     row.child(
                                                         div()
@@ -584,7 +595,9 @@ pub fn track_header(
                                                 })
                                                 .child(
                                                     div()
+                                                        .flex_1()
                                                         .min_w(px(0.0))
+                                                        .overflow_hidden()
                                                         .truncate()
                                                         .text_size(px(11.0))
                                                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -598,6 +611,8 @@ pub fn track_header(
                                             // ramp — never bright accent — so it
                                             // reads as secondary info, not a link.
                                             div()
+                                                .min_w(px(0.0))
+                                                .overflow_hidden()
                                                 .text_size(px(8.5))
                                                 .truncate()
                                                 .text_color(if is_automation {
@@ -613,6 +628,7 @@ pub fn track_header(
                             div()
                                 .flex()
                                 .flex_row()
+                                .flex_shrink_0()
                                 .items_center()
                                 .gap(px(2.0))
                                 .px(px(3.0))

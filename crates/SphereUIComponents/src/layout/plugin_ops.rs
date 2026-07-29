@@ -1981,8 +1981,17 @@ impl StudioLayout {
 
         let state = &self.timeline.read(cx).state;
         let mut instances = Vec::new();
-        for track in &state.tracks {
-            for slot in &track.inserts {
+        let owners = state
+            .tracks
+            .iter()
+            .map(|track| (track.id.as_str(), track.name.as_str(), &track.inserts))
+            .chain(std::iter::once((
+                crate::components::timeline::timeline_state::MASTER_TRACK_ID,
+                "Master",
+                &state.master.inserts,
+            )));
+        for (track_id, track_name, inserts) in owners {
+            for slot in inserts {
                 let Some(slot_plugin_id) = slot.plugin_id.as_deref() else {
                     continue;
                 };
@@ -2007,11 +2016,11 @@ impl StudioLayout {
                 .or_else(|| slot.vst3_state.clone());
                 instances.push(PluginInstanceDescriptor {
                     instance_key: PluginInstanceKey {
-                        track_id: track.id.clone(),
+                        track_id: track_id.to_string(),
                         insert_id: slot.id.clone(),
                     },
                     plugin_id: plugin_id.to_string(),
-                    track_name: track.name.clone(),
+                    track_name: track_name.to_string(),
                     insert_name: slot.display_name.clone(),
                     bypassed: slot.bypassed,
                     enabled: slot.enabled,
@@ -3848,20 +3857,31 @@ impl StudioLayout {
     }
 
     pub(super) fn request_track_insert_parameters(&self, track_id: &str, cx: &Context<Self>) {
-        let instance_ids: Vec<String> = self
-            .timeline
-            .read(cx)
-            .state
-            .find_track(track_id)
-            .map(|track| {
-                track
-                    .inserts
-                    .iter()
-                    .filter(|insert| !insert.is_empty())
-                    .map(|insert| insert.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+        let instance_ids: Vec<String> = if track_id
+            == crate::components::timeline::timeline_state::MASTER_TRACK_ID
+        {
+            state
+                .master
+                .inserts
+                .iter()
+                .filter(|insert| !insert.is_empty())
+                .map(|insert| insert.id.clone())
+                .collect()
+        } else {
+            state
+                .find_track(track_id)
+                .map(|track| {
+                    track
+                        .inserts
+                        .iter()
+                        .filter(|insert| !insert.is_empty())
+                        .map(|insert| insert.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         for instance_id in instance_ids {
             self.request_bridge_insert_parameters(&instance_id);
         }
