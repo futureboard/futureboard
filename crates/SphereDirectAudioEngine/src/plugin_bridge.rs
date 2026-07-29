@@ -91,7 +91,10 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
     fn push_param(&self, _param_id: u32, _value: f32, _sample_offset: u32) {}
 
     /// Write the track's pre-plugin stereo input for effect inserts (engine →
-    /// host `audio_in`). Wait-free raw buffer copy.
+    /// host `audio_in`). Must be called only after a successful
+    /// [`Self::read_output`] for the previous cycle (or when no prior request is
+    /// outstanding) so the host is not still copying the last block. Wait-free
+    /// raw buffer copy.
     fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize);
 
     /// Publish the request for the host to process `frames` next (sets the block

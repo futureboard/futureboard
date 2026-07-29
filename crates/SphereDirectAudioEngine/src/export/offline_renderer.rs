@@ -263,11 +263,15 @@ fn render_offline_impl(
             })
             .collect();
         runtime.resolve_bridge_sinks();
-        // Prime the bridge's one-block pipeline. The first rendered block
-        // consumes this silent/stale response and requests the first timeline
-        // block, matching realtime's one-block bridge latency (covered by PDC).
+        // Prime the bridge's one-block pipeline with silence so the host does
+        // not process leftover realtime `audio_in`. The first rendered block
+        // consumes this silent response and requests the first timeline block,
+        // matching realtime's one-block bridge latency (covered by PDC).
+        let prime_frames = request.block_size.max(1);
+        let zeros = vec![0.0f32; prime_frames];
         for sink in runtime.plugin_bridge_sinks.values() {
-            sink.request_block(request.block_size.max(1) as u32);
+            sink.write_input(&zeros, &zeros, prime_frames);
+            sink.request_block(prime_frames as u32);
         }
     }
     // Deterministic bounce: apply the exact constant per-block fader gain, never
@@ -441,6 +445,7 @@ fn render_offline_impl(
         }
         let frames_u64 = frames as u64;
         let block_end = produced.saturating_add(frames_u64);
+        let mut stop_for_silence = false;
 
         // Emit only the portion that lands in [write_start, write_limit). Full
         // blocks may straddle warmup→content or content→tail; we slice here
@@ -483,17 +488,18 @@ fn render_offline_impl(
             }
             written = written.saturating_add(emit_len as u64);
 
-            // UntilSilence: stop after this block once content is done and the
-            // emitted peak has decayed below threshold.
+            // UntilSilence: stop once content is done and the emitted peak has
+            // decayed below threshold.
             if produced >= content_end && until_silence && block_peak < silence_threshold {
-                produced = produced.saturating_add(frames_u64);
-                pos = pos.saturating_add(frames_u64);
-                break;
+                stop_for_silence = true;
             }
         }
 
         produced = produced.saturating_add(frames_u64);
         pos = pos.saturating_add(frames_u64);
+        if stop_for_silence {
+            break;
+        }
 
         // Throttle progress callbacks (~ every 16 blocks) to avoid flooding.
         progress_throttle = progress_throttle.wrapping_add(1);

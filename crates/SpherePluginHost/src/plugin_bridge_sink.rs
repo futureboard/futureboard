@@ -262,7 +262,10 @@ impl PluginBridgeSink for SharedRegionSink {
     }
 
     fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
-        // SAFETY: the engine owns `audio_in` for this block (before `request_seq`).
+        // SAFETY: the engine owns `audio_in` only after the host published
+        // `done_seq` for the previous request (consumed by `read_output` above
+        // in `apply_external_bridge_insert_block`) and before this side bumps
+        // `request_seq` again.
         unsafe {
             self.region
                 .bridge()
