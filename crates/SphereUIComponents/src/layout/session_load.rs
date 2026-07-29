@@ -803,10 +803,19 @@ impl StudioLayout {
         let Some(root) = package.path.parent().map(PathBuf::from) else {
             return;
         };
+        // Cubase/Nuendo XML (and other foreign imports) bind untitled: never
+        // write peak caches or copy media into the archive's folder. Native
+        // `.fbproj` sessions keep peak files under the project tree.
+        let persist_peaks = !crate::project::is_import_path(&package.path);
         let timeline = self.timeline.clone();
         let layout = cx.entity().clone();
         crate::components::timeline::audio_import::schedule_project_waveform_restore(
-            &project, root, timeline, layout, cx,
+            &project,
+            root,
+            persist_peaks,
+            timeline,
+            layout,
+            cx,
         );
     }
 

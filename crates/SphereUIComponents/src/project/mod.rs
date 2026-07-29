@@ -1464,7 +1464,15 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         name: pc.name.clone(),
                         start_beat: pc.start_beat as f32,
                         duration_beats: pc.duration_beats as f32,
-                        source_duration_seconds: None,
+                        source_duration_seconds: match &pc.source {
+                            ClipSource::Audio { asset_id, .. }
+                            | ClipSource::Rauf { asset_id, .. } => project
+                                .assets
+                                .iter()
+                                .find(|asset| asset.id == *asset_id)
+                                .and_then(|asset| asset.duration_secs),
+                            _ => None,
+                        },
                         offset_beats: pc.offset_beats,
                         gain: pc.gain,
                         clip_type,

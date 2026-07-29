@@ -16,9 +16,14 @@
 //! | `MAudioEvent` | one audio clip: position, length, offset, event gain |
 //! | `FNPath` / `AudioFile` | the media file, its rate, frames and channels |
 //!
-//! Everything else — mixer state, inserts, automation, hit points — is either
-//! Cubase-specific binary or has no Futureboard equivalent, so it is skipped
-//! rather than guessed at.
+//! Event `Volume` is renormalized so Cubase's info-line 0.00 dB (stored as
+//! ~0.2927, not 1.0) becomes Futureboard gain 1.0. Mixer channel/insert state
+//! still lives in Cubase's opaque binary blob and is not guessed at.
+//!
+//! Track timebase (`MListNode/Domain/Type`) controls how `Start` is read:
+//! musical (`0`) uses PPQ ticks, sample / linear domains use arrangement
+//! samples. Event `Length` that matches the referenced file's frame count is
+//! always treated as samples so audio duration stays physical wall-time.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +43,22 @@ use crate::project::{
 /// 206 BPM / 600 s arrangement is 2060 quarter notes, i.e. 480 units each —
 /// the same PPQN Cubase uses everywhere else.
 const TICKS_PER_QUARTER: f64 = 480.0;
+
+/// Cubase XML `MAudioEvent/Volume` at the info-line 0.00 dB default.
+///
+/// Steinberg does not store linear unity as `1.0` here — a freshly created
+/// stereo event writes this constant instead. Dividing through maps 0 dB to
+/// Futureboard clip gain `1.0` while preserving relative boosts/cuts.
+const CUBASE_EVENT_VOLUME_UNITY: f64 = 0.292_682_886_123_657_23;
+
+/// How a track measures event start positions (`MListNode/Domain`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackTimebase {
+    /// Bars & beats — `Start` is PPQ ticks (`TICKS_PER_QUARTER` per beat).
+    Musical,
+    /// Linear / sample — `Start` is arrangement samples at the project rate.
+    Samples,
+}
 
 /// Directories under the archive's own folder that are searched for media
 /// before falling back to a recursive scan.
@@ -112,12 +133,14 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
 
         let mut clips = Vec::new();
         if let Some(node) = node {
+            let timebase = track_timebase(node);
             for event in archive.list_objects(node, "Events", "MAudioEvent") {
                 if let Some(clip) = audio_clip(
                     &archive,
                     event,
                     &tempo,
                     sample_rate,
+                    timebase,
                     &mut media,
                     &mut assets,
                     &mut project.assets,
@@ -396,7 +419,12 @@ fn signature_points(archive: &Archive<'_, '_>) -> Vec<ProjectTimeSignaturePoint>
             if numerator == 0 || denominator == 0 {
                 return None;
             }
-            let beat = prim_f64(event, "Position").unwrap_or(0.0) / TICKS_PER_QUARTER;
+            // Archives write either `Position` (ticks) or `Start` (same units);
+            // prefer Position when both exist.
+            let ticks = prim_f64(event, "Position")
+                .or_else(|| prim_f64(event, "Start"))
+                .unwrap_or(0.0);
+            let beat = ticks / TICKS_PER_QUARTER;
             Some(ProjectTimeSignaturePoint {
                 id: new_id(),
                 beat: beat.max(0.0),
@@ -410,6 +438,44 @@ fn signature_points(archive: &Archive<'_, '_>) -> Vec<ProjectTimeSignaturePoint>
     points
 }
 
+/// Map Cubase's event `Volume` field onto Futureboard linear clip gain.
+fn cubase_event_gain(raw: f64) -> f32 {
+    if !raw.is_finite() || raw <= 0.0 {
+        return 1.0;
+    }
+    ((raw / CUBASE_EVENT_VOLUME_UNITY) as f32).clamp(0.0, 4.0)
+}
+
+/// Resolve a track's arrangement timebase from its list-node Domain.
+///
+/// Cubase: Musical → Start in beats/ticks, Linear → Start in seconds/samples.
+/// Type `0` plus a Tempo Track reference covers musical exports; Type `10`
+/// (sample period) covers linear. A Domain that embeds a tempo track without
+/// an explicit Type is also treated as musical.
+fn track_timebase(list_node: Node<'_, '_>) -> TrackTimebase {
+    let Some(domain) = list_node.children().find(|child| {
+        child.has_tag_name("member") && child.attribute("name") == Some("Domain")
+    }) else {
+        return TrackTimebase::Samples;
+    };
+    if let Some(kind) = prim_f64(domain, "Type") {
+        return match kind as i32 {
+            0 => TrackTimebase::Musical,
+            _ => TrackTimebase::Samples,
+        };
+    }
+    let musical = domain.children().any(|child| {
+        child.has_tag_name("obj")
+            && (child.attribute("class") == Some("MTempoTrackEvent")
+                || child.attribute("name") == Some("Tempo Track"))
+    });
+    if musical {
+        TrackTimebase::Musical
+    } else {
+        TrackTimebase::Samples
+    }
+}
+
 // ── Clips and media ──────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -418,18 +484,35 @@ fn audio_clip(
     event: Node<'_, '_>,
     tempo: &TempoMap,
     sample_rate: u32,
+    timebase: TrackTimebase,
     media: &mut MediaResolver,
     assets: &mut HashMap<PathBuf, String>,
     project_assets: &mut Vec<ProjectAsset>,
     missing_media: &mut usize,
 ) -> Option<ProjectClip> {
     let rate = sample_rate.max(1) as f64;
-    // Event positions are in arrangement samples (an event's Length matches the
-    // referenced file's frame count exactly).
-    let start_seconds = prim_f64(event, "Start").unwrap_or(0.0).max(0.0) / rate;
-    let length_seconds = prim_f64(event, "Length").unwrap_or(0.0).max(0.0) / rate;
-    let offset_seconds = prim_f64(event, "Offset").unwrap_or(0.0).max(0.0) / rate;
-    let start_beat = tempo.seconds_to_beats(start_seconds);
+    let start_raw = prim_f64(event, "Start").unwrap_or(0.0).max(0.0);
+    let length_raw = prim_f64(event, "Length").unwrap_or(0.0).max(0.0);
+
+    // Start follows the track timebase. Length that describes audible media is
+    // in samples (it matches AudioFile/FrameCount on every clip in real
+    // archives) even when Start is musical PPQ.
+    let start_beat = match timebase {
+        TrackTimebase::Musical => start_raw / TICKS_PER_QUARTER,
+        TrackTimebase::Samples => tempo.seconds_to_beats(start_raw / rate),
+    };
+    let length_seconds = length_raw / rate;
+    if length_seconds <= 0.0 {
+        return None;
+    }
+    let start_seconds = match timebase {
+        TrackTimebase::Musical => {
+            // Invert the tempo map at start_beat for a wall-clock duration span.
+            // For a constant-tempo project this is start_beat * 60 / bpm.
+            beat_to_seconds(tempo, start_beat)
+        }
+        TrackTimebase::Samples => start_raw / rate,
+    };
     let end_beat = tempo.seconds_to_beats(start_seconds + length_seconds);
     let duration_beats = (end_beat - start_beat).max(0.0);
     if duration_beats <= 0.0 {
@@ -477,6 +560,20 @@ fn audio_clip(
         *missing_media += 1;
     }
 
+    // Source-domain offset: event Offset first, else AudioCluster/Segments.
+    let file_rate = file.sample_rate.unwrap_or(sample_rate).max(1) as f64;
+    let event_offset_samples = prim_f64(event, "Offset").unwrap_or(0.0).max(0.0);
+    let segment_offset_samples = clip_obj
+        .and_then(|clip| segment_source_offset(archive, clip))
+        .unwrap_or(0.0)
+        .max(0.0);
+    let offset_samples = if event_offset_samples > 0.0 {
+        event_offset_samples
+    } else {
+        segment_offset_samples
+    };
+    let offset_seconds = offset_samples / file_rate;
+
     Some(ProjectClip {
         id: new_id(),
         name,
@@ -484,12 +581,26 @@ fn audio_clip(
         duration_beats,
         // Beat-domain offset into the source, same conversion as the position.
         offset_beats: (tempo.seconds_to_beats(offset_seconds) - tempo.seconds_to_beats(0.0)) as f32,
-        // Cubase's per-event volume is a linear gain, like ours.
-        gain: prim_f64(event, "Volume").unwrap_or(1.0).clamp(0.0, 4.0) as f32,
+        // Cubase's default 0 dB is ~0.2927, not 1.0 — normalize first.
+        gain: cubase_event_gain(prim_f64(event, "Volume").unwrap_or(CUBASE_EVENT_VOLUME_UNITY)),
         muted: false,
         source,
         stretch: AudioClipStretchState::default(),
     })
+}
+
+/// Wall-clock seconds at `beat` according to the piecewise tempo map.
+fn beat_to_seconds(tempo: &TempoMap, beat: f64) -> f64 {
+    let mut current = tempo.points[0];
+    for point in &tempo.points {
+        if point.0 <= beat {
+            current = *point;
+        } else {
+            break;
+        }
+    }
+    let (at_beat, bpm, at_seconds) = current;
+    at_seconds + (beat - at_beat) * 60.0 / bpm
 }
 
 /// A media file referenced by a clip, with the format facts the archive already
@@ -513,11 +624,19 @@ impl MediaFile {
 }
 
 fn media_file(archive: &Archive<'_, '_>, clip: Node<'_, '_>) -> Option<MediaFile> {
-    let path_obj = archive.descendant_class(clip, "FNPath")?;
+    // Prefer the clip's own FNPath / AudioCluster children. A deep walk would
+    // otherwise burn the hit-point list (often thousands of MHitPointEvent
+    // nodes) before finding the path, and the walk cap can skip the media.
+    let path_obj = archive
+        .child_class(clip, "FNPath")
+        .or_else(|| archive.descendant_class(clip, "FNPath"))?;
     let file_name = prim_str(path_obj, "Name")?.to_string();
     let recorded_dir = prim_str(path_obj, "Path").unwrap_or("");
 
-    let audio_file = archive.descendant_class(clip, "AudioFile");
+    let audio_file = archive
+        .child_class(clip, "AudioCluster")
+        .and_then(|cluster| archive.descendant_class(cluster, "AudioFile"))
+        .or_else(|| archive.descendant_class(clip, "AudioFile"));
     let sample_rate = audio_file
         .and_then(|file| prim_f64(file, "Rate"))
         .filter(|rate| *rate > 0.0)
@@ -535,6 +654,18 @@ fn media_file(archive: &Archive<'_, '_>, clip: Node<'_, '_>) -> Option<MediaFile
         channels,
         frames,
     })
+}
+
+/// Sample offset into the source from `AudioCluster/Segments[0]/Offset`.
+fn segment_source_offset(archive: &Archive<'_, '_>, clip: Node<'_, '_>) -> Option<f64> {
+    let cluster = archive.child_class(clip, "AudioCluster")?;
+    let segments = cluster.children().find(|child| {
+        child.has_tag_name("list") && child.attribute("name") == Some("Segments")
+    })?;
+    let first = segments
+        .children()
+        .find(|child| child.has_tag_name("item") || child.has_tag_name("obj"))?;
+    prim_f64(first, "Offset")
 }
 
 /// `SpeakerArr/Type` lists one entry per channel.
@@ -642,6 +773,7 @@ mod tests {
       <obj class="MListNode" name="Node" ID="11">
          <string name="Name" value="KICK" wide="true"/>
          <member name="Domain">
+            <int name="Type" value="0"/>
             <obj class="MTempoTrackEvent" name="Tempo Track" ID="12">
                <list name="TempoEvent" type="obj">
                   <obj class="MTempoEvent" ID="13">
@@ -662,7 +794,8 @@ mod tests {
          </member>
          <list name="Events" type="obj">
             <obj class="MAudioEvent" ID="16">
-               <float name="Start" value="88200"/>
+               <!-- Musical Start: 4 beats * 480 PPQ. Length stays samples. -->
+               <float name="Start" value="1920"/>
                <float name="Length" value="44100"/>
                <float name="Volume" value="0.5"/>
                <string name="Description" value="Kick take" wide="true"/>
@@ -736,7 +869,7 @@ mod tests {
 
         let clip = &track.clips[0];
         assert_eq!(clip.name, "Kick take");
-        // 88200 samples at 44.1 kHz = 2 s = 4 beats at 120 BPM.
+        // Musical Start=1920 PPQ → 4 beats. Length=44100 samples → 1 s → 2 beats @120.
         assert!(
             (clip.start_beat - 4.0).abs() < 1e-6,
             "start {}",
@@ -747,7 +880,12 @@ mod tests {
             "duration {}",
             clip.duration_beats
         );
-        assert!((clip.gain - 0.5).abs() < 1e-6);
+        // Fixture Volume=0.5 → relative to Cubase 0 dB unity (~0.2927) ≈ 1.708.
+        assert!(
+            (clip.gain - cubase_event_gain(0.5)).abs() < 1e-5,
+            "gain {}",
+            clip.gain
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -787,6 +925,99 @@ mod tests {
     }
 
     #[test]
+    fn cubase_default_event_volume_maps_to_unity_gain() {
+        assert!((cubase_event_gain(CUBASE_EVENT_VOLUME_UNITY) - 1.0).abs() < 1e-5);
+        assert!((cubase_event_gain(0.0) - 1.0).abs() < 1e-5);
+        // ≈ +7.82 dB relative boost still lands inside our 4.0 clamp.
+        let boosted = cubase_event_gain(0.720_092_95);
+        assert!(boosted > 2.0 && boosted < 3.0, "boosted={boosted}");
+    }
+
+    #[test]
+    fn musical_start_is_ppq_not_samples() {
+        // Minimal musical-track event: Start=251520 ticks → 524 beats, Length is
+        // still samples so duration stays 26.5 s (= 91 beats @206 BPM).
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<tracklist>
+   <obj class="PArrangeSetup" name="Setup" ID="1">
+      <float name="SampleRate" value="44100"/>
+   </obj>
+   <obj class="MAudioTrackEvent" ID="10">
+      <obj class="MListNode" name="Node" ID="11">
+         <string name="Name" value="GTSOLO" wide="true"/>
+         <member name="Domain">
+            <int name="Type" value="0"/>
+            <obj class="MTempoTrackEvent" name="Tempo Track" ID="12">
+               <list name="TempoEvent" type="obj">
+                  <obj class="MTempoEvent" ID="13">
+                     <float name="BPM" value="206"/>
+                     <float name="PPQ" value="0"/>
+                  </obj>
+               </list>
+            </obj>
+         </member>
+         <list name="Events" type="obj">
+            <obj class="MAudioEvent" ID="16">
+               <float name="Start" value="251520"/>
+               <float name="Length" value="1168864"/>
+               <float name="Volume" value="0.29268288612365723"/>
+               <string name="Description" value="GT2" wide="true"/>
+               <obj class="PAudioClip" name="AudioClip" ID="17">
+                  <string name="Name" value="GT2" wide="true"/>
+                  <obj class="FNPath" name="Path" ID="18">
+                     <string name="Name" value="kick.wav" wide="true"/>
+                     <string name="Path" value="C:\Somewhere\Else\Audio\" wide="true"/>
+                  </obj>
+                  <obj class="AudioCluster" name="Cluster" ID="19">
+                     <list name="Substreams" type="obj">
+                        <obj class="AudioFile" ID="20">
+                           <obj name="FPath" ID="18"/>
+                           <int name="FrameCount" value="1168864"/>
+                           <member name="SpeakerArr">
+                              <list name="Type" type="int">
+                                 <item value="1"/>
+                                 <item value="2"/>
+                              </list>
+                           </member>
+                           <float name="Rate" value="44100"/>
+                        </obj>
+                     </list>
+                  </obj>
+               </obj>
+            </obj>
+         </list>
+      </obj>
+   </obj>
+</tracklist>
+"#;
+        let dir = std::env::temp_dir().join(format!(
+            "fb_cubase_musical_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("Audio")).unwrap();
+        fs::write(dir.join("Audio/kick.wav"), b"RIFF").unwrap();
+        let path = dir.join("Song.xml");
+        fs::write(&path, xml).unwrap();
+        let project = import(&path).unwrap();
+        let clip = &project.tracks[0].clips[0];
+        assert!(
+            (clip.start_beat - 524.0).abs() < 1e-6,
+            "start {}",
+            clip.start_beat
+        );
+        assert!(
+            (clip.duration_beats - 91.0).abs() < 1e-3,
+            "duration {}",
+            clip.duration_beats
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn archive_without_audio_tracks_is_rejected() {
         let dir = archive_dir("empty");
         let path = dir.join("Empty.xml");
@@ -796,5 +1027,50 @@ mod tests {
         assert!(matches!(error, ProjectError::Corrupted(_)), "got {error:?}");
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Local ad-hoc dump against the real NIKKE archive (not run in CI).
+    #[test]
+    #[ignore = "requires local /home/arizkami/Downloads/Nikke1/NIKKE.xml"]
+    fn dump_nikke_archive() {
+        let path = PathBuf::from("/home/arizkami/Downloads/Nikke1/NIKKE.xml");
+        let project = import(&path).expect("import");
+        eprintln!(
+            "nikke: tracks={} bpm={} sr={} sig={}/{} tempo_pts={} assets={} missing_check_paths={}",
+            project.tracks.len(),
+            project.settings.bpm,
+            project.settings.sample_rate,
+            project.settings.time_sig_num,
+            project.settings.time_sig_den,
+            project.settings.tempo_points.len(),
+            project.assets.len(),
+            project
+                .assets
+                .iter()
+                .filter(|a| a
+                    .absolute_path
+                    .as_ref()
+                    .map(|p| !p.is_file())
+                    .unwrap_or(true))
+                .count(),
+        );
+        for track in &project.tracks {
+            let clip = track.clips.first();
+            eprintln!(
+                "  track='{}' clips={} first_start={:?} first_dur={:?} gain={:?} source={:?}",
+                track.name,
+                track.clips.len(),
+                clip.map(|c| c.start_beat),
+                clip.map(|c| c.duration_beats),
+                clip.map(|c| c.gain),
+                clip.map(|c| match &c.source {
+                    ClipSource::Audio { source_path, .. } => source_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                }),
+            );
+        }
     }
 }
