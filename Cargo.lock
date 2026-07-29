@@ -19,6 +19,7 @@ dependencies = [
  "meowsyn",
  "transient",
  "wrapsynth",
+ "zcomp",
 ]
 
 [[package]]
@@ -7482,6 +7483,7 @@ dependencies = [
  "verbspace",
  "windows 0.61.3",
  "wrapsynth",
+ "zcomp",
 ]
 
 [[package]]
@@ -7552,6 +7554,7 @@ dependencies = [
  "windows-core 0.61.2",
  "wrapsynth",
  "x11-dl",
+ "zcomp",
  "zed-reqwest",
 ]
 
@@ -10660,6 +10663,16 @@ dependencies = [
  "serde",
  "zbus_names",
  "zvariant",
+]
+
+[[package]]
+name = "zcomp"
+version = "0.1.0"
+dependencies = [
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -252,6 +252,7 @@ enum BuiltinDsp {
     Clipper67(clipper67::Dsp),
     Transient(transient::Dsp),
     WrapSynth(wrapsynth::Dsp),
+    Zcomp(zcomp::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -302,6 +303,7 @@ impl BuiltinHostProcessor {
             "clipper67" => Some(Self::clipper67(sample_rate, state_json)),
             "transient" => Some(Self::transient(sample_rate, state_json)),
             "wrapsynth" => Some(Self::wrapsynth(sample_rate, state_json)),
+            "zcomp" => Some(Self::zcomp(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -575,6 +577,32 @@ impl BuiltinHostProcessor {
         }
     }
 
+    fn zcomp(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = zcomp::Dsp::new(sr);
+        if let Some(json) = state_json {
+            match zcomp::ipc::ZcompState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::Zcomp(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         match unsafe { &mut *self.dsp.get() } {
@@ -646,6 +674,13 @@ impl BuiltinHostProcessor {
             BuiltinDsp::WrapSynth(dsp) => {
                 for i in 0..frames {
                     let (l, r) = dsp.process_stereo();
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
+            BuiltinDsp::Zcomp(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
                     interleaved[i * 2] = l;
                     interleaved[i * 2 + 1] = r;
                 }
@@ -737,7 +772,7 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
-            BuiltinDsp::Transient(dsp) => {
+            BuiltinDsp::Zcomp(dsp) => {
                 let f = dsp.meter_frame();
                 Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
                     in_peak: f.in_peak,
@@ -774,6 +809,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Transient(dsp) => dsp.latency_samples(),
             BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
             BuiltinDsp::WrapSynth(_) => 0,
+            BuiltinDsp::Zcomp(dsp) => dsp.latency_samples(),
         }
     }
 
@@ -816,6 +852,9 @@ impl BuiltinHostProcessor {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
             BuiltinDsp::WrapSynth(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::Zcomp(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -1229,6 +1268,67 @@ mod builtin_processor_tests {
         );
         assert!(frame.in_rms > 0.0 && frame.out_rms > 0.0);
         assert_eq!(processor.latency_samples(), 0);
+    }
+
+    #[test]
+    fn zcomp_publishes_real_gain_reduction_through_the_host_frame() {
+        let processor = BuiltinHostProcessor::zcomp(48_000, None);
+        let threshold = zcomp::ui_param_index("thresholdDb").expect("in wire table");
+        let ratio = zcomp::ui_param_index("ratio").expect("in wire table");
+        processor.apply_param(threshold, -30.0);
+        processor.apply_param(ratio, 8.0);
+
+        let silence = [0.0f32; 64];
+        let mut output = [0.0f32; 128];
+        processor.process_block(&silence, &silence, &mut output, 64);
+        let quiet = processor
+            .meter_frame()
+            .expect("zcomp always publishes a frame");
+        assert!(quiet.gain_reduction_db < 1.0);
+
+        let loud = [0.75f32; 64];
+        for _ in 0..64 {
+            processor.process_block(&loud, &loud, &mut output, 64);
+        }
+        let frame = processor
+            .meter_frame()
+            .expect("zcomp always publishes a frame");
+        assert!(
+            frame.gain_reduction_db > 1.0,
+            "no reduction reported for a hot signal: {}",
+            frame.gain_reduction_db
+        );
+        assert!(frame.in_rms > 0.0 && frame.out_rms > 0.0);
+        assert_eq!(processor.latency_samples(), 0);
+    }
+
+    #[test]
+    fn zcomp_restores_state_and_takes_wire_params() {
+        let mut params = zcomp::default_params();
+        params.power = false;
+        let json = zcomp::ipc::ZcompState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::zcomp(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i]);
+            assert_eq!(output[i * 2 + 1], in_r[i]);
+        }
+
+        restored.apply_param(zcomp::ui_param_index("power").expect("power"), 1.0);
+        restored.apply_param(zcomp::ui_param_index("model").expect("model"), 1.0);
+        restored.apply_param(zcomp::UI_PARAM_IDS.len() as u32, 1.0);
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        let fallback = BuiltinHostProcessor::zcomp(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
     }
 
     #[test]

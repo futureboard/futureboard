@@ -19,17 +19,18 @@ pub use builtin_ui_embed as ui;
 
 pub use builtin_dsp_core as core;
 
-pub use c1073;
-pub use compresser;
 pub use burnlimit;
+pub use c1073;
+pub use clipper67;
+pub use compresser;
 pub use echospace;
 pub use equz8;
 pub use fa2a;
 pub use fa76;
-pub use clipper67;
 pub use meowsyn;
 pub use transient;
 pub use wrapsynth;
+pub use zcomp;
 
 use builtin_dsp_core::PluginDescriptor;
 
@@ -47,6 +48,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         c1073::descriptor(),
         meowsyn::descriptor(),
         wrapsynth::descriptor(),
+        zcomp::descriptor(),
     ]
 }
 
@@ -69,6 +71,7 @@ mod tests {
         assert!(ids.contains(&c1073::PLUGIN_ID));
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
         assert!(ids.contains(&wrapsynth::PLUGIN_ID));
+        assert!(ids.contains(&zcomp::PLUGIN_ID));
     }
 
     #[test]
@@ -79,6 +82,7 @@ mod tests {
         let mut delay = echospace::Dsp::new(48_000.0);
         let mut fet = fa76::Dsp::new(48_000.0);
         let mut channel = c1073::Dsp::new(48_000.0);
+        let mut ultimate = zcomp::Dsp::new(48_000.0);
 
         for dsp in [
             &mut eq as &mut dyn StereoEffect,
@@ -87,6 +91,7 @@ mod tests {
             &mut delay,
             &mut fet,
             &mut channel,
+            &mut ultimate,
         ] {
             let (l, r) = dsp.process_stereo(0.2, -0.1);
             assert!(l.is_finite() && r.is_finite());
