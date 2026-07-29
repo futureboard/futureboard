@@ -1,0 +1,102 @@
+/*
+ * Transient — attack / sustain shaper faceplate.
+ *
+ * Dark charcoal UI with a teal signal accent for the transient path and a soft
+ * amber reserved for sustain shaping. Flat surfaces, thin borders, tabular
+ * numerals — same family as 67Clipper / BurnLimit, distinct accent.
+ */
+
+:root {
+  --bg: #05080a;
+  --panel: #10161a;
+  --panel-hi: #182026;
+  --inset: #0a0e11;
+  --stage: #06090b;
+  --float: rgba(16, 22, 26, 0.92);
+
+  --border: rgba(255, 255, 255, 0.075);
+  --border-hi: rgba(255, 255, 255, 0.14);
+
+  --text: #eef4f7;
+  --text-muted: rgba(170, 190, 199, 0.58);
+  --readout: #eef4f7;
+
+  --accent: #2ec4b6;
+  --accent-soft: #3fd4c6;
+  --accent-dim: rgba(46, 196, 182, 0.16);
+  --red: #e8483a;
+  --red-soft: rgba(232, 72, 58, 0.7);
+  --amber: #e8a23a;
+
+  --signal: var(--accent);
+  --gr: var(--amber);
+  --clip: var(--red);
+
+  --r: 0.6rem;
+  --r-sm: 0.35rem;
+
+  --s1: 0.25rem;
+  --s2: 0.5rem;
+  --s3: 0.75rem;
+  --s4: 1rem;
+  --s5: 1.25rem;
+
+  --chrome-h: 2.35rem;
+  --footer-h: 3.5rem;
+
+  --knob-lg: clamp(3.6rem, 6.5vw, 4.5rem);
+  --knob-md: clamp(2.9rem, 5vw, 3.5rem);
+  --knob-sm: clamp(2.35rem, 4vw, 2.75rem);
+
+  --ease: 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 860px;
+  height: 100%;
+  min-height: 460px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Sans', 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    color var(--ease),
+    background-color var(--ease),
+    border-color var(--ease);
+}
+
+button:focus-visible,
+select:focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+}

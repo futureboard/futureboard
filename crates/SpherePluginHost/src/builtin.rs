@@ -102,6 +102,13 @@ const CATALOG: &[BuiltinEntry] = &[
         has_editor: true,
     },
     BuiltinEntry {
+        stem: "transient",
+        name: "Transient",
+        category: "Dynamics",
+        kind: PluginKind::Effect,
+        has_editor: true,
+    },
+    BuiltinEntry {
         stem: "c1073",
         name: "C1073",
         category: "EQ",
@@ -186,6 +193,7 @@ pub const AUDIO_BRIDGE_STEMS: &[&str] = &[
     "fa76",
     "burnlimit",
     "clipper67",
+    "transient",
     "wrapsynth",
 ];
 
@@ -321,6 +329,10 @@ mod tests {
             builtin_editor_url(&builtin_id("clipper67")).as_deref(),
             Some("mikoplugin://clipper67/index.html")
         );
+        assert_eq!(
+            builtin_editor_url(&builtin_id("transient")).as_deref(),
+            Some("mikoplugin://transient/index.html")
+        );
         assert!(builtin_editor_url(&builtin_id("compresser")).is_none());
         assert!(builtin_editor_url("vst3:whatever").is_none());
     }
@@ -350,6 +362,8 @@ mod tests {
         assert!(builtin_audio_bridge_supported("builtin:burnlimit"));
         assert!(builtin_audio_bridge_supported("clipper67"));
         assert!(builtin_audio_bridge_supported("builtin:clipper67"));
+        assert!(builtin_audio_bridge_supported("transient"));
+        assert!(builtin_audio_bridge_supported("builtin:transient"));
         assert!(builtin_audio_bridge_supported("wrapsynth"));
         assert!(builtin_audio_bridge_supported("builtin:wrapsynth"));
         // Catalogued, but the host has no DSP for it — must keep its old path.
@@ -381,6 +395,7 @@ mod tests {
         assert_eq!(builtin_display_name("builtin:fa76"), Some("FA-76"));
         assert_eq!(builtin_display_name("builtin:burnlimit"), Some("BurnLimit"));
         assert_eq!(builtin_display_name("builtin:clipper67"), Some("67Clipper"));
+        assert_eq!(builtin_display_name("builtin:transient"), Some("Transient"));
         assert_eq!(builtin_display_name("builtin:wrapsynth"), Some("WrapSynth"));
         assert_eq!(builtin_display_name("vst3:whatever"), None);
     }
