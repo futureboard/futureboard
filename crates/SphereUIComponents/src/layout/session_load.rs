@@ -203,20 +203,29 @@ impl StudioLayout {
         let path = &package.path;
         let expected_tracks = expected_persisted_track_count(&project.tracks);
 
-        let folder = path.parent().map(PathBuf::from);
-        self.project_session.bind_saved(
-            project.id.clone(),
-            project.name.clone(),
-            folder,
-            path.clone(),
-            project.created_at,
-            project.modified_at,
-        );
-        session_log!(
-            "session bound: name={} path={}",
-            self.project_session.name,
-            path.display()
-        );
+        // A project imported from another DAW's file has no Futureboard file to
+        // save back into: bind it untitled and dirty so the first save is a
+        // Save As and the imported file is never overwritten.
+        if crate::project::is_import_path(path) {
+            self.project_session
+                .bind_untitled(project.name.clone(), true);
+            session_log!("session bound from import: name={}", project.name);
+        } else {
+            let folder = path.parent().map(PathBuf::from);
+            self.project_session.bind_saved(
+                project.id.clone(),
+                project.name.clone(),
+                folder,
+                path.clone(),
+                project.created_at,
+                project.modified_at,
+            );
+            session_log!(
+                "session bound: name={} path={}",
+                self.project_session.name,
+                path.display()
+            );
+        }
         self.sync_project_session_to_workspace(cx);
         self.recent_projects
             .push(&project.name, path.clone(), now_secs());
@@ -717,20 +726,29 @@ impl StudioLayout {
             return false;
         }
 
-        let folder = path.parent().map(PathBuf::from);
-        self.project_session.bind_saved(
-            project.id.clone(),
-            project.name.clone(),
-            folder,
-            path.clone(),
-            project.created_at,
-            project.modified_at,
-        );
-        session_log!(
-            "session bound: name={} path={}",
-            self.project_session.name,
-            path.display()
-        );
+        // A project imported from another DAW's file has no Futureboard file to
+        // save back into: bind it untitled and dirty so the first save is a
+        // Save As and the imported file is never overwritten.
+        if crate::project::is_import_path(path) {
+            self.project_session
+                .bind_untitled(project.name.clone(), true);
+            session_log!("session bound from import: name={}", project.name);
+        } else {
+            let folder = path.parent().map(PathBuf::from);
+            self.project_session.bind_saved(
+                project.id.clone(),
+                project.name.clone(),
+                folder,
+                path.clone(),
+                project.created_at,
+                project.modified_at,
+            );
+            session_log!(
+                "session bound: name={} path={}",
+                self.project_session.name,
+                path.display()
+            );
+        }
         self.sync_project_session_to_workspace(cx);
         self.recent_projects
             .push(&project.name, path.clone(), now_secs());

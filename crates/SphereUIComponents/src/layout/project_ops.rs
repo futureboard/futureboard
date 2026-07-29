@@ -1033,6 +1033,12 @@ impl StudioLayout {
                         "Futureboard Project",
                         crate::project::io::SUPPORTED_PROJECT_FILE_EXTS,
                     )
+                    // Projects exported by another DAW open through the
+                    // importers in `crate::project::import`.
+                    .add_filter(
+                        "Cubase XML Track Archive",
+                        crate::project::IMPORT_PROJECT_FILE_EXTS,
+                    )
                     .pick_file()
                     .await;
                 if let Some(handle) = result {
