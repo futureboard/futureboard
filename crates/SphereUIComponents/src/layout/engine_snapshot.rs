@@ -292,10 +292,13 @@ fn build_engine_inserts_for(
 ) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
-    // Offline export always renders plugins in-process (the live out-of-process
-    // bridge has no host attached to the isolated offline graph), so it skips the
-    // bridge branch and carries each insert's saved VST3 state for restore.
-    if !export_mode && super::plugin_bridge_runtime::bridge_enabled() {
+    // When the external bridge is active, live inserts (VST3 + built-in) are
+    // `external-bridge-plugin` descriptors processed through realtime bridge
+    // sinks. Offline export detaches those sinks and drives them from the
+    // export worker (`export_window::BridgeSinkHandoff`), so the export snapshot
+    // must keep the same insert kinds — not rebuild as in-process `native-plugin`
+    // inserts (which would bypass the live DSP and render dry/raw audio).
+    if super::plugin_bridge_runtime::bridge_enabled() {
         return slots
             .iter()
             .enumerate()
@@ -581,11 +584,11 @@ pub(crate) fn build_engine_project_snapshot(
     )
 }
 
-/// Offline-export snapshot: plugin inserts are forced in-process and carry their
-/// saved VST3 state so the isolated offline graph renders instruments/effects the
-/// out-of-process bridge would otherwise own. `pdc_enabled` / `latency_graph_version`
-/// are stamped from the live engine so the offline render uses the *same*
-/// latency-compensated graph as playback. See `export_ops` / `offline_renderer`.
+/// Offline-export snapshot: when the external bridge is active, inserts mirror
+/// the live bridge graph so export can drive the detached realtime bridge sinks.
+/// Legacy in-process export (bridge off) carries saved VST3 state instead.
+/// `pdc_enabled` / `latency_graph_version` are stamped from the live engine so the
+/// offline render uses the *same* latency-compensated graph as playback.
 pub(super) fn build_engine_project_snapshot_for_export(
     state: &TimelineState,
     sample_rate: u32,
@@ -1006,6 +1009,7 @@ mod tests {
     use super::*;
     use crate::components::edit::EditCommand;
     use crate::components::timeline::timeline_state::{CreateTrackOptions, MidiControllerKind};
+    use crate::layout::plugin_bridge_runtime;
 
     fn instrument_state_with_clip() -> (TimelineState, String) {
         let mut state = TimelineState::default();
@@ -1751,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    fn export_snapshot_forces_in_process_inserts_and_carries_state() {
+    fn export_snapshot_uses_bridge_inserts_when_bridge_enabled() {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
 
         let mut state = TimelineState::default();
@@ -1780,8 +1784,6 @@ mod tests {
             None,
             "Plugin A".to_string(),
         );
-        // Stamp a saved-state blob the way refresh_bridge_plugin_states does
-        // before an export.
         let state_bytes = vec![9u8, 8, 7, 6];
         for track in &mut state.tracks {
             for ins in &mut track.inserts {
@@ -1791,25 +1793,36 @@ mod tests {
             }
         }
 
-        // Export snapshot: in-process kind + carried state, regardless of the
-        // live bridge setting.
-        let exported =
-            build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
-        let insert = exported
-            .tracks
-            .iter()
-            .find(|t| t.id == track_id)
-            .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
-            .expect("insert in export snapshot");
-        assert_eq!(
-            insert.kind, "native-plugin",
-            "export must force in-process inserts"
-        );
-        assert_eq!(
-            insert.state.as_deref(),
-            Some(state_bytes.as_slice()),
-            "export must carry the saved VST3 state"
-        );
+        if plugin_bridge_runtime::bridge_enabled() {
+            let exported =
+                build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
+            let insert = exported
+                .tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
+                .expect("insert in export snapshot");
+            assert_eq!(
+                insert.kind,
+                "external-bridge-plugin",
+                "export must mirror live bridge inserts so offline render can drive bridge sinks"
+            );
+            assert!(
+                insert.state.is_none(),
+                "bridge-owned inserts do not carry in-process restore blobs"
+            );
+        } else {
+            let exported =
+                build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
+            let insert = exported
+                .tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
+                .expect("insert in export snapshot");
+            assert_eq!(insert.kind, "native-plugin");
+            assert_eq!(insert.state.as_deref(), Some(state_bytes.as_slice()));
+        }
 
         // Live snapshot never carries the export state (bridged host owns restore).
         let live = build_engine_project_snapshot(&state, 48_000, None, None);

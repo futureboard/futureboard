@@ -456,12 +456,18 @@ fn target_from_slot(
     slot: &crate::components::timeline::timeline_state::InsertSlotState,
     is_instrument: bool,
 ) -> Option<PluginRestoreTarget> {
-    if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
-        return None;
-    }
-    let path = slot.plugin_path.as_ref()?;
-    if path.as_os_str().is_empty() {
-        return None;
+    let is_builtin = slot
+        .plugin_id
+        .as_deref()
+        .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
+    if !is_builtin {
+        if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+            return None;
+        }
+        let path = slot.plugin_path.as_ref()?;
+        if path.as_os_str().is_empty() {
+            return None;
+        }
     }
     Some(PluginRestoreTarget {
         track_id: track_id.to_string(),

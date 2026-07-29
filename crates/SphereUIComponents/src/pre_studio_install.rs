@@ -206,12 +206,18 @@ fn target_from_slot(
     slot: &crate::components::timeline::timeline_state::InsertSlotState,
     _is_instrument: bool,
 ) -> Option<RestoreTarget> {
-    if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
-        return None;
-    }
-    let path = slot.plugin_path.as_ref()?;
-    if path.as_os_str().is_empty() {
-        return None;
+    let is_builtin = slot
+        .plugin_id
+        .as_deref()
+        .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
+    if !is_builtin {
+        if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+            return None;
+        }
+        let path = slot.plugin_path.as_ref()?;
+        if path.as_os_str().is_empty() {
+            return None;
+        }
     }
     Some(RestoreTarget {
         track_id: track_id.to_string(),
@@ -240,7 +246,11 @@ fn restore_bridge_target(
         return RestoreOutcome::Failed;
     };
 
-    if !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
+    let is_builtin = slot
+        .plugin_id
+        .as_deref()
+        .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
+    if !is_builtin && !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
         let reason = slot
             .plugin_path
             .as_ref()
@@ -259,9 +269,8 @@ fn restore_bridge_target(
     let path_string = slot
         .plugin_path
         .as_ref()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let descriptor = BridgePluginDescriptor {
         track_id: target.track_id.clone(),
         insert_id: target.slot_id.clone(),
@@ -281,7 +290,16 @@ fn restore_bridge_target(
         PluginRuntimeState::Loading,
         host_pid,
     );
-    if let Err(error) = bridge.send_load_plugin(descriptor, sample_rate, max_block_size) {
+    let load_result = if is_builtin {
+        let state_json = slot
+            .vst3_state
+            .as_deref()
+            .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
+        bridge.send_load_builtin_plugin(descriptor, sample_rate, max_block_size, state_json)
+    } else {
+        bridge.send_load_plugin(descriptor, sample_rate, max_block_size)
+    };
+    if let Err(error) = load_result {
         timeline_state.set_insert_runtime(
             &target.track_id,
             &target.slot_id,
@@ -291,8 +309,10 @@ fn restore_bridge_target(
         );
         return RestoreOutcome::Failed;
     }
-    if let Some(state) = slot.vst3_state.as_ref() {
-        let _ = bridge.send_plugin_state(&target.slot_id, state);
+    if !is_builtin {
+        if let Some(state) = slot.vst3_state.as_ref() {
+            let _ = bridge.send_plugin_state(&target.slot_id, state);
+        }
     }
     drop(bridge);
     poll_bridge_events(runtime, timeline_state);
