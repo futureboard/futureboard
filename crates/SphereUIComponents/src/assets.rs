@@ -191,7 +191,7 @@ pub fn register_fonts(cx: &mut gpui::App) {
     );
 
     let blobs = vec![
-        ("Inter Variable Text", Cow::Borrowed(INTER_VARIABLE)),
+        (crate::theme::FONT_FAMILY, Cow::Borrowed(INTER_VARIABLE)),
         ("Google Sans", Cow::Borrowed(GOOGLE_SANS_VARIABLE)),
     ];
 

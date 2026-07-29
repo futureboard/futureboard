@@ -8,7 +8,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// Primary Latin/UI font family used across the native app.
-pub const FONT_FAMILY: &str = "Inter Variable Text";
+///
+/// This must match the family stored in `InterVariable.ttf`. CoreText does not
+/// resolve the Windows-compatible "Inter Variable Text" alias.
+pub const FONT_FAMILY: &str = "Inter Variable";
 
 /// Thai-capable fallback registered from `packages/shared/fonts`.
 pub const THAI_FONT_FAMILY: &str = "Google Sans";

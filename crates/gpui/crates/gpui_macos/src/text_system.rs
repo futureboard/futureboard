@@ -743,7 +743,32 @@ mod lenient_font_attributes {
 #[cfg(test)]
 mod tests {
     use crate::MacTextSystem;
-    use gpui::{FontRun, GlyphId, PlatformTextSystem, font, px};
+    use gpui::{FontRun, FontWeight, GlyphId, PlatformTextSystem, font, px};
+    use std::borrow::Cow;
+
+    #[test]
+    fn test_embedded_inter_variable_family_resolves_and_renders() {
+        const INTER_VARIABLE: &[u8] =
+            include_bytes!("../../../../../packages/shared/fonts/InterVariable.ttf");
+
+        let fonts = MacTextSystem::new();
+        fonts
+            .add_fonts(vec![Cow::Borrowed(INTER_VARIABLE)])
+            .unwrap();
+
+        for weight in [
+            FontWeight::NORMAL,
+            FontWeight::MEDIUM,
+            FontWeight::SEMIBOLD,
+            FontWeight::BOLD,
+        ] {
+            let mut descriptor = font("Inter Variable");
+            descriptor.weight = weight;
+            let font_id = fonts.font_id(&descriptor).unwrap();
+            let glyph_id = fonts.glyph_for_char(font_id, 'W').unwrap();
+            assert!(fonts.advance(font_id, glyph_id).unwrap().width > 0.);
+        }
+    }
 
     #[test]
     fn test_layout_line_bom_char() {
