@@ -469,7 +469,9 @@ pub struct SharedAudioBridge {
     /// metadata for routing; `out_channels` above still describes the current
     /// shared-buffer layout.
     pub plugin_output_channels: AtomicU32,
-    pub _pad_header: AtomicU32,
+    /// Host DSP blocks whose process time met or exceeded the block deadline.
+    /// This occupies the former header padding slot, preserving the wire size.
+    pub producer_deadline_misses: AtomicU32,
 
     // --- Block handshake (lock-free, one-block latency) ---
     /// Bumped by the engine after it writes `audio_in` + the rings for a block.
@@ -568,6 +570,7 @@ impl SharedAudioBridge {
         self.out_channels.store(channels, Ordering::Relaxed);
         self.plugin_output_channels
             .store(channels.max(1), Ordering::Relaxed);
+        self.producer_deadline_misses.store(0, Ordering::Relaxed);
         self.layout_version
             .store(BRIDGE_LAYOUT_VERSION, Ordering::Relaxed);
         self.dsp_output_state
@@ -615,6 +618,25 @@ impl SharedAudioBridge {
 
     pub fn plugin_output_channels(&self) -> u32 {
         self.plugin_output_channels.load(Ordering::Acquire).max(1)
+    }
+
+    /// Publish one producer DSP duration and classify it against the exact
+    /// sample-rate/block-size deadline. Atomics only; safe on the producer hot
+    /// path and observable from the control/UI diagnostics thread.
+    pub fn record_process_timing(&self, frames: usize, process_micros: u32) {
+        self.last_process_micros
+            .store(process_micros, Ordering::Relaxed);
+        self.max_process_micros
+            .fetch_max(process_micros, Ordering::Relaxed);
+        let sample_rate = self.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+        let deadline_micros = (frames as u64)
+            .saturating_mul(1_000_000)
+            .saturating_add(sample_rate - 1)
+            / sample_rate;
+        if deadline_micros > 0 && process_micros as u64 >= deadline_micros {
+            self.producer_deadline_misses
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Store the host output peak meters (host side).
@@ -1431,6 +1453,21 @@ mod tests {
         assert!(!bridge.dsp_output_ready());
         bridge.set_dsp_output_ready(true);
         assert!(bridge.dsp_output_ready());
+    }
+
+    #[test]
+    fn process_timing_counts_real_deadline_misses() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        bridge.init_header(48_000, 256, 2);
+
+        // 64 / 48 kHz = 1,333.33 µs, rounded up to the first whole µs.
+        bridge.record_process_timing(64, 1_333);
+        assert_eq!(bridge.producer_deadline_misses.load(Ordering::Relaxed), 0);
+        bridge.record_process_timing(64, 1_334);
+        assert_eq!(bridge.producer_deadline_misses.load(Ordering::Relaxed), 1);
+        assert_eq!(bridge.last_process_micros.load(Ordering::Relaxed), 1_334);
+        assert_eq!(bridge.max_process_micros.load(Ordering::Relaxed), 1_334);
     }
 
     #[test]

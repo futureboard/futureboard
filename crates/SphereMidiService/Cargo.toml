@@ -19,5 +19,8 @@ midir.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

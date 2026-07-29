@@ -1733,12 +1733,7 @@ fn service_audio_bridge(
         );
     }
     let process_micros = process_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-    bridge
-        .last_process_micros
-        .store(process_micros, Ordering::Relaxed);
-    bridge
-        .max_process_micros
-        .fetch_max(process_micros, Ordering::Relaxed);
+    bridge.record_process_timing(frames, process_micros);
     bridge.done_seq.store(req, Ordering::Release);
 }
 
@@ -1784,8 +1779,141 @@ fn boost_audio_producer_thread() {
     }
 }
 
-#[cfg(not(windows))]
+/// Promote the producer itself before entering the hot loop. This deliberately
+/// runs on the producer thread (once, before any block is serviced), so the
+/// policy applies to the thread that actually calls VST3 `process()`.
+#[cfg(target_os = "linux")]
+fn boost_audio_producer_thread() {
+    const FIFO_PRIORITIES: [libc::c_int; 3] = [70, 20, 5];
+    const FALLBACK_NICE: libc::c_int = -10;
+
+    for priority in FIFO_PRIORITIES {
+        // SAFETY: every field in `sched_param` is initialized before the call,
+        // and pid 0 means the calling thread on Linux.
+        let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+        param.sched_priority = priority;
+        if unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) } == 0 {
+            eprintln!("[plugin-host-audio] producer scheduling=SCHED_FIFO priority={priority}");
+            return;
+        }
+    }
+
+    // Permission-less fallback. Linux applies PRIO_PROCESS to the individual
+    // thread when passed its tid; pid 0 means this producer thread.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, FALLBACK_NICE) } == 0 {
+        eprintln!(
+            "[plugin-host-audio] realtime permission denied; producer scheduling=SCHED_OTHER nice={FALLBACK_NICE}"
+        );
+    } else {
+        eprintln!(
+            "[plugin-host-audio] realtime permission denied and nice fallback unavailable: {}",
+            io::Error::last_os_error()
+        );
+    }
+}
+
+/// macOS has no Linux-style per-user RT priority budget. Put the producer in
+/// the user-interactive QoS class, then request a bounded Mach time-constraint
+/// policy. The QoS promotion remains active when the stricter policy is denied.
+#[cfg(target_os = "macos")]
+fn boost_audio_producer_thread() {
+    #[repr(C)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+    #[repr(C)]
+    struct ThreadTimeConstraintPolicy {
+        period: u32,
+        computation: u32,
+        constraint: u32,
+        preemptible: i32,
+    }
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        fn mach_thread_self() -> u32;
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+        fn thread_policy_set(thread: u32, flavor: i32, policy_info: *const i32, count: u32) -> i32;
+    }
+
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    const THREAD_TIME_CONSTRAINT_POLICY: i32 = 2;
+
+    // SAFETY: these functions affect only the calling thread and all pointers
+    // below refer to initialized, correctly sized C-layout values.
+    unsafe {
+        let qos_ok = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) == 0;
+        let mut timebase = MachTimebaseInfo { numer: 0, denom: 0 };
+        let timebase_ok =
+            mach_timebase_info(&mut timebase) == 0 && timebase.numer != 0 && timebase.denom != 0;
+        let to_ticks = |nanos: u64| -> u32 {
+            if timebase_ok {
+                nanos
+                    .saturating_mul(timebase.denom as u64)
+                    .checked_div(timebase.numer as u64)
+                    .unwrap_or(0)
+                    .min(u32::MAX as u64) as u32
+            } else {
+                0
+            }
+        };
+        let policy = ThreadTimeConstraintPolicy {
+            period: 0,
+            computation: to_ticks(2_000_000),
+            constraint: to_ticks(10_000_000),
+            preemptible: 1,
+        };
+        let rt_ok = timebase_ok
+            && thread_policy_set(
+                mach_thread_self(),
+                THREAD_TIME_CONSTRAINT_POLICY,
+                (&policy as *const ThreadTimeConstraintPolicy).cast(),
+                (std::mem::size_of::<ThreadTimeConstraintPolicy>() / std::mem::size_of::<i32>())
+                    as u32,
+            ) == 0;
+        eprintln!(
+            "[plugin-host-audio] producer qos_user_interactive={qos_ok} mach_time_constraint={rt_ok} fallback={}",
+            if rt_ok { "none" } else if qos_ok { "qos" } else { "default" }
+        );
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn boost_audio_producer_thread() {}
+
+#[derive(Default)]
+struct ProducerDiagnostics {
+    blocks: u64,
+    deadline_misses: u64,
+    max_process_micros: u32,
+}
+
+impl ProducerDiagnostics {
+    fn record(&mut self, bridge: &SpherePluginHost::audio_bridge::SharedAudioBridge) {
+        let process_micros = bridge.last_process_micros.load(Ordering::Relaxed);
+        let frames = bridge.block_frames.load(Ordering::Relaxed) as u64;
+        let sample_rate = bridge.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+        let deadline_micros = frames
+            .saturating_mul(1_000_000)
+            .saturating_add(sample_rate - 1)
+            / sample_rate;
+        self.blocks = self.blocks.saturating_add(1);
+        self.max_process_micros = self.max_process_micros.max(process_micros);
+        if deadline_micros > 0 && process_micros as u64 >= deadline_micros {
+            self.deadline_misses = self.deadline_misses.saturating_add(1);
+        }
+    }
+
+    fn report(&self) {
+        eprintln!(
+            "[plugin-host-audio] producer diagnostics os={} blocks={} deadline_misses={} max_process_us={}",
+            std::env::consts::OS,
+            self.blocks,
+            self.deadline_misses,
+            self.max_process_micros
+        );
+    }
+}
 
 /// Dedicated host audio producer thread. VST3 `process()` runs only here (the
 /// editor stays on the STA main thread); the per-voice MIDI mutex inside
@@ -1815,6 +1943,7 @@ fn run_audio_producer(
     kick: Option<BridgeKickEvent>,
 ) {
     boost_audio_producer_thread();
+    let mut diagnostics = ProducerDiagnostics::default();
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
@@ -1828,12 +1957,16 @@ fn run_audio_producer(
             .map(|map| Arc::clone(&map))
             .unwrap_or_default();
         for (instance_id, region) in snapshot.iter() {
+            let before = region.bridge().done_seq.load(Ordering::Relaxed);
             service_audio_bridge(
                 region.as_ref(),
                 &dsp,
                 builtin_snapshot.get(instance_id).map(Arc::as_ref),
                 instance_id,
             );
+            if region.bridge().done_seq.load(Ordering::Relaxed) != before {
+                diagnostics.record(region.bridge());
+            }
         }
         // Acknowledge the latest voice-snapshot publish now that any snapshot
         // borrowed for this block has been dropped (lets unload hand the final
@@ -1850,6 +1983,7 @@ fn run_audio_producer(
             None => std::thread::sleep(Duration::from_micros(250)),
         }
     }
+    diagnostics.report();
 }
 
 fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
@@ -2310,10 +2444,12 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     let bridge = region.bridge();
                     let (peak_l, peak_r) = bridge.meters();
                     eprintln!(
-                        "[plugin-host-bridge] instance={instance_id} request_seq={} done_seq={} xruns={} process_us={} max_process_us={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
+                        "[plugin-host-bridge] instance={instance_id} os={} request_seq={} done_seq={} xruns={} producer_deadline_misses={} process_us={} max_process_us={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
+                        std::env::consts::OS,
                         bridge.request_seq.load(Ordering::Relaxed),
                         bridge.done_seq.load(Ordering::Relaxed),
                         bridge.xrun_count.load(Ordering::Relaxed),
+                        bridge.producer_deadline_misses.load(Ordering::Relaxed),
                         bridge.last_process_micros.load(Ordering::Relaxed),
                         bridge.max_process_micros.load(Ordering::Relaxed),
                         if bridge.dsp_output_ready() {

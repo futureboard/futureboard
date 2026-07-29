@@ -49,6 +49,7 @@ dependencies = [
 name = "SphereMidiService"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "midir",
  "serde",
  "windows 0.61.3",
