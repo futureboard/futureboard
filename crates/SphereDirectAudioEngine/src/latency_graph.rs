@@ -270,6 +270,18 @@ pub fn plan_runtime_latency_graph(
             if Some(idx) == master_index || is_master_track_type(&tracks[idx].track_type) {
                 continue;
             }
+            // Main-output → bus/return feeders must not take PDC on the feeder
+            // hop. The bus already carries upstream latency in its path and
+            // compensates once before summing to master. Delaying both the
+            // feeder and the bus double-compensates and makes bus-routed audio
+            // late vs direct-to-master tracks by exactly that extra delay.
+            // Send→return is different: the dry main still goes to master, so
+            // the source keeps its delay (applied after the pre-PDC send tap).
+            if resolve_output_target_index(idx, tracks, &id_to_index)
+                .is_some_and(|target| is_routing_track_type(&tracks[target].track_type))
+            {
+                continue;
+            }
             // PDC delay is relative to the *main/dry* path so return-FX latency
             // can pull dry forward without also delaying the send feed.
             let path = main_path_to_master(
@@ -416,6 +428,37 @@ mod tests {
         // (applied after the send tap) so dry and wet meet at the master.
         assert_eq!(latency.track_pdc_delay[0], 256);
         assert_eq!(latency.track_pdc_delay[1], 0);
+    }
+
+    #[test]
+    fn main_to_bus_does_not_double_pdc_against_longer_direct_path() {
+        // src → bus (0 insert lat) and slow → master (512). Without the feeder
+        // exemption both src and bus got D = max − path(bus), so bus audio
+        // arrived at max+D. Feeder delay must stay 0; only the bus (or other
+        // master-bound hop) compensates.
+        let mut src = track("src", "audio", 0, vec![]);
+        src.output_track_id = Some("bus".to_string());
+        let tracks = vec![
+            src,
+            track("bus", "bus", 0, vec![]),
+            track("slow", "audio", 512, vec![]),
+            track("master", "master", 0, vec![]),
+        ];
+        let audio_graph = plan_runtime_audio_graph(&tracks).unwrap();
+        let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
+        assert_eq!(latency.max_path_latency_samples, 512);
+        assert_eq!(
+            latency.track_pdc_delay[0], 0,
+            "main→bus feeder must not take PDC (would double with the bus)"
+        );
+        assert_eq!(
+            latency.track_pdc_delay[1], 512,
+            "bus compensates once to align with the longer direct path"
+        );
+        assert_eq!(latency.track_pdc_delay[2], 0);
+        // Bus-path arrival at master = bus_output_lat + bus_pdc = 0 + 512 = max.
+        let bus_arrival = latency.track_output_latency[1] + latency.track_pdc_delay[1];
+        assert_eq!(bus_arrival, latency.max_path_latency_samples);
     }
 
     #[test]

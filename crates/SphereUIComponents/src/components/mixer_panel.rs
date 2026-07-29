@@ -55,6 +55,20 @@ pub use callbacks::*;
 use drag::SendSlotDrag;
 pub use split::*;
 
+/// True when a mixer strip should paint as selected (multi-select aware).
+#[inline]
+fn mixer_strip_is_selected(
+    track_id: &str,
+    primary: Option<&str>,
+    selected_ids: &[String],
+) -> bool {
+    if !selected_ids.is_empty() {
+        selected_ids.iter().any(|id| id == track_id)
+    } else {
+        primary == Some(track_id)
+    }
+}
+
 /// Maximum insert slots per track. Once reached, the trailing empty "+ Add
 /// Insert" slot and the INSERTS header "+" are hidden/disabled.
 const MAX_INSERT_SLOTS: usize = 8;
@@ -1481,7 +1495,9 @@ fn channel_strip(
     let on_select_strip =
         move |event: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
             if event.button == gpui::MouseButton::Left {
-                select_cb(&select_id, w, cx);
+                let additive = event.modifiers.control || event.modifiers.platform;
+                let range = event.modifiers.shift;
+                select_cb(&select_id, additive, range, w, cx);
             }
         };
     let context_id = track.id.clone();
@@ -1630,13 +1646,16 @@ fn vsti_output_sub_strip(
             }
         }
     }
-    let is_selected = selected_track_id == Some(child_track.id.as_str()) || focus_highlight;
+    let is_selected = focus_highlight
+        || selected_track_id == Some(child_track.id.as_str());
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
         move |event: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
             if event.button == gpui::MouseButton::Left {
-                select_cb(&select_id, w, cx);
+                let additive = event.modifiers.control || event.modifiers.platform;
+                let range = event.modifiers.shift;
+                select_cb(&select_id, additive, range, w, cx);
             }
         };
     let context_id = child_track.id.clone();
@@ -2161,6 +2180,7 @@ pub(crate) fn build_mixer_render_snapshot(
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_mixer_channels: &HashSet<String>,
     selected_track_id: Option<&str>,
+    selected_track_ids: &[String],
     scroll_x: f32,
     channel_area_width: f32,
     strip_height: f32,
@@ -2174,7 +2194,8 @@ pub(crate) fn build_mixer_render_snapshot(
         let geom = match *item {
             MixerRenderItem::Track { track_index } => {
                 let track = &tracks[track_index];
-                let selected = selected_track_id == Some(track.id.as_str());
+                let selected =
+                    mixer_strip_is_selected(&track.id, selected_track_id, selected_track_ids);
                 let bg = if selected {
                     Colors::surface_card_selected()
                 } else if track_index % 2 == 0 {
@@ -2208,7 +2229,8 @@ pub(crate) fn build_mixer_render_snapshot(
             } => {
                 let parent = &tracks[parent_index];
                 let child = &tracks[child_index];
-                let selected = selected_track_id == Some(child.id.as_str());
+                let selected =
+                    mixer_strip_is_selected(&child.id, selected_track_id, selected_track_ids);
                 MixerStripGeom {
                     x,
                     width: STRIP_WIDTH,
@@ -2248,6 +2270,7 @@ pub fn mixer_panel(
     tracks: &[TrackState],
     master: &MasterBusState,
     selected_track_id: Option<&str>,
+    selected_track_ids: &[String],
     callbacks: MixerCallbacks,
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_mixer_channels: &HashSet<String>,
@@ -2327,6 +2350,7 @@ pub fn mixer_panel(
     let strip_row = mixer_strip_scroller(
         tracks,
         selected_track_id,
+        selected_track_ids,
         callbacks.clone(),
         collapsed_vsti_output_groups,
         hidden_mixer_channels,
@@ -2363,6 +2387,7 @@ pub fn mixer_panel(
             collapsed_vsti_output_groups,
             hidden_mixer_channels,
             selected_track_id,
+            selected_track_ids,
             scroll_x,
             viewport_width,
             strip_available_px,
@@ -2410,6 +2435,7 @@ pub fn mixer_panel(
 pub(crate) fn mixer_strip_scroller(
     tracks: &[TrackState],
     selected_track_id: Option<&str>,
+    selected_track_ids: &[String],
     callbacks: MixerCallbacks,
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_mixer_channels: &HashSet<String>,
@@ -2453,7 +2479,8 @@ pub(crate) fn mixer_strip_scroller(
         .map(|item| match *item {
             MixerRenderItem::Track { track_index } => {
                 let track = &tracks[track_index];
-                let is_sel = selected_track_id == Some(track.id.as_str());
+                let is_sel =
+                    mixer_strip_is_selected(&track.id, selected_track_id, selected_track_ids);
                 let vsti_group_expanded = track
                     .instrument_insert()
                     .filter(|slot| !slot.is_empty())
@@ -2484,6 +2511,11 @@ pub(crate) fn mixer_strip_scroller(
                 let bus_counts = parent.inserts[insert_index]
                     .output_bus_channel_counts
                     .clone();
+                let child_selected = mixer_strip_is_selected(
+                    &tracks[child_index].id,
+                    selected_track_id,
+                    selected_track_ids,
+                );
                 vsti_output_sub_strip(
                     parent,
                     &tracks[child_index],
@@ -2493,7 +2525,7 @@ pub(crate) fn mixer_strip_scroller(
                     bus_index,
                     &bus_counts,
                     selected_track_id,
-                    false,
+                    child_selected,
                     vsti_output_meters,
                     &callbacks,
                     split,

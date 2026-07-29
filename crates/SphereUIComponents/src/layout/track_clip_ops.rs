@@ -111,24 +111,31 @@ impl StudioLayout {
     }
 
     pub(super) fn delete_selected_track(&mut self, cx: &mut Context<Self>) {
-        let Some(track_id) = self
-            .timeline
-            .read(cx)
-            .state
-            .selection
-            .selected_track_id
-            .clone()
-        else {
-            return;
+        let ids: Vec<String> = {
+            let state = &self.timeline.read(cx).state;
+            let mut ids = state.selection.selected_track_ids.clone();
+            if ids.is_empty() {
+                if let Some(primary) = state.selection.selected_track_id.clone() {
+                    ids.push(primary);
+                }
+            }
+            ids
         };
+        if ids.is_empty() {
+            return;
+        }
         // Close editors + MIDI panic BEFORE the model mutation so the engine
         // reload triggered by `mark_dirty` can actually release the instances.
-        self.cleanup_track_plugins_before_delete(&track_id, cx);
+        for track_id in &ids {
+            self.cleanup_track_plugins_before_delete(track_id, cx);
+        }
         let _ = self.timeline.update(cx, |timeline, cx| {
-            let Some(snapshot) = TrackSnapshot::capture(&timeline.state, &track_id) else {
-                return;
-            };
-            timeline.run_edit_command(EditCommand::DeleteTrack { snapshot }, cx);
+            for track_id in &ids {
+                let Some(snapshot) = TrackSnapshot::capture(&timeline.state, track_id) else {
+                    continue;
+                };
+                timeline.run_edit_command(EditCommand::DeleteTrack { snapshot }, cx);
+            }
         });
         self.mark_dirty();
     }
@@ -634,12 +641,26 @@ impl StudioLayout {
             let id = timeline.state.selection.selected_track_id.clone()?;
             timeline.state.toggle_track_mute(&id);
             let muted = timeline.state.find_track(&id).map(|t| t.muted)?;
+            let mut ids = vec![id.clone()];
+            if timeline.state.is_track_selected(&id)
+                && timeline.state.selection.selected_track_ids.len() > 1
+            {
+                for other in timeline.state.selection.selected_track_ids.clone() {
+                    if other == id {
+                        continue;
+                    }
+                    timeline.state.set_track_mute(&other, muted);
+                    ids.push(other);
+                }
+            }
             cx.notify();
-            Some((id, muted))
+            Some((ids, muted))
         });
-        if let Some((id, muted)) = toggled {
+        if let Some((ids, muted)) = toggled {
             if let Some(engine) = self.audio_bridge.engine.as_ref() {
-                let _ = engine.update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 });
+                for id in &ids {
+                    let _ = engine.update_track_param(id, "muted", if muted { 1.0 } else { 0.0 });
+                }
             }
             self.push_mixer_snapshot_to_window(cx);
         }
@@ -652,12 +673,26 @@ impl StudioLayout {
             let id = timeline.state.selection.selected_track_id.clone()?;
             timeline.state.toggle_track_solo(&id);
             let solo = timeline.state.find_track(&id).map(|t| t.solo)?;
+            let mut ids = vec![id.clone()];
+            if timeline.state.is_track_selected(&id)
+                && timeline.state.selection.selected_track_ids.len() > 1
+            {
+                for other in timeline.state.selection.selected_track_ids.clone() {
+                    if other == id {
+                        continue;
+                    }
+                    timeline.state.set_track_solo(&other, solo);
+                    ids.push(other);
+                }
+            }
             cx.notify();
-            Some((id, solo))
+            Some((ids, solo))
         });
-        if let Some((id, solo)) = toggled {
+        if let Some((ids, solo)) = toggled {
             if let Some(engine) = self.audio_bridge.engine.as_ref() {
-                let _ = engine.update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 });
+                for id in &ids {
+                    let _ = engine.update_track_param(id, "solo", if solo { 1.0 } else { 0.0 });
+                }
             }
             self.push_mixer_snapshot_to_window(cx);
         }
@@ -674,15 +709,30 @@ impl StudioLayout {
     }
 
     pub(super) fn reset_selected_track_volume(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                timeline
-                    .state
-                    .set_track_volume(&id, timeline_state::volume::db_to_norm(0.0));
+        self.mark_dirty_view_only();
+        let norm = timeline_state::volume::db_to_norm(0.0);
+        let ids: Vec<String> = self.timeline.update(cx, |timeline, cx| {
+            let mut ids = timeline.state.selection.selected_track_ids.clone();
+            if ids.is_empty() {
+                if let Some(primary) = timeline.state.selection.selected_track_id.clone() {
+                    ids.push(primary);
+                }
+            }
+            for id in &ids {
+                timeline.state.set_track_volume(id, norm);
+            }
+            if !ids.is_empty() {
                 cx.notify();
             }
+            ids
         });
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            let linear = super::engine_snapshot::volume_norm_to_linear(norm) as f64;
+            for id in &ids {
+                let _ = engine.update_track_param(id, "volume", linear);
+            }
+        }
+        self.push_mixer_snapshot_to_window(cx);
     }
 
     /// Create a Bus strip immediately (mixer context menu). Routes the currently
@@ -710,13 +760,28 @@ impl StudioLayout {
     }
 
     pub(super) fn reset_selected_track_pan(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                timeline.state.set_track_pan(&id, 0.0);
+        self.mark_dirty_view_only();
+        let ids: Vec<String> = self.timeline.update(cx, |timeline, cx| {
+            let mut ids = timeline.state.selection.selected_track_ids.clone();
+            if ids.is_empty() {
+                if let Some(primary) = timeline.state.selection.selected_track_id.clone() {
+                    ids.push(primary);
+                }
+            }
+            for id in &ids {
+                timeline.state.set_track_pan(id, 0.0);
+            }
+            if !ids.is_empty() {
                 cx.notify();
             }
+            ids
         });
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            for id in &ids {
+                let _ = engine.update_track_param(id, "pan", 0.0);
+            }
+        }
+        self.push_mixer_snapshot_to_window(cx);
     }
 
     pub(super) fn set_context_track_height_preset(

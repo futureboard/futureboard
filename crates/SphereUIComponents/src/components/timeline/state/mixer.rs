@@ -319,6 +319,17 @@ impl TimelineState {
         false
     }
 
+    /// Set solo without toggling. Returns `true` when the stored value changed.
+    pub fn set_track_solo(&mut self, track_id: &str, solo: bool) -> bool {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.solo != solo {
+                t.solo = solo;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn toggle_track_arm(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.armed = !t.armed;

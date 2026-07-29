@@ -5,7 +5,8 @@ use gpui::{App, Window};
 /// views can never disagree.
 #[derive(Clone)]
 pub struct MixerCallbacks {
-    pub on_select_track: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
+    pub on_select_track:
+        std::sync::Arc<dyn Fn(&String, bool, bool, &mut Window, &mut App) + 'static>,
     pub on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
     pub on_volume_drag_start:
         std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
@@ -71,6 +72,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     use std::sync::Arc;
 
     let noop_track = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
+    let noop_select = Arc::new(|_: &String, _: bool, _: bool, _: &mut Window, _: &mut App| {});
     let noop_vol = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_vol_commit = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
@@ -86,7 +88,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_send_reorder = Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
     let noop_send_gain = Arc::new(|_: &(String, String, f32), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
-        on_select_track: noop_track.clone(),
+        on_select_track: noop_select,
         on_volume_change: noop_vol.clone(),
         on_volume_drag_start: noop_vol.clone(),
         on_volume_drag_preview: noop_vol,

@@ -206,6 +206,7 @@ impl StudioLayout {
             tracks,
             master,
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
+            selected_track_ids: timeline.state.selection.selected_track_ids.clone(),
             mixer_scroll_x: self.mixer_view.scroll_x,
             mixer_insert_section_px: clamp_mixer_section_height_px(
                 self.mixer_view.insert_section_px,
@@ -966,29 +967,22 @@ impl StudioLayout {
         let mixer_panel_select = self.mixer_panel.clone();
         let owner_select = owner.clone();
         let on_select_track: std::sync::Arc<
-            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            dyn Fn(&String, bool, bool, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, additive: bool, range: bool, _w, cx| {
             let _interaction = crate::perf::PerfScope::enter("MixerSelectInteraction");
             let id = id.clone();
             if external_mixer_debug_enabled() {
-                external_mixer_debug(&format!("mixer command dispatched select_track id={id}"));
-            }
-            if timeline_select
-                .read(cx)
-                .state
-                .selection
-                .selected_track_id
-                .as_deref()
-                == Some(id.as_str())
-            {
-                return;
+                external_mixer_debug(&format!(
+                    "mixer command dispatched select_track id={id} additive={additive} range={range}"
+                ));
             }
             // Commit the shared selection without scheduling the full Timeline
             // repaint first. That repaint may include waveform work; when mixer
             // invalidation was deferred behind it, the strip highlight visibly
             // lagged even though the model had already changed.
             timeline_select.update(cx, |t, _cx| {
-                t.state.select_track(&id);
+                t.state
+                    .select_track_with_modifiers(&id, additive, range);
             });
             // Queue the lightweight mixer repaint first so selection feedback is
             // not blocked by Timeline/Inspector/tree work.
@@ -1181,6 +1175,19 @@ impl StudioLayout {
                             .find_track(&id)
                             .map(|track| track.muted)
                             .unwrap_or(false);
+                        // Ctrl/Shift multi-select: apply the same mute state to
+                        // every selected strip when the clicked one is in the set.
+                        if t.state.is_track_selected(&id)
+                            && t.state.selection.selected_track_ids.len() > 1
+                        {
+                            let ids = t.state.selection.selected_track_ids.clone();
+                            for other in ids {
+                                if other == id {
+                                    continue;
+                                }
+                                t.state.set_track_mute(&other, muted);
+                            }
+                        }
                     });
                 }
                 // Dispatch the bounded, non-blocking realtime command before
@@ -1189,9 +1196,27 @@ impl StudioLayout {
                 {
                     let _dispatch = crate::perf::PerfScope::enter("MixerMuteCommandDispatch");
                     if let Some(engine) = audio_engine.as_ref() {
-                        audio_router_applied = engine
-                            .update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 })
-                            .is_ok();
+                        let ids: Vec<String> = timeline_mute.read(cx).state.selection.selected_track_ids
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let batch = if ids.len() > 1
+                            && ids.iter().any(|selected| selected == &id)
+                        {
+                            ids
+                        } else {
+                            vec![id.clone()]
+                        };
+                        for track_id in &batch {
+                            audio_router_applied = engine
+                                .update_track_param(
+                                    track_id,
+                                    "muted",
+                                    if muted { 1.0 } else { 0.0 },
+                                )
+                                .is_ok()
+                                || audio_router_applied;
+                        }
                     }
                 }
                 // Give the control that was clicked immediate visual feedback.
@@ -1270,15 +1295,44 @@ impl StudioLayout {
                             .find_track(&id)
                             .map(|track| track.solo)
                             .unwrap_or(false);
+                        if t.state.is_track_selected(&id)
+                            && t.state.selection.selected_track_ids.len() > 1
+                        {
+                            let ids = t.state.selection.selected_track_ids.clone();
+                            for other in ids {
+                                if other == id {
+                                    continue;
+                                }
+                                t.state.set_track_solo(&other, solo);
+                            }
+                        }
                     });
                 }
                 let mut audio_router_applied = false;
                 {
                     let _dispatch = crate::perf::PerfScope::enter("MixerSoloCommandDispatch");
                     if let Some(engine) = audio_engine.as_ref() {
-                        audio_router_applied = engine
-                            .update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 })
-                            .is_ok();
+                        let ids: Vec<String> = timeline_solo
+                            .read(cx)
+                            .state
+                            .selection
+                            .selected_track_ids
+                            .iter()
+                            .cloned()
+                            .collect();
+                        let batch = if ids.len() > 1
+                            && ids.iter().any(|selected| selected == &id)
+                        {
+                            ids
+                        } else {
+                            vec![id.clone()]
+                        };
+                        for track_id in &batch {
+                            audio_router_applied = engine
+                                .update_track_param(track_id, "solo", if solo { 1.0 } else { 0.0 })
+                                .is_ok()
+                                || audio_router_applied;
+                        }
                     }
                 }
                 crate::perf::record_notify("mixer_solo");
@@ -1542,7 +1596,13 @@ impl StudioLayout {
                 let window_id = window.window_handle().window_id();
                 StudioLayout::defer_update(&this, cx, move |this, cx| {
                     let _ = this.timeline.update(cx, |timeline, cx| {
-                        timeline.state.select_track(&track_id);
+                        // Preserve Ctrl/Shift multi-select when the strip is
+                        // already in the set; only retarget the primary.
+                        if timeline.state.is_track_selected(&track_id) {
+                            timeline.state.selection.selected_track_id = Some(track_id.clone());
+                        } else {
+                            timeline.state.select_track(&track_id);
+                        }
                         cx.notify();
                     });
                     this.try_open_context_menu(

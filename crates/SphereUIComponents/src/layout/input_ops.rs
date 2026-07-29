@@ -1141,6 +1141,9 @@ impl StudioLayout {
                 ContextMenuEntry::Separator,
                 ContextMenuEntry::item("Mute", "track:mute"),
                 ContextMenuEntry::item("Solo", "track:solo"),
+                ContextMenuEntry::Separator,
+                ContextMenuEntry::item("Track Color", "track:color"),
+                ContextMenuEntry::danger_item("Delete Track", "track:delete"),
             ],
             ContextTarget::SendPicker { track_id } => {
                 let state = &self.timeline.read(cx).state;

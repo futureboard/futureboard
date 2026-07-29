@@ -2028,7 +2028,11 @@ impl StudioLayout {
                 if let Some(track_id) = self.context_track_id_or_selected(cx) {
                     self.panels.inspector = true;
                     self.timeline.update(cx, |timeline, cx| {
-                        timeline.state.select_track(&track_id);
+                        if timeline.state.is_track_selected(&track_id) {
+                            timeline.state.selection.selected_track_id = Some(track_id.clone());
+                        } else {
+                            timeline.state.select_track(&track_id);
+                        }
                         cx.notify();
                     });
                     self.set_active_panel(WorkspaceActivePanel::Inspector, cx);

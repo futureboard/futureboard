@@ -119,6 +119,7 @@ impl MixerPanelView {
             tracks,
             master,
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
+            selected_track_ids: timeline.state.selection.selected_track_ids.clone(),
             collapsed,
             hidden,
             vsti_output_meters: chrome.vsti_output_meters.clone(),
@@ -139,6 +140,7 @@ impl MixerPanelView {
         state.strip_count.hash(&mut hasher);
         state.track_count.hash(&mut hasher);
         state.selected_track_id.as_deref().hash(&mut hasher);
+        state.selected_track_ids.hash(&mut hasher);
         q(state.scroll_x).hash(&mut hasher);
         q(state.viewport_width).hash(&mut hasher);
         q(state.strip_available_px).hash(&mut hasher);
@@ -155,6 +157,7 @@ struct MixerPanelViewState {
     tracks: Vec<crate::components::timeline::timeline_state::TrackState>,
     master: crate::components::timeline::timeline_state::MasterBusState,
     selected_track_id: Option<String>,
+    selected_track_ids: Vec<String>,
     collapsed: HashSet<String>,
     hidden: HashSet<String>,
     vsti_output_meters: HashMap<String, VstiOutputMeterState>,
@@ -213,6 +216,7 @@ impl Render for MixerPanelView {
             let strip_row = mixer_strip_scroller(
                 &state.tracks,
                 state.selected_track_id.as_deref(),
+                &state.selected_track_ids,
                 callbacks.clone(),
                 &state.collapsed,
                 &state.hidden,
@@ -243,6 +247,7 @@ impl Render for MixerPanelView {
                 &state.collapsed,
                 &state.hidden,
                 state.selected_track_id.as_deref(),
+                &state.selected_track_ids,
                 state.scroll_x,
                 state.viewport_width,
                 state.strip_available_px,

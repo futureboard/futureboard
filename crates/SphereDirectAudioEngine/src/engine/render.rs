@@ -1654,9 +1654,10 @@ pub(crate) fn apply_external_bridge_insert_block(
     // `params["role"]` resolved at build time — no params-map read per block.
     let is_effect = insert.bridge_is_effect;
 
-    if insert.scratch_l.len() < frames {
-        insert.scratch_l.resize(frames, 0.0);
-        insert.scratch_r.resize(frames, 0.0);
+    if insert.scratch_l.len() < frames || insert.scratch_r.len() < frames {
+        // Scratches are pre-sized at graph build / `resolve_bridge_sinks`.
+        // Growing here would allocate on the audio thread — skip this insert.
+        return;
     }
 
     // One-block handshake ownership (critical):
