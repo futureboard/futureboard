@@ -80,6 +80,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         burnlimit::ui::UI_ORIGIN => burnlimit::ui_param_index(param_id),
         clipper67::ui::UI_ORIGIN => clipper67::ui_param_index(param_id),
         wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_index(param_id),
+        zcomp::ui::UI_ORIGIN => zcomp::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -123,6 +124,7 @@ mod state_mirror {
         BurnLimit(Box<burnlimit::Params>),
         Clipper67(Box<clipper67::Params>),
         WrapSynth(Box<wrapsynth::Params>),
+        Zcomp(Box<zcomp::Params>),
     }
 
     impl BuiltinParams {
@@ -137,6 +139,7 @@ mod state_mirror {
                 Self::BurnLimit(_) => burnlimit::ui::UI_ORIGIN,
                 Self::Clipper67(_) => clipper67::ui::UI_ORIGIN,
                 Self::WrapSynth(_) => wrapsynth::ui::UI_ORIGIN,
+                Self::Zcomp(_) => zcomp::ui::UI_ORIGIN,
             }
         }
 
@@ -164,6 +167,7 @@ mod state_mirror {
                 wrapsynth::ui::UI_ORIGIN => {
                     Some(Self::WrapSynth(Box::new(wrapsynth::default_params())))
                 }
+                zcomp::ui::UI_ORIGIN => Some(Self::Zcomp(Box::new(zcomp::default_params()))),
                 _ => None,
             }
         }
@@ -207,6 +211,7 @@ mod state_mirror {
             burnlimit::ui::UI_ORIGIN => burnlimit::ui_param_id(wire_index).is_some(),
             clipper67::ui::UI_ORIGIN => clipper67::ui_param_id(wire_index).is_some(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_id(wire_index).is_some(),
+            zcomp::ui::UI_ORIGIN => zcomp::ui_param_id(wire_index).is_some(),
             _ => false,
         };
         if !known {
@@ -244,6 +249,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::WrapSynth(params)) => {
                 let _ = wrapsynth::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::Zcomp(params)) => {
+                let _ = zcomp::ipc::apply_wire_param(params, wire_index, value);
             }
             None => {}
         }
@@ -286,6 +294,9 @@ mod state_mirror {
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ipc::WrapSynthState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::WrapSynth(Box::new(state.params))),
+            zcomp::ui::UI_ORIGIN => zcomp::ipc::ZcompState::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::Zcomp(Box::new(state.params))),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -352,6 +363,11 @@ mod state_mirror {
             }
             BuiltinParams::WrapSynth(params) if origin == wrapsynth::ui::UI_ORIGIN => {
                 wrapsynth::ipc::WrapSynthState::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            BuiltinParams::Zcomp(params) if origin == zcomp::ui::UI_ORIGIN => {
+                zcomp::ipc::ZcompState::new((**params).clone())
                     .to_json()
                     .ok()?
             }
@@ -425,6 +441,12 @@ mod state_mirror {
                 wrapsynth::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| wrapsynth::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::Zcomp(params)) if origin == zcomp::ui::UI_ORIGIN => {
+                zcomp::ipc::ui_values(params)
+                    .into_iter()
+                    .filter_map(|(id, value)| zcomp::ui_param_index(id).map(|i| (i, value)))
                     .collect()
             }
             _ => Vec::new(),
@@ -823,6 +845,7 @@ mod imp {
             burnlimit::ui::UI_ORIGIN => burnlimit::ui::BurnLimitUi::resolve_ui_asset(path)?,
             clipper67::ui::UI_ORIGIN => clipper67::ui::Clipper67Ui::resolve_ui_asset(path)?,
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::resolve_ui_asset(path)?,
+            zcomp::ui::UI_ORIGIN => zcomp::ui::ZcompUi::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -847,6 +870,7 @@ mod imp {
                 | burnlimit::ui::UI_ORIGIN
                 | clipper67::ui::UI_ORIGIN
                 | wrapsynth::ui::UI_ORIGIN
+                | zcomp::ui::UI_ORIGIN
         )
     }
 
@@ -862,6 +886,7 @@ mod imp {
             burnlimit::ui::UI_ORIGIN => burnlimit::ui::BurnLimitUi::is_embedded(),
             clipper67::ui::UI_ORIGIN => clipper67::ui::Clipper67Ui::is_embedded(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::is_embedded(),
+            zcomp::ui::UI_ORIGIN => zcomp::ui::ZcompUi::is_embedded(),
             _ => false,
         }
     }

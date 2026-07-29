@@ -67,6 +67,13 @@ const CATALOG: &[BuiltinEntry] = &[
         has_editor: true,
     },
     BuiltinEntry {
+        stem: "zcomp",
+        name: "Z-Comp",
+        category: "Dynamics",
+        kind: PluginKind::Effect,
+        has_editor: true,
+    },
+    BuiltinEntry {
         stem: "echospace",
         name: "EchoSpace",
         category: "Delay",
@@ -187,6 +194,7 @@ pub const AUDIO_BRIDGE_STEMS: &[&str] = &[
     "burnlimit",
     "clipper67",
     "wrapsynth",
+    "zcomp",
 ];
 
 /// Whether this built-in currently has an out-of-process audio DSP runtime.
@@ -310,6 +318,10 @@ mod tests {
             Some("mikoplugin://fa2a/index.html")
         );
         assert_eq!(
+            builtin_editor_url(&builtin_id("zcomp")).as_deref(),
+            Some("mikoplugin://zcomp/index.html")
+        );
+        assert_eq!(
             builtin_editor_url(&builtin_id("fa76")).as_deref(),
             Some("mikoplugin://fa76/index.html")
         );
@@ -344,6 +356,8 @@ mod tests {
         assert!(builtin_audio_bridge_supported("builtin:echospace"));
         assert!(builtin_audio_bridge_supported("fa2a"));
         assert!(builtin_audio_bridge_supported("builtin:fa2a"));
+        assert!(builtin_audio_bridge_supported("zcomp"));
+        assert!(builtin_audio_bridge_supported("builtin:zcomp"));
         assert!(builtin_audio_bridge_supported("fa76"));
         assert!(builtin_audio_bridge_supported("builtin:fa76"));
         assert!(builtin_audio_bridge_supported("burnlimit"));
@@ -378,6 +392,7 @@ mod tests {
         assert_eq!(builtin_display_name("builtin:verbspace"), Some("VerbSpace"));
         assert_eq!(builtin_display_name("echospace"), Some("EchoSpace"));
         assert_eq!(builtin_display_name("builtin:fa2a"), Some("FA-2A"));
+        assert_eq!(builtin_display_name("builtin:zcomp"), Some("Z-Comp"));
         assert_eq!(builtin_display_name("builtin:fa76"), Some("FA-76"));
         assert_eq!(builtin_display_name("builtin:burnlimit"), Some("BurnLimit"));
         assert_eq!(builtin_display_name("builtin:clipper67"), Some("67Clipper"));

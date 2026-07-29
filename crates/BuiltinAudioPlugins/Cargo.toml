@@ -26,6 +26,7 @@ clipper67.workspace = true
 c1073.workspace = true
 meowsyn.workspace = true
 wrapsynth.workspace = true
+zcomp.workspace = true
 
 [lints]
 workspace = true
