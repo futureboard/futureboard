@@ -25,6 +25,7 @@ export type ZcompParams = {
   stereoLink: number
   color: number
   autoRelease: boolean
+  scListen: boolean
 }
 
 export type MeterFrame = {
@@ -65,6 +66,7 @@ export const defaults: ZcompParams = {
   stereoLink: 100,
   color: 18,
   autoRelease: true,
+  scListen: false,
 }
 
 type Binding = {
@@ -166,6 +168,8 @@ function parseParams(state: unknown): ZcompParams | null {
   const raw = params as unknown as ZcompParams
   return {
     ...raw,
+    // Added after the first release: a state blob without it is still valid.
+    scListen: typeof params.scListen === 'boolean' ? params.scListen : false,
     thresholdDb: Math.min(0, Math.max(-60, raw.thresholdDb)),
     ratio: Math.min(20, Math.max(1, raw.ratio)),
     attackMs: Math.min(120, Math.max(0.01, raw.attackMs)),

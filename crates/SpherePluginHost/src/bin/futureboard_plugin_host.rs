@@ -784,6 +784,20 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
+            BuiltinDsp::Transient(dsp) => {
+                let f = dsp.meter_frame();
+                Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+                    in_peak: f.in_peak,
+                    in_rms: f.in_rms,
+                    out_peak: f.out_peak,
+                    out_rms: f.out_rms,
+                    // Transient shaping is a gain change in either direction;
+                    // the frame carries its magnitude.
+                    gain_reduction_db: f.gain_reduction_db,
+                    in_clip: f.in_clip,
+                    out_clip: f.out_clip,
+                })
+            }
             BuiltinDsp::Equz8(_)
             | BuiltinDsp::Verbspace(_)
             | BuiltinDsp::Echospace(_)

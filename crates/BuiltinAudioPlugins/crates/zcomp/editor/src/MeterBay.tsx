@@ -1,9 +1,10 @@
 /**
- * Hardware meter bay: IN ladder · enamel VU · OUT ladder.
+ * Meter bay: IN ladder · enamel VU movement · OUT ladder.
  *
- * Host telemetry is consumed via a ref so App knobs never re-render at meter
- * rate. One RAF loop advances ballistics, paints both LED canvases, and rotates
- * the needle with a transform — no React setState on the hot path.
+ * Host telemetry is consumed through a ref, so the faceplate never re-renders
+ * at meter rate. One RAF loop advances the ballistics, paints both LED
+ * canvases, rotates the needle by attribute, and writes the numeric readouts at
+ * a fixed 15 Hz — no React state on the hot path.
  */
 
 import {
@@ -33,15 +34,22 @@ import {
   type PeakHold,
 } from './meter'
 
+/** 0 VU is referenced to −18 dBFS, the usual digital alignment. */
 const OUTPUT_REF_DBFS = -18
-const PIVOT_X = 100
-const PIVOT_Y = 134
-const NEEDLE_R = 100
-const SCALE_R = 104
-const LABEL_R = 86
-const TICK_MAJOR = 9
-const TICK_MINOR = 5
+
+const FACE_W = 260
+const FACE_H = 140
+const PIVOT_X = 130
+const PIVOT_Y = 158
+const NEEDLE_R = 124
+const SCALE_R = 128
+const LABEL_R = 110
+const TICK_MAJOR = 10
+const TICK_MINOR = 6
 const READOUT_HZ = 15
+
+/** Engraved legend beside the LED ladders (dBFS). */
+const LADDER_LEGEND = [0, -6, -12, -20, -30, -45, -60]
 
 type Props = {
   metersRef: MutableRefObject<MeterFrame | null>
@@ -95,14 +103,14 @@ function paintLadder(
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, cssW, cssH)
 
-  const gap = 1.15
+  const gap = 1.4
   const segH = (cssH - gap * (LADDER_SEGMENTS - 1)) / LADDER_SEGMENTS
   const peakSeg = Math.round(peakNorm * LADDER_SEGMENTS)
   const rmsSeg = Math.round(rmsNorm * LADDER_SEGMENTS)
   const holdSeg = Math.round(hold * LADDER_SEGMENTS)
 
   for (let i = 0; i < LADDER_SEGMENTS; i++) {
-    // i = 0 at top (hot), matching hardware LED strips.
+    // i = 0 at the top (hot end), matching hardware LED strips.
     const fromTop = LADDER_SEGMENTS - i
     const y = i * (segH + gap)
     const lit = fromTop <= peakSeg
@@ -112,28 +120,25 @@ function paintLadder(
     let fill = colors.idle
     if (lit) {
       const t = fromTop / LADDER_SEGMENTS
-      if (t > 0.88) fill = colors.hot
-      else if (t > 0.68) fill = colors.warm
+      if (t > 0.9) fill = colors.hot
+      else if (t > 0.72) fill = colors.warm
       else fill = colors.cool
     }
 
-    ctx.globalAlpha = lit ? (rmsLit ? 1 : 0.72) : 0.22
+    ctx.globalAlpha = lit ? (rmsLit ? 1 : 0.62) : 0.2
     ctx.fillStyle = fill
-    const inset = lit ? 0 : 0.5
-    const x = inset
-    const ww = cssW - inset * 2
+    ctx.beginPath()
     if (typeof ctx.roundRect === 'function') {
-      ctx.beginPath()
-      ctx.roundRect(x, y, ww, segH, 1)
-      ctx.fill()
+      ctx.roundRect(0, y, cssW, segH, 1.5)
     } else {
-      ctx.fillRect(x, y, ww, segH)
+      ctx.rect(0, y, cssW, segH)
     }
+    ctx.fill()
 
     if (isHold) {
       ctx.globalAlpha = 1
       ctx.fillStyle = colors.hold
-      ctx.fillRect(0, y, cssW, Math.max(1.2, segH * 0.55))
+      ctx.fillRect(0, y, cssW, Math.max(1.4, segH * 0.5))
     }
   }
   ctx.globalAlpha = 1
@@ -160,99 +165,111 @@ function VuFace({
 
   return (
     <svg
-      viewBox="0 0 200 120"
+      viewBox={`0 0 ${FACE_W} ${FACE_H}`}
       role="img"
       aria-label={mode === 'reduction' ? 'Gain reduction meter' : 'Output level meter'}
     >
       <defs>
-        <linearGradient id={`${faceId}-face`} x1="0" x2="0" y1="0" y2="1">
+        <linearGradient id={`${faceId}-face`} x1="0.2" x2="0.8" y1="0" y2="1">
           <stop offset="0" stopColor="var(--meter-face-hi)" />
-          <stop offset="0.55" stopColor="var(--meter-face)" />
+          <stop offset="0.5" stopColor="var(--meter-face)" />
           <stop offset="1" stopColor="var(--meter-face-lo)" />
         </linearGradient>
-        <linearGradient id={`${faceId}-glass`} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="rgba(255,255,255,0.22)" />
-          <stop offset="0.35" stopColor="rgba(255,255,255,0.05)" />
-          <stop offset="1" stopColor="rgba(0,0,0,0.12)" />
+        <radialGradient id={`${faceId}-vignette`} cx="0.5" cy="0.15" r="0.95">
+          <stop offset="0" stopColor="rgba(255,255,255,0.16)" />
+          <stop offset="0.65" stopColor="rgba(0,0,0,0)" />
+          <stop offset="1" stopColor="rgba(0,0,0,0.28)" />
+        </radialGradient>
+        <linearGradient id={`${faceId}-glass`} x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stopColor="rgba(255,255,255,0.20)" />
+          <stop offset="0.42" stopColor="rgba(255,255,255,0.05)" />
+          <stop offset="0.43" stopColor="rgba(255,255,255,0.01)" />
+          <stop offset="1" stopColor="rgba(0,0,0,0.14)" />
         </linearGradient>
+        <clipPath id={`${faceId}-clip`}>
+          <rect x="0" y="0" width={FACE_W} height={FACE_H} rx="4" />
+        </clipPath>
         <filter id={`${faceId}-needle`} x="-40%" y="-40%" width="180%" height="180%">
-          <feDropShadow dx="0.4" dy="1.1" stdDeviation="0.7" floodOpacity="0.45" />
+          <feDropShadow dx="0.6" dy="1.6" stdDeviation="0.9" floodOpacity="0.4" />
         </filter>
       </defs>
 
-      <rect x="0" y="0" width="200" height="120" rx="7" fill={`url(#${faceId}-face)`} />
-      <path className="arc" d={arcPath(arcStart, arcEnd)} />
-      {hotA && hotB ? <path className="arc hot" d={arcPath(hotA, hotB)} /> : null}
+      <g clipPath={`url(#${faceId}-clip)`}>
+        <rect x="0" y="0" width={FACE_W} height={FACE_H} fill={`url(#${faceId}-face)`} />
 
-      {ticks.map((tick) => {
-        const outer = polar(tick.norm, SCALE_R)
-        const inner = polar(tick.norm, SCALE_R - (tick.major ? TICK_MAJOR : TICK_MINOR))
-        const labelAt = polar(tick.norm, LABEL_R)
-        return (
-          <g key={`${mode}-${tick.norm}-${tick.label}`}>
-            <line
-              className={`tick${tick.major ? ' major' : ''}${tick.hot ? ' hot' : ''}`}
-              x1={inner.x}
-              y1={inner.y}
-              x2={outer.x}
-              y2={outer.y}
-            />
-            {tick.label ? (
-              <text
-                className={`label${tick.hot ? ' hot' : ''}`}
-                x={labelAt.x}
-                y={labelAt.y}
-              >
-                {tick.label}
-              </text>
-            ) : null}
-          </g>
-        )
-      })}
+        <path className="arc" d={arcPath(arcStart, arcEnd)} />
+        {hotA && hotB ? <path className="arc hot" d={arcPath(hotA, hotB)} /> : null}
 
-      <text className="caption" x="100" y="18">
-        {mode === 'reduction' ? 'GAIN REDUCTION' : 'OUTPUT'}
-      </text>
-      <text className="unit" x="100" y="88">
-        {mode === 'reduction' ? 'dB' : 'VU'}
-      </text>
+        {ticks.map((tick) => {
+          const outer = polar(tick.norm, SCALE_R)
+          const inner = polar(tick.norm, SCALE_R - (tick.major ? TICK_MAJOR : TICK_MINOR))
+          const labelAt = polar(tick.norm, LABEL_R)
+          return (
+            <g key={`${mode}-${tick.norm}-${tick.label}`}>
+              <line
+                className={`tick${tick.major ? ' major' : ''}${tick.hot ? ' hot' : ''}`}
+                x1={inner.x}
+                y1={inner.y}
+                x2={outer.x}
+                y2={outer.y}
+              />
+              {tick.label ? (
+                <text
+                  className={`label${tick.hot ? ' hot' : ''}`}
+                  x={labelAt.x}
+                  y={labelAt.y}
+                >
+                  {tick.label}
+                </text>
+              ) : null}
+            </g>
+          )
+        })}
 
-      <g
-        ref={needleRef}
-        className="needle-g"
-        transform={`rotate(${restAngle.toFixed(3)} ${PIVOT_X} ${PIVOT_Y})`}
-        filter={`url(#${faceId}-needle)`}
-      >
-        <line
-          className="needle"
-          x1={PIVOT_X}
-          y1={PIVOT_Y}
-          x2={PIVOT_X}
-          y2={PIVOT_Y - NEEDLE_R}
+        <text className="caption" x={FACE_W / 2} y="20">
+          {mode === 'reduction' ? 'GAIN REDUCTION' : 'OUTPUT LEVEL'}
+        </text>
+        <text className="unit" x={FACE_W / 2} y="98">
+          {mode === 'reduction' ? 'dB' : 'VU'}
+        </text>
+        <text className="brand" x="16" y="130" textAnchor="start">
+          Z—COMP
+        </text>
+        <text className="brand" x={FACE_W - 16} y="130" textAnchor="end">
+          {mode === 'reduction' ? 'VU BALLISTICS' : '0 VU = −18 dBFS'}
+        </text>
+
+        <g
+          ref={needleRef}
+          transform={`rotate(${restAngle.toFixed(3)} ${PIVOT_X} ${PIVOT_Y})`}
+          filter={`url(#${faceId}-needle)`}
+        >
+          <polygon
+            className="needle"
+            points={`${PIVOT_X - 2.6},${PIVOT_Y} ${PIVOT_X - 0.7},${PIVOT_Y - NEEDLE_R} ${PIVOT_X + 0.7},${PIVOT_Y - NEEDLE_R} ${PIVOT_X + 2.6},${PIVOT_Y}`}
+          />
+        </g>
+
+        <rect
+          x="0"
+          y="0"
+          width={FACE_W}
+          height={FACE_H}
+          fill={`url(#${faceId}-vignette)`}
+          pointerEvents="none"
         />
-        <circle className="hub" cx={PIVOT_X} cy={PIVOT_Y} r="4.2" />
+        <rect
+          x="0"
+          y="0"
+          width={FACE_W}
+          height={FACE_H * 0.52}
+          fill={`url(#${faceId}-glass)`}
+          pointerEvents="none"
+        />
+        <text ref={parkedRef} className="parked" x={FACE_W / 2} y="118" style={{ display: 'none' }}>
+          no signal
+        </text>
       </g>
-
-      <rect
-        className="bezel"
-        x="0.7"
-        y="0.7"
-        width="198.6"
-        height="118.6"
-        rx="6.4"
-      />
-      <rect
-        x="2"
-        y="2"
-        width="196"
-        height="52"
-        rx="5"
-        fill={`url(#${faceId}-glass)`}
-        pointerEvents="none"
-      />
-      <text ref={parkedRef} className="parked" x="100" y="108" style={{ display: 'none' }}>
-        no signal
-      </text>
     </svg>
   )
 }
@@ -276,16 +293,8 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
   liveRef.current = live
 
   useEffect(() => {
-    const inState: LadderState = {
-      peak: 0,
-      rms: 0,
-      hold: createPeakHold(),
-    }
-    const outState: LadderState = {
-      peak: 0,
-      rms: 0,
-      hold: createPeakHold(),
-    }
+    const inState: LadderState = { peak: 0, rms: 0, hold: createPeakHold() }
+    const outState: LadderState = { peak: 0, rms: 0, hold: createPeakHold() }
     let needle = normFor(modeRef.current, modeRef.current === 'reduction' ? 0 : -20)
     let last = performance.now()
     let readoutAcc = 0
@@ -298,14 +307,15 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
       cool: '#4a9a8c',
       warm: '#c9a35a',
       hot: '#c43a28',
-      idle: 'rgba(255,255,255,0.06)',
+      idle: 'rgba(255,255,255,0.05)',
       hold: 'rgba(245,240,230,0.95)',
     }
 
     const syncColors = () => {
       const root = rootRef.current
       if (!root) return
-      colors.cool = readCssColor(root, '--btn-on', colors.cool)
+      colors.cool = readCssColor(root, '--led-cool', colors.cool)
+      colors.warm = readCssColor(root, '--led-warm', colors.warm)
       colors.hot = readCssColor(root, '--clip', colors.hot)
     }
     syncColors()
@@ -366,24 +376,18 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
         outState.hold.age = PEAK_HOLD_SECONDS
       }
 
-      const target =
-        isLive
-          ? normFor(
-              meterMode,
-              meterMode === 'reduction'
-                ? grDb
-                : linearToDb(outRmsLin) - OUTPUT_REF_DBFS,
-            )
-          : normFor(meterMode, meterMode === 'reduction' ? 0 : -20)
+      const target = isLive
+        ? normFor(
+            meterMode,
+            meterMode === 'reduction' ? grDb : linearToDb(outRmsLin) - OUTPUT_REF_DBFS,
+          )
+        : normFor(meterMode, meterMode === 'reduction' ? 0 : -20)
 
       needle = advance(needle, target, dt)
-      const angle = angleFor(needle)
-      if (needleRef.current) {
-        needleRef.current.setAttribute(
-          'transform',
-          `rotate(${angle.toFixed(3)} ${PIVOT_X} ${PIVOT_Y})`,
-        )
-      }
+      needleRef.current?.setAttribute(
+        'transform',
+        `rotate(${angleFor(needle).toFixed(3)} ${PIVOT_X} ${PIVOT_Y})`,
+      )
 
       if (inCanvasRef.current) {
         paintLadder(
@@ -410,12 +414,8 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
       if (clipBtnRef.current) {
         clipBtnRef.current.hidden = !outClip
       }
-      if (inClipRef.current) {
-        inClipRef.current.classList.toggle('is-on', inClip)
-      }
-      if (outClipRef.current) {
-        outClipRef.current.classList.toggle('is-on', outClip)
-      }
+      inClipRef.current?.classList.toggle('is-on', inClip)
+      outClipRef.current?.classList.toggle('is-on', outClip)
 
       if (readoutAcc >= 1 / READOUT_HZ) {
         readoutAcc = 0
@@ -451,12 +451,9 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
     }
   }, [metersRef])
 
-  // Resync needle rest + cool LED color when the model skin changes.
+  // A skin change repaints the LED colours on the next RAF; drop the backing
+  // stores so the canvases also pick up any new device pixel ratio.
   useEffect(() => {
-    const root = rootRef.current
-    if (!root) return
-    // Force a color pull on next paint by toggling a data attr the loop reads
-    // via getComputedStyle when visibility fires; also poke canvases size.
     for (const canvas of [inCanvasRef.current, outCanvasRef.current]) {
       if (canvas) {
         canvas.width = 0
@@ -466,48 +463,59 @@ export function MeterBay({ metersRef, live, mode, onClearOutClip }: Props) {
   }, [live, mode])
 
   return (
-    <div
-      ref={rootRef}
-      className={`meter-bay${!live ? ' is-dark' : ''}`}
-      aria-label="Level meters"
-    >
-      <div className="io-strip">
-        <span className="io-label">In</span>
-        <span ref={inClipRef} className="clip-led" aria-hidden="true" />
-        <canvas ref={inCanvasRef} className="io-ladder" aria-hidden="true" />
-        <output ref={inReadoutRef}>—</output>
-      </div>
-
-      <div className="meter-well">
-        <div className="meter">
+    <div ref={rootRef} className="meter-bay" aria-label="Level meters">
+      <div className="movement">
+        <div className={`glass${live ? '' : ' is-dark'}`}>
           <VuFace
             mode={mode}
             faceId={faceId}
             needleRef={needleRef}
             parkedRef={parkedRef}
           />
+          <span className="screw tl" aria-hidden="true" />
+          <span className="screw tr" aria-hidden="true" />
+          <span className="screw bl" aria-hidden="true" />
+          <span className="screw br" aria-hidden="true" />
           <button
             ref={clipBtnRef}
             type="button"
             className="clip-flag"
             hidden
+            title="Output clipped — click to clear"
             onClick={onClearOutClip}
           >
             CLIP
           </button>
         </div>
-        <div className="gr-readout" aria-live="polite">
-          <span>GR</span>
-          <output ref={grReadoutRef}>—</output>
+        <div className="gr-strip">
+          <span className="tag">Reduction</span>
+          <output ref={grReadoutRef} aria-live="off">
+            —
+          </output>
           <small>dB</small>
         </div>
       </div>
 
-      <div className="io-strip">
-        <span className="io-label">Out</span>
-        <span ref={outClipRef} className="clip-led" aria-hidden="true" />
-        <canvas ref={outCanvasRef} className="io-ladder" aria-hidden="true" />
-        <output ref={outReadoutRef}>—</output>
+      <div className="ladders">
+        <div className="io">
+          <span className="io-tag">In</span>
+          <span ref={inClipRef} className="clip-led" aria-hidden="true" />
+          <canvas ref={inCanvasRef} className="ladder" aria-hidden="true" />
+          <output ref={inReadoutRef}>—</output>
+        </div>
+
+        <div className="io-scale" aria-hidden="true">
+          {LADDER_LEGEND.map((db) => (
+            <span key={db}>{db}</span>
+          ))}
+        </div>
+
+        <div className="io">
+          <span className="io-tag">Out</span>
+          <span ref={outClipRef} className="clip-led" aria-hidden="true" />
+          <canvas ref={outCanvasRef} className="ladder" aria-hidden="true" />
+          <output ref={outReadoutRef}>—</output>
+        </div>
       </div>
     </div>
   )

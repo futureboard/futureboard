@@ -2,21 +2,28 @@
 //!
 //! Four circuit models share one realtime-safe gain computer and colour stage:
 //!
-//! - **Comp 2500** — feed-forward VCA with soft dual-slope knee and THD colour
-//! - **Distressor** — aggressive detector with British-mode grit and hard ratios
-//! - **Avalon** — feedback Class-A optical leveling with slow musical recovery
-//! - **SSL** — bus-compressor glue with program-dependent auto-release
+//! - **Comp 2500** — feed-forward VCA, wide soft knee, thrust sidechain, THD
+//! - **Distressor** — FET feedback cell, hard ratios, British-mode grit
+//! - **Avalon** — Class-A optical leveller with over-easy ratio and LDR memory
+//! - **SSL** — bus glue with the dual time-constant auto-release network
+//!
+//! The algorithm itself lives in [`dsp`]; this module owns the parameter
+//! schema, metering, and the [`StereoEffect`] wiring the host sees.
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
-    flush_denormal, linear_to_db, mix, time_constant,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, db_to_linear, mix,
+    time_constant,
 };
 use serde::{Deserialize, Serialize};
 
+pub mod dsp;
 pub mod ipc;
 pub mod ui;
 
+pub use dsp::{CellFrame, ModelCoeffs, model_coeffs};
 pub use ipc::{UI_PARAM_IDS, ui_param_id, ui_param_index};
+
+use dsp::{GainCell, Smoothed};
 
 pub const PLUGIN_ID: &str = "futureboard.zcomp";
 
@@ -176,6 +183,10 @@ pub struct Params {
     pub stereo_link: f32,
     pub color: f32,
     pub auto_release: bool,
+    /// Audition the post-filter sidechain instead of the compressed signal, so
+    /// the HPF and thrust settings can be heard while they are dialled.
+    #[serde(default)]
+    pub sc_listen: bool,
 }
 
 pub fn default_params() -> Params {
@@ -193,107 +204,7 @@ pub fn default_params() -> Params {
         stereo_link: 100.0,
         color: 18.0,
         auto_release: true,
-    }
-}
-
-/// Resolved runtime coefficients for the selected circuit model.
-#[derive(Debug, Clone, Copy)]
-struct ModelCoeffs {
-    threshold_db: f32,
-    ratio: f32,
-    knee_db: f32,
-    attack_sec: f32,
-    release_sec: f32,
-    release_tail_sec: f32,
-    /// 0 = pure feed-forward, 1 = pure feedback.
-    feedback: f32,
-    /// Detector RMS blend (0 = peak, 1 = RMS).
-    rms_blend: f32,
-    /// Soft clip / harmonic drive after the gain cell.
-    drive: f32,
-    /// Extra detector boost (Distressor British / 2500 THD sense).
-    detector_boost: f32,
-}
-
-fn model_coeffs(params: &Params) -> ModelCoeffs {
-    let color = clamp(params.color, 0.0, 100.0) / 100.0;
-    let ratio = params.ratio.max(1.0);
-    let knee = params.knee_db.max(0.0);
-    let attack_ms = params.attack_ms.max(0.01);
-    let release_ms = params.release_ms.max(10.0);
-
-    match params.model {
-        CompModel::Comp2500 => {
-            // API 2500: feed-forward VCA, dual soft knee, THD colouring.
-            ModelCoeffs {
-                threshold_db: params.threshold_db,
-                ratio: ratio * (1.0 + color * 0.08),
-                knee_db: (knee + 4.0 + color * 4.0).min(24.0),
-                attack_sec: (attack_ms * 0.001).clamp(0.0002, 0.080),
-                release_sec: (release_ms * 0.001).clamp(0.020, 1.200),
-                release_tail_sec: (release_ms * 0.001 * 1.8).clamp(0.050, 2.0),
-                feedback: 0.08,
-                rms_blend: 0.25,
-                drive: color * 0.55,
-                detector_boost: 1.0 + color * 0.22,
-            }
-        }
-        CompModel::Distressor => {
-            // Distressor: punchy detector, hard ratios, British grit.
-            let british = color;
-            ModelCoeffs {
-                threshold_db: params.threshold_db - british * 1.5,
-                ratio: (ratio * (1.0 + british * 0.45)).min(40.0),
-                knee_db: (knee * (1.0 - british * 0.55)).max(0.5),
-                attack_sec: (attack_ms * 0.001 * (1.0 - british * 0.35)).clamp(0.00005, 0.050),
-                release_sec: (release_ms * 0.001).clamp(0.010, 1.500),
-                release_tail_sec: (release_ms * 0.001 * (2.4 + british)).clamp(0.040, 3.0),
-                feedback: 0.18 + british * 0.22,
-                rms_blend: 0.10,
-                drive: 0.20 + british * 0.95,
-                detector_boost: 1.15 + british * 0.85,
-            }
-        }
-        CompModel::Avalon => {
-            // Avalon: Class-A optical leveling — soft, slow, musical.
-            ModelCoeffs {
-                threshold_db: params.threshold_db,
-                ratio: (2.0 + (ratio - 1.0) * 0.55).clamp(1.5, 8.0),
-                knee_db: (knee + 8.0 + color * 4.0).min(24.0),
-                attack_sec: (attack_ms * 0.001).max(0.008).clamp(0.008, 0.080),
-                release_sec: (release_ms * 0.001).max(0.080).clamp(0.080, 1.800),
-                release_tail_sec: (release_ms * 0.001 * 3.5 + color * 1.2).clamp(0.400, 5.0),
-                feedback: 0.82,
-                rms_blend: 0.55,
-                drive: color * 0.28,
-                detector_boost: 1.0 + color * 0.08,
-            }
-        }
-        CompModel::Ssl => {
-            // SSL bus compressor: soft knee glue, optional auto-release.
-            let auto = params.auto_release;
-            let release_base = if auto {
-                0.120
-            } else {
-                (release_ms * 0.001).clamp(0.050, 1.200)
-            };
-            ModelCoeffs {
-                threshold_db: params.threshold_db,
-                ratio: ratio.clamp(1.5, 10.0),
-                knee_db: (knee + 3.0).clamp(2.0, 18.0),
-                attack_sec: (attack_ms * 0.001).clamp(0.0001, 0.030),
-                release_sec: release_base,
-                release_tail_sec: if auto {
-                    0.850 + color * 0.4
-                } else {
-                    release_base * 2.2
-                },
-                feedback: 0.12,
-                rms_blend: 0.35 + color * 0.15,
-                drive: color * 0.32,
-                detector_boost: 1.0 + color * 0.12,
-            }
-        }
+        sc_listen: false,
     }
 }
 
@@ -409,266 +320,15 @@ pub fn descriptor() -> PluginDescriptor {
                 max: 1.0,
                 unit: "bool",
             },
+            ParamDescriptor {
+                id: "scListen",
+                name: "Sidechain Listen",
+                default_value: 0.0,
+                min: 0.0,
+                max: 1.0,
+                unit: "bool",
+            },
         ],
-    }
-}
-
-/// Multi-model stereo gain cell. Topology (FF/FB blend), detector ballistics,
-/// and colour are all coefficient-driven so model changes stay allocation-free.
-#[derive(Debug, Clone)]
-struct GainCell {
-    sample_rate: f32,
-    threshold_db: f32,
-    ratio: f32,
-    knee_db: f32,
-    attack_coeff: f32,
-    release_fast_coeff: f32,
-    release_tail_coeff: f32,
-    feedback: f32,
-    rms_blend: f32,
-    drive: f32,
-    detector_boost: f32,
-    envelope_l: f32,
-    envelope_r: f32,
-    envelope_linked: f32,
-    rms_l: f32,
-    rms_r: f32,
-    rms_linked: f32,
-    gr_l_db: f32,
-    gr_r_db: f32,
-    gr_linked_db: f32,
-    sidechain_coeff: f32,
-    sidechain_x1: [f32; 2],
-    sidechain_y1: [f32; 2],
-    rms_coeff: f32,
-    stereo_link: f32,
-    auto_release: bool,
-}
-
-impl GainCell {
-    fn new(sample_rate: f32) -> Self {
-        let sr = sample_rate.max(1.0);
-        let mut cell = Self {
-            sample_rate: sr,
-            threshold_db: -18.0,
-            ratio: 4.0,
-            knee_db: 6.0,
-            attack_coeff: 0.0,
-            release_fast_coeff: 0.0,
-            release_tail_coeff: 0.0,
-            feedback: 0.0,
-            rms_blend: 0.0,
-            drive: 0.0,
-            detector_boost: 1.0,
-            envelope_l: 0.0,
-            envelope_r: 0.0,
-            envelope_linked: 0.0,
-            rms_l: 0.0,
-            rms_r: 0.0,
-            rms_linked: 0.0,
-            gr_l_db: 0.0,
-            gr_r_db: 0.0,
-            gr_linked_db: 0.0,
-            sidechain_coeff: 0.0,
-            sidechain_x1: [0.0; 2],
-            sidechain_y1: [0.0; 2],
-            rms_coeff: time_constant(sr, 0.012),
-            stereo_link: 1.0,
-            auto_release: true,
-        };
-        cell.set_model(
-            model_coeffs(&default_params()),
-            default_params().sidechain_hpf_hz,
-            default_params().stereo_link,
-            default_params().auto_release,
-        );
-        cell
-    }
-
-    fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate.max(1.0);
-        self.rms_coeff = time_constant(self.sample_rate, 0.012);
-    }
-
-    fn set_model(
-        &mut self,
-        coeffs: ModelCoeffs,
-        sidechain_cutoff_hz: f32,
-        stereo_link: f32,
-        auto_release: bool,
-    ) {
-        self.threshold_db = coeffs.threshold_db;
-        self.ratio = coeffs.ratio.max(1.0);
-        self.knee_db = coeffs.knee_db.max(0.0);
-        self.attack_coeff = time_constant(self.sample_rate, coeffs.attack_sec);
-        self.release_fast_coeff = time_constant(self.sample_rate, coeffs.release_sec);
-        self.release_tail_coeff = time_constant(self.sample_rate, coeffs.release_tail_sec);
-        self.feedback = clamp(coeffs.feedback, 0.0, 1.0);
-        self.rms_blend = clamp(coeffs.rms_blend, 0.0, 1.0);
-        self.drive = coeffs.drive.max(0.0);
-        self.detector_boost = coeffs.detector_boost.max(1.0);
-        self.stereo_link = clamp(stereo_link, 0.0, 100.0) / 100.0;
-        self.auto_release = auto_release;
-
-        let cutoff = clamp(sidechain_cutoff_hz, 20.0, self.sample_rate * 0.45);
-        self.sidechain_coeff = (-2.0 * std::f32::consts::PI * cutoff / self.sample_rate).exp();
-    }
-
-    fn reset(&mut self) {
-        self.envelope_l = 0.0;
-        self.envelope_r = 0.0;
-        self.envelope_linked = 0.0;
-        self.rms_l = 0.0;
-        self.rms_r = 0.0;
-        self.rms_linked = 0.0;
-        self.gr_l_db = 0.0;
-        self.gr_r_db = 0.0;
-        self.gr_linked_db = 0.0;
-        self.sidechain_x1 = [0.0; 2];
-        self.sidechain_y1 = [0.0; 2];
-    }
-
-    #[inline]
-    fn gain_reduction_db(&self) -> f32 {
-        let link = self.stereo_link;
-        let dual = self.gr_l_db.max(self.gr_r_db);
-        dual * (1.0 - link) + self.gr_linked_db * link
-    }
-
-    #[inline]
-    fn high_pass(&mut self, input: f32, channel: usize) -> f32 {
-        let output = self.sidechain_coeff
-            * (self.sidechain_y1[channel] + input - self.sidechain_x1[channel]);
-        self.sidechain_x1[channel] = input;
-        self.sidechain_y1[channel] = flush_denormal(output);
-        self.sidechain_y1[channel]
-    }
-
-    #[inline]
-    fn soft_knee_gr_db(&self, level_db: f32) -> f32 {
-        let over = level_db - self.threshold_db;
-        let half_knee = self.knee_db * 0.5;
-        let curved_over = if over <= -half_knee {
-            0.0
-        } else if over >= half_knee {
-            over
-        } else {
-            let t = over + half_knee;
-            t * t / (2.0 * self.knee_db.max(1.0e-6))
-        };
-        // Feed-forward slope; feedback path scales this further via topology.
-        curved_over * (1.0 - 1.0 / self.ratio)
-    }
-
-    #[inline]
-    fn follow_gr(current: f32, target: f32, attack: f32, release: f32) -> f32 {
-        let coeff = if target > current { attack } else { release };
-        flush_denormal(coeff * current + (1.0 - coeff) * target)
-    }
-
-    #[inline]
-    fn follow_env(current: f32, target: f32, attack: f32, release: f32) -> f32 {
-        let coeff = if target > current { attack } else { release };
-        flush_denormal(coeff * current + (1.0 - coeff) * target)
-    }
-
-    #[inline]
-    fn colour(&self, sample: f32) -> f32 {
-        if self.drive <= 0.0 {
-            return sample;
-        }
-        // Odd-harmonic soft saturation. Amount scales with model colour.
-        let x = sample * (1.0 + self.drive * 0.85);
-        let soft = x - (x * x * x) / (3.0 + self.drive * 2.0);
-        let wet = soft / (1.0 + self.drive * 0.35);
-        mix(sample, wet, clamp(self.drive, 0.0, 1.0))
-    }
-
-    #[inline]
-    fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
-        // Feedback path observes post-cell signal via previous GR.
-        let prev_gain_l = db_to_linear(-self.gr_l_db);
-        let prev_gain_r = db_to_linear(-self.gr_r_db);
-
-        let ff_l = left;
-        let ff_r = right;
-        let fb_l = left * prev_gain_l;
-        let fb_r = right * prev_gain_r;
-
-        let sense_l = mix(ff_l, fb_l, self.feedback);
-        let sense_r = mix(ff_r, fb_r, self.feedback);
-
-        let sc_l = self.high_pass(sense_l, 0).abs() * self.detector_boost;
-        let sc_r = self.high_pass(sense_r, 1).abs() * self.detector_boost;
-        // Linked detector from the louder filtered channel (no second HPF pass).
-        let sc_link = sc_l.max(sc_r);
-
-        // Peak / RMS hybrid detector.
-        let rms_coeff = self.rms_coeff;
-        self.rms_l = flush_denormal(rms_coeff * self.rms_l + (1.0 - rms_coeff) * (sc_l * sc_l));
-        self.rms_r = flush_denormal(rms_coeff * self.rms_r + (1.0 - rms_coeff) * (sc_r * sc_r));
-        self.rms_linked =
-            flush_denormal(rms_coeff * self.rms_linked + (1.0 - rms_coeff) * (sc_link * sc_link));
-
-        let peak_l = sc_l;
-        let peak_r = sc_r;
-        let peak_link = sc_link;
-        let det_l = mix(peak_l, self.rms_l.max(0.0).sqrt(), self.rms_blend);
-        let det_r = mix(peak_r, self.rms_r.max(0.0).sqrt(), self.rms_blend);
-        let det_link = mix(peak_link, self.rms_linked.max(0.0).sqrt(), self.rms_blend);
-
-        self.envelope_l = Self::follow_env(
-            self.envelope_l,
-            det_l,
-            self.attack_coeff,
-            self.release_fast_coeff,
-        );
-        self.envelope_r = Self::follow_env(
-            self.envelope_r,
-            det_r,
-            self.attack_coeff,
-            self.release_fast_coeff,
-        );
-        self.envelope_linked = Self::follow_env(
-            self.envelope_linked,
-            det_link,
-            self.attack_coeff,
-            self.release_fast_coeff,
-        );
-
-        let target_l = self.soft_knee_gr_db(linear_to_db(self.envelope_l.max(1.0e-12)));
-        let target_r = self.soft_knee_gr_db(linear_to_db(self.envelope_r.max(1.0e-12)));
-        let target_link = self.soft_knee_gr_db(linear_to_db(self.envelope_linked.max(1.0e-12)));
-
-        // Program-dependent release: deeper GR stretches the tail (SSL Auto /
-        // Distressor / Avalon optical memory).
-        let depth = clamp(
-            self.gr_linked_db.max(self.gr_l_db).max(self.gr_r_db) / 12.0,
-            0.0,
-            1.0,
-        );
-        let release = if self.auto_release {
-            self.release_fast_coeff
-                + (self.release_tail_coeff - self.release_fast_coeff) * (0.35 + depth * 0.65)
-        } else {
-            self.release_fast_coeff
-                + (self.release_tail_coeff - self.release_fast_coeff) * depth * 0.45
-        };
-
-        self.gr_l_db = Self::follow_gr(self.gr_l_db, target_l, self.attack_coeff, release);
-        self.gr_r_db = Self::follow_gr(self.gr_r_db, target_r, self.attack_coeff, release);
-        self.gr_linked_db =
-            Self::follow_gr(self.gr_linked_db, target_link, self.attack_coeff, release);
-
-        let link = self.stereo_link;
-        let gr_l = self.gr_l_db * (1.0 - link) + self.gr_linked_db * link;
-        let gr_r = self.gr_r_db * (1.0 - link) + self.gr_linked_db * link;
-        let gain_l = db_to_linear(-gr_l);
-        let gain_r = db_to_linear(-gr_r);
-
-        let wet_l = self.colour(left * gain_l);
-        let wet_r = self.colour(right * gain_r);
-        (wet_l, wet_r)
     }
 }
 
@@ -676,18 +336,26 @@ impl GainCell {
 pub struct Dsp {
     params: Params,
     cell: GainCell,
-    makeup_gain: f32,
+    makeup: Smoothed,
+    mix_amount: Smoothed,
     meters: Meters,
 }
 
 impl Dsp {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
+        let params = default_params();
         let mut dsp = Self {
-            params: default_params(),
-            cell: GainCell::new(sr),
-            makeup_gain: 1.0,
+            cell: GainCell::new(
+                sr,
+                model_coeffs(&params),
+                params.sidechain_hpf_hz,
+                params.stereo_link,
+            ),
+            makeup: Smoothed::new(sr, db_to_linear(params.makeup_db)),
+            mix_amount: Smoothed::new(sr, params.mix / 100.0),
             meters: Meters::new(sr),
+            params,
         };
         dsp.apply_params();
         dsp
@@ -743,19 +411,22 @@ impl Dsp {
         }
     }
 
+    /// No lookahead: the cell reacts to the sample it is given, so the graph
+    /// needs no delay compensation for this plugin.
     pub fn latency_samples(&self) -> usize {
         0
     }
 
+    /// Control-thread work: resolve the model, retune the cell, and retarget
+    /// the smoothed output gains. Never called from the audio callback.
     fn apply_params(&mut self) {
-        let coeffs = model_coeffs(&self.params);
         self.cell.set_model(
-            coeffs,
+            model_coeffs(&self.params),
             self.params.sidechain_hpf_hz,
             self.params.stereo_link,
-            self.params.auto_release,
         );
-        self.makeup_gain = db_to_linear(self.params.makeup_db);
+        self.makeup.set_target(db_to_linear(self.params.makeup_db));
+        self.mix_amount.set_target(self.params.mix / 100.0);
     }
 }
 
@@ -763,11 +434,15 @@ impl StereoEffect for Dsp {
     fn reset(&mut self) {
         self.cell.reset();
         self.meters.reset();
+        self.makeup.snap(db_to_linear(self.params.makeup_db));
+        self.mix_amount.snap(self.params.mix / 100.0);
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         let sr = sample_rate.max(1.0);
         self.cell.set_sample_rate(sr);
+        self.makeup.set_sample_rate(sr);
+        self.mix_amount.set_sample_rate(sr);
         self.meters = Meters::new(sr);
         self.apply_params();
     }
@@ -777,12 +452,27 @@ impl StereoEffect for Dsp {
             self.meters.push((left, right), (left, right));
             return (left, right);
         }
-        let (mut wet_l, mut wet_r) = self.cell.process_stereo(left, right);
-        wet_l *= self.makeup_gain;
-        wet_r *= self.makeup_gain;
-        let amount = self.params.mix / 100.0;
-        let out_l = mix(left, wet_l, amount);
-        let out_r = mix(right, wet_r, amount);
+
+        let frame = self.cell.process_stereo(left, right);
+        // Both smoothers advance every sample so a branch cannot desynchronise
+        // them from the audio they scale.
+        let makeup = self.makeup.next();
+        let amount = self.mix_amount.next();
+
+        let (out_l, out_r) = if self.params.sc_listen {
+            // Auditioning the detector feed: the gain cell still runs so the
+            // reduction meter keeps telling the truth about what it would do.
+            (
+                frame.sidechain_left * makeup,
+                frame.sidechain_right * makeup,
+            )
+        } else {
+            (
+                mix(left, frame.left * makeup, amount),
+                mix(right, frame.right * makeup, amount),
+            )
+        };
+
         self.meters.push((left, right), (out_l, out_r));
         (out_l, out_r)
     }
@@ -912,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn model_coeffs_ssl_auto_uses_program_release() {
+    fn model_coeffs_ssl_auto_uses_a_dual_time_constant_network() {
         let mut params = default_params();
         params.model = CompModel::Ssl;
         params.auto_release = true;
@@ -920,6 +610,88 @@ mod tests {
         params.auto_release = false;
         params.release_ms = 50.0;
         let manual = model_coeffs(&params);
-        assert!(auto.release_tail_sec > manual.release_sec);
+
+        assert!(auto.release_slow_sec > auto.release_fast_sec);
+        assert!(auto.release_slow_sec > manual.release_fast_sec);
+        assert!(auto.program_auto_bias > manual.program_auto_bias);
+    }
+
+    #[test]
+    fn steady_state_reduction_tracks_the_dialled_ratio() {
+        // Feed-forward VCA with no colour: the only things between the input
+        // peak and the meter are the detector blend and the ballistics ripple.
+        let mut params = default_params();
+        params.model = CompModel::Comp2500;
+        params.color = 0.0;
+        params.knee_db = 0.0;
+        params.ratio = 4.0;
+        params.threshold_db = -30.0;
+        params.mix = 100.0;
+        params.makeup_db = 0.0;
+
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+        // -10 dBFS peak is 20 dB over threshold; 4:1 asks for 15 dB off.
+        let frame = run_tone(&mut dsp, 0.3162, 48_000);
+
+        assert!(
+            (frame.gain_reduction_db - 15.0).abs() < 2.5,
+            "expected ~15 dB of reduction, got {}",
+            frame.gain_reduction_db
+        );
+    }
+
+    #[test]
+    fn sidechain_listen_outputs_the_detector_feed() {
+        let mut params = default_params();
+        params.model = CompModel::Comp2500;
+        params.color = 0.0;
+        params.sidechain_hpf_hz = 500.0;
+        params.sc_listen = true;
+        params.makeup_db = 0.0;
+
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+
+        // 30 Hz is far below the sidechain corner, so auditioning the detector
+        // feed should be near silent while the cell still reports its work.
+        let step = 2.0 * std::f32::consts::PI * 30.0 / 48_000.0;
+        let mut peak = 0.0_f32;
+        for n in 0..24_000 {
+            let x = (n as f32 * step).sin() * 0.8;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite());
+            if n > 12_000 {
+                peak = peak.max(l.abs());
+            }
+        }
+        assert!(peak < 0.08, "sidechain listen passed the lows: {peak}");
+    }
+
+    #[test]
+    fn makeup_changes_do_not_step_the_output() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.mix = 100.0;
+        params.makeup_db = 0.0;
+        params.color = 0.0;
+        dsp.set_params(params.clone());
+        for n in 0..4_800 {
+            dsp.process_stereo((n as f32 * 0.05).sin() * 0.2, 0.0);
+        }
+
+        params.makeup_db = 18.0;
+        dsp.set_params(params);
+
+        let mut previous = dsp.process_stereo(0.2, 0.0).0;
+        for _ in 0..4_800 {
+            let (out, _) = dsp.process_stereo(0.2, 0.0);
+            assert!(
+                (out - previous).abs() < 0.02,
+                "makeup stepped by {}",
+                out - previous
+            );
+            previous = out;
+        }
     }
 }
