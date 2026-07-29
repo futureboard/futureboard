@@ -108,6 +108,8 @@ fn main() {
     application()
         .with_assets(EmbeddedAssets::new())
         .run(app::setup);
+    #[cfg(feature = "builtin-plugin-editor")]
+    sphere_ui_components::components::builtin_plugin_editor::shutdown();
     if let Some(discord_rpc) = discord_rpc {
         discord_rpc.shutdown();
     }
@@ -136,6 +138,14 @@ fn dispatch_cef_process() {
             std::process::exit(code);
         }
         Ok(ProcessDispatch::BrowserProcess) => {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = gpui_macos::configure_cef_application() {
+                eprintln!(
+                    "[cef-process] macos_application_setup_failed error={error}; \
+                     built-in plugin editors will be unavailable"
+                );
+                return;
+            }
             if let Err(error) =
                 sphere_ui_components::components::builtin_plugin_editor::install_process_app(
                     scheme_app,

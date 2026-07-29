@@ -1,7 +1,7 @@
 //! Feature-gated native-window CEF runtime.
 
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::thread::{self, ThreadId};
 
@@ -154,7 +154,7 @@ pub fn execute_subprocess(
 
 /// Executable CEF should launch for renderer, GPU, utility, and other helper
 /// processes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum BrowserSubprocess {
     /// CEF re-launches the browser executable. This is represented by an empty
     /// `browser_subprocess_path`, per CEF's API contract, and requires the
@@ -163,6 +163,48 @@ pub enum BrowserSubprocess {
     CurrentExecutable,
     /// Use a separately packaged helper executable.
     SeparateExecutable(PathBuf),
+}
+
+pub const MACOS_HELPER_EXECUTABLE_NAME: &str = "Futureboard Studio Helper";
+pub const MACOS_CEF_FRAMEWORK_NAME: &str = "Chromium Embedded Framework.framework";
+
+/// Resolve and validate the CEF helper shipped beside a macOS application.
+///
+/// `executable` must have the standard
+/// `<app>.app/Contents/MacOS/<executable>` shape. No current-working-directory
+/// fallback is permitted because Finder launches do not inherit a useful cwd.
+#[cfg(target_os = "macos")]
+pub fn macos_browser_subprocess(executable: &Path) -> Result<BrowserSubprocess, CefRuntimeError> {
+    let contents = executable
+        .parent()
+        .and_then(Path::parent)
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .ok_or_else(|| CefRuntimeError::MacBundleLayout(executable.to_path_buf()))?;
+    let frameworks = contents.join("Frameworks");
+    let framework = frameworks.join(MACOS_CEF_FRAMEWORK_NAME);
+    if !framework.join("Chromium Embedded Framework").is_file() {
+        return Err(CefRuntimeError::MacFrameworkMissing(framework));
+    }
+    let helper = frameworks
+        .join(format!("{MACOS_HELPER_EXECUTABLE_NAME}.app"))
+        .join("Contents")
+        .join("MacOS")
+        .join(MACOS_HELPER_EXECUTABLE_NAME);
+    if !helper.is_file() {
+        return Err(CefRuntimeError::MacHelperMissing(helper));
+    }
+    Ok(BrowserSubprocess::SeparateExecutable(helper))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn platform_browser_subprocess() -> Result<BrowserSubprocess, CefRuntimeError> {
+    Ok(BrowserSubprocess::CurrentExecutable)
+}
+
+#[cfg(target_os = "macos")]
+pub fn platform_browser_subprocess() -> Result<BrowserSubprocess, CefRuntimeError> {
+    let executable = std::env::current_exe()?;
+    macos_browser_subprocess(&executable)
 }
 
 /// Browser-process configuration. The runtime uses a portable, integrated
@@ -323,6 +365,11 @@ impl CefRuntime {
         let settings = cef::Settings {
             no_sandbox: 1,
             multi_threaded_message_loop: 0,
+            // Futureboard owns the AppKit/GPUI event loop and calls
+            // CefDoMessageLoopWork on that main thread. The pinned cef-rs OSR
+            // sample enables the external pump for this integration model;
+            // leaving it disabled installs CEF's standalone run-loop observer
+            // and traps once NSApplication::run begins.
             external_message_pump: 0,
             windowless_rendering_enabled: i32::from(config.windowless_rendering),
             cache_path: cef_path(config.cache_path.as_ref()),
@@ -701,8 +748,13 @@ fn load_macos_framework() -> Result<(), CefRuntimeError> {
 
     match LIBRARY.get_or_init(|| {
         let executable = std::env::current_exe().map_err(|_| ())?;
+        let helper = executable
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+            .and_then(Path::parent)
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "Frameworks"));
         let loader = std::panic::catch_unwind(|| {
-            cef::library_loader::LibraryLoader::new(&executable, false)
+            cef::library_loader::LibraryLoader::new(&executable, helper)
         })
         .map_err(|_| ())?;
         loader.load().then_some(loader).ok_or(())
@@ -820,6 +872,15 @@ pub enum CefRuntimeError {
     #[cfg(target_os = "macos")]
     #[error("Chromium Embedded Framework.framework was not found in the application bundle")]
     MacFrameworkNotFound,
+    #[cfg(target_os = "macos")]
+    #[error("macOS executable is not inside an application bundle: {0}")]
+    MacBundleLayout(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error("macOS CEF helper executable is missing: {0}")]
+    MacHelperMissing(PathBuf),
+    #[cfg(target_os = "macos")]
+    #[error("macOS Chromium framework is missing or incomplete: {0}")]
+    MacFrameworkMissing(PathBuf),
 }
 
 #[cfg(test)]
@@ -874,5 +935,59 @@ mod tests {
             ProcessDispatch::from_exit_code(9),
             ProcessDispatch::SubprocessExit(9)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolves_helper_from_application_executable() {
+        let root = std::env::temp_dir().join(format!(
+            "futureboard-cef-layout-test-{}",
+            std::process::id()
+        ));
+        let executable = root.join("Futureboard Studio.app/Contents/MacOS/FutureboardNative");
+        let frameworks = root.join("Futureboard Studio.app/Contents/Frameworks");
+        let framework = frameworks
+            .join(MACOS_CEF_FRAMEWORK_NAME)
+            .join("Chromium Embedded Framework");
+        let helper = frameworks
+            .join(format!("{MACOS_HELPER_EXECUTABLE_NAME}.app"))
+            .join("Contents/MacOS")
+            .join(MACOS_HELPER_EXECUTABLE_NAME);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(framework.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&executable, []).unwrap();
+        std::fs::write(&framework, []).unwrap();
+        std::fs::write(&helper, []).unwrap();
+
+        assert_eq!(
+            macos_browser_subprocess(&executable).unwrap(),
+            BrowserSubprocess::SeparateExecutable(helper)
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_helper_has_actionable_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "futureboard-cef-missing-helper-test-{}",
+            std::process::id()
+        ));
+        let executable = root.join("Futureboard Studio.app/Contents/MacOS/FutureboardNative");
+        let framework = root
+            .join("Futureboard Studio.app/Contents/Frameworks")
+            .join(MACOS_CEF_FRAMEWORK_NAME)
+            .join("Chromium Embedded Framework");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(framework.parent().unwrap()).unwrap();
+        std::fs::write(&executable, []).unwrap();
+        std::fs::write(&framework, []).unwrap();
+
+        assert!(matches!(
+            macos_browser_subprocess(&executable),
+            Err(CefRuntimeError::MacHelperMissing(_))
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

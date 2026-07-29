@@ -38,7 +38,7 @@ use objc::{
     class,
     declare::ClassDecl,
     msg_send,
-    runtime::{Class, Object, Sel},
+    runtime::{self, Class, Object, Sel},
     sel, sel_impl,
 };
 use parking_lot::Mutex;
@@ -68,6 +68,7 @@ const NSUTF8StringEncoding: NSUInteger = 4;
 const MAC_PLATFORM_IVAR: &str = "platform";
 static mut APP_CLASS: *const Class = ptr::null();
 static mut APP_DELEGATE_CLASS: *const Class = ptr::null();
+static CEF_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
 
 #[ctor]
 unsafe fn build_classes() {
@@ -157,6 +158,128 @@ unsafe fn build_classes() {
             decl.register()
         }
     }
+}
+
+/// Make GPUI's `NSApplication` subclass satisfy CEF's macOS event contract.
+///
+/// CEF installs the protocols when its framework is loaded, which happens
+/// after this crate's constructor registers `GPUIApplication`. Objective-C
+/// explicitly permits adding protocols and methods to a registered class, so
+/// the browser process calls this after loading CEF but before the first
+/// `sharedApplication` access. This changes the class definition; it does not
+/// replace or swizzle an existing method.
+pub fn configure_cef_application() -> Result<()> {
+    const CEF_APP_PROTOCOL: &[u8] = b"CefAppProtocol\0";
+    const CR_APP_CONTROL_PROTOCOL: &[u8] = b"CrAppControlProtocol\0";
+    static CONFIGURED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+    CONFIGURED
+        .get_or_init(|| unsafe {
+            if !pthread_main_np().eq(&1) {
+                return Err("CEF application setup must run on the macOS main thread".to_owned());
+            }
+            // `cef_application_mac.h` declares CefAppProtocol in the client
+            // application, not in the framework binary. Clang emits that
+            // protocol when compiling the sample's Objective-C application
+            // class; the Rust host creates the equivalent declaration here.
+            let mut protocol = runtime::objc_getProtocol(CEF_APP_PROTOCOL.as_ptr().cast());
+            if protocol.is_null() {
+                let parent =
+                    runtime::objc_getProtocol(CR_APP_CONTROL_PROTOCOL.as_ptr().cast());
+                if parent.is_null() {
+                    return Err(
+                        "CEF framework did not register CrAppControlProtocol".to_owned()
+                    );
+                }
+                let created =
+                    runtime::objc_allocateProtocol(CEF_APP_PROTOCOL.as_ptr().cast());
+                if created.is_null() {
+                    return Err("could not allocate CefAppProtocol".to_owned());
+                }
+                runtime::protocol_addProtocol(created, parent);
+                runtime::objc_registerProtocol(created);
+                protocol = created;
+            }
+            let app_class = APP_CLASS.cast_mut();
+            if app_class.is_null() {
+                return Err("GPUIApplication was not registered".to_owned());
+            }
+            if runtime::class_conformsToProtocol(app_class, protocol) == NO
+                && runtime::class_addProtocol(app_class, protocol) == NO
+            {
+                return Err("could not add CefAppProtocol to GPUIApplication".to_owned());
+            }
+
+            add_cef_method(
+                app_class,
+                sel!(sendEvent:),
+                cef_send_event as extern "C" fn(&mut Object, Sel, id),
+                b"v@:@\0",
+            )?;
+            add_cef_method(
+                app_class,
+                sel!(setHandlingSendEvent:),
+                cef_set_handling_send_event as extern "C" fn(&mut Object, Sel, BOOL),
+                b"v@:c\0",
+            )?;
+            add_cef_method(
+                app_class,
+                sel!(isHandlingSendEvent),
+                cef_is_handling_send_event as extern "C" fn(&Object, Sel) -> BOOL,
+                b"c@:\0",
+            )?;
+            Ok(())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+unsafe fn add_cef_method<T>(
+    class: *mut Class,
+    selector: Sel,
+    implementation: T,
+    encoding: &'static [u8],
+) -> std::result::Result<(), String>
+where
+    T: Copy,
+{
+    let implementation: runtime::Imp = unsafe { std::mem::transmute_copy(&implementation) };
+    if unsafe {
+        runtime::class_addMethod(class, selector, implementation, encoding.as_ptr().cast())
+    } == NO
+    {
+        return Err(format!(
+            "could not add CEF selector {selector:?} to GPUIApplication"
+        ));
+    }
+    Ok(())
+}
+
+extern "C" fn cef_send_event(this: &mut Object, _: Sel, event: id) {
+    let nested = CEF_HANDLING_SEND_EVENT.swap(true, Ordering::SeqCst);
+    unsafe {
+        let superclass = &*runtime::class_getSuperclass(APP_CLASS);
+        let _: () = msg_send![super(this, superclass), sendEvent: event];
+    }
+    if !nested {
+        CEF_HANDLING_SEND_EVENT.store(false, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn cef_set_handling_send_event(_: &mut Object, _: Sel, value: BOOL) {
+    CEF_HANDLING_SEND_EVENT.store(value != NO, Ordering::SeqCst);
+}
+
+extern "C" fn cef_is_handling_send_event(_: &Object, _: Sel) -> BOOL {
+    if CEF_HANDLING_SEND_EVENT.load(Ordering::SeqCst) {
+        YES
+    } else {
+        NO
+    }
+}
+
+unsafe extern "C" {
+    fn pthread_main_np() -> i32;
 }
 
 pub struct MacPlatform(Mutex<MacPlatformState>);

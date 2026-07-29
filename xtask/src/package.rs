@@ -163,6 +163,11 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         eprintln!("[xtask] staged sidecar executable: {name}");
         sidecar_names.push(name);
     }
+    if let Some(helper) = &build.cef_helper_executable {
+        let name = staging::stage_executable(&plan.staging_dir, helper)?;
+        eprintln!("[xtask] staged macOS CEF helper executable: {name}");
+        sidecar_names.push(name);
+    }
 
     let siblings = staging::stage_runtime_siblings(&plan.staging_dir, executable)?;
     for lib in &siblings {

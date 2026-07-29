@@ -658,7 +658,7 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
+    use sphere_webview::client::{BrowserLifecycle, plugin_browser_client_with_surface};
     use sphere_webview::osr::{
         OsrInput, OsrKey, OsrKeyKind, OsrModifiers, OsrMouseButton, OsrSurface,
     };
@@ -666,11 +666,11 @@ mod imp {
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
+    use sphere_webview::scheme::{BridgeSink, SchemeAsset, register_plugin_scheme_factory};
 
     use super::{
-        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
-        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
+        EditorInput, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton,
+        HostAvailability, OFFSCREEN_HOSTING, ViewEvent, ViewId, ViewRect, origin_for_plugin_id,
     };
 
     struct HostedView {
@@ -942,7 +942,14 @@ mod imp {
         if !has_embedded_ui(origin) {
             return HostAvailability::UiNotEmbedded(plugin_id.to_string());
         }
-        HostAvailability::Ready
+        #[cfg(target_os = "macos")]
+        return HostAvailability::RuntimeFailed(
+            "built-in plugin editors are temporarily unavailable on macOS: \
+             CEF browser creation is deferred while the AppKit run-loop trap is resolved"
+                .to_owned(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        return HostAvailability::Ready;
     }
 
     /// Transfer ownership of the browser process's `CefApp` into the UI-thread
@@ -982,6 +989,10 @@ mod imp {
         let config = CefRuntimeConfig {
             cache_path: cef_cache_dir(),
             remote_debugging_port: debug_port(),
+            browser_subprocess: match sphere_webview::runtime::platform_browser_subprocess() {
+                Ok(subprocess) => subprocess,
+                Err(error) => return remember_runtime_failure(error.to_string()),
+            },
             // Chromium decides this once, at initialize, so the whole process
             // opts in wherever editors are hosted off-screen.
             windowless_rendering: OFFSCREEN_HOSTING,
@@ -1020,10 +1031,10 @@ mod imp {
     /// platforms. `0` where off-screen hosting needs no parent.
     #[cfg(target_os = "windows")]
     fn create_hidden_warmup_parent() -> u64 {
-        use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, HMENU, WINDOW_EX_STYLE, WS_POPUP,
         };
+        use windows::core::w;
         // The predefined STATIC class is fine here: the window is never shown,
         // it exists only so CEF has a real HWND to create its child under.
         unsafe {
@@ -1064,6 +1075,19 @@ mod imp {
     /// [`INBOUND`] queue and would be misread as the real editor's handshake
     /// when one opens later.
     fn ensure_warmup(host: &mut Host) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = host;
+            eprintln!(
+                "[cef-warmup] deferred platform=macos reason=appkit-run-loop-contract-unresolved"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        ensure_warmup_supported(host);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn ensure_warmup_supported(host: &mut Host) {
         if host.warmup.is_some() {
             return;
         }
@@ -1140,6 +1164,55 @@ mod imp {
                     ensure_warmup(host);
                 }
             }
+        });
+    }
+
+    /// Close every CEF browser and finish process-global shutdown on the UI
+    /// thread after GPUI's application loop exits.
+    pub fn shutdown() {
+        HOST.with(|cell| {
+            let Some(host) = cell.borrow_mut().take() else {
+                return;
+            };
+            let open_count =
+                host.views.len() + host.closing_views.len() + usize::from(host.warmup.is_some());
+            eprintln!("[cef-runtime] shutdown requested open_browser_count={open_count}");
+            for hosted in host.views.values() {
+                let _ = hosted.view.close(true);
+            }
+            for closing in host.closing_views.values() {
+                let _ = closing.hosted.view.close(true);
+            }
+            if let Some(warmup) = host.warmup.as_ref() {
+                let _ = warmup._view.close(true);
+            }
+
+            let mut remaining = open_count;
+            for _ in 0..MAX_CLOSE_PUMP_TICKS {
+                let _ = host.runtime.do_message_loop_work();
+                remaining = host
+                    .views
+                    .values()
+                    .filter(|hosted| !hosted.lifecycle.before_close())
+                    .count()
+                    + host
+                        .closing_views
+                        .values()
+                        .filter(|closing| !closing.hosted.lifecycle.before_close())
+                        .count()
+                    + host
+                        .warmup
+                        .as_ref()
+                        .filter(|warmup| !warmup._lifecycle.before_close())
+                        .map_or(0, |_| 1);
+                if remaining == 0 {
+                    break;
+                }
+            }
+            eprintln!("[cef-runtime] shutdown close_pump_complete remaining_open={remaining}");
+            // Field order now releases all browser/client handles before
+            // `CefRuntime::drop` invokes cef_shutdown exactly once.
+            drop(host);
         });
     }
 
@@ -1687,6 +1760,8 @@ mod imp {
 
 #[cfg(feature = "builtin-plugin-editor")]
 pub use imp::install_process_app;
+#[cfg(feature = "builtin-plugin-editor")]
+pub use imp::shutdown;
 pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, preload, pump, reload_view,
     send_to_view, send_view_input, set_view_bounds, take_inbound, take_view_events,
@@ -1791,9 +1866,11 @@ mod tests {
             availability("builtin:rodharerist"),
             HostAvailability::NotCompiledIn
         );
-        assert!(HostAvailability::NotCompiledIn
-            .to_string()
-            .contains("builtin-plugin-editor"));
+        assert!(
+            HostAvailability::NotCompiledIn
+                .to_string()
+                .contains("builtin-plugin-editor")
+        );
     }
 
     #[cfg(feature = "builtin-plugin-editor")]

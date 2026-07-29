@@ -1,0 +1,13 @@
+[package]
+name = "futureboard_cef_helper"
+version = "2026.7.2"
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "futureboard_cef_helper"
+path = "src/main.rs"
+
+[dependencies]
+sphere-webview = { workspace = true, features = ["cef-runtime"] }
+

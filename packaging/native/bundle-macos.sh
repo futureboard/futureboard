@@ -19,6 +19,15 @@ APP_DIR="$OUT/$APP_NAME.app"
 # If Info.plist says futureboard_native, keep this.
 # If Info.plist says FutureboardNative, change this to FutureboardNative.
 APP_EXECUTABLE_NAME="FutureboardNative"
+CEF_HELPER_BINARY_NAME="futureboard_cef_helper"
+CEF_HELPER_BASE_NAME="$APP_NAME Helper"
+CEF_HELPER_VARIANTS=(
+  "Helper"
+  "Helper (GPU)"
+  "Helper (Renderer)"
+  "Helper (Plugin)"
+  "Helper (Alerts)"
+)
 
 ICON_SRC="$ROOT/packages/shared/app/icons/icon.icns"
 PLIST_SRC="$ROOT/packaging/native/Info.plist"
@@ -43,6 +52,10 @@ if [[ ! -f "$PLIST_SRC" ]]; then
   echo "error: Info.plist not found: $PLIST_SRC" >&2
   exit 1
 fi
+if [[ ! -f "$PACKAGE_DIR/$CEF_HELPER_BINARY_NAME" ]]; then
+  echo "error: staged macOS CEF helper not found: $PACKAGE_DIR/$CEF_HELPER_BINARY_NAME" >&2
+  exit 1
+fi
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
@@ -61,6 +74,39 @@ fi
 mv "$CEF_FRAMEWORK" "$FRAMEWORKS/"
 chmod +x "$MACOS/$APP_EXECUTABLE_NAME"
 chmod +x "$MACOS/FutureboardPluginHostX64" "$MACOS/FutureboardPluginScanner"
+
+# CEF 150's macOS sample packages five helper variants. They share the same
+# minimal Rust executable but require distinct application/executable names so
+# Chromium can select the appropriate role.
+for VARIANT in "${CEF_HELPER_VARIANTS[@]}"; do
+  HELPER_NAME="$APP_NAME $VARIANT"
+  HELPER_APP="$FRAMEWORKS/$HELPER_NAME.app"
+  HELPER_MACOS="$HELPER_APP/Contents/MacOS"
+  mkdir -p "$HELPER_MACOS"
+  cp "$MACOS/$CEF_HELPER_BINARY_NAME" "$HELPER_MACOS/$HELPER_NAME"
+  chmod +x "$HELPER_MACOS/$HELPER_NAME"
+  cat > "$HELPER_APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>$HELPER_NAME</string>
+  <key>CFBundleIdentifier</key><string>org.futureboard.studio.native</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>$HELPER_NAME</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+  plutil -lint "$HELPER_APP/Contents/Info.plist" >/dev/null
+done
+rm "$MACOS/$CEF_HELPER_BINARY_NAME"
 
 # Icon
 if [[ -f "$ICON_SRC" ]]; then

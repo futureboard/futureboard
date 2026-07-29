@@ -4,6 +4,7 @@ resolver = "3"
 
 members = [
     "apps/native/studio",
+    "apps/native/cef_helper",
     "apps/native/livestage",
 
     "crates/SphereAudioEditor",

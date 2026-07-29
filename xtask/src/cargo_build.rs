@@ -28,6 +28,8 @@ pub const APP_BINARY: &str = "FutureboardNative";
 
 /// Package that owns the runtime sidecar executables.
 const SIDECAR_PACKAGE: &str = "sphere-plugin-host";
+const CEF_HELPER_PACKAGE: &str = "futureboard_cef_helper";
+pub const CEF_HELPER_BINARY: &str = "futureboard_cef_helper";
 
 /// Sidecar binaries `FutureboardNative` spawns from its own directory. These are
 /// separate `[[bin]]` targets, so building the app package alone does not
@@ -50,6 +52,8 @@ pub struct BuildOutput {
     /// Absolute paths to the runtime sidecar executables, in the order of
     /// [`SIDECAR_BINARIES`].
     pub sidecar_executables: Vec<PathBuf>,
+    /// Dedicated CEF subprocess entry point, built only for macOS packages.
+    pub cef_helper_executable: Option<PathBuf>,
 }
 
 /// Build the application and its sidecars for the requested profile / target /
@@ -61,6 +65,9 @@ pub fn build(
     cef_path: Option<&Path>,
 ) -> Result<BuildOutput> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let target_is_macos = target
+        .map(|triple| triple.ends_with("apple-darwin"))
+        .unwrap_or(cfg!(target_os = "macos"));
 
     let mut command = Command::new(&cargo);
     command
@@ -74,6 +81,11 @@ pub fn build(
 
     for bin in SIDECAR_BINARIES {
         command.args(["--bin", bin]);
+    }
+    if target_is_macos {
+        command
+            .args(["--package", CEF_HELPER_PACKAGE])
+            .args(["--bin", CEF_HELPER_BINARY]);
     }
     if let Some(target) = target {
         command.args(["--target", target]);
@@ -143,10 +155,21 @@ pub fn build(
         })?;
         sidecar_executables.push(path);
     }
+    let cef_helper_executable = if target_is_macos {
+        Some(executables.remove(CEF_HELPER_BINARY).ok_or_else(|| {
+            anyhow!(
+                "cargo build succeeded but emitted no executable artifact for macOS CEF helper \
+                 `{CEF_HELPER_BINARY}`"
+            )
+        })?)
+    } else {
+        None
+    };
 
     Ok(BuildOutput {
         app_executable,
         sidecar_executables,
+        cef_helper_executable,
     })
 }
 
@@ -165,12 +188,13 @@ fn merged_features(edition: Edition) -> String {
 /// executables we asked Cargo to build.
 fn wanted_executable(artifact: &Artifact) -> Option<(String, PathBuf)> {
     let name = artifact.target.name.as_str();
-    let is_wanted = (name == APP_BINARY || SIDECAR_BINARIES.contains(&name))
-        && artifact
-            .target
-            .kind
-            .iter()
-            .any(|kind| kind.as_str() == "bin");
+    let is_wanted =
+        (name == APP_BINARY || name == CEF_HELPER_BINARY || SIDECAR_BINARIES.contains(&name))
+            && artifact
+                .target
+                .kind
+                .iter()
+                .any(|kind| kind.as_str() == "bin");
     if !is_wanted {
         return None;
     }
