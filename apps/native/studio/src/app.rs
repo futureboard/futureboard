@@ -82,10 +82,28 @@ pub fn setup(cx: &mut App) {
     assets::register_fonts(cx);
     boot::log("fonts registered");
 
+    // On macOS CEF must install its integrated CFRunLoop observer during
+    // applicationDidFinishLaunching, before GPUI creates the first native
+    // window. Deferring initialization to the first main-queue turn is too
+    // late and causes the pinned CEF framework to assert in its run-loop
+    // observer. The probe under SphereWebView covers this ordering.
+    #[cfg(all(feature = "builtin-plugin-editor", target_os = "macos"))]
+    {
+        use sphere_ui_components::components::builtin_plugin_editor;
+        match builtin_plugin_editor::init_at_boot() {
+            Ok(()) => {
+                boot::log("builtin plugin editor host (CEF) initialized before first macOS window");
+                builtin_plugin_editor::preload();
+            }
+            Err(err) => boot::log(&format!("builtin plugin editor host unavailable: {err}")),
+        }
+    }
+
     // Prewarm CEF on the GPUI UI thread, but outside this active App update.
     // CEF may synchronously dispatch Win32 messages while initializing; running
     // it as foreground work prevents those messages from re-entering a borrowed
     // AppCell. A failure stays non-fatal and is surfaced by the editor window.
+    #[cfg(not(all(feature = "builtin-plugin-editor", target_os = "macos")))]
     cx.spawn(async move |cx| {
         use sphere_ui_components::components::builtin_plugin_editor;
         match builtin_plugin_editor::init_at_boot() {
@@ -108,6 +126,22 @@ pub fn setup(cx: &mut App) {
             }
             Err(err) => boot::log(&format!("builtin plugin editor host unavailable: {err}")),
         }
+    })
+    .detach();
+
+    // macOS initialization and browser creation happened synchronously above
+    // at the proven AppKit lifecycle point. Drive the warm-up after this App
+    // update is released; CEF remains owned by the same main thread.
+    #[cfg(all(feature = "builtin-plugin-editor", target_os = "macos"))]
+    cx.spawn(async move |cx| {
+        use sphere_ui_components::components::builtin_plugin_editor;
+        for _ in 0..150 {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
+            builtin_plugin_editor::pump();
+        }
+        boot::log("builtin plugin editor warm-up pump finished");
     })
     .detach();
 

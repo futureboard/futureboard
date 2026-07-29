@@ -942,14 +942,7 @@ mod imp {
         if !has_embedded_ui(origin) {
             return HostAvailability::UiNotEmbedded(plugin_id.to_string());
         }
-        #[cfg(target_os = "macos")]
-        return HostAvailability::RuntimeFailed(
-            "built-in plugin editors are temporarily unavailable on macOS: \
-             CEF browser creation is deferred while the AppKit run-loop trap is resolved"
-                .to_owned(),
-        );
-        #[cfg(not(target_os = "macos"))]
-        return HostAvailability::Ready;
+        HostAvailability::Ready
     }
 
     /// Transfer ownership of the browser process's `CefApp` into the UI-thread
@@ -1075,18 +1068,9 @@ mod imp {
     /// [`INBOUND`] queue and would be misread as the real editor's handshake
     /// when one opens later.
     fn ensure_warmup(host: &mut Host) {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = host;
-            eprintln!(
-                "[cef-warmup] deferred platform=macos reason=appkit-run-loop-contract-unresolved"
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
         ensure_warmup_supported(host);
     }
 
-    #[cfg(not(target_os = "macos"))]
     fn ensure_warmup_supported(host: &mut Host) {
         if host.warmup.is_some() {
             return;
