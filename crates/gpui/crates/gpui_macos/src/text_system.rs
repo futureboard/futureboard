@@ -25,6 +25,7 @@ use core_text::{
     string_attributes::kCTFontAttributeName,
 };
 use font_kit::{
+    canvas::{Canvas, Format},
     font::Font as FontKitFont,
     handle::Handle,
     hinting::HintingOptions,
@@ -43,7 +44,7 @@ use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
     rect::{RectF, RectI},
     transform2d::Transform2F,
-    vector::Vector2F,
+    vector::{Vector2F, Vector2I},
 };
 use smallvec::SmallVec;
 use std::{borrow::Cow, char, convert::TryFrom, sync::Arc, sync::OnceLock};
@@ -427,6 +428,37 @@ impl MacTextSystemState {
             }
             let bitmap_size = bitmap_size;
 
+            // Use font-kit's CoreText rasterizer for ordinary alpha glyphs. It
+            // initializes the A8 canvas and its foreground color according to
+            // font-kit's cross-platform atlas contract. The former hand-rolled
+            // kCGImageAlphaOnly path could return apparently valid metrics and
+            // non-empty buffers while producing transparent text in Metal.
+            //
+            // Emoji and dilated text retain the specialized CGContext path
+            // below because they need RGBA conversion or custom luminance.
+            if !params.is_emoji && params.dilation == 0 {
+                let mut canvas = Canvas::new(
+                    Vector2I::new(bitmap_size.width.0, bitmap_size.height.0),
+                    Format::A8,
+                );
+                let subpixel_shift = params
+                    .subpixel_variant
+                    .map(|value| value as f32 / SUBPIXEL_VARIANTS_X as f32);
+                let transform = Transform2F::from_translation(Vector2F::new(
+                    -glyph_bounds.origin.x.0 as f32 + subpixel_shift.x,
+                    -glyph_bounds.origin.y.0 as f32 + subpixel_shift.y,
+                )) * Transform2F::from_scale(params.scale_factor);
+                self.fonts[params.font_id.0].rasterize_glyph(
+                    &mut canvas,
+                    params.glyph_id.0,
+                    f32::from(params.font_size),
+                    transform,
+                    HintingOptions::None,
+                    font_kit::canvas::RasterizationOptions::GrayscaleAa,
+                )?;
+                return Ok((bitmap_size, canvas.pixels));
+            }
+
             let mut bytes;
             let cx;
             if params.is_emoji {
@@ -743,7 +775,10 @@ mod lenient_font_attributes {
 #[cfg(test)]
 mod tests {
     use crate::MacTextSystem;
-    use gpui::{FontRun, FontWeight, GlyphId, PlatformTextSystem, font, px};
+    use gpui::{
+        FontFallbacks, FontRun, FontWeight, GlyphId, PlatformTextSystem, RenderGlyphParams, font,
+        point, px,
+    };
     use std::borrow::Cow;
 
     #[test]
@@ -764,9 +799,34 @@ mod tests {
         ] {
             let mut descriptor = font("Inter Variable");
             descriptor.weight = weight;
+            descriptor.fallbacks = Some(FontFallbacks::from_fonts(vec![
+                "Inter Variable".to_string(),
+                "Leelawadee UI".to_string(),
+                "Noto Sans Thai".to_string(),
+                "Google Sans".to_string(),
+                "Segoe UI".to_string(),
+                "Arial".to_string(),
+            ]));
             let font_id = fonts.font_id(&descriptor).unwrap();
             let glyph_id = fonts.glyph_for_char(font_id, 'W').unwrap();
             assert!(fonts.advance(font_id, glyph_id).unwrap().width > 0.);
+
+            let params = RenderGlyphParams {
+                font_id,
+                glyph_id,
+                font_size: px(16.),
+                subpixel_variant: point(0, 0),
+                scale_factor: 1.,
+                is_emoji: false,
+                subpixel_rendering: false,
+                dilation: 0,
+            };
+            let bounds = fonts.glyph_raster_bounds(&params).unwrap();
+            let (_, pixels) = fonts.rasterize_glyph(&params, bounds).unwrap();
+            assert!(
+                pixels.iter().any(|pixel| *pixel != 0),
+                "embedded Inter glyph rasterized as transparent at weight {weight:?}"
+            );
         }
     }
 
