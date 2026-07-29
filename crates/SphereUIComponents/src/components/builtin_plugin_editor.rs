@@ -650,6 +650,10 @@ mod imp {
     pub fn send_to_view(_view_id: ViewId, _code: &str) {}
 
     pub fn reload_view(_view_id: ViewId) {}
+
+    pub fn take_global_play_pause_requests(_view_id: ViewId) -> u32 {
+        0
+    }
 }
 
 #[cfg(feature = "builtin-plugin-editor")]
@@ -658,7 +662,7 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use sphere_webview::client::{BrowserLifecycle, plugin_browser_client_with_surface};
+    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
     use sphere_webview::osr::{
         OsrInput, OsrKey, OsrKeyKind, OsrModifiers, OsrMouseButton, OsrSurface,
     };
@@ -666,11 +670,11 @@ mod imp {
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::scheme::{BridgeSink, SchemeAsset, register_plugin_scheme_factory};
+    use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
     use super::{
-        EditorInput, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton,
-        HostAvailability, OFFSCREEN_HOSTING, ViewEvent, ViewId, ViewRect, origin_for_plugin_id,
+        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
+        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
     };
 
     struct HostedView {
@@ -932,6 +936,22 @@ mod imp {
         });
     }
 
+    /// Drain global transport shortcuts captured by this view's native CEF
+    /// keyboard handler.
+    pub fn take_global_play_pause_requests(view_id: ViewId) -> u32 {
+        HOST.with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|slot| {
+                    slot.as_ref()?
+                        .views
+                        .get(&view_id)
+                        .map(|hosted| hosted.lifecycle.take_global_play_pause_requests())
+                })
+                .unwrap_or(0)
+        })
+    }
+
     pub fn availability(plugin_id: &str) -> HostAvailability {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return HostAvailability::NoEditorForPlugin(plugin_id.to_string());
@@ -1024,10 +1044,10 @@ mod imp {
     /// platforms. `0` where off-screen hosting needs no parent.
     #[cfg(target_os = "windows")]
     fn create_hidden_warmup_parent() -> u64 {
+        use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, HMENU, WINDOW_EX_STYLE, WS_POPUP,
         };
-        use windows::core::w;
         // The predefined STATIC class is fine here: the window is never shown,
         // it exists only so CEF has a real HWND to create its child under.
         unsafe {
@@ -1577,6 +1597,11 @@ mod imp {
                         );
                         match result {
                             Ok(view) if lifecycle.after_created() => {
+                                if let Err(error) = view.set_zoom_level(0.0) {
+                                    eprintln!(
+                                        "[plugin-editor] failed to lock zoom view_id={view_id:?} err={error}"
+                                    );
+                                }
                                 let browser_id = view.browser_identifier();
                                 host.views.insert(
                                     view_id,
@@ -1649,6 +1674,7 @@ mod imp {
                 if hosted.lifecycle.take_renderer_terminated() {
                     eprintln!("[plugin-scheme] reloading crashed renderer view_id={view_id:?}");
                     let _ = hosted.view.reload();
+                    let _ = hosted.view.set_zoom_level(0.0);
                     completed.push((*view_id, ViewEvent::RendererCrashed));
                 }
                 if !hosted.stability_reported
@@ -1748,8 +1774,8 @@ pub use imp::install_process_app;
 pub use imp::shutdown;
 pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, preload, pump, reload_view,
-    send_to_view, send_view_input, set_view_bounds, take_inbound, take_view_events,
-    view_frame_generation, with_view_frame,
+    send_to_view, send_view_input, set_view_bounds, take_global_play_pause_requests, take_inbound,
+    take_view_events, view_frame_generation, with_view_frame,
 };
 
 #[cfg(test)]
@@ -1850,11 +1876,9 @@ mod tests {
             availability("builtin:rodharerist"),
             HostAvailability::NotCompiledIn
         );
-        assert!(
-            HostAvailability::NotCompiledIn
-                .to_string()
-                .contains("builtin-plugin-editor")
-        );
+        assert!(HostAvailability::NotCompiledIn
+            .to_string()
+            .contains("builtin-plugin-editor"));
     }
 
     #[cfg(feature = "builtin-plugin-editor")]

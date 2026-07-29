@@ -711,6 +711,16 @@ impl WebView<'_> {
         Ok(())
     }
 
+    /// Pin the browser's page zoom. Built-in editors use `0.0` (100%).
+    pub fn set_zoom_level(&self, zoom_level: f64) -> Result<(), CefRuntimeError> {
+        self.ensure_thread()?;
+        self.browser
+            .host()
+            .ok_or(CefRuntimeError::MissingBrowserHost)?
+            .set_zoom_level(zoom_level);
+        Ok(())
+    }
+
     pub fn close(&self, force: bool) -> Result<(), CefRuntimeError> {
         self.ensure_thread()?;
         let host = self
@@ -771,7 +781,7 @@ fn platform_set_bounds(
     handle: cef::sys::cef_window_handle_t,
     bounds: WindowBounds,
 ) -> Result<(), CefRuntimeError> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
     let ok = unsafe {
         SetWindowPos(
             handle.0.cast(),
