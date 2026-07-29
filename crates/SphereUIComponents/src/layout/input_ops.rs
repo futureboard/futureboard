@@ -12,11 +12,13 @@ use crate::components::plugin_picker::{
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::{
-    is_project_routing_track, is_vsti_output_child_track_id, ClipType, TrackType,
+    is_project_routing_track, ClipType, TrackType,
 };
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
-use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
+use super::{
+    ContextMenuTarget, ContextTarget, OpenPopover, RightDockTab, StudioLayout, TextMenuTarget,
+};
 
 /// Inspector inline name-edit fields — the focus-handle-backed track-name and
 /// clip-name text inputs plus the ids they are currently bound to. `StudioLayout`
@@ -334,6 +336,9 @@ impl StudioLayout {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.panels.browser {
+            return false;
+        }
         let search_focused = self.browser_search_input.is_focused(window);
         if !search_focused {
             return false;
@@ -680,11 +685,13 @@ impl StudioLayout {
     pub(super) fn text_input_has_focus(&self, window: &Window) -> bool {
         self.command_palette_input.is_focused(window)
             || self.project_switcher_search_input.is_focused(window)
-            || self.browser_search_input.is_focused(window)
+            || (self.panels.browser && self.browser_search_input.is_focused(window))
             || self.plugin_picker_search_input.is_focused(window)
             || self.automation_picker_search_input.is_focused(window)
-            || self.inspector_name_edit.name_input.is_focused(window)
-            || self.inspector_name_edit.clip_name_input.is_focused(window)
+            || (self.panels.inspector
+                && self.right_dock_tab == RightDockTab::Inspector
+                && (self.inspector_name_edit.name_input.is_focused(window)
+                    || self.inspector_name_edit.clip_name_input.is_focused(window)))
     }
 
     /// Route a key to the Inspector's track-name field when it owns focus.
@@ -697,6 +704,9 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !(self.panels.inspector && self.right_dock_tab == RightDockTab::Inspector) {
+            return false;
+        }
         let track_name_focused = self.inspector_name_edit.name_input.is_focused(window);
         let clip_name_focused = self.inspector_name_edit.clip_name_input.is_focused(window);
         if !track_name_focused && !clip_name_focused {
@@ -793,6 +803,10 @@ impl StudioLayout {
     /// overlay's `FocusHandle` "focused" (the handle is still ref-counted) even
     /// though its element is no longer rendered. That orphaned focus is exactly
     /// what silently killed every keyboard shortcut — see `reclaim` in render.
+    ///
+    /// Browser/inspector fields are gated on panel visibility for the same
+    /// reason: closing the side panel leaves the search/name FocusHandle
+    /// orphaned, which on Linux was enough to block Space/transport forever.
     pub(super) fn keyboard_text_capture_live(&self, window: &Window) -> bool {
         (self.command_palette.is_open && self.command_palette_input.is_focused(window))
             || (self.project_switcher.is_open
@@ -802,9 +816,11 @@ impl StudioLayout {
                 self.overlay.open_popover,
                 Some(OpenPopover::AutomationTargetPicker { .. })
             ) && self.automation_picker_search_input.is_focused(window))
-            || self.browser_search_input.is_focused(window)
-            || self.inspector_name_edit.name_input.is_focused(window)
-            || self.inspector_name_edit.clip_name_input.is_focused(window)
+            || (self.panels.browser && self.browser_search_input.is_focused(window))
+            || (self.panels.inspector
+                && self.right_dock_tab == RightDockTab::Inspector
+                && (self.inspector_name_edit.name_input.is_focused(window)
+                    || self.inspector_name_edit.clip_name_input.is_focused(window)))
     }
 
     pub(super) fn is_text_editing_context(&self, window: &Window) -> bool {
@@ -826,11 +842,17 @@ impl StudioLayout {
         ) && self.automation_picker_search_input.is_focused(window)
         {
             "automation_picker_search".to_string()
-        } else if self.browser_search_input.is_focused(window) {
+        } else if self.panels.browser && self.browser_search_input.is_focused(window) {
             "browser_search".to_string()
-        } else if self.inspector_name_edit.name_input.is_focused(window) {
+        } else if self.panels.inspector
+            && self.right_dock_tab == RightDockTab::Inspector
+            && self.inspector_name_edit.name_input.is_focused(window)
+        {
             "inspector_track_name".to_string()
-        } else if self.inspector_name_edit.clip_name_input.is_focused(window) {
+        } else if self.panels.inspector
+            && self.right_dock_tab == RightDockTab::Inspector
+            && self.inspector_name_edit.clip_name_input.is_focused(window)
+        {
             "inspector_clip_name".to_string()
         } else if self.focus_handle.is_focused(window) {
             "studio_shortcut_anchor".to_string()
@@ -848,6 +870,7 @@ impl StudioLayout {
             ContextTarget::TimelineEmpty => vec![
                 ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
                 ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
                 ContextMenuEntry::Separator,
                 menu_item_enabled("Paste", "edit:paste", !self.clip_clipboard.is_empty())
                     .with_shortcut("Ctrl+V"),
@@ -874,6 +897,7 @@ impl StudioLayout {
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
                     ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                    ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Zoom In", "view:zoom-in"),
                     ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
@@ -1003,6 +1027,7 @@ impl StudioLayout {
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
                     ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
+                    ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
                 ];
                 entries
             }
@@ -1109,6 +1134,8 @@ impl StudioLayout {
                 entries
             }
             ContextTarget::Mixer(_) => vec![
+                ContextMenuEntry::item("Add Bus", "mixer:create-bus"),
+                ContextMenuEntry::Separator,
                 ContextMenuEntry::item("Reset Volume", "mixer:reset-volume"),
                 ContextMenuEntry::item("Reset Pan", "mixer:reset-pan"),
                 ContextMenuEntry::Separator,
@@ -1121,13 +1148,6 @@ impl StudioLayout {
                     return vec![ContextMenuEntry::disabled_item("Track unavailable", "noop")];
                 };
                 let mut entries = vec![ContextMenuEntry::Header("Send To".to_string())];
-                if source.track_type.is_routing() && !is_vsti_output_child_track_id(&source.id) {
-                    entries.push(ContextMenuEntry::disabled_item(
-                        "Routing tracks cannot send",
-                        "noop",
-                    ));
-                    return entries;
-                }
                 let existing: std::collections::HashSet<&str> = source
                     .sends
                     .iter()
@@ -1450,6 +1470,7 @@ impl StudioLayout {
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item("Add Marker Here", "ruler:add-marker"),
                     ContextMenuEntry::item("Create Region Here", "ruler:add-region"),
+                    ContextMenuEntry::item("Set Loop to Selection", "ruler:set-loop-selection"),
                     ContextMenuEntry::Separator,
                 ];
                 if !has_automation {

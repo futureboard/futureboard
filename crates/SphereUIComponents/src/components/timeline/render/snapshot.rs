@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
-    clip_output_local_to_source_sample, is_vsti_output_child_track_id, ClipState, ClipType,
+    clip_output_local_to_source_sample, is_arrangement_hidden_track, ClipState, ClipType,
     GridLineLevel, TimelineState, TrackRowLayoutEntry, TrackState, DEFAULT_TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_cache::{
@@ -243,9 +243,9 @@ fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLa
     state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
-        // VSTi multi-out child channels are mixer-only — exclude them from the
-        // arrangement canvas the same way the GPUI track list does.
-        .filter(|(_, track)| !is_vsti_output_child_track_id(&track.id))
+        // Mixer-only channels (Bus/Return + VSTi multi-out children) are excluded
+        // from the arrangement canvas the same way the GPUI track list does.
+        .filter(|(_, track)| !is_arrangement_hidden_track(track))
         .map(|(rel, track)| {
             let index = range.start_index + rel;
             let row = row_layout
@@ -285,8 +285,8 @@ fn build_clips(
         .iter()
         .enumerate()
     {
-        // Mixer-only VSTi child channels never carry arrangement clips.
-        if is_vsti_output_child_track_id(&track.id) {
+        // Mixer-only channels never carry arrangement clips.
+        if is_arrangement_hidden_track(track) {
             continue;
         }
         let track_index = range.start_index + rel;

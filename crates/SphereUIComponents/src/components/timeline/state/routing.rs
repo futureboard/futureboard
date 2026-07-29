@@ -473,6 +473,45 @@ impl TimelineState {
         Some((return_id, send_id))
     }
 
+    /// Create a mixer-only Bus immediately (no Add Track dialog). Optionally
+    /// routes the given tracks' main outs into the new bus.
+    pub fn create_bus_track(&mut self, route_from_track_ids: &[String]) -> String {
+        let next_bus = self
+            .tracks
+            .iter()
+            .filter(|track| track.track_type == TrackType::Bus)
+            .count()
+            + 1;
+        let bus_id = self.create_track(CreateTrackOptions {
+            track_type: TrackType::Bus,
+            name: format!("Bus {next_bus}"),
+            color: self.track_color_for_index(self.tracks.len()),
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        for track_id in route_from_track_ids {
+            if track_id == &bus_id {
+                continue;
+            }
+            let Some(track) = self.find_track(track_id) else {
+                continue;
+            };
+            if track.track_type.is_routing() || track.track_type == TrackType::Master {
+                continue;
+            }
+            self.set_track_output_routing(
+                track_id,
+                TrackOutputRouting::Bus {
+                    bus_id: bus_id.clone(),
+                },
+            );
+        }
+        self.select_track(&bus_id);
+        bus_id
+    }
+
     pub fn remove_send(&mut self, track_id: &str, send_id: &str) {
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             track.sends.retain(|s| s.id != send_id);
@@ -693,5 +732,25 @@ mod tests {
         assert!(state.set_send_gain_db(&source_id, &send_id, 30.0));
         assert_eq!(state.find_track(&source_id).unwrap().sends[0].gain_db, 6.0);
         assert!(!state.set_send_gain_db(&source_id, &send_id, 6.0));
+    }
+
+    #[test]
+    fn create_bus_routes_sources_and_hides_from_arrangement() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let audio_id = create_track(&mut state, TrackType::Audio, "Drums");
+        let bus_id = state.create_bus_track(&[audio_id.clone()]);
+        let bus = state.find_track(&bus_id).unwrap();
+        assert_eq!(bus.track_type, TrackType::Bus);
+        assert!(is_arrangement_hidden_track(bus));
+        assert_eq!(
+            state.find_track(&audio_id).unwrap().routing.output,
+            TrackOutputRouting::Bus {
+                bus_id: bus_id.clone()
+            }
+        );
+        let layout = state.track_row_layout();
+        assert_eq!(layout.row_for_track(&bus_id).unwrap().height, 0.0);
+        assert!(layout.row_for_track(&audio_id).unwrap().height > 0.0);
     }
 }

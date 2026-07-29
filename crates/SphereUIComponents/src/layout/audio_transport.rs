@@ -1898,19 +1898,22 @@ impl StudioLayout {
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
-        let (enabled, start_beats, end_beats, bpm) = {
+        let (enabled, start_seconds, end_seconds) = {
             let timeline = self.timeline.read(cx);
             let transport = &timeline.state.transport;
+            let base = timeline.state.bpm.max(1.0) as f64;
             (
                 transport.loop_enabled,
-                transport.loop_start_beats,
-                transport.loop_end_beats,
-                timeline.state.bpm,
+                timeline
+                    .state
+                    .tempo_map
+                    .seconds_at_beat(transport.loop_start_beats as f64, base),
+                timeline
+                    .state
+                    .tempo_map
+                    .seconds_at_beat(transport.loop_end_beats as f64, base),
             )
         };
-        let bpm = bpm.max(1.0) as f64;
-        let start_seconds = start_beats as f64 * 60.0 / bpm;
-        let end_seconds = end_beats as f64 * 60.0 / bpm;
         if let Err(error) = engine.set_loop(enabled, start_seconds, end_seconds) {
             if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set loop failed: {error}");

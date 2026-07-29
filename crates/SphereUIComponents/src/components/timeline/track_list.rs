@@ -10,7 +10,7 @@ use crate::components::timeline::automation_lane::{
     automation_lane, AutomationDownCallback, AutomationHoverCallback, AutomationLaneActionCallback,
 };
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, AutomationHover, AutomationMarquee, TimelineState,
+    is_arrangement_hidden_track, AutomationHover, AutomationMarquee, TimelineState,
     AUTOMATION_CONTROL_LANE_HEIGHT, AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
@@ -120,12 +120,10 @@ pub fn track_list(
     }
 
     for track in state.tracks[visible_start..visible_end].iter() {
-        // VSTi multi-out child channels are mixer-only — never render them as
-        // arrangement rows (no header, no lane, no resize handle). They have a
+        // Mixer-only channels (Bus/Return + VSTi multi-out children) never render
+        // as arrangement rows (no header, no lane, no resize handle). They have a
         // zero-height entry in the row layout, so spacers/indices stay aligned.
-        if is_vsti_output_child_track_id(&track.id)
-            || state.is_track_hidden_by_collapsed_group(track)
-        {
+        if is_arrangement_hidden_track(track) || state.is_track_hidden_by_collapsed_group(track) {
             continue;
         }
         let index = row_layout

@@ -1481,6 +1481,10 @@ impl StudioLayout {
             cx.notify();
             return;
         }
+        if command_id == "mixer:create-bus" {
+            self.create_bus_track_immediate(cx);
+            return;
+        }
         match command_id {
             "noop" => {}
 
@@ -1585,6 +1589,27 @@ impl StudioLayout {
                         timeline.mark_project_changed(cx);
                         cx.notify();
                     });
+                    self.mark_dirty();
+                    cx.notify();
+                }
+            }
+            "ruler:set-loop-selection" => {
+                let applied = self.timeline.update(cx, |timeline, cx| {
+                    let Some(range) = timeline.state.arrangement_range.as_ref() else {
+                        return false;
+                    };
+                    let (start, end) = range.as_f32_range();
+                    if end <= start {
+                        return false;
+                    }
+                    timeline.state.transport.loop_start_beats = start;
+                    timeline.state.transport.loop_end_beats = end;
+                    timeline.state.transport.loop_enabled = true;
+                    cx.notify();
+                    true
+                });
+                if applied {
+                    self.sync_loop_controls(cx);
                     self.mark_dirty();
                     cx.notify();
                 }

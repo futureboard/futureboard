@@ -75,6 +75,10 @@ impl MixerTreeSidebar {
         }
     }
 
+    pub fn is_filter_focused(&self, window: &Window) -> bool {
+        self.filter_input.is_focused(window)
+    }
+
     pub fn set_session_hooks(
         &mut self,
         callbacks: MixerTreeCallbacks,

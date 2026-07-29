@@ -116,19 +116,16 @@ impl TrackRowLayout {
             .map(|track| track.id.as_str())
             .collect();
         for (index, track) in state.tracks.iter().enumerate() {
-            // VSTi multi-out child channels are mixer-only. They live in `state.tracks`
-            // so the engine snapshot and
-            // mixer can route/meter them, but they must NOT occupy arrangement
-            // space. Keep them in the rows vector (1:1 with `state.tracks`, so the
-            // `row.index == state.tracks position` invariant the timeline relies
-            // on stays intact) but collapse them to zero height: they emit no lane,
-            // no clip, no header, and never match `track_at_content_y`.
+            // Mixer-only channels (Bus/Return + VSTi multi-out children) live in
+            // `state.tracks` for engine/mixer routing, but must NOT occupy
+            // arrangement space. Keep them in the rows vector (1:1 with
+            // `state.tracks`) but collapse them to zero height.
             let hidden_by_group = track
                 .parent_group_id
                 .as_deref()
                 .is_some_and(|group_id| collapsed_group_ids.contains(group_id));
             let (height, automation_height) =
-                if is_vsti_output_child_track_id(&track.id) || hidden_by_group {
+                if is_arrangement_hidden_track(track) || hidden_by_group {
                     (0.0, 0.0)
                 } else {
                     (

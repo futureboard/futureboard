@@ -67,6 +67,11 @@ impl TrackType {
     pub fn is_routing(self) -> bool {
         matches!(self, TrackType::Bus | TrackType::Return | TrackType::Group)
     }
+
+    /// Bus/Return live in the mixer only — they never occupy arrangement lanes.
+    pub fn is_mixer_only(self) -> bool {
+        matches!(self, TrackType::Bus | TrackType::Return)
+    }
 }
 
 /// Per-track edit/display mode. `Clips` is normal clip editing; `Automation`

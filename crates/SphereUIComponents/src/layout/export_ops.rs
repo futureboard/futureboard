@@ -90,7 +90,14 @@ impl StudioLayout {
             master_volume,
             content_end_beat,
             time_selection: None,
-            loop_range: None,
+            loop_range: {
+                let t = &tl_state.transport;
+                if t.loop_end_beats > t.loop_start_beats {
+                    Some((t.loop_start_beats as f64, t.loop_end_beats as f64))
+                } else {
+                    None
+                }
+            },
             mp3_available: sphere_encoder::mp3_available(),
             track_targets: tl_state
                 .tracks

@@ -685,6 +685,30 @@ impl StudioLayout {
         });
     }
 
+    /// Create a Bus strip immediately (mixer context menu). Routes the currently
+    /// selected non-routing track(s) into the new bus when present.
+    pub(super) fn create_bus_track_immediate(&mut self, cx: &mut Context<Self>) {
+        self.overlay.open_popover = None;
+        let bus_id = self.timeline.update(cx, |timeline, cx| {
+            let mut route_from = timeline.state.selection.selected_track_ids.clone();
+            if route_from.is_empty() {
+                if let Some(primary) = timeline.state.selection.selected_track_id.clone() {
+                    route_from.push(primary);
+                }
+            }
+            let bus_id = timeline.state.create_bus_track(&route_from);
+            cx.notify();
+            bus_id
+        });
+        self.mark_dirty();
+        self.audio_bridge.project_dirty = true;
+        self.schedule_audio_project_sync(cx, true, "mixer_create_bus");
+        self.push_mixer_snapshot_to_window(cx);
+        let _ = self.mixer_panel.update(cx, |_, cx| cx.notify());
+        let _ = bus_id;
+        cx.notify();
+    }
+
     pub(super) fn reset_selected_track_pan(&mut self, cx: &mut Context<Self>) {
         self.mark_dirty();
         let _ = self.timeline.update(cx, |timeline, cx| {

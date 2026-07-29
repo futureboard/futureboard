@@ -171,7 +171,37 @@ impl StudioLayout {
             TransportCommand::ReturnToStart => self.seek_native_playhead(cx, 0.0),
             TransportCommand::ToggleLoop => {
                 let _ = self.timeline.update(cx, |timeline, cx| {
-                    timeline.state.transport.loop_enabled = !timeline.state.transport.loop_enabled;
+                    let enabling = !timeline.state.transport.loop_enabled;
+                    if enabling {
+                        if let Some(range) = timeline.state.arrangement_range.clone() {
+                            let (start, end) = range.as_f32_range();
+                            if end > start {
+                                timeline.state.transport.loop_start_beats = start;
+                                timeline.state.transport.loop_end_beats = end;
+                            }
+                        } else {
+                            let still_default =
+                                (timeline.state.transport.loop_start_beats - 0.0).abs()
+                                    < f32::EPSILON
+                                    && (timeline.state.transport.loop_end_beats - 16.0).abs()
+                                        < f32::EPSILON;
+                            if still_default {
+                                // Still on the empty-project default — seed one bar
+                                // around the playhead so enabling Loop is visible.
+                                let bar = timeline
+                                    .state
+                                    .time_signature_map
+                                    .points
+                                    .first()
+                                    .map(|p| p.numerator.max(1) as f32)
+                                    .unwrap_or(4.0);
+                                let playhead = timeline.state.transport.playhead_beats.max(0.0);
+                                timeline.state.transport.loop_start_beats = playhead;
+                                timeline.state.transport.loop_end_beats = playhead + bar;
+                            }
+                        }
+                    }
+                    timeline.state.transport.loop_enabled = enabling;
                     cx.notify();
                 });
                 self.sync_loop_controls(cx);
