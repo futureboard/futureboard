@@ -7,7 +7,7 @@ served at `mikoplugin://burnlimit/index.html`.
 
 Stage-first maximizer: steel input body, vermillion GR from the top, amber
 ceiling / peak marks, vertical Gain fader, dense bottom strip. Identity comes
-from the display — not glow or ornament.
+from the display — not glow or ornament. Typography is Mona Sans (variable).
 
 ```bash
 bun install

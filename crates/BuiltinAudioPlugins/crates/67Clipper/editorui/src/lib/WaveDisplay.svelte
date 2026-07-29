@@ -212,5 +212,19 @@
     letter-spacing: 0.01em;
     pointer-events: none;
     white-space: nowrap;
+    animation: tag-arrive 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  @keyframes tag-arrive {
+    from {
+      opacity: 0;
+      transform: translate(-50%, -80%) scale(0.92);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tag {
+      animation: none;
+    }
   }
 </style>
