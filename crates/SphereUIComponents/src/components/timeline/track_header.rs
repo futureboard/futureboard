@@ -9,7 +9,7 @@ use crate::components::fader::{db_value_pill, horizontal_fader_with_drag_callbac
 use crate::components::knob::format_pan_label;
 use crate::components::spin_drag::SpinDrag;
 use crate::components::timeline::timeline_state::{
-    is_vsti_output_child_track_id, volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState,
+    is_arrangement_hidden_track, volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState,
     TrackType, HEADER_WIDTH, TRACK_HEADER_CONTROLS_MIN_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
@@ -196,7 +196,7 @@ pub fn track_header(
             .into_iter()
             .flatten()
             .rev()
-            .find(|candidate| !is_vsti_output_child_track_id(&candidate.id))
+            .find(|candidate| !is_arrangement_hidden_track(candidate))
             .is_none_or(|previous| previous.parent_group_id.as_deref() != Some(group_id))
     });
     let is_last_group_child = track.parent_group_id.as_deref().is_some_and(|group_id| {
@@ -204,7 +204,7 @@ pub fn track_header(
             .tracks
             .iter()
             .skip(index + 1)
-            .find(|candidate| !is_vsti_output_child_track_id(&candidate.id))
+            .find(|candidate| !is_arrangement_hidden_track(candidate))
             .is_none_or(|next| next.parent_group_id.as_deref() != Some(group_id))
     });
     // Adaptive header: the volume/pan/meter/dB control row only fits at the

@@ -384,10 +384,30 @@ pub fn timeline_ruler(
                             .w(px(width))
                             // Loop range highlight: keep extremely subtle so it never reads
                             // as a foreground "region strip" over the ruler/viewport.
-                            .bg(Colors::with_alpha(Colors::timeline_selection(), 0.20))
-                            .border_l(px(1.0))
-                            .border_r(px(1.0))
-                            .border_color(Colors::with_alpha(Colors::timeline_selection(), 0.45)),
+                            .bg(Colors::with_alpha(Colors::timeline_selection(), 0.28))
+                            .border_l(px(2.0))
+                            .border_r(px(2.0))
+                            .border_color(Colors::with_alpha(Colors::timeline_selection(), 0.70))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(-1.0))
+                                    .top(px(4.0))
+                                    .w(px(3.0))
+                                    .h(px(12.0))
+                                    .rounded(px(1.0))
+                                    .bg(Colors::with_alpha(Colors::timeline_selection(), 0.95)),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .right(px(-1.0))
+                                    .top(px(4.0))
+                                    .w(px(3.0))
+                                    .h(px(12.0))
+                                    .rounded(px(1.0))
+                                    .bg(Colors::with_alpha(Colors::timeline_selection(), 0.95)),
+                            ),
                     )
                 } else {
                     None

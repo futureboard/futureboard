@@ -138,9 +138,11 @@ impl MixerWindow {
 
 impl Render for MixerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Claim otherwise-unowned keyboard focus, but never steal it from a
-        // future inline parameter editor mounted inside the mixer.
-        if window.focused(cx).is_none() {
+        // Reclaim the shortcut anchor unless the tree filter is actively typing.
+        // Orphaned focus (filter closed / strip click that doesn't take focus)
+        // otherwise leaves capture_key_down early-returning forever on Linux.
+        let filter_owns_keyboard = self.tree_sidebar.read(cx).is_filter_focused(window);
+        if !self.focus_handle.is_focused(window) && !filter_owns_keyboard {
             self.focus_handle.focus(window, cx);
         }
         let viewport_width: f32 = window.bounds().size.width.into();
@@ -166,6 +168,7 @@ impl Render for MixerWindow {
         let on_close = self.on_close.clone();
         let dispatch_key = self.dispatch_key.clone();
         let shortcut_focus = self.focus_handle.clone();
+        let focus_on_pointer = self.focus_handle.clone();
         let tree_width = if tree_sidebar_enabled {
             if tree_sidebar_collapsed {
                 MIXER_TREE_COLLAPSED_RAIL_WIDTH
@@ -194,6 +197,9 @@ impl Render for MixerWindow {
             .font(crate::theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
+            .capture_any_mouse_down(move |_event, window, cx| {
+                focus_on_pointer.focus(window, cx);
+            })
             .capture_key_down(move |event, _window, cx| {
                 let window = _window;
                 if window

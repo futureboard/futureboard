@@ -70,6 +70,81 @@ pub fn slider_with_reset(
     )
 }
 
+/// Compact fill-only slider for dense rows (mixer send gain). No thumb — value
+/// is read from the filled rail length. Smaller hit/rail than [`slider`].
+pub fn compact_slider_with_reset(
+    id: impl Into<gpui::SharedString>,
+    value_norm: f32,
+    accent: gpui::Rgba,
+    on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
+    on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let id_str: gpui::SharedString = id.into();
+    let id_string = id_str.to_string();
+    let value = value_norm.clamp(0.0, 1.0);
+    let fill = {
+        let mut c = accent;
+        c.a = 0.9;
+        c
+    };
+
+    div()
+        .id(gpui::ElementId::Name(id_str.clone()))
+        .h(px(10.0))
+        .flex_1()
+        .min_w_0()
+        .relative()
+        .cursor(gpui::CursorStyle::ResizeLeftRight)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(3.5))
+                .h(px(3.0))
+                .bg(Colors::divider())
+                .rounded_full(),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(3.5))
+                .h(px(3.0))
+                .w(gpui::relative(value))
+                .bg(fill)
+                .rounded_full(),
+        )
+        .on_drag(
+            SliderDrag {
+                id: id_string.clone(),
+            },
+            move |drag, _offset, _window, cx| {
+                cx.new(|_| SliderDrag {
+                    id: drag.id.clone(),
+                })
+            },
+        )
+        .on_drag_move::<SliderDrag>(move |event: &DragMoveEvent<SliderDrag>, window, cx| {
+            if event.drag(cx).id != id_string {
+                return;
+            }
+            let bounds = event.bounds;
+            let x: f32 = event.event.position.x.into();
+            let ox: f32 = bounds.origin.x.into();
+            let ow: f32 = f32::from(bounds.size.width).max(1.0);
+            let new_value = ((x - ox) / ow).clamp(0.0, 1.0);
+            on_change(&new_value, window, cx);
+        })
+        .when_some(on_double_click_reset, |this, reset| {
+            this.on_click(move |event, window, cx| {
+                if event.click_count() >= 2 {
+                    reset(window, cx);
+                }
+            })
+        })
+}
+
 pub fn slider_with_drag_callbacks(
     id: impl Into<gpui::SharedString>,
     value_norm: f32,

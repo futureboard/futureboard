@@ -47,6 +47,15 @@ pub struct AudioPluginDspState {
     sample_rate: u32,
     eq_l: Vec<Biquad>,
     eq_r: Vec<Biquad>,
+    /// Cached process-path params (refreshed on rebuild / once per block).
+    /// Avoids string-keyed HashMap lookups and allocations on the sample loop.
+    power: bool,
+    is_eq: bool,
+    drive: f32,
+    peak_reduction: f32,
+    compress_ratio: f32,
+    output_gain: f32,
+    mix: f32,
 }
 
 impl AudioPluginDspState {
@@ -55,6 +64,13 @@ impl AudioPluginDspState {
             sample_rate: sample_rate.max(1),
             eq_l: Vec::new(),
             eq_r: Vec::new(),
+            power: true,
+            is_eq: false,
+            drive: 0.0,
+            peak_reduction: 0.0,
+            compress_ratio: 3.0,
+            output_gain: 1.0,
+            mix: 1.0,
         };
         state.rebuild(plugin_id, params, sample_rate);
         state
@@ -64,7 +80,8 @@ impl AudioPluginDspState {
         self.sample_rate = sample_rate.max(1);
         self.eq_l.clear();
         self.eq_r.clear();
-        if !is_eq_plugin(plugin_id) {
+        self.refresh_process_params(plugin_id, params);
+        if !self.is_eq {
             return;
         }
 
@@ -86,6 +103,31 @@ impl AudioPluginDspState {
             self.eq_r.push(filter);
         }
     }
+
+    /// Resolve sample-path scalars from the live param map. Call from the control
+    /// thread (rebuild) or once per audio block before the sample loop.
+    pub fn refresh_process_params(&mut self, plugin_id: &str, params: &PluginParams) {
+        self.power = param_bool(params, "power", true);
+        self.is_eq = is_eq_plugin(plugin_id);
+        self.drive = (param_f32(params, "drive", 0.0)
+            + param_f32(params, "saturation", 0.0) * 0.5
+            + param_f32(params, "color", 0.0) * 0.12)
+            .clamp(0.0, 100.0)
+            / 100.0;
+        self.peak_reduction = param_f32(params, "peakReduction", 0.0).clamp(0.0, 100.0) / 100.0;
+        self.compress_ratio = if is_limiter_plugin(plugin_id) {
+            10.0
+        } else {
+            3.0
+        };
+        let mut db = 0.0;
+        db += param_f32(params, "outputDb", 0.0);
+        db += param_f32(params, "gainDb", 0.0);
+        db += param_f32(params, "outputTrimDb", 0.0);
+        db += param_f32(params, "out", 0.0);
+        self.output_gain = db_to_linear(db);
+        self.mix = param_f32(params, "mix", 100.0).clamp(0.0, 100.0) / 100.0;
+    }
 }
 
 impl Default for AudioPluginDspState {
@@ -94,6 +136,13 @@ impl Default for AudioPluginDspState {
             sample_rate: 44_100,
             eq_l: Vec::new(),
             eq_r: Vec::new(),
+            power: true,
+            is_eq: false,
+            drive: 0.0,
+            peak_reduction: 0.0,
+            compress_ratio: 3.0,
+            output_gain: 1.0,
+            mix: 1.0,
         }
     }
 }
@@ -190,14 +239,18 @@ pub fn process_stereo_sample(
     l: f32,
     r: f32,
 ) -> (f32, f32) {
-    if !enabled || !param_bool(params, "power", true) {
+    // Keep params usable for callers that mutate the map without rebuild —
+    // refresh is cheap vs HashMap lookups *per sample*.
+    let _ = plugin_id;
+    let _ = params;
+    if !enabled || !state.power {
         return (l, r);
     }
 
     let mut wet_l = l;
     let mut wet_r = r;
 
-    if is_eq_plugin(plugin_id) {
+    if state.is_eq {
         for filter in &mut state.eq_l {
             wet_l = filter.process(wet_l);
         }
@@ -206,38 +259,25 @@ pub fn process_stereo_sample(
         }
     }
 
-    let drive = (param_f32(params, "drive", 0.0)
-        + param_f32(params, "saturation", 0.0) * 0.5
-        + param_f32(params, "color", 0.0) * 0.12)
-        .clamp(0.0, 100.0)
-        / 100.0;
+    let drive = state.drive;
     if drive > 0.0 {
         let amount = 1.0 + drive * 8.0;
         wet_l = (wet_l * amount).tanh() / amount.tanh().max(0.001);
         wet_r = (wet_r * amount).tanh() / amount.tanh().max(0.001);
     }
 
-    let reduction = param_f32(params, "peakReduction", 0.0).clamp(0.0, 100.0) / 100.0;
+    let reduction = state.peak_reduction;
     if reduction > 0.0 {
         let threshold = 0.9 - reduction * 0.82;
-        let ratio = if plugin_id.to_ascii_lowercase().contains("limit") {
-            10.0
-        } else {
-            3.0
-        };
+        let ratio = state.compress_ratio;
         wet_l = soft_knee_compress(wet_l, threshold, ratio);
         wet_r = soft_knee_compress(wet_r, threshold, ratio);
     }
 
-    let mut db = 0.0;
-    db += param_f32(params, "outputDb", 0.0);
-    db += param_f32(params, "gainDb", 0.0);
-    db += param_f32(params, "outputTrimDb", 0.0);
-    db += param_f32(params, "out", 0.0);
-    wet_l *= db_to_linear(db);
-    wet_r *= db_to_linear(db);
+    wet_l *= state.output_gain;
+    wet_r *= state.output_gain;
 
-    let mix = param_f32(params, "mix", 100.0).clamp(0.0, 100.0) / 100.0;
+    let mix = state.mix;
     (
         (l * (1.0 - mix) + wet_l * mix).clamp(-1.5, 1.5),
         (r * (1.0 - mix) + wet_r * mix).clamp(-1.5, 1.5),
@@ -316,8 +356,28 @@ pub fn should_rebuild_state(plugin_id: &str, param_id: &str) -> bool {
 
 #[inline]
 pub fn is_eq_plugin(plugin_id: &str) -> bool {
-    let kind = plugin_id.to_ascii_lowercase();
-    kind == "eq" || kind == "equz8" || kind == "sphere.eq8" || kind.contains("eq")
+    plugin_id.eq_ignore_ascii_case("eq")
+        || plugin_id.eq_ignore_ascii_case("equz8")
+        || plugin_id.eq_ignore_ascii_case("sphere.eq8")
+        || contains_ascii_ignore_case(plugin_id, "eq")
+}
+
+#[inline]
+fn is_limiter_plugin(plugin_id: &str) -> bool {
+    plugin_id.eq_ignore_ascii_case("limiter")
+        || plugin_id.eq_ignore_ascii_case("sphere.limit")
+        || contains_ascii_ignore_case(plugin_id, "limit")
+}
+
+#[inline]
+fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[inline]

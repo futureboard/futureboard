@@ -170,6 +170,12 @@ pub fn render_project_sample(
         if !muted {
             let master = &mut runtime.tracks[m_idx];
             for insert in &mut master.inserts {
+                if insert.kind_tag != crate::runtime::RuntimeInsertKind::NativePlugin {
+                    let plugin_id = canonical_plugin_id(&insert.kind);
+                    insert
+                        .dsp
+                        .refresh_process_params(plugin_id, &insert.params);
+                }
                 let (l, r) = apply_insert(out_l, out_r, insert);
                 out_l = l;
                 out_r = r;
@@ -1558,19 +1564,26 @@ pub(crate) fn apply_bridge_insert_output(
     scratch_l: &[f32],
     scratch_r: &[f32],
 ) -> (f32, f32) {
+    let need_peaks = crate::forensic_trace::engine_midi_verbose_enabled()
+        || plugin_restore_debug_enabled()
+        || crate::runtime::midi_verbose_enabled();
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     if is_effect && got > 0 {
         block_l[..got].copy_from_slice(&scratch_l[..got]);
         block_r[..got].copy_from_slice(&scratch_r[..got]);
-        peak_l = scratch_l[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
-        peak_r = scratch_r[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+        if need_peaks {
+            peak_l = scratch_l[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+            peak_r = scratch_r[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+        }
     } else if !is_effect {
         for i in 0..got {
             block_l[i] += scratch_l[i];
             block_r[i] += scratch_r[i];
-            peak_l = peak_l.max(scratch_l[i].abs());
-            peak_r = peak_r.max(scratch_r[i].abs());
+            if need_peaks {
+                peak_l = peak_l.max(scratch_l[i].abs());
+                peak_r = peak_r.max(scratch_r[i].abs());
+            }
         }
     }
     (peak_l, peak_r)
@@ -2151,6 +2164,10 @@ pub fn apply_insert_block(
         return;
     }
     if insert.kind_tag != crate::runtime::RuntimeInsertKind::NativePlugin {
+        let plugin_id = canonical_plugin_id(&insert.kind);
+        insert
+            .dsp
+            .refresh_process_params(plugin_id, &insert.params);
         for i in 0..block_l.len().min(block_r.len()) {
             let (l, r) = apply_insert(block_l[i], block_r[i], insert);
             block_l[i] = l;

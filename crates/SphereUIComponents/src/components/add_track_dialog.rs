@@ -199,6 +199,22 @@ impl AddTrackKind {
         }
     }
 
+    /// Compact tab chrome labels (no "Track" suffix) so the type row fits.
+    pub fn tab_label_key(self) -> &'static str {
+        match self {
+            Self::Audio => "add-track.tab.audio",
+            Self::Instrument => "add-track.tab.instrument",
+            Self::Midi => "add-track.tab.midi",
+            Self::Plugin => "add-track.tab.plugin",
+            Self::Bus => "add-track.tab.bus",
+            Self::Return => "add-track.tab.return",
+            Self::Group => "add-track.tab.group",
+            Self::Master => "add-track.tab.master",
+            Self::Automation => "add-track.tab.automation",
+            Self::Folder => "add-track.tab.folder",
+        }
+    }
+
     pub fn default_name_stem(self) -> &'static str {
         match self {
             Self::Audio => "Audio Track",
@@ -255,6 +271,7 @@ impl AddTrackKind {
             Self::Audio,
             Self::Instrument,
             Self::Midi,
+            Self::Bus,
             Self::Automation,
             Self::Folder,
         ]
@@ -296,6 +313,8 @@ pub struct AddTrackDialogState {
     pub fx_chain: Option<String>,
     pub input_label: String,
     pub output_label: String,
+    /// Live Bus/Return destinations for the Output select: `(track_id, display_name)`.
+    pub audio_output_targets: Vec<(String, String)>,
     pub ascending_input: bool,
     pub ascending_output: bool,
     pub midi_channel_label: String,
@@ -354,6 +373,7 @@ impl AddTrackDialogState {
             fx_chain: None,
             input_label: kind.default_input().to_string(),
             output_label: "Main".to_string(),
+            audio_output_targets: Vec::new(),
             ascending_input: false,
             ascending_output: false,
             midi_channel_label: "All Channels".to_string(),
@@ -489,6 +509,19 @@ fn select_options(values: &[&'static str]) -> Vec<SelectOption> {
         .iter()
         .map(|value| SelectOption::new(*value, *value))
         .collect()
+}
+
+/// Output destinations for Audio/Instrument/MIDI tracks: Main, each live
+/// project Bus/Return as `Bus - {name}`, then None. Replaces the old hardcoded
+/// "Bus A" stub that never mapped to a real track id.
+fn audio_output_select_options(bus_targets: &[(String, String)]) -> Vec<SelectOption> {
+    let mut options = vec![SelectOption::new("Main", "Main")];
+    for (_, name) in bus_targets {
+        let label = format!("Bus - {name}");
+        options.push(SelectOption::new(label.clone(), label));
+    }
+    options.push(SelectOption::new("None", "None"));
+    options
 }
 
 /// MIDI input options for the Instrument/MIDI routing selects: real detected
@@ -839,9 +872,12 @@ fn type_tabs(
 ) -> impl IntoElement {
     let tabs = AddTrackKind::visible_tabs(state.selected_kind);
     let mut row = div()
+        .id("add-track-type-tabs")
         .flex()
         .flex_row()
-        .gap(px(4.0))
+        .items_center()
+        .w_full()
+        .gap(px(3.0))
         .px(px(BODY_PAD_X))
         .py(px(6.0));
     for (i, kind) in tabs.iter().enumerate() {
@@ -852,13 +888,15 @@ fn type_tabs(
         let mut tab = div()
             .id(("add-track-tab", i))
             .flex()
+            .flex_1()
             .flex_row()
             .items_center()
             .justify_center()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .h(px(27.0))
-            .min_w(px(84.0))
-            .px(px(9.0))
+            .min_w(px(0.0))
+            .px(px(6.0))
+            .overflow_hidden()
             .rounded_md()
             .border(px(1.0))
             .border_color(if active {
@@ -878,11 +916,11 @@ fn type_tabs(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(15.0))
-                    .h(px(15.0))
+                    .w(px(14.0))
+                    .h(px(14.0))
                     .child(icon(
                         kind.icon(),
-                        12.5,
+                        12.0,
                         if active {
                             Colors::accent_primary()
                         } else {
@@ -892,6 +930,9 @@ fn type_tabs(
             )
             .child(
                 div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .truncate()
                     .text_size(px(10.5))
                     .font_weight(if active {
                         gpui::FontWeight::SEMIBOLD
@@ -903,7 +944,7 @@ fn type_tabs(
                     } else {
                         Colors::text_muted()
                     })
-                    .child(i18n.tr(kind.label_key())),
+                    .child(i18n.tr(kind.tab_label_key())),
             );
         if supported {
             tab = tab
@@ -1256,7 +1297,7 @@ fn type_fields(
                         "add-track-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
-                        select_options(&["Main", "Bus A", "None"]),
+                        audio_output_select_options(&state.audio_output_targets),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
                         SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
@@ -1350,7 +1391,7 @@ fn type_fields(
                         "add-track-instrument-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
-                        select_options(&["Main", "Bus A", "None"]),
+                        audio_output_select_options(&state.audio_output_targets),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
                         SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
@@ -1438,7 +1479,7 @@ fn type_fields(
                         "add-track-midi-output-select",
                         Some(state.output_label.as_str()),
                         "Select output...",
-                        select_options(&["Main", "Bus A", "None"]),
+                        audio_output_select_options(&state.audio_output_targets),
                         add_track_select_open(open_select, AddTrackSelectId::Output),
                         SelectMenuPlacement::Above,
                         Arc::new(move |_, w, cx| toggle_output(&AddTrackSelectId::Output, w, cx)),
@@ -1486,6 +1527,16 @@ fn type_fields(
                 i18n.tr("add-track.routing.output"),
                 select_box("Main".to_string()),
             ))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_faint())
+                    .child(if state.selected_kind == AddTrackKind::Bus {
+                        i18n.tr("add-track.hint.bus-route-selected")
+                    } else {
+                        i18n.tr("add-track.hint.return-output")
+                    }),
+            )
             .into_any_element(),
         _ => div()
             .text_size(px(10.0))
@@ -1738,6 +1789,22 @@ impl AddTrackWindow {
     /// Preferences MIDI device changes, mirroring `set_instrument_plugins`.
     pub fn set_midi_input_devices(&mut self, midi_input_devices: Vec<String>) {
         self.midi_input_devices = midi_input_devices;
+    }
+
+    /// Refresh Bus/Return destinations for the Output select. Called whenever
+    /// the dialog opens/reactivates so newly created buses appear immediately.
+    pub fn set_audio_output_targets(&mut self, audio_output_targets: Vec<(String, String)>) {
+        self.state.audio_output_targets = audio_output_targets;
+        if self.state.output_label != "Main"
+            && self.state.output_label != "None"
+            && !self
+                .state
+                .audio_output_targets
+                .iter()
+                .any(|(_, name)| self.state.output_label == format!("Bus - {name}"))
+        {
+            self.state.output_label = "Main".to_string();
+        }
     }
 
     /// Push the picker's current selection back into the dialog state so the
@@ -2505,6 +2572,7 @@ pub fn open_add_track_window(
     language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
     midi_input_devices: Vec<String>,
+    audio_output_targets: Vec<(String, String)>,
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
     cx: &mut App,
 ) -> Result<WindowHandle<AddTrackWindow>, String> {
@@ -2523,6 +2591,7 @@ pub fn open_add_track_window(
     );
     state.selected_kind = kind;
     state.input_label = kind.default_input().to_string();
+    state.audio_output_targets = audio_output_targets;
     state.track_name = format!("{} {}", i18n.tr(kind.label_key()), state.next_number);
     add_track_debug(&format!(
         "open window kind={} track_count={}",

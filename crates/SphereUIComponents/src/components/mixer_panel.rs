@@ -981,13 +981,13 @@ fn send_chip(
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(2.0))
         .mx(px(2.0))
-        .px(px(4.0))
-        .h(px(36.0))
+        .px(px(3.0))
+        .h(px(26.0))
         .rounded_sm()
         .bg(bg)
-        .text_size(px(9.0))
+        .text_size(px(8.5))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -1001,7 +1001,7 @@ fn send_chip(
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap(px(1.0))
+                .gap(px(0.0))
                 .child(
                     div()
                         .flex()
@@ -1011,12 +1011,12 @@ fn send_chip(
                         .child(
                             div()
                                 .ml(px(3.0))
-                                .text_size(px(7.5))
+                                .text_size(px(7.0))
                                 .text_color(Colors::text_secondary())
                                 .child(gain_label),
                         ),
                 )
-                .child(crate::components::slider::slider_with_reset(
+                .child(crate::components::slider::compact_slider_with_reset(
                     format!("mixer-send-gain-{}-{}", track_id, send.id),
                     gain_norm,
                     Colors::accent_primary(),

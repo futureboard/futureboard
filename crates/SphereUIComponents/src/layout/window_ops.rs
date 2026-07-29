@@ -87,11 +87,44 @@ fn dialog_audio_input_routing(
     }
 }
 
-fn dialog_audio_output_routing(label: &str) -> TrackOutputRouting {
+fn dialog_audio_output_routing(
+    label: &str,
+    bus_targets: &[(String, String)],
+) -> TrackOutputRouting {
     match label {
         "None" => TrackOutputRouting::None,
-        _ => TrackOutputRouting::Main,
+        "Main" | "Stereo Master" | "Mono Master" => TrackOutputRouting::Main,
+        other => {
+            if let Some(name) = other.strip_prefix("Bus - ") {
+                if let Some((id, _)) = bus_targets.iter().find(|(_, n)| n == name) {
+                    return TrackOutputRouting::Bus {
+                        bus_id: id.clone(),
+                    };
+                }
+            }
+            if let Some((id, _)) = bus_targets
+                .iter()
+                .find(|(id, name)| id == other || name == other)
+            {
+                return TrackOutputRouting::Bus {
+                    bus_id: id.clone(),
+                };
+            }
+            TrackOutputRouting::Main
+        }
     }
+}
+
+fn project_bus_output_targets(
+    state: &crate::components::timeline::timeline_state::TimelineState,
+) -> Vec<(String, String)> {
+    use crate::components::timeline::timeline_state::is_project_routing_track;
+    state
+        .tracks
+        .iter()
+        .filter(|track| is_project_routing_track(track))
+        .map(|track| (track.id.clone(), track.name.clone()))
+        .collect()
 }
 
 fn dialog_midi_input_routing(label: &str) -> TrackMidiInputRouting {
@@ -329,6 +362,7 @@ impl StudioLayout {
         let midi_input_devices = add_track_midi_input_devices(&self.settings.read(cx).current);
 
         if let Some(handle) = self.external_windows.add_track.clone() {
+            let audio_output_targets = project_bus_output_targets(&self.timeline.read(cx).state);
             if handle
                 .update(cx, |win, window, cx| {
                     win.set_instrument_plugins(add_track_instrument_plugins_from_catalog(
@@ -336,6 +370,7 @@ impl StudioLayout {
                     ));
                     win.set_midi_input_devices(midi_input_devices.clone());
                     win.set_context(kind, track_count, has_master_track, default_monitor_mode);
+                    win.set_audio_output_targets(audio_output_targets);
                     window.activate_window();
                     cx.notify();
                 })
@@ -366,6 +401,7 @@ impl StudioLayout {
 
         let layout = cx.entity().clone();
         let language = self.settings.read(cx).current.general.language.clone();
+        let audio_output_targets = project_bus_output_targets(&self.timeline.read(cx).state);
         let on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut gpui::App) + 'static> =
             Arc::new(move |dialog, _name, cx| {
                 let Some(track_type) = dialog.selected_kind.native_track_type() else {
@@ -376,6 +412,21 @@ impl StudioLayout {
                     let selected_input_device = this.selected_input_device_channels(cx);
                     let mut bridge_inserts = Vec::new();
                     let _ = this.timeline.update(cx, |timeline, cx| {
+                        let route_selected_to_new_bus =
+                            dialog.selected_kind == AddTrackKind::Bus;
+                        let selected_for_bus: Vec<String> = if route_selected_to_new_bus {
+                            let mut ids = timeline.state.selection.selected_track_ids.clone();
+                            if ids.is_empty() {
+                                if let Some(primary) =
+                                    timeline.state.selection.selected_track_id.clone()
+                                {
+                                    ids.push(primary);
+                                }
+                            }
+                            ids
+                        } else {
+                            Vec::new()
+                        };
                         let count = dialog.count.clamp(1, 128) as usize;
                         let base_name =
                             cleaned_track_name(&dialog.track_name, dialog.selected_kind);
@@ -423,6 +474,18 @@ impl StudioLayout {
                                 let midi_input = dialog_midi_input_routing(&dialog.input_label);
                                 timeline.state.set_track_midi_input(&id, midi_input);
                             }
+                            if matches!(
+                                dialog.selected_kind,
+                                AddTrackKind::Audio
+                                    | AddTrackKind::Instrument
+                                    | AddTrackKind::Midi
+                            ) {
+                                let output = dialog_audio_output_routing(
+                                    &dialog.output_label,
+                                    &dialog.audio_output_targets,
+                                );
+                                timeline.state.set_track_output_routing(&id, output);
+                            }
                             if dialog.selected_kind == AddTrackKind::Audio {
                                 let audio_format = dialog_audio_format(dialog.audio_format);
                                 let input = dialog_audio_input_routing(
@@ -430,10 +493,8 @@ impl StudioLayout {
                                     dialog.audio_format,
                                     selected_input_device.as_ref(),
                                 );
-                                let output = dialog_audio_output_routing(&dialog.output_label);
                                 timeline.state.set_track_audio_format(&id, audio_format);
                                 timeline.state.set_track_input_routing(&id, input);
-                                timeline.state.set_track_output_routing(&id, output);
                             }
                             if dialog.selected_kind == AddTrackKind::Instrument
                                 && dialog.instrument_mode == InstrumentMode::Vsti
@@ -514,6 +575,30 @@ impl StudioLayout {
                             created_ids.push(id.clone());
                             selected_track_id = Some(id);
                         }
+                        // Creating a Bus with tracks already selected routes those
+                        // tracks' main outs into the new bus (single-bus create only).
+                        if route_selected_to_new_bus && created_ids.len() == 1 {
+                            let bus_id = &created_ids[0];
+                            for track_id in &selected_for_bus {
+                                if track_id == bus_id {
+                                    continue;
+                                }
+                                let Some(track) = timeline.state.find_track(track_id) else {
+                                    continue;
+                                };
+                                if track.track_type.is_routing()
+                                    || track.track_type == TrackType::Master
+                                {
+                                    continue;
+                                }
+                                timeline.state.set_track_output_routing(
+                                    track_id,
+                                    TrackOutputRouting::Bus {
+                                        bus_id: bus_id.clone(),
+                                    },
+                                );
+                            }
+                        }
                         if let Some(id) = selected_track_id {
                             timeline.state.select_track(&id);
                         }
@@ -546,6 +631,7 @@ impl StudioLayout {
             language,
             instrument_plugins,
             midi_input_devices,
+            audio_output_targets,
             on_confirm_request,
             cx,
         ) {
