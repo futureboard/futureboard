@@ -15,6 +15,12 @@ export type Band = {
   freq: number
   gainDb: number
   q: number
+  /** Pro-Q-style dynamic EQ for shapes that have a gain stage. */
+  dynamic: boolean
+  thresholdDb: number
+  rangeDb: number
+  attackMs: number
+  releaseMs: number
 }
 
 /// `soloBand` value meaning "no band is soloed". Mirrors `ipc::SOLO_NONE`.
@@ -119,6 +125,35 @@ export function postParam(id: string, value: number) {
   requestAnimationFrame(flush)
 }
 
+function parseBand(raw: unknown): Band | null {
+  if (!raw || typeof raw !== 'object') return null
+  const band = raw as Partial<Band>
+  if (
+    typeof band.active !== 'boolean' ||
+    typeof band.bandType !== 'string' ||
+    typeof band.freq !== 'number' ||
+    typeof band.gainDb !== 'number' ||
+    typeof band.q !== 'number'
+  ) {
+    return null
+  }
+  // Dynamic fields are optional so projects saved before dynamic EQ existed
+  // still open with dynamic off / neutral timing.
+  return {
+    active: band.active,
+    bandType: band.bandType as Band['bandType'],
+    freq: band.freq,
+    gainDb: band.gainDb,
+    q: band.q,
+    dynamic: band.dynamic === true,
+    thresholdDb:
+      typeof band.thresholdDb === 'number' ? band.thresholdDb : -24,
+    rangeDb: typeof band.rangeDb === 'number' ? band.rangeDb : 0,
+    attackMs: typeof band.attackMs === 'number' ? band.attackMs : 10,
+    releaseMs: typeof band.releaseMs === 'number' ? band.releaseMs : 100,
+  }
+}
+
 function parseParams(state: unknown): EqParams | null {
   if (!state || typeof state !== 'object') return null
   const candidate =
@@ -133,6 +168,12 @@ function parseParams(state: unknown): EqParams | null {
   ) {
     return null
   }
+  const bands: Band[] = []
+  for (const entry of params.bands) {
+    const band = parseBand(entry)
+    if (!band) return null
+    bands.push(band)
+  }
   // Optional on purpose: state saved before band solo existed has no
   // `soloBand`, and rejecting it here would make those projects fail to load
   // rather than simply opening with solo off. Rust applies the same default.
@@ -140,10 +181,16 @@ function parseParams(state: unknown): EqParams | null {
     typeof params.soloBand === 'number' &&
     Number.isInteger(params.soloBand) &&
     params.soloBand >= 0 &&
-    params.soloBand < params.bands.length
+    params.soloBand < bands.length
       ? params.soloBand
       : SOLO_NONE
-  return { ...(params as EqParams), soloBand }
+  return {
+    power: params.power,
+    outputDb: params.outputDb,
+    mix: params.mix,
+    bands,
+    soloBand,
+  }
 }
 
 export function connectBridge(

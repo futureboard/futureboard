@@ -24,7 +24,7 @@ import './Editor.scss'
 
 function App() {
   const [params, setParams] = useState<EqParams>(DEFAULT_PARAMS)
-  const [selected, setSelected] = useState(2)
+  const [selected, setSelected] = useState(0)
   const [connected, setConnected] = useState(false)
   const [showBandCurves, setShowBandCurves] = useState(true)
   const [showSpectrum, setShowSpectrum] = useState(true)
