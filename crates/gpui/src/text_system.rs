@@ -58,6 +58,13 @@ pub struct TextSystem {
     fallback_font_stack: SmallVec<[Font; 2]>,
 }
 
+fn font_with_fallback_family(font: &Font, fallback: &Font) -> Font {
+    Font {
+        family: fallback.family.clone(),
+        ..font.clone()
+    }
+}
+
 impl TextSystem {
     /// Create a new TextSystem with the given platform text system.
     pub fn new(platform_text_system: Arc<dyn PlatformTextSystem>) -> Self {
@@ -149,8 +156,9 @@ impl TextSystem {
         if let Ok(font_id) = self.font_id(font) {
             return font_id;
         }
-        for fallback in &self.fallback_font_stack {
-            if let Ok(font_id) = self.font_id(fallback) {
+        for system_fallback in &self.fallback_font_stack {
+            let fallback = font_with_fallback_family(font, system_fallback);
+            if let Ok(font_id) = self.font_id(&fallback) {
                 return font_id;
             }
         }
@@ -1202,5 +1210,28 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_fallback_preserves_requested_face_attributes() {
+        let mut requested = font("Unavailable UI Font");
+        requested.weight = FontWeight::SEMIBOLD;
+        requested.style = FontStyle::Italic;
+        requested.fallbacks = Some(FontFallbacks::from_fonts(vec!["Noto Sans".to_string()]));
+
+        let fallback = font_with_fallback_family(&requested, &font("Segoe UI"));
+
+        assert_eq!(
+            fallback,
+            Font {
+                family: "Segoe UI".into(),
+                ..requested
+            }
+        );
     }
 }
