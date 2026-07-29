@@ -195,10 +195,16 @@
 
   .knob.dragging .fill {
     stroke: #8ec8dc;
+    transition-duration: 0ms;
   }
 
   .knob.dragging .pointer {
     fill: var(--steel);
+  }
+
+  .knob.dragging .pointer,
+  .knob.dragging .pointer-group {
+    transition-duration: 0ms;
   }
 
   .plate {

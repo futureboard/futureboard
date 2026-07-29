@@ -126,6 +126,13 @@
     preset = wrapped
     postAllParams(next)
   }
+
+  const grReadout = $derived(
+    connected && meters ? meters.gainReductionDb.toFixed(1) : '—',
+  )
+  const outReadout = $derived(
+    connected && meters ? linearToDb(meters.outPeak).toFixed(1) : '—',
+  )
 </script>
 
 <div class="unit">
@@ -142,6 +149,14 @@
         onnext={() => loadPreset((preset ?? -1) + 1)}
       />
       <div class="chrome-actions">
+        <div class="readout-chip">
+          <span class="rlabel">GR</span>
+          <span class="rvalue gr">{grReadout}</span>
+        </div>
+        <div class="readout-chip">
+          <span class="rlabel">OUT</span>
+          <span class="rvalue">{outReadout}</span>
+        </div>
         <button
           type="button"
           class="chip"
@@ -291,6 +306,37 @@
     gap: var(--s2);
   }
 
+  .readout-chip {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    height: var(--chrome-h);
+    padding: 0 0.65rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--inset);
+  }
+
+  .rlabel {
+    color: var(--text-muted);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .rvalue {
+    min-width: 2.6ch;
+    color: var(--text);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    text-align: right;
+  }
+
+  .rvalue.gr {
+    color: var(--vermillion);
+  }
+
   .chip {
     display: inline-flex;
     align-items: center;
@@ -372,6 +418,9 @@
     font-weight: 650;
     letter-spacing: 0.02em;
     border-right: 1px solid var(--border);
+    transition:
+      color var(--ease),
+      background-color var(--ease);
   }
 
   .style:last-child {

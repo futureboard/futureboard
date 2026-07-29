@@ -13,6 +13,7 @@
   const { spec, value, onchange, size, disabled = false }: Props = $props()
 
   const norm = $derived(toNorm(spec, value))
+  const uid = $derived(`fk${spec.id}`)
 
   let dragging = $state(false)
   let dragStartY = 0
@@ -105,6 +106,12 @@
     ondblclick={() => !disabled && onchange(spec.default)}
   >
     <svg viewBox="0 0 80 80" aria-hidden="true">
+      <defs>
+        <linearGradient id="{uid}-body" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#2a323c" />
+          <stop offset="1" stop-color="#12161c" />
+        </linearGradient>
+      </defs>
       <circle
         class="track"
         cx="40"
@@ -125,8 +132,11 @@
         stroke-dasharray="{(norm * 75).toFixed(2)} 100"
         transform="rotate(135 40 40)"
       />
-      <circle cx="40" cy="40" r="22" class="body" />
-      <g style="transform: rotate({pointerAngle}deg); transform-origin: 40px 40px">
+      <circle cx="40" cy="40" r="22" fill="url(#{uid}-body)" class="body" />
+      <g
+        class="pointer-group"
+        style="transform: rotate({pointerAngle}deg); transform-origin: 40px 40px"
+      >
         <rect class="pointer" x="39" y="14" width="2" height="10" rx="1" />
       </g>
     </svg>
@@ -175,10 +185,10 @@
     stroke: var(--accent);
     stroke-width: 5;
     stroke-linecap: round;
+    transition: stroke-dasharray var(--ease);
   }
 
   .body {
-    fill: #14181f;
     stroke: rgba(255, 255, 255, 0.08);
     stroke-width: 1;
   }
@@ -187,12 +197,23 @@
     fill: #f5f7fa;
   }
 
+  .pointer,
+  .pointer-group {
+    transition: transform var(--ease);
+  }
+
   .knob.dragging .fill {
     stroke: var(--accent-soft);
+    transition-duration: 0ms;
   }
 
   .knob.dragging .pointer {
     fill: var(--accent-soft);
+  }
+
+  .knob.dragging .pointer,
+  .knob.dragging .pointer-group {
+    transition-duration: 0ms;
   }
 
   .plate {

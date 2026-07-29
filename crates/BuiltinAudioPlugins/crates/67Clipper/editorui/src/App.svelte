@@ -273,7 +273,6 @@
     display: grid;
     width: 100%;
     height: 100%;
-    padding: var(--s3);
     background: var(--bg);
   }
 
@@ -283,16 +282,13 @@
     gap: var(--s3);
     width: 100%;
     height: 100%;
-    max-width: 68rem;
-    max-height: 36rem;
-    margin: auto;
+    min-width: 0;
+    min-height: 0;
     padding: var(--s3) var(--s4);
-    border: 1px solid var(--border-hi);
-    border-radius: calc(var(--r) + 0.15rem);
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 28%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 28%),
       var(--panel);
-    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
   }
 
   .chrome {
@@ -326,7 +322,7 @@
     align-items: baseline;
     gap: 0.3rem;
     height: var(--chrome-h);
-    padding: 0 0.6rem;
+    padding: 0 0.65rem;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--inset);
@@ -377,6 +373,7 @@
     color: var(--text);
     border-color: rgba(61, 158, 255, 0.5);
     background: var(--accent-dim);
+    animation: state-confirm 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .stage {
@@ -434,6 +431,9 @@
     text-transform: uppercase;
     text-align: left;
     border-bottom: 2px solid transparent;
+    transition:
+      color var(--ease),
+      border-color var(--ease);
   }
 
   .mode:hover {
@@ -443,6 +443,7 @@
   .mode.on {
     color: var(--text);
     border-bottom-color: var(--accent);
+    animation: state-confirm 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .knobs {
@@ -483,11 +484,13 @@
     gap: var(--s2);
   }
 
-  @media (max-width: 960px) {
-    .panel {
-      max-height: none;
+  @keyframes state-confirm {
+    45% {
+      filter: brightness(1.16);
     }
+  }
 
+  @media (max-width: 960px) {
     .chrome {
       grid-template-columns: 1fr;
       justify-items: start;

@@ -51,6 +51,7 @@
       "name": "clipper67-editor",
       "version": "0.0.0",
       "dependencies": {
+        "@fontsource-variable/mona-sans": "^5.3.0",
         "svelte": "^5.51.0",
       },
       "devDependencies": {
