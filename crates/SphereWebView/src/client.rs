@@ -4,20 +4,22 @@
 //! browser/load lifecycle, and exposes thread-safe state to the native host so
 //! registry insertion/removal can follow `OnAfterCreated`/`OnBeforeClose`.
 
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, CefStringUtf16, Client, DisplayHandler, Errorcode, Frame, ImplBrowser,
-    ImplClient, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRequest,
-    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, RenderHandler, Request,
-    RequestHandler, TerminationStatus, TransitionType, WrapClient, WrapDisplayHandler,
-    WrapLifeSpanHandler, WrapLoadHandler, WrapRequestHandler, wrap_client, wrap_display_handler,
-    wrap_life_span_handler, wrap_load_handler, wrap_request_handler,
+    wrap_client, wrap_display_handler, wrap_keyboard_handler, wrap_life_span_handler,
+    wrap_load_handler, wrap_request_handler, Browser, CefString, CefStringUtf16, Client,
+    DisplayHandler, Errorcode, Frame, ImplBrowser, ImplClient, ImplDisplayHandler, ImplFrame,
+    ImplKeyboardHandler, ImplLifeSpanHandler, ImplLoadHandler, ImplRequest, ImplRequestHandler,
+    KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity,
+    RenderHandler, Request, RequestHandler, TerminationStatus, TransitionType, WrapClient,
+    WrapDisplayHandler, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRequestHandler,
 };
 
-use crate::scheme::{PLUGIN_SCHEME, cef_diagnostics_enabled};
+use crate::scheme::{cef_diagnostics_enabled, PLUGIN_SCHEME};
 
 const JAVASCRIPT_PROBE: &str =
     "console.log('[cef-diagnostic] javascript-executed url=' + location.href);";
@@ -72,6 +74,7 @@ struct BrowserLifecycleInner {
     renderer_terminated: AtomicBool,
     javascript_executed: AtomicBool,
     browser_id: AtomicI32,
+    global_play_pause_requests: AtomicU32,
 }
 
 /// CEF lifecycle state shared by callbacks and the native editor registry.
@@ -101,6 +104,12 @@ impl BrowserLifecycle {
         self.0.renderer_terminated.swap(false, Ordering::AcqRel)
     }
 
+    /// Drain Space presses captured by CEF while focus is outside an editable
+    /// field. The GPUI host dispatches these through the Studio command system.
+    pub fn take_global_play_pause_requests(&self) -> u32 {
+        self.0.global_play_pause_requests.swap(0, Ordering::AcqRel)
+    }
+
     fn mark_after_created(&self, browser_id: i32) {
         self.0.browser_id.store(browser_id, Ordering::Release);
         self.0.after_created.store(true, Ordering::Release);
@@ -116,6 +125,12 @@ impl BrowserLifecycle {
 
     fn mark_javascript_executed(&self) {
         self.0.javascript_executed.store(true, Ordering::Release);
+    }
+
+    fn request_global_play_pause(&self) {
+        self.0
+            .global_play_pause_requests
+            .fetch_add(1, Ordering::Release);
     }
 }
 
@@ -371,12 +386,95 @@ fn is_allowed_navigation(url: &str, allowed_origin: &str, control_url: Option<&s
     lower == allowed_origin || lower.starts_with(&format!("{allowed_origin}/"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginKeyAction {
+    ConsumeZoom,
+    GlobalPlayPause,
+}
+
+fn plugin_key_action(event: &KeyEvent) -> Option<PluginKeyAction> {
+    // CEF may follow RAWKEYDOWN with CHAR. Handling only RAWKEYDOWN prevents
+    // one physical Space press from toggling transport twice.
+    if event.type_ != KeyEventType::RAWKEYDOWN {
+        return None;
+    }
+
+    const CONTROL_DOWN: u32 = 4;
+    const ALT_DOWN: u32 = 8;
+    const COMMAND_DOWN: u32 = 128;
+    const IS_REPEAT: u32 = 8192;
+    const VKEY_SPACE: i32 = 0x20;
+    const VKEY_0: i32 = 0x30;
+    const VKEY_ADD: i32 = 0x6b;
+    const VKEY_SUBTRACT: i32 = 0x6d;
+    const VKEY_OEM_PLUS: i32 = 0xbb;
+    const VKEY_OEM_MINUS: i32 = 0xbd;
+
+    let primary = event.modifiers & (CONTROL_DOWN | COMMAND_DOWN) != 0;
+    let zoom_key = matches!(
+        event.windows_key_code,
+        VKEY_0 | VKEY_ADD | VKEY_SUBTRACT | VKEY_OEM_PLUS | VKEY_OEM_MINUS
+    );
+    if primary && zoom_key {
+        return Some(PluginKeyAction::ConsumeZoom);
+    }
+
+    let modified = event.modifiers & (CONTROL_DOWN | ALT_DOWN | COMMAND_DOWN) != 0;
+    let repeated = event.modifiers & IS_REPEAT != 0;
+    if event.windows_key_code == VKEY_SPACE
+        && !modified
+        && !repeated
+        && event.focus_on_editable_field == 0
+    {
+        return Some(PluginKeyAction::GlobalPlayPause);
+    }
+    None
+}
+
+macro_rules! plugin_keyboard_handler {
+    ($os_event:ty) => {
+        wrap_keyboard_handler! {
+            pub struct PluginKeyboardHandler {
+                lifecycle: BrowserLifecycle,
+                _lifetime: ObjectLifetime,
+            }
+
+            impl KeyboardHandler {
+                fn on_pre_key_event(
+                    &self,
+                    _browser: Option<&mut Browser>,
+                    event: Option<&KeyEvent>,
+                    _os_event: $os_event,
+                    _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
+                ) -> ::std::os::raw::c_int {
+                    match event.and_then(plugin_key_action) {
+                        Some(PluginKeyAction::GlobalPlayPause) => {
+                            self.lifecycle.request_global_play_pause();
+                            1
+                        }
+                        Some(PluginKeyAction::ConsumeZoom) => 1,
+                        None => 0,
+                    }
+                }
+            }
+        }
+    };
+}
+
+#[cfg(windows)]
+plugin_keyboard_handler!(Option<&mut cef::sys::MSG>);
+#[cfg(target_os = "linux")]
+plugin_keyboard_handler!(Option<&mut cef::sys::XEvent>);
+#[cfg(target_os = "macos")]
+plugin_keyboard_handler!(*mut u8);
+
 wrap_client! {
     pub struct PluginBrowserClient {
         request_handler: RequestHandler,
         life_span_handler: LifeSpanHandler,
         load_handler: LoadHandler,
         display_handler: DisplayHandler,
+        keyboard_handler: KeyboardHandler,
         // `Some` only for a windowless browser; returning `None` here is what
         // tells CEF the browser is windowed.
         render_handler: Option<RenderHandler>,
@@ -402,6 +500,10 @@ wrap_client! {
 
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(self.display_handler.clone())
+        }
+
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(self.keyboard_handler.clone())
         }
     }
 }
@@ -443,12 +545,17 @@ pub fn plugin_browser_client_with_surface(
         lifecycle.clone(),
         ObjectLifetime::new("cef_display_handler_t"),
     );
+    let keyboard_handler = PluginKeyboardHandler::new(
+        lifecycle.clone(),
+        ObjectLifetime::new("cef_keyboard_handler_t"),
+    );
     let render_handler = surface.map(crate::osr::osr_render_handler);
     let client = PluginBrowserClient::new(
         request_handler,
         life_span_handler,
         load_handler,
         display_handler,
+        keyboard_handler,
         render_handler,
         ObjectLifetime::new("cef_client_t"),
     );
@@ -526,5 +633,37 @@ mod tests {
         lifecycle.mark_renderer_terminated();
         assert!(lifecycle.take_renderer_terminated());
         assert!(!lifecycle.take_renderer_terminated());
+        lifecycle.request_global_play_pause();
+        lifecycle.request_global_play_pause();
+        assert_eq!(lifecycle.take_global_play_pause_requests(), 2);
+        assert_eq!(lifecycle.take_global_play_pause_requests(), 0);
+    }
+
+    #[test]
+    fn plugin_keys_disable_zoom_and_route_unmodified_space() {
+        let raw = |windows_key_code, modifiers, editable| KeyEvent {
+            type_: KeyEventType::RAWKEYDOWN,
+            windows_key_code,
+            modifiers,
+            focus_on_editable_field: i32::from(editable),
+            ..Default::default()
+        };
+        assert_eq!(
+            plugin_key_action(&raw(0x20, 0, false)),
+            Some(PluginKeyAction::GlobalPlayPause)
+        );
+        assert_eq!(plugin_key_action(&raw(0x20, 0, true)), None);
+        assert_eq!(plugin_key_action(&raw(0x20, 4, false)), None);
+        assert_eq!(plugin_key_action(&raw(0x20, 8192, false)), None);
+        for key in [0x30, 0x6b, 0x6d, 0xbb, 0xbd] {
+            assert_eq!(
+                plugin_key_action(&raw(key, 4, false)),
+                Some(PluginKeyAction::ConsumeZoom)
+            );
+            assert_eq!(
+                plugin_key_action(&raw(key, 128, true)),
+                Some(PluginKeyAction::ConsumeZoom)
+            );
+        }
     }
 }

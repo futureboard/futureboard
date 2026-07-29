@@ -32,9 +32,9 @@ use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
     wrap_app, wrap_browser_process_handler, wrap_resource_handler, wrap_scheme_handler_factory,
     App, BrowserProcessHandler, CefString, CefStringUtf16, ImplApp, ImplBrowserProcessHandler,
-    ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler, ImplResponse,
-    ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler, SchemeHandlerFactory,
-    SchemeOptions, WrapApp, WrapBrowserProcessHandler, WrapResourceHandler,
+    ImplCommandLine, ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler,
+    ImplResponse, ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler,
+    SchemeHandlerFactory, SchemeOptions, WrapApp, WrapBrowserProcessHandler, WrapResourceHandler,
     WrapSchemeHandlerFactory,
 };
 
@@ -227,6 +227,18 @@ wrap_app! {
     }
 
     impl App {
+        fn on_before_command_line_processing(
+            &self,
+            _process_type: Option<&CefString>,
+            command_line: Option<&mut cef::CommandLine>,
+        ) {
+            if let Some(command_line) = command_line {
+                // Built-in plugin editors have a fixed layout; browser pinch
+                // zoom must never resize their document.
+                command_line.append_switch(Some(&CefString::from("disable-pinch")));
+            }
+        }
+
         fn on_register_custom_schemes(&self, registrar: Option<&mut cef::SchemeRegistrar>) {
             let Some(registrar) = registrar else { return };
             // STANDARD gives the scheme real origin semantics (so the editor

@@ -796,38 +796,27 @@ impl BuiltinPluginEditorWindow {
         self.post_to_view(&msg);
     }
 
-    /// Install the Studio shortcut bridge without requiring every embedded
-    /// editor bundle to duplicate it. Text/editable controls retain Space.
-    fn install_global_shortcut_bridge(&self) {
+    /// Disable renderer-side zoom gestures as a second layer behind CEF's
+    /// native shortcut and command-line policy.
+    fn install_browser_policy(&self) {
         host::send_to_view(
             self.view_id,
             r#"
 (() => {
-  if (window.__futureboardGlobalShortcutsInstalled) return;
-  window.__futureboardGlobalShortcutsInstalled = true;
-  window.addEventListener("keydown", (event) => {
-    const target = event.target;
-    const tag = target && target.tagName;
-    const editing = !!(target && (
-      target.isContentEditable ||
-      tag === "INPUT" ||
-      tag === "TEXTAREA" ||
-      tag === "SELECT"
-    ));
-    if (!editing && !event.repeat && event.code === "Space" &&
-        !event.ctrlKey && !event.altKey && !event.metaKey) {
+  if (window.__futureboardBrowserPolicyInstalled) return;
+  window.__futureboardBrowserPolicyInstalled = true;
+  window.addEventListener("wheel", (event) => {
+    if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      void fetch("/__bridge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "futureboard.globalCommand",
-          commandId: "transport:play-pause"
-        })
-      });
     }
-  }, true);
+  }, { capture: true, passive: false });
+  for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+    window.addEventListener(type, (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, passive: false });
+  }
 })();
 "#,
         );
@@ -853,7 +842,7 @@ impl BuiltinPluginEditorWindow {
                 // unrelated crash.
                 self.attached_at = None;
                 self.bridge_ready_retries = 0;
-                self.install_global_shortcut_bridge();
+                self.install_browser_policy();
                 self.push_selected_instance();
             }
             InboundMsg::InstanceReady {
@@ -1353,6 +1342,14 @@ impl BuiltinPluginEditorWindow {
     /// One pump tick. Consumes completion events without invoking CEF.
     fn tick(&mut self, cx: &mut Context<Self>) -> PumpTick {
         let mut content_to_drop = None;
+        let play_pause_requests = host::take_global_play_pause_requests(self.view_id);
+        if play_pause_requests > 0 {
+            if let Some(dispatch) = self.host_ops.dispatch_global_command.as_ref() {
+                for _ in 0..play_pause_requests {
+                    dispatch("transport:play-pause", cx);
+                }
+            }
+        }
         for event in host::take_view_events(self.view_id) {
             match event {
                 ViewEvent::Opened if matches!(self.status, Status::Attaching) => {
@@ -1913,9 +1910,13 @@ impl BuiltinPluginEditorWindow {
     fn on_surface_scroll(
         &mut self,
         event: &ScrollWheelEvent,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
+        if event.modifiers.control || event.modifiers.platform {
+            window.prevent_default();
+            return;
+        }
         let (x, y) = self.to_view_point(event.position);
         let (delta_x, delta_y) = match event.delta {
             ScrollDelta::Pixels(delta) => {
