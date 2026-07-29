@@ -10,13 +10,10 @@ use crate::theme::{self, Colors};
 use std::time::Duration;
 
 use gpui::{
-    div, ease_in_out, px, Animation, AnimationExt, App, Bounds, Context, FocusHandle,
+    div, ease_in_out, px, Animation, AnimationExt, App, AppContext, Bounds, Context, FocusHandle,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
-// `AppContext` (for `cx.new`) is only used by the Windows window-open path below.
-#[cfg(target_os = "windows")]
-use gpui::AppContext;
 
 pub const PROGRESS_DIALOG_WIDTH: f32 = 430.0;
 const PROGRESS_DIALOG_HEIGHT: f32 = 168.0;
@@ -493,7 +490,6 @@ fn progress_window_height(options: &ProgressDialogOptions) -> f32 {
     height
 }
 
-#[cfg(target_os = "windows")]
 pub fn open_progress_dialog_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     options: ProgressDialogOptions,
@@ -522,16 +518,6 @@ pub fn open_progress_dialog_window(
         cx.new(|cx| ProgressDialogWindow::new(options, on_cancel, cx))
     })
     .map_err(|e| e.to_string())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn open_progress_dialog_window(
-    _owner_bounds: Option<Bounds<gpui::Pixels>>,
-    _options: ProgressDialogOptions,
-    _on_cancel: Option<ProgressDialogCancelCb>,
-    _cx: &mut App,
-) -> Result<WindowHandle<ProgressDialogWindow>, String> {
-    Err("native progress dialog is only available on Windows".to_string())
 }
 
 pub fn open_loading_session_dialog_window(

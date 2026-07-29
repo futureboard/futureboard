@@ -1,0 +1,15 @@
+[package]
+name = "rustysynth"
+version = "1.3.6"
+authors = ["Nobuaki Tanaka"]
+edition = "2021"
+
+description = "A SoundFont MIDI synthesizer written in pure Rust"
+documentation = "https://docs.rs/rustysynth/latest/rustysynth/"
+readme = "README.md"
+repository = "https://github.com/sinshu/rustysynth"
+license = "MIT"
+keywords = ["soundfont", "midi", "synthesizer", "audio", "music"]
+categories = ["multimedia::audio"]
+
+[dependencies]

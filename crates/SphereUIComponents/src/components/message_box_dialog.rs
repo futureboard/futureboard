@@ -1,4 +1,4 @@
-//! Borderless native message box (Windows only).
+//! Borderless native message box (cross-platform GPUI dialog).
 //!
 //! Mirrors the Electron / web [`MessageBoxOptions`] surface: title, message,
 //! optional detail, custom button labels, default/cancel indices, and kind
@@ -382,7 +382,10 @@ impl MessageBoxWindow {
 }
 
 impl Render for MessageBoxWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
         let title = if self.options.title.is_empty() {
             "Futureboard Studio".to_string()
         } else {
@@ -441,9 +444,6 @@ impl Render for MessageBoxWindow {
 }
 
 /// Open a borderless message box centered over `owner_bounds`.
-///
-/// Windows only; returns an error on other platforms.
-#[cfg(target_os = "windows")]
 pub fn open_message_box_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     options: MessageBoxOptions,
@@ -471,18 +471,7 @@ pub fn open_message_box_window(
     .map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn open_message_box_window(
-    _owner_bounds: Option<Bounds<gpui::Pixels>>,
-    _options: MessageBoxOptions,
-    _on_response: ResponseCb,
-    _cx: &mut App,
-) -> Result<WindowHandle<MessageBoxWindow>, String> {
-    Err("native message box is only available on Windows".to_string())
-}
-
 /// Preset matching web unsaved-changes guard (`projectLifecycle.ts`).
-#[cfg(target_os = "windows")]
 pub fn unsaved_changes_options(project_name: &str, detail: &str) -> MessageBoxOptions {
     MessageBoxOptions {
         kind: MessageBoxKind::Warning,
@@ -497,10 +486,4 @@ pub fn unsaved_changes_options(project_name: &str, detail: &str) -> MessageBoxOp
         default_id: 0,
         cancel_id: Some(2),
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn unsaved_changes_options(project_name: &str, detail: &str) -> MessageBoxOptions {
-    let _ = (project_name, detail);
-    MessageBoxOptions::default()
 }

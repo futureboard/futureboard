@@ -1317,7 +1317,6 @@ fn begin_project_session_load_inner(
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn open_loading_session_window(
     session_name: Option<String>,
     transaction: SessionLoadTransaction,
@@ -1348,14 +1347,4 @@ fn open_loading_session_window(
         cx.new(|cx| LoadingSessionWindow::new_for_load(session_name, transaction, cx))
     })
     .map_err(|e| e.to_string())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn open_loading_session_window(
-    _session_name: Option<String>,
-    _transaction: SessionLoadTransaction,
-    _owner_bounds: Option<Bounds<Pixels>>,
-    _cx: &mut App,
-) -> Result<WindowHandle<LoadingSessionWindow>, String> {
-    Err("native loading session window is not available on this platform".to_string())
 }
