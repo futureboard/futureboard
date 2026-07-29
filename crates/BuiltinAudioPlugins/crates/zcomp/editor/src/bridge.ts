@@ -161,7 +161,22 @@ function parseParams(state: unknown): ZcompParams | null {
     const value = params[key]
     if (typeof value !== 'number' || !Number.isFinite(value)) return null
   }
-  return params as unknown as ZcompParams
+  // Clamp like `ipc::sanitize_params` so a hand-edited blob cannot drive
+  // knobs outside the ranges the DSP accepts.
+  const raw = params as unknown as ZcompParams
+  return {
+    ...raw,
+    thresholdDb: Math.min(0, Math.max(-60, raw.thresholdDb)),
+    ratio: Math.min(20, Math.max(1, raw.ratio)),
+    attackMs: Math.min(120, Math.max(0.01, raw.attackMs)),
+    releaseMs: Math.min(2500, Math.max(10, raw.releaseMs)),
+    kneeDb: Math.min(24, Math.max(0, raw.kneeDb)),
+    makeupDb: Math.min(24, Math.max(-24, raw.makeupDb)),
+    mix: Math.min(100, Math.max(0, raw.mix)),
+    sidechainHpfHz: Math.min(500, Math.max(20, raw.sidechainHpfHz)),
+    stereoLink: Math.min(100, Math.max(0, raw.stereoLink)),
+    color: Math.min(100, Math.max(0, raw.color)),
+  }
 }
 
 export function connectBridge(

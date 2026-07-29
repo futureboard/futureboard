@@ -1,336 +1,975 @@
+/*
+ * Z-Comp — multi-circuit compressor faceplate in the FA family language.
+ *
+ * Craft comes from materials (painted metal, aluminum knobs, enamel VU), not
+ * glow / glassmorphism. Switching Model retints the panel enamel and meter
+ * face — the colour change stays, but it reads as different hardware skins.
+ */
+
+@property --panel-hi {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #2e343c;
+}
+@property --panel {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #1f242b;
+}
+@property --panel-lo {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #15191e;
+}
+@property --meter-face-hi {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #3a6fad;
+}
+@property --meter-face {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #2a5f9a;
+}
+@property --meter-face-lo {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #1a4574;
+}
+@property --meter-ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f0f4f8;
+}
+@property --meter-hot {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #d4452e;
+}
+@property --btn-on {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #d8b35a;
+}
+@property --btn-on-ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #1a160e;
+}
+@property --focus {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #c9a24a;
+}
+
 :root {
-  --bg: #101418;
-  --panel: #171c21;
-  --raised: #1d242b;
-  --line: #2c353e;
-  --text: #d7dee4;
-  --muted: #7d8a95;
-  --signal: #4ec8d8;
-  --signal-dim: #2a7f8c;
-  --warn: #d28a4a;
-  --danger: #d45a5a;
-  --knob: #252c34;
-  --knob-rim: #3a4550;
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
+  --panel-hi: #2e343c;
+  --panel: #1f242b;
+  --panel-lo: #15191e;
+  --base: #0e1013;
+  --chassis: #0a0b0d;
+
+  --inset: #101317;
+  --bezel: #4a5563;
+  --bezel-hi: #8a96a6;
+
+  --border: rgba(0, 0, 0, 0.55);
+  --border-hi: rgba(255, 255, 255, 0.1);
+  --border-soft: rgba(255, 255, 255, 0.06);
+
+  --engrave: #e6e9ee;
+  --engrave-muted: rgba(220, 226, 234, 0.58);
+  --readout: #c5ced8;
+
+  --focus: #c9a24a;
+  --lamp: #e8a83a;
+  --lamp-soft: rgba(232, 168, 58, 0.4);
+  --clip: #c43a28;
+
+  --meter-face-hi: #3a6fad;
+  --meter-face: #2a5f9a;
+  --meter-face-lo: #1a4574;
+  --meter-ink: #f0f4f8;
+  --meter-hot: #d4452e;
+
+  --btn: #1a1e24;
+  --btn-hi: #323942;
+  --btn-on: #d8b35a;
+  --btn-on-ink: #1a160e;
+  --drive: 0;
+
+  --knob-lg: clamp(5.25rem, 10vw, 6.75rem);
+  --knob-sm: clamp(3rem, 5.5vw, 3.75rem);
+
+  --radius: 0.55rem;
+  --radius-sm: 0.4rem;
+  --radius-panel: 0.85rem;
+  --radius-well: 0.7rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+
+  --skin-ease: 320ms cubic-bezier(0.22, 0.8, 0.28, 1);
+
   color-scheme: dark;
 }
 
-* { box-sizing: border-box; }
-html, body, #root {
+/* Model skins — enamel + VU face, not neon accents. */
+.unit[data-model='ssl'] {
+  --panel-hi: #2e343c;
+  --panel: #1f242b;
+  --panel-lo: #15191e;
+  --meter-face-hi: #3a6fad;
+  --meter-face: #2a5f9a;
+  --meter-face-lo: #1a4574;
+  --btn-on: #7eb8d4;
+  --btn-on-ink: #0e1820;
+  --focus: #7eb8d4;
+}
+
+.unit[data-model='comp2500'] {
+  --panel-hi: #2a3338;
+  --panel: #1c2428;
+  --panel-lo: #13191c;
+  --meter-face-hi: #4aa8b4;
+  --meter-face: #2f8794;
+  --meter-face-lo: #1c5e68;
+  --btn-on: #5ec4d4;
+  --btn-on-ink: #0c1a1c;
+  --focus: #5ec4d4;
+}
+
+.unit[data-model='distressor'] {
+  --panel-hi: #3a322c;
+  --panel: #28221e;
+  --panel-lo: #1a1613;
+  --meter-face-hi: #e0b56a;
+  --meter-face: #c9923e;
+  --meter-face-lo: #8a6024;
+  --meter-ink: #1c140a;
+  --meter-hot: #8a2418;
+  --btn-on: #d4a05e;
+  --btn-on-ink: #1a1208;
+  --focus: #d4a05e;
+}
+
+.unit[data-model='avalon'] {
+  --panel-hi: #2e3832;
+  --panel: #1f2823;
+  --panel-lo: #141a16;
+  --meter-face-hi: #8fbf96;
+  --meter-face: #6a9a72;
+  --meter-face-lo: #43664a;
+  --meter-ink: #101610;
+  --meter-hot: #8a3218;
+  --btn-on: #7eb68a;
+  --btn-on-ink: #0e1610;
+  --focus: #7eb68a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
   width: 100%;
-  min-width: 860px;
-  min-height: 100%;
+  min-width: 760px;
+  height: 100%;
+  min-height: 460px;
   margin: 0;
-}
-button, input { font: inherit; }
-button { color: inherit; cursor: pointer; }
-
-.shell {
-  min-height: 100vh;
-  display: grid;
-  grid-template-rows: auto 1fr auto auto;
-  background:
-    radial-gradient(1200px 420px at 50% -10%, rgba(78, 200, 216, 0.08), transparent 60%),
-    linear-gradient(180deg, #14191e 0%, var(--bg) 42%, #0c1014 100%);
-  transition: filter 180ms ease, opacity 180ms ease;
+  overflow: hidden;
 }
 
-.shell.powered-off .workspace,
-.shell.powered-off .secondary {
-  filter: saturate(0.2);
-  opacity: 0.48;
+body {
+  background: var(--chassis);
+  color: var(--engrave);
+  font-family: 'Helvetica Neue', Helvetica, Arial, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  line-height: 1.2;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
 }
 
-.topbar {
-  display: grid;
-  grid-template-columns: 180px 1fr auto;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(18, 23, 28, 0.92);
+button,
+input {
+  margin: 0;
+  font: inherit;
+  color: inherit;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
 }
-.brand > span {
-  width: 32px;
-  height: 32px;
+
+button:focus-visible,
+[role='slider']:focus-visible,
+[role='switch']:focus-visible,
+[role='radio']:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.unit {
   display: grid;
   place-items: center;
-  border: 1px solid var(--signal);
-  color: var(--signal);
-  font: 700 15px/1 "IBM Plex Sans", sans-serif;
-  letter-spacing: 0.02em;
-}
-.brand div { display: flex; flex-direction: column; gap: 1px; }
-.brand strong { font-size: 14px; font-weight: 650; letter-spacing: 0.02em; }
-.brand small,
-footer,
-.knob-label,
-.level-bar > span,
-.model-blurb {
-  color: var(--muted);
-  font: 600 10px/1.4 "IBM Plex Sans", sans-serif;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.model-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  max-width: 520px;
-  justify-self: center;
   width: 100%;
-}
-.model-strip button {
-  height: 34px;
-  border: 1px solid var(--line);
-  background: var(--raised);
-  color: var(--muted);
-  font: 600 11px/1 "IBM Plex Sans", sans-serif;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
-}
-.model-strip button.active {
-  border-color: var(--signal);
-  color: var(--text);
-  background: #1a2a30;
-  box-shadow: inset 0 -2px 0 var(--signal);
+  height: 100%;
+  padding: var(--space-3);
+  background: var(--chassis);
+  transition:
+    --panel-hi var(--skin-ease),
+    --panel var(--skin-ease),
+    --panel-lo var(--skin-ease),
+    --meter-face-hi var(--skin-ease),
+    --meter-face var(--skin-ease),
+    --meter-face-lo var(--skin-ease),
+    --meter-ink var(--skin-ease),
+    --meter-hot var(--skin-ease),
+    --btn-on var(--skin-ease),
+    --btn-on-ink var(--skin-ease),
+    --focus var(--skin-ease);
 }
 
-.top-actions {
+.unit.is-skin-pulse .panel {
+  animation: skin-bloom 420ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.unit.is-skin-pulse .meter-well {
+  animation: well-glow 420ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+@keyframes skin-bloom {
+  0% {
+    filter: brightness(1);
+  }
+  35% {
+    filter: brightness(1.08);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+@keyframes well-glow {
+  0% {
+    box-shadow:
+      inset 0 2px 5px rgba(0, 0, 0, 0.7),
+      0 1px 0 var(--border-hi);
+  }
+  40% {
+    box-shadow:
+      inset 0 2px 5px rgba(0, 0, 0, 0.7),
+      0 0 0 1px color-mix(in srgb, var(--btn-on) 35%, transparent),
+      0 0 18px color-mix(in srgb, var(--btn-on) 22%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 0 2px 5px rgba(0, 0, 0, 0.7),
+      0 1px 0 var(--border-hi);
+  }
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(100%, 58rem);
+  padding: clamp(0.85rem, 2vw, 1.25rem);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: linear-gradient(
+    180deg,
+    var(--panel-hi) 0%,
+    var(--panel) 42%,
+    var(--panel-lo) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 var(--border-hi),
+    0 14px 32px rgba(0, 0, 0, 0.5);
+  transition:
+    background var(--skin-ease),
+    filter 160ms ease,
+    opacity 160ms ease,
+    box-shadow var(--skin-ease);
+}
+
+.panel.is-off .knobs,
+.panel.is-off .extras,
+.panel.is-off .models .bank,
+.panel.is-off .meter-well {
+  filter: grayscale(0.45) brightness(0.78);
+  opacity: 0.62;
+}
+
+.top {
+  display: grid;
+  grid-template-columns: minmax(7.5rem, 11rem) minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.wordmark {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.65rem;
 }
-.toggle,
-.power {
-  height: 32px;
-  min-width: 72px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  font: 600 11px/1 "IBM Plex Sans", sans-serif;
-  letter-spacing: 0.04em;
+
+.wordmark .z {
+  display: grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-sm);
+  background: var(--inset);
+  color: var(--btn-on);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: color var(--skin-ease), border-color var(--skin-ease);
+}
+
+.wordmark strong {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.toggle.on {
-  border-color: var(--signal-dim);
-  color: var(--signal);
+
+.wordmark em {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--engrave-muted);
+  font-size: 0.58rem;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
-.power.on {
-  border-color: var(--signal);
-  color: var(--signal);
+
+.meter-bay {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: stretch;
+  justify-self: center;
+  width: min(100%, 28rem);
 }
-.link-dot {
-  width: 8px;
-  height: 8px;
+
+.meter-well {
+  display: grid;
+  gap: 0.35rem;
+  justify-self: stretch;
+  width: 100%;
+  padding: 0.45rem;
+  border-radius: var(--radius-well);
+  background:
+    radial-gradient(
+      120% 80% at 50% 0%,
+      color-mix(in srgb, var(--btn-on) calc(var(--drive) * 18%), transparent),
+      transparent 62%
+    ),
+    #0c0e11;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.7),
+    0 1px 0 var(--border-hi);
+  transition: box-shadow var(--skin-ease), background var(--skin-ease);
+}
+
+.gr-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0 0.15rem 0.1rem;
+}
+
+.gr-readout span,
+.gr-readout small {
+  color: var(--engrave-muted);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.gr-readout output {
+  margin-left: auto;
+  color: var(--btn-on);
+  font-size: 1.05rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  transition: color var(--skin-ease);
+}
+
+.io-strip {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: 0.28rem;
+  min-width: 1.85rem;
+  padding: 0.15rem 0;
+}
+
+.io-label {
+  color: var(--engrave-muted);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.clip-led {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 50%;
+  background: #2a3038;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
+}
+
+.clip-led.is-on {
+  background: var(--clip);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--clip) 40%, transparent),
+    0 0 8px color-mix(in srgb, var(--clip) 55%, transparent);
+}
+
+.io-ladder {
+  display: block;
+  width: 0.78rem;
+  height: 100%;
+  min-height: 6.8rem;
+  border-radius: 2px;
+  background: #07090c;
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.75),
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.io-strip output {
+  color: var(--engrave-muted);
+  font-size: 0.58rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.io-strip:has(.clip-led.is-on) output {
+  color: var(--clip);
+}
+
+.circuit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.45rem 0.7rem;
+  margin: -0.15rem 0 0;
+  color: var(--engrave-muted);
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.circuit strong {
+  color: var(--engrave);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.circuit span {
+  color: var(--engrave-muted);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.link {
+  width: 0.45rem;
+  height: 0.45rem;
+  margin: 0.15rem auto 0;
   border-radius: 50%;
   background: #3a4550;
 }
-.link-dot.live {
-  background: var(--signal);
-  box-shadow: 0 0 0 3px rgba(78, 200, 216, 0.18);
+
+.link.is-live {
+  background: var(--btn-on);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--btn-on) 28%, transparent);
+  transition: background var(--skin-ease), box-shadow var(--skin-ease);
 }
 
-.workspace {
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  gap: 18px;
-  padding: 18px 18px 8px;
+.knob.is-disabled {
+  opacity: 0.48;
+}
+
+.knob.is-disabled .cap {
+  cursor: default;
+  filter: none;
+}
+
+.knob.is-disabled .readout {
+  color: var(--btn-on);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   align-items: stretch;
 }
 
-.meters {
+.meter-switch {
   display: grid;
-  grid-template-rows: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.2rem;
+  padding: 0.18rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--inset);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
-.level-bar {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  justify-items: center;
-  gap: 6px;
-  padding: 8px 6px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-}
-.level-bar.clip output { color: var(--danger); }
-.level-track {
-  position: relative;
-  width: 18px;
-  height: 100%;
-  min-height: 120px;
-  border: 1px solid #243038;
-  background: #0b0f13;
-  overflow: hidden;
-}
-.level-track i {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: block;
-}
-.level-track .rms {
-  background: linear-gradient(180deg, #3aa3b4, #1d6672);
-  opacity: 0.85;
-}
-.level-track .peak {
-  background: linear-gradient(180deg, var(--signal), #2f7f8c 70%, transparent);
-  mix-blend-mode: screen;
-}
-.level-bar output {
-  font: 600 10px/1 "IBM Plex Sans", monospace;
-  font-variant-numeric: tabular-nums;
+.meter-switch button,
+.auto,
+.models .bank button {
+  height: 1.7rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--btn);
+  color: var(--engrave-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition:
+    background var(--skin-ease),
+    color var(--skin-ease),
+    border-color var(--skin-ease),
+    box-shadow 140ms ease;
 }
 
-.center {
-  display: grid;
-  grid-template-rows: auto auto 1fr;
-  gap: 14px;
-  align-content: start;
+.meter-switch button.is-on,
+.auto.is-on,
+.models .bank button.is-on {
+  border-color: rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--btn-on) 88%, #fff), var(--btn-on));
+  color: var(--btn-on-ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
-.gr-meter {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  padding: 12px 14px 16px;
-}
-.gr-meter header {
+.power {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 10px;
-}
-.gr-meter strong {
-  font-size: 12px;
-  letter-spacing: 0.08em;
-}
-.gr-meter output {
-  font: 600 18px/1 "IBM Plex Sans", monospace;
-  font-variant-numeric: tabular-nums;
-  color: var(--signal);
-}
-.gr-face {
-  position: relative;
-  height: 28px;
-  border: 1px solid #243038;
-  background:
-    repeating-linear-gradient(
-      90deg,
-      transparent 0,
-      transparent calc(12.5% - 1px),
-      #243038 calc(12.5% - 1px),
-      #243038 12.5%
-    ),
-    #0b0f13;
-  overflow: hidden;
-}
-.gr-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: linear-gradient(90deg, #2a8a98, var(--signal));
-  transition: width 80ms linear;
-}
-.gr-ticks {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.gr-ticks span {
-  position: absolute;
-  top: 100%;
-  transform: translate(-50%, 4px);
-  font: 600 8px/1 "IBM Plex Sans", monospace;
-  color: var(--muted);
+  align-items: center;
+  gap: 0.45rem;
+  height: 2rem;
+  padding: 0 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--btn-hi), var(--btn));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-.model-blurb {
-  margin: 0;
-  text-align: center;
-  letter-spacing: 0.08em;
+.power .lamp {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #2a2e34;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
-.knob-row,
-.secondary {
+.power.is-on .lamp {
+  background: var(--lamp);
+  box-shadow:
+    0 0 0 2px var(--lamp-soft),
+    0 0 8px var(--lamp-soft);
+}
+
+.power .legend {
+  color: var(--engrave-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.power.is-on .legend {
+  color: var(--engrave);
+}
+
+.models {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.bank-label {
+  color: var(--engrave-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.bank {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.28rem;
+}
+
+.auto {
+  min-width: 5.2rem;
+  padding: 0 0.55rem;
+}
+
+.knobs,
+.extras {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 10px 18px;
-}
-.secondary {
-  padding: 8px 18px 14px;
-  border-top: 1px solid var(--line);
-  background: rgba(14, 18, 22, 0.7);
+  gap: clamp(0.55rem, 1.8vw, 1.35rem);
 }
 
-.knob-control {
-  width: 88px;
-  display: grid;
-  justify-items: center;
-  gap: 6px;
+.extras {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-soft);
 }
+
+/* Aluminum knob — FA-76 language */
 .knob {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.cap {
+  width: var(--knob-lg);
+  height: var(--knob-lg);
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.55));
+}
+
+.knob.sm .cap {
+  width: var(--knob-sm);
+  height: var(--knob-sm);
+}
+
+.cap.is-dragging {
+  filter: drop-shadow(0 5px 8px rgba(0, 0, 0, 0.65));
+}
+
+.cap svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.cap .rim {
+  stroke: rgba(0, 0, 0, 0.55);
+  stroke-width: 1;
+}
+
+.cap .body {
+  stroke: rgba(20, 24, 32, 0.7);
+  stroke-width: 1;
+}
+
+.cap .gloss {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.35);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.cap .pointer {
+  fill: #11151c;
+}
+
+.plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.plate .name {
+  color: var(--engrave);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.plate .readout {
+  padding: 0.08rem 0.35rem;
+  border-radius: var(--radius-sm);
+  color: var(--readout);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: text;
+}
+
+.plate .readout:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.plate .unit {
+  margin-left: 0.1rem;
+  font-size: 0.58rem;
+  opacity: 0.65;
+}
+
+.plate .input {
+  width: 3.6rem;
+  padding: 0.06rem 0.2rem;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: #0c1016;
+  color: var(--engrave);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-align: center;
+  user-select: text;
+}
+
+/* VU face — FA cream/blue enamel family */
+.meter-bay.is-dark .meter {
+  filter: brightness(0.82) saturate(0.85);
+}
+
+.meter {
   position: relative;
-  width: 64px;
-  height: 64px;
 }
-.knob-cap {
+
+.meter svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: calc(var(--radius-sm) + 0.1rem);
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+.meter .arc {
+  fill: none;
+  stroke: var(--meter-ink);
+  stroke-width: 1.4;
+  opacity: 0.55;
+  transition: stroke var(--skin-ease);
+}
+
+.meter .arc.hot {
+  stroke: var(--meter-hot);
+  opacity: 0.9;
+  stroke-width: 2.1;
+}
+
+.meter .tick {
+  stroke: var(--meter-ink);
+  stroke-width: 1.05;
+  stroke-linecap: round;
+  opacity: 0.75;
+  transition: stroke var(--skin-ease);
+}
+
+.meter .tick.major {
+  stroke-width: 1.65;
+  opacity: 0.9;
+}
+
+.meter .tick.hot {
+  stroke: var(--meter-hot);
+}
+
+.meter .label {
+  fill: var(--meter-ink);
+  font-size: 7.5px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  transition: fill var(--skin-ease);
+}
+
+.meter .label.hot {
+  fill: var(--meter-hot);
+}
+
+.meter .needle {
+  stroke: #1a120c;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.meter .hub {
+  fill: #2a241c;
+  stroke: #0c0a08;
+  stroke-width: 0.8;
+}
+
+.meter .caption {
+  fill: var(--meter-ink);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-anchor: middle;
+  opacity: 0.72;
+  transition: fill var(--skin-ease);
+}
+
+.meter .unit {
+  fill: var(--meter-ink);
+  font-size: 6.4px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-anchor: middle;
+  opacity: 0.45;
+  transition: fill var(--skin-ease);
+}
+
+.meter .bezel {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0.35);
+  stroke-width: 1.35;
+  pointer-events: none;
+}
+
+.meter .parked {
+  fill: var(--meter-ink);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-anchor: middle;
+  text-transform: uppercase;
+  opacity: 0.45;
+}
+
+.clip-flag {
   position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--knob-rim);
-  background:
-    radial-gradient(circle at 35% 28%, #36414b, var(--knob) 58%),
-    var(--knob);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  right: 0.4rem;
+  bottom: 0.35rem;
+  height: 1.15rem;
+  padding: 0 0.4rem;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-sm);
+  background: var(--clip);
+  color: #fff4ef;
+  font-size: 0.55rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--clip) 45%, transparent);
 }
-.knob-cap i {
-  position: absolute;
-  left: 50%;
-  top: 10px;
-  width: 2px;
-  height: 16px;
-  margin-left: -1px;
-  background: var(--signal);
-  transform-origin: 50% 22px;
-  transform: rotate(var(--knob-angle));
-  border-radius: 1px;
+
+/* Preset stepper — FA-76 language */
+.preset {
+  display: grid;
+  grid-template-columns: 1.55rem minmax(0, 1fr) 1.55rem;
+  align-items: stretch;
+  width: 100%;
+  max-width: 11rem;
+  height: 1.85rem;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #2a3038, #161a20);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.35);
 }
-.knob input {
+
+.preset .step {
+  color: var(--engrave-muted);
+  font-size: 0.95rem;
+}
+
+.preset .step:hover {
+  color: var(--engrave);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.preset .select {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  border-inline: 1px solid rgba(0, 0, 0, 0.4);
+}
+
+.preset .select > span {
+  overflow: hidden;
+  width: 100%;
+  padding: 0 0.35rem;
+  color: var(--engrave);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset .select select {
   position: absolute;
   inset: 0;
   width: 100%;
-  height: 100%;
+  border: 0;
   opacity: 0;
-  cursor: ns-resize;
-  margin: 0;
-}
-.knob-control output {
-  font: 600 11px/1 "IBM Plex Sans", monospace;
-  font-variant-numeric: tabular-nums;
-  color: #c5ced5;
+  cursor: pointer;
+  background: #1a1e24;
+  color: var(--engrave);
 }
 
-footer {
-  display: flex;
-  justify-content: space-between;
-  padding: 8px 14px 12px;
-  border-top: 1px solid var(--line);
-}
+@media (max-width: 880px) {
+  .top {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
 
-.shell.model-comp2500 { --signal: #5ec4d4; }
-.shell.model-distressor { --signal: #d4a05e; }
-.shell.model-avalon { --signal: #7eb68a; }
-.shell.model-ssl { --signal: #4ec8d8; }
+  .identity,
+  .side,
+  .meter-bay {
+    width: min(100%, 28rem);
+  }
+
+  .models {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
+
+  .auto {
+    width: 100%;
+  }
+}
