@@ -388,6 +388,12 @@ select:focus-visible,
     stroke-width: 1.25;
     opacity: 0.72;
   }
+
+  &.is-dynamic-extent {
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+    opacity: 0.45;
+  }
 }
 
 .curve-glow {
@@ -512,7 +518,7 @@ select:focus-visible,
 
 .control-rack {
   display: grid;
-  grid-template-columns: minmax(11.5rem, 1fr) auto auto;
+  grid-template-columns: minmax(11.5rem, 1fr) auto auto auto;
   align-items: center;
   gap: clamp(0.8rem, 2.4vw, 1.7rem);
   margin: 0 var(--space-3) var(--space-3);
@@ -622,6 +628,39 @@ select:focus-visible,
   }
 }
 
+.band-dyn {
+  flex: none;
+  height: 1.35rem;
+  padding: 0 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+
+  &:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--text-faint);
+  }
+
+  &.is-on {
+    color: #0b0e13;
+    border-color: var(--band);
+    background: var(--band);
+  }
+
+  &.is-disabled,
+  &:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+}
+
 .band-toggle {
   flex: none;
   width: 0.65rem;
@@ -690,6 +729,32 @@ select:focus-visible,
   grid-template-columns: repeat(3, var(--control-column));
   justify-content: center;
   align-items: center;
+}
+
+.dyn-controls {
+  display: grid;
+  grid-template-columns: repeat(4, var(--control-column));
+  justify-content: center;
+  align-items: end;
+  gap: 0.15rem 0;
+  opacity: 0.38;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+
+  &.is-open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.dyn-label {
+  grid-column: 1 / -1;
+  color: var(--text-faint);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
 }
 
 .master-section {
@@ -888,6 +953,7 @@ select:focus-visible,
     grid-template-columns: minmax(10.5rem, 1fr) auto;
     grid-template-areas:
       'filter band'
+      'dyn dyn'
       'master master';
     row-gap: var(--space-3);
   }
@@ -898,6 +964,13 @@ select:focus-visible,
 
   .band-controls {
     grid-area: band;
+  }
+
+  .dyn-controls {
+    grid-area: dyn;
+    justify-content: center;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-2);
   }
 
   .master-section {

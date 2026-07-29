@@ -21,6 +21,16 @@
   let inBar = $state(untrack(() => inTarget))
   let outBar = $state(untrack(() => outTarget))
   let grBar = $state(untrack(() => grTarget))
+  let peakHold = $state<number | null>(null)
+
+  $effect(() => {
+    if (!live) {
+      peakHold = null
+      return
+    }
+    const db = linearToDb(outPeak)
+    if (peakHold === null || db > peakHold) peakHold = db
+  })
 
   $effect(() => {
     let raf = 0
@@ -67,6 +77,7 @@
   <div class="readout">
     <span class="num">{grDb === null ? '—' : `-${grDb.toFixed(1)}`}</span>
     <span class="unit">dB</span>
+    <span class="peak">{peakHold === null ? '—' : `${peakHold.toFixed(1)} pk`}</span>
   </div>
 </aside>
 
@@ -113,6 +124,7 @@
     bottom: 0;
     left: 0;
     border-radius: inherit;
+    transition: height 50ms linear;
   }
 
   .fill.in {
@@ -140,6 +152,7 @@
 
   .clip-led.on {
     background: var(--clip);
+    animation: clip-confirm 420ms ease-out;
   }
 
   .label {
@@ -151,24 +164,41 @@
   }
 
   .readout {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto;
     align-items: baseline;
-    justify-content: center;
-    gap: 0.2rem;
+    column-gap: 0.25rem;
+    row-gap: 0.1rem;
     padding-top: var(--s1);
     border-top: 1px solid var(--border);
   }
 
   .num {
+    grid-column: 1;
     color: var(--red);
-    font-size: 1rem;
+    font-size: 1.05rem;
     font-weight: 700;
     letter-spacing: -0.03em;
   }
 
   .unit {
+    grid-column: 2;
     color: var(--text-muted);
     font-size: 0.55rem;
     font-weight: 650;
+  }
+
+  .peak {
+    grid-column: 1 / -1;
+    color: var(--text-muted);
+    font-size: 0.6rem;
+    font-weight: 600;
+  }
+
+  @keyframes clip-confirm {
+    35% {
+      transform: translateX(-50%) scale(1.45);
+    }
   }
 </style>

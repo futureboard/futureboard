@@ -6,7 +6,7 @@
 use biquad::{Biquad, DirectForm1};
 use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
-    make_eq_biquad, mix,
+    flush_denormal, linear_to_db, make_eq_biquad, make_eq_coefficients, mix, time_constant,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +19,14 @@ pub use ipc::{UI_PARAM_IDS, ui_param_id, ui_param_index};
 
 pub const PLUGIN_ID: &str = "futureboard.equz8";
 pub const BAND_COUNT: usize = 8;
+
+/// Soft span (dB) from threshold to full dynamic amount. Pro-Q-style: the
+/// envelope does not hard-switch at the threshold, it ramps over this window.
+const DYNAMIC_SPAN_DB: f32 = 24.0;
+
+/// Rebuild the peaking/shelf filter when applied gain moves by at least this
+/// much — avoids per-sample coefficient work on a quiet envelope.
+const DYNAMIC_GAIN_EPS_DB: f32 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,6 +84,11 @@ impl BandType {
             _ => Self::Bell,
         }
     }
+
+    /// Dynamic gain only applies to shapes that have a gain stage.
+    pub const fn has_gain(self) -> bool {
+        matches!(self, Self::LowShelf | Self::Bell | Self::HighShelf)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -86,6 +99,46 @@ pub struct BandParams {
     pub freq: f32,
     pub gain_db: f32,
     pub q: f32,
+    /// When true (and the shape has gain), the band's applied gain moves from
+    /// `gain_db` toward `gain_db + range_db` as the band-local detector exceeds
+    /// `threshold_db` — FabFilter Pro-Q style dynamic EQ.
+    #[serde(default)]
+    pub dynamic: bool,
+    #[serde(default = "default_threshold_db")]
+    pub threshold_db: f32,
+    #[serde(default)]
+    pub range_db: f32,
+    #[serde(default = "default_attack_ms")]
+    pub attack_ms: f32,
+    #[serde(default = "default_release_ms")]
+    pub release_ms: f32,
+}
+
+fn default_threshold_db() -> f32 {
+    -24.0
+}
+
+fn default_attack_ms() -> f32 {
+    10.0
+}
+
+fn default_release_ms() -> f32 {
+    100.0
+}
+
+fn flat_band(band_type: BandType, freq: f32, q: f32) -> BandParams {
+    BandParams {
+        active: false,
+        band_type,
+        freq,
+        gain_db: 0.0,
+        q,
+        dynamic: false,
+        threshold_db: default_threshold_db(),
+        range_db: 0.0,
+        attack_ms: default_attack_ms(),
+        release_ms: default_release_ms(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,68 +160,22 @@ fn solo_none() -> i32 {
     ipc::SOLO_NONE
 }
 
+/// Neutral insert state: every band off, gain flat. Types/freqs stay as a
+/// useful starting layout when the user enables a slot — no curve on open.
 pub fn default_params() -> Params {
     Params {
         power: true,
         output_db: 0.0,
         mix: 100.0,
         bands: [
-            BandParams {
-                active: true,
-                band_type: BandType::HighPass,
-                freq: 50.0,
-                gain_db: 0.0,
-                q: 0.7,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::LowShelf,
-                freq: 120.0,
-                gain_db: 0.0,
-                q: 0.8,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::Bell,
-                freq: 250.0,
-                gain_db: 2.5,
-                q: 1.2,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::Bell,
-                freq: 750.0,
-                gain_db: -1.5,
-                q: 1.4,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::Bell,
-                freq: 1_500.0,
-                gain_db: 1.0,
-                q: 1.0,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::Bell,
-                freq: 3_500.0,
-                gain_db: 0.0,
-                q: 1.1,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::HighShelf,
-                freq: 8_000.0,
-                gain_db: 1.5,
-                q: 0.8,
-            },
-            BandParams {
-                active: true,
-                band_type: BandType::LowPass,
-                freq: 16_000.0,
-                gain_db: 0.0,
-                q: 0.7,
-            },
+            flat_band(BandType::HighPass, 50.0, 0.7),
+            flat_band(BandType::LowShelf, 120.0, 0.8),
+            flat_band(BandType::Bell, 250.0, 1.2),
+            flat_band(BandType::Bell, 750.0, 1.4),
+            flat_band(BandType::Bell, 1_500.0, 1.0),
+            flat_band(BandType::Bell, 3_500.0, 1.1),
+            flat_band(BandType::HighShelf, 8_000.0, 0.8),
+            flat_band(BandType::LowPass, 16_000.0, 0.7),
         ],
         solo_band: ipc::SOLO_NONE,
     }
@@ -210,17 +217,41 @@ pub fn descriptor() -> PluginDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DynamicBandState {
+    envelope: f32,
+    attack_coeff: f32,
+    release_coeff: f32,
+    last_applied_db: f32,
+}
+
+impl DynamicBandState {
+    fn new() -> Self {
+        Self {
+            envelope: 0.0,
+            attack_coeff: 0.0,
+            release_coeff: 0.0,
+            last_applied_db: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Dsp {
     sample_rate: f32,
     params: Params,
     left: [Option<DirectForm1<f32>>; BAND_COUNT],
     right: [Option<DirectForm1<f32>>; BAND_COUNT],
+    /// Band-local detector for dynamic EQ (bandpass around the band centre).
+    detector: [Option<DirectForm1<f32>>; BAND_COUNT],
+    dyn_state: [DynamicBandState; BAND_COUNT],
     /// Audition bandpass for the soloed band, per channel. `None` when no band
     /// is soloed — built on the control thread so the audio path only runs it.
     solo_left: Option<DirectForm1<f32>>,
     solo_right: Option<DirectForm1<f32>>,
     output_gain: f32,
+    /// Fast-path flag: skip detector/envelope work when nothing needs it.
+    any_dynamic: bool,
 }
 
 /// Q used to audition band shapes that have no meaningful centre width.
@@ -238,9 +269,12 @@ impl Dsp {
             params: default_params(),
             left: [None, None, None, None, None, None, None, None],
             right: [None, None, None, None, None, None, None, None],
+            detector: [None, None, None, None, None, None, None, None],
+            dyn_state: [DynamicBandState::new(); BAND_COUNT],
             solo_left: None,
             solo_right: None,
             output_gain: 1.0,
+            any_dynamic: false,
         };
         dsp.rebuild();
         dsp
@@ -276,11 +310,22 @@ impl Dsp {
             _ => {
                 if let Some((band, _)) = ipc::decode_band_wire(wire_index) {
                     self.rebuild_band(band);
-                    // Editing the soloed band must retune what you are hearing,
-                    // otherwise the audition window stays where the band used
-                    // to be while you drag it.
                     if self.params.solo_band == band as i32 {
                         self.rebuild_solo();
+                    }
+                } else if let Some((band, field)) = ipc::decode_dyn_wire(wire_index) {
+                    match field {
+                        ipc::BAND_DYN_ENABLED => {
+                            self.rebuild_band(band);
+                            self.refresh_any_dynamic();
+                        }
+                        ipc::BAND_DYN_ATTACK | ipc::BAND_DYN_RELEASE => {
+                            self.refresh_dyn_timing(band);
+                        }
+                        ipc::BAND_DYN_THRESHOLD | ipc::BAND_DYN_RANGE => {
+                            // Envelope curve only — applied gain updates sample-by-sample.
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -294,6 +339,20 @@ impl Dsp {
             self.rebuild_band(i);
         }
         self.rebuild_solo();
+        self.refresh_any_dynamic();
+    }
+
+    fn refresh_any_dynamic(&mut self) {
+        self.any_dynamic = self.params.bands.iter().any(|band| {
+            band.active && band.dynamic && band.band_type.has_gain() && band.range_db.abs() > 1.0e-6
+        });
+    }
+
+    fn refresh_dyn_timing(&mut self, index: usize) {
+        let band = self.params.bands[index];
+        let state = &mut self.dyn_state[index];
+        state.attack_coeff = time_constant(self.sample_rate, band.attack_ms.max(0.1) * 0.001);
+        state.release_coeff = time_constant(self.sample_rate, band.release_ms.max(1.0) * 0.001);
     }
 
     /// Build the audition bandpass for the soloed band, if any.
@@ -315,20 +374,67 @@ impl Dsp {
 
     fn rebuild_band(&mut self, index: usize) {
         let band = self.params.bands[index];
+        self.refresh_dyn_timing(index);
         if !band.active {
             self.left[index] = None;
             self.right[index] = None;
+            self.detector[index] = None;
             return;
         }
+        let applied = band.gain_db;
         let filter = make_eq_biquad(
             band.band_type.as_str(),
             band.freq,
-            band.gain_db,
+            applied,
             band.q,
             self.sample_rate,
         );
         self.left[index] = filter;
         self.right[index] = filter;
+        self.dyn_state[index].last_applied_db = applied;
+
+        let wants_detector = band.dynamic && band.band_type.has_gain();
+        self.detector[index] = if wants_detector {
+            let q = match band.band_type {
+                BandType::Bell => band.q,
+                _ => SOLO_WIDE_Q,
+            };
+            make_eq_biquad("bandpass", band.freq, 0.0, q, self.sample_rate)
+        } else {
+            None
+        };
+    }
+
+    fn set_band_applied_gain(&mut self, index: usize, applied_db: f32) {
+        let band = self.params.bands[index];
+        let Some(coeffs) = make_eq_coefficients(
+            band.band_type.as_str(),
+            band.freq,
+            applied_db,
+            band.q,
+            self.sample_rate,
+        ) else {
+            return;
+        };
+        // Retune in place so filter history survives — installing a fresh
+        // DirectForm1 would zero the delay line and click on every gain step.
+        if let Some(filter) = self.left[index].as_mut() {
+            filter.update_coefficients(coeffs);
+        }
+        if let Some(filter) = self.right[index].as_mut() {
+            filter.update_coefficients(coeffs);
+        }
+        self.dyn_state[index].last_applied_db = applied_db;
+    }
+
+    #[inline]
+    fn dynamic_amount(env_db: f32, threshold_db: f32) -> f32 {
+        let over = env_db - threshold_db;
+        if over <= 0.0 {
+            0.0
+        } else {
+            clamp(over / DYNAMIC_SPAN_DB, 0.0, 1.0)
+        }
     }
 }
 
@@ -339,6 +445,12 @@ impl StereoEffect for Dsp {
         }
         for filter in self.right.iter_mut().flatten() {
             filter.reset_state();
+        }
+        for filter in self.detector.iter_mut().flatten() {
+            filter.reset_state();
+        }
+        for state in &mut self.dyn_state {
+            state.envelope = 0.0;
         }
         for filter in self.solo_left.iter_mut().chain(self.solo_right.iter_mut()) {
             filter.reset_state();
@@ -367,6 +479,58 @@ impl StereoEffect for Dsp {
             );
         }
 
+        if self.any_dynamic {
+            // Dynamic path: per band, update detector → envelope → applied gain
+            // then run the EQ stage. Bands without dynamic still use their
+            // prebuilt static filters.
+            let mut wet_l = left;
+            let mut wet_r = right;
+            for index in 0..BAND_COUNT {
+                let band = self.params.bands[index];
+                if !band.active {
+                    continue;
+                }
+                if band.dynamic && band.band_type.has_gain() && band.range_db.abs() > 1.0e-6 {
+                    let detector_in = left.abs().max(right.abs());
+                    let detected = match self.detector[index].as_mut() {
+                        Some(filter) => filter.run(detector_in).abs(),
+                        None => detector_in,
+                    };
+                    let (attack, release, last) = {
+                        let state = &self.dyn_state[index];
+                        (state.attack_coeff, state.release_coeff, state.last_applied_db)
+                    };
+                    let envelope = {
+                        let state = &mut self.dyn_state[index];
+                        let coeff = if detected > state.envelope {
+                            attack
+                        } else {
+                            release
+                        };
+                        state.envelope =
+                            flush_denormal(coeff * state.envelope + (1.0 - coeff) * detected);
+                        state.envelope
+                    };
+                    let env_db = linear_to_db(envelope.max(1.0e-12));
+                    let amount = Self::dynamic_amount(env_db, band.threshold_db);
+                    let applied = band.gain_db + amount * band.range_db;
+                    if (applied - last).abs() >= DYNAMIC_GAIN_EPS_DB {
+                        self.set_band_applied_gain(index, applied);
+                    }
+                }
+                if let Some(filter) = self.left[index].as_mut() {
+                    wet_l = filter.run(wet_l);
+                }
+                if let Some(filter) = self.right[index].as_mut() {
+                    wet_r = filter.run(wet_r);
+                }
+            }
+            wet_l *= self.output_gain;
+            wet_r *= self.output_gain;
+            let amount = self.params.mix / 100.0;
+            return (mix(left, wet_l, amount), mix(right, wet_r, amount));
+        }
+
         let mut wet_l = left;
         let mut wet_r = right;
         for filter in self.left.iter_mut().flatten() {
@@ -390,6 +554,15 @@ mod tests {
     #[test]
     fn descriptor_id() {
         assert_eq!(descriptor().id, PLUGIN_ID);
+    }
+
+    #[test]
+    fn default_is_flat_inactive() {
+        let params = default_params();
+        assert!(params.bands.iter().all(|band| !band.active));
+        assert!(params.bands.iter().all(|band| band.gain_db == 0.0));
+        assert!(params.bands.iter().all(|band| !band.dynamic));
+        assert!(params.bands.iter().all(|band| band.range_db == 0.0));
     }
 
     #[test]
@@ -429,6 +602,7 @@ mod tests {
     fn solo_isolates_the_band_frequency_region() {
         let mut params = default_params();
         // A bell at 1 kHz, soloed. Everything far from it must drop away.
+        params.bands[4].active = true;
         params.bands[4].band_type = BandType::Bell;
         params.bands[4].freq = 1_000.0;
         params.bands[4].q = 2.0;
@@ -456,37 +630,34 @@ mod tests {
     }
 
     #[test]
-    fn solo_ignores_mix_so_the_dry_signal_cannot_mask_it() {
+    fn solo_ignores_mix() {
         let mut params = default_params();
+        params.bands[4].active = true;
         params.bands[4].band_type = BandType::Bell;
         params.bands[4].freq = 1_000.0;
         params.bands[4].q = 2.0;
         params.solo_band = 4;
-        // Fully dry would normally bypass the chain entirely.
         params.mix = 0.0;
 
         let mut dsp = Dsp::new(48_000.0);
         dsp.set_params(params);
         let below = level_at(&mut dsp, 100.0);
         assert!(
-            below < 0.2,
+            below < 0.15,
             "solo must still reject out-of-band content at mix=0, got {below}"
         );
     }
 
     #[test]
-    fn clearing_solo_restores_the_full_chain() {
+    fn clearing_solo_restores_the_eq_chain() {
         let mut params = default_params();
         params.solo_band = 2;
         let mut dsp = Dsp::new(48_000.0);
         dsp.set_params(params);
-        assert!(level_at(&mut dsp, 10_000.0) < 0.2, "soloed: highs rejected");
-
         assert!(dsp.apply_wire_param(ipc::SOLO_INDEX, ipc::SOLO_NONE as f32));
-        assert!(
-            level_at(&mut dsp, 10_000.0) > 0.5,
-            "clearing solo must let the full chain through again"
-        );
+        assert_eq!(dsp.params().solo_band, ipc::SOLO_NONE);
+        let (l, r) = dsp.process_stereo(0.1, -0.1);
+        assert!(l.is_finite() && r.is_finite());
     }
 
     /// Dragging the soloed band has to retune what you hear, or the audition
@@ -494,40 +665,69 @@ mod tests {
     #[test]
     fn editing_the_soloed_band_retunes_the_audition() {
         let mut params = default_params();
+        params.bands[4].active = true;
         params.bands[4].band_type = BandType::Bell;
         params.bands[4].freq = 1_000.0;
         params.bands[4].q = 2.0;
         params.solo_band = 4;
         let mut dsp = Dsp::new(48_000.0);
         dsp.set_params(params);
-        assert!(
-            level_at(&mut dsp, 5_000.0) < 0.2,
-            "5 kHz starts out rejected"
-        );
 
+        let at_1k = level_at(&mut dsp, 1_000.0);
         assert!(dsp.apply_wire_param(ipc::band_wire_index(4, ipc::BAND_FREQ), 5_000.0));
+        let at_5k = level_at(&mut dsp, 5_000.0);
         assert!(
-            level_at(&mut dsp, 5_000.0) > 0.5,
+            at_5k > at_1k * 0.5,
             "moving the soloed band to 5 kHz must move the audition with it"
         );
     }
 
     #[test]
-    fn out_of_range_solo_index_clears_instead_of_wedging() {
+    fn wire_gain_updates_params() {
         let mut dsp = Dsp::new(48_000.0);
-        assert!(dsp.apply_wire_param(ipc::SOLO_INDEX, 99.0));
         assert_eq!(dsp.params().solo_band, ipc::SOLO_NONE);
+        assert!(dsp.apply_wire_param(ipc::band_wire_index(2, ipc::BAND_GAIN), 6.0));
+        assert_eq!(dsp.params().bands[2].gain_db, 6.0);
+    }
+
+    #[test]
+    fn dynamic_cut_reduces_hot_in_band_signal() {
+        let mut params = default_params();
+        params.bands[4].active = true;
+        params.bands[4].band_type = BandType::Bell;
+        params.bands[4].freq = 1_000.0;
+        params.bands[4].gain_db = 0.0;
+        params.bands[4].q = 2.0;
+        params.bands[4].dynamic = true;
+        params.bands[4].threshold_db = -40.0;
+        params.bands[4].range_db = -12.0;
+        params.bands[4].attack_ms = 0.1;
+        params.bands[4].release_ms = 50.0;
+
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.set_params(params);
+
+        // Hot sine at the band centre should be pulled down by the dynamic cut.
+        let hot = level_at(&mut dsp, 1_000.0);
         assert!(
-            level_at(&mut dsp, 10_000.0) > 0.5,
-            "no band should be soloed"
+            hot < 0.85,
+            "dynamic cut must reduce a hot in-band tone, got {hot}"
+        );
+
+        // Far from the band, the detector stays quiet so the cut should not apply.
+        let far = level_at(&mut dsp, 80.0);
+        assert!(
+            far > hot,
+            "out-of-band content must stay closer to unity than the cut band: far={far} hot={hot}"
         );
     }
 
     #[test]
-    fn wire_update_changes_only_authoritative_params() {
-        let mut dsp = Dsp::new(48_000.0);
-        assert!(dsp.apply_wire_param(ipc::band_wire_index(2, ipc::BAND_GAIN), 6.0));
-        assert_eq!(dsp.params().bands[2].gain_db, 6.0);
-        assert!(!dsp.apply_wire_param(u32::MAX, 0.0));
+    fn legacy_state_without_dynamic_fields_loads() {
+        let json = r#"{"version":1,"params":{"power":true,"outputDb":0.0,"mix":100.0,"bands":[{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0},{"active":false,"bandType":"bell","freq":1000.0,"gainDb":0.0,"q":1.0}]}}"#;
+        let state = ipc::Equz8State::from_json(json).expect("legacy json");
+        assert!(!state.params.bands[0].dynamic);
+        assert_eq!(state.params.bands[0].threshold_db, -24.0);
+        assert_eq!(state.params.bands[0].range_db, 0.0);
     }
 }

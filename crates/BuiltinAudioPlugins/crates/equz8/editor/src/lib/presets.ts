@@ -1,21 +1,41 @@
 import { SOLO_NONE, postParam, type Band, type EqParams } from '../bridge'
 import { filterKind } from './eq'
 
+function flatBand(
+  bandType: Band['bandType'],
+  freq: number,
+  q: number,
+): Band {
+  return {
+    active: false,
+    bandType,
+    freq,
+    gainDb: 0,
+    q,
+    dynamic: false,
+    thresholdDb: -24,
+    rangeDb: 0,
+    attackMs: 10,
+    releaseMs: 100,
+  }
+}
+
 /// Mirrors `default_params()` in the Rust DSP crate. Rust stays authoritative:
 /// these values only seed the editor before the first `selectInstance`.
+/// Every band starts inactive and flat — no curve on open.
 export const DEFAULT_PARAMS: EqParams = {
   power: true,
   outputDb: 0,
   mix: 100,
   bands: [
-    { active: true, bandType: 'highpass', freq: 50, gainDb: 0, q: 0.7 },
-    { active: true, bandType: 'lowshelf', freq: 120, gainDb: 0, q: 0.8 },
-    { active: true, bandType: 'bell', freq: 250, gainDb: 2.5, q: 1.2 },
-    { active: true, bandType: 'bell', freq: 750, gainDb: -1.5, q: 1.4 },
-    { active: true, bandType: 'bell', freq: 1500, gainDb: 1, q: 1 },
-    { active: true, bandType: 'bell', freq: 3500, gainDb: 0, q: 1.1 },
-    { active: true, bandType: 'highshelf', freq: 8000, gainDb: 1.5, q: 0.8 },
-    { active: true, bandType: 'lowpass', freq: 16000, gainDb: 0, q: 0.7 },
+    flatBand('highpass', 50, 0.7),
+    flatBand('lowshelf', 120, 0.8),
+    flatBand('bell', 250, 1.2),
+    flatBand('bell', 750, 1.4),
+    flatBand('bell', 1500, 1),
+    flatBand('bell', 3500, 1.1),
+    flatBand('highshelf', 8000, 0.8),
+    flatBand('lowpass', 16000, 0.7),
   ],
   soloBand: SOLO_NONE,
 }
@@ -39,6 +59,11 @@ function preset(
       mix,
       bands: DEFAULT_PARAMS.bands.map((band, index) => ({
         ...band,
+        // Factory looks enable the full strip; Default stays all-off via
+        // `DEFAULT_PARAMS` directly.
+        active: true,
+        dynamic: false,
+        rangeDb: 0,
         ...(bands[index] ?? {}),
       })),
       // Solo is an audition state, never part of a preset: loading a preset
@@ -48,8 +73,12 @@ function preset(
   }
 }
 
+export function cloneParams(params: EqParams): EqParams {
+  return { ...params, bands: params.bands.map((band) => ({ ...band })) }
+}
+
 export const FACTORY_PRESETS: FactoryPreset[] = [
-  preset('Default', []),
+  { name: 'Default', params: cloneParams(DEFAULT_PARAMS) },
   preset('Low-End Control', [
     { freq: 32, q: 0.72 },
     { freq: 95, gainDb: -1.5, q: 0.8 },
@@ -106,10 +135,6 @@ export const FACTORY_PRESETS: FactoryPreset[] = [
   ]),
 ]
 
-export function cloneParams(params: EqParams): EqParams {
-  return { ...params, bands: params.bands.map((band) => ({ ...band })) }
-}
-
 export function paramsMatch(left: EqParams, right: EqParams) {
   if (
     left.power !== right.power ||
@@ -126,7 +151,12 @@ export function paramsMatch(left: EqParams, right: EqParams) {
       band.bandType === other.bandType &&
       Math.abs(band.freq - other.freq) < 0.01 &&
       Math.abs(band.gainDb - other.gainDb) < 0.01 &&
-      Math.abs(band.q - other.q) < 0.001
+      Math.abs(band.q - other.q) < 0.001 &&
+      band.dynamic === other.dynamic &&
+      Math.abs(band.thresholdDb - other.thresholdDb) < 0.01 &&
+      Math.abs(band.rangeDb - other.rangeDb) < 0.01 &&
+      Math.abs(band.attackMs - other.attackMs) < 0.01 &&
+      Math.abs(band.releaseMs - other.releaseMs) < 0.01
     )
   })
 }
@@ -152,6 +182,11 @@ export function postAllParams(params: EqParams) {
     postParam(`${prefix}freq`, band.freq)
     postParam(`${prefix}gainDb`, band.gainDb)
     postParam(`${prefix}q`, band.q)
+    postParam(`${prefix}dynEnabled`, band.dynamic ? 1 : 0)
+    postParam(`${prefix}thresholdDb`, band.thresholdDb)
+    postParam(`${prefix}rangeDb`, band.rangeDb)
+    postParam(`${prefix}attackMs`, band.attackMs)
+    postParam(`${prefix}releaseMs`, band.releaseMs)
   })
 }
 
@@ -166,4 +201,19 @@ export function postBandPatch(index: number, patch: Partial<Band>) {
   if (patch.freq !== undefined) postParam(`${prefix}freq`, patch.freq)
   if (patch.gainDb !== undefined) postParam(`${prefix}gainDb`, patch.gainDb)
   if (patch.q !== undefined) postParam(`${prefix}q`, patch.q)
+  if (patch.dynamic !== undefined) {
+    postParam(`${prefix}dynEnabled`, patch.dynamic ? 1 : 0)
+  }
+  if (patch.thresholdDb !== undefined) {
+    postParam(`${prefix}thresholdDb`, patch.thresholdDb)
+  }
+  if (patch.rangeDb !== undefined) {
+    postParam(`${prefix}rangeDb`, patch.rangeDb)
+  }
+  if (patch.attackMs !== undefined) {
+    postParam(`${prefix}attackMs`, patch.attackMs)
+  }
+  if (patch.releaseMs !== undefined) {
+    postParam(`${prefix}releaseMs`, patch.releaseMs)
+  }
 }

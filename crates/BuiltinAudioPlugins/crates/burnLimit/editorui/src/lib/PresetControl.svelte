@@ -54,6 +54,9 @@
     color: var(--text-muted);
     font-size: 1rem;
     line-height: 1;
+    transition:
+      color var(--ease),
+      background-color var(--ease);
   }
 
   .step:hover {

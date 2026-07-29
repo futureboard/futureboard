@@ -17,6 +17,7 @@ dependencies = [
  "fa2a",
  "fa76",
  "meowsyn",
+ "transient",
  "wrapsynth",
  "zcomp",
 ]
@@ -7478,6 +7479,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sphere_directaudioengine",
+ "transient",
  "verbspace",
  "windows 0.61.3",
  "wrapsynth",
@@ -7544,6 +7546,7 @@ dependencies = [
  "sphere-graphic-engine",
  "sphere-plugin-host",
  "sphere_directaudioengine",
+ "transient",
  "unicode-segmentation",
  "verbspace",
  "wgpu",
@@ -8620,6 +8623,16 @@ dependencies = [
  "rand_distr",
  "rustfft",
  "tract-nnef",
+]
+
+[[package]]
+name = "transient"
+version = "0.1.0"
+dependencies = [
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

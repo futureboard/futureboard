@@ -28,6 +28,7 @@ pub use equz8;
 pub use fa2a;
 pub use fa76;
 pub use meowsyn;
+pub use transient;
 pub use wrapsynth;
 pub use zcomp;
 
@@ -43,6 +44,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         fa76::descriptor(),
         burnlimit::descriptor(),
         clipper67::descriptor(),
+        transient::descriptor(),
         c1073::descriptor(),
         meowsyn::descriptor(),
         wrapsynth::descriptor(),
@@ -65,6 +67,7 @@ mod tests {
         assert!(ids.contains(&fa76::PLUGIN_ID));
         assert!(ids.contains(&burnlimit::PLUGIN_ID));
         assert!(ids.contains(&clipper67::PLUGIN_ID));
+        assert!(ids.contains(&transient::PLUGIN_ID));
         assert!(ids.contains(&c1073::PLUGIN_ID));
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
         assert!(ids.contains(&wrapsynth::PLUGIN_ID));

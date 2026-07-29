@@ -49,6 +49,7 @@ export function ControlRack({
 }: ControlRackProps) {
   const kind = filterKind(band.bandType)
   const canGain = bandHasGain(band.bandType)
+  const canDynamic = canGain
 
   return (
     <section
@@ -81,6 +82,26 @@ export function ControlRack({
           </button>
           <button
             type="button"
+            className={`band-dyn${band.dynamic ? ' is-on' : ''}${canDynamic ? '' : ' is-disabled'}`}
+            aria-pressed={band.dynamic}
+            disabled={!canDynamic}
+            aria-label={`Band ${selected + 1} dynamic EQ`}
+            title={
+              canDynamic
+                ? band.dynamic
+                  ? 'Disable dynamic EQ'
+                  : 'Enable dynamic EQ (Pro-Q style)'
+                : `${kind.label} has no gain stage for dynamic EQ`
+            }
+            onClick={() => {
+              if (!canDynamic) return
+              onBandChange({ dynamic: !band.dynamic })
+            }}
+          >
+            Dyn
+          </button>
+          <button
+            type="button"
             className={`band-toggle${band.active ? ' is-on' : ''}`}
             role="switch"
             aria-checked={band.active}
@@ -99,7 +120,12 @@ export function ControlRack({
               aria-pressed={band.bandType === item.type}
               title={item.label}
               aria-label={item.label}
-              onClick={() => onBandChange({ bandType: item.type })}
+              onClick={() =>
+                onBandChange({
+                  bandType: item.type,
+                  ...(bandHasGain(item.type) ? {} : { dynamic: false }),
+                })
+              }
             >
               <svg viewBox="0 0 32 20" aria-hidden="true">
                 <path d={item.glyph} />
@@ -151,6 +177,69 @@ export function ControlRack({
           toProgress={qToProgress}
           fromProgress={progressToQ}
           onChange={(q) => onBandChange({ q })}
+        />
+      </div>
+
+      <div className={`dyn-controls${band.dynamic && canDynamic ? ' is-open' : ''}`}>
+        <span className="dyn-label">Dynamic</span>
+        <Knob
+          variant="band"
+          label="Thresh"
+          value={band.thresholdDb}
+          min={-60}
+          max={0}
+          step={0.5}
+          unit="dB"
+          format={formatGain}
+          defaultValue={defaultBand.thresholdDb}
+          disabled={!band.dynamic || !canDynamic}
+          disabledHint="Enable Dyn first"
+          onChange={(thresholdDb) => onBandChange({ thresholdDb })}
+        />
+        <Knob
+          variant="band"
+          label="Range"
+          value={band.rangeDb}
+          min={-24}
+          max={24}
+          step={0.1}
+          unit="dB"
+          format={formatGain}
+          defaultValue={defaultBand.rangeDb}
+          originAtDefault
+          disabled={!band.dynamic || !canDynamic}
+          disabledHint="Enable Dyn first"
+          onChange={(rangeDb) => onBandChange({ rangeDb })}
+        />
+        <Knob
+          variant="band"
+          label="Attack"
+          value={band.attackMs}
+          min={0.1}
+          max={500}
+          step={0.1}
+          unit="ms"
+          format={(value) =>
+            value < 10 ? value.toFixed(1) : String(Math.round(value))
+          }
+          defaultValue={defaultBand.attackMs}
+          disabled={!band.dynamic || !canDynamic}
+          disabledHint="Enable Dyn first"
+          onChange={(attackMs) => onBandChange({ attackMs })}
+        />
+        <Knob
+          variant="band"
+          label="Release"
+          value={band.releaseMs}
+          min={1}
+          max={5000}
+          step={1}
+          unit="ms"
+          format={(value) => String(Math.round(value))}
+          defaultValue={defaultBand.releaseMs}
+          disabled={!band.dynamic || !canDynamic}
+          disabledHint="Enable Dyn first"
+          onChange={(releaseMs) => onBandChange({ releaseMs })}
         />
       </div>
 

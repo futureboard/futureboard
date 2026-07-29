@@ -12,6 +12,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@fontsource-variable/mona-sans": "^5.3.0",
     "svelte": "^5.51.0"
   },
   "devDependencies": {

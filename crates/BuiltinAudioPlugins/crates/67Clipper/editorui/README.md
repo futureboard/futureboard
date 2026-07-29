@@ -12,7 +12,7 @@ red gain-reduction/clip overlay from the top), a floating rounded control
 panel over the bottom-left of the stage (mode pushbuttons, Threshold / Shape /
 Ceiling), thin In/Out/GR bar meters on the right, and a bottom strip for
 Mix, DC Filter, and Stereo Link. Dark charcoal surfaces, one neon-blue signal
-accent, soft red reserved for clipping.
+accent, soft red reserved for clipping. Typography is Mona Sans (variable).
 
 ## Wire contract
 
