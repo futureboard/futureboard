@@ -1654,14 +1654,21 @@ pub(crate) fn apply_external_bridge_insert_block(
     // `params["role"]` resolved at build time — no params-map read per block.
     let is_effect = insert.bridge_is_effect;
 
-    if is_effect {
-        sink.write_input(&block_l[..frames], &block_r[..frames], frames);
-    }
-
     if insert.scratch_l.len() < frames {
         insert.scratch_l.resize(frames, 0.0);
         insert.scratch_r.resize(frames, 0.0);
     }
+
+    // One-block handshake ownership (critical):
+    //   1. read previous wet  — proves the host finished the last cycle and
+    //      released `audio_in` (it copies input before publishing `done_seq`);
+    //   2. write next dry     — only now is overwriting `audio_in` safe;
+    //   3. apply wet to block;
+    //   4. request next       — host may read `audio_in` after this.
+    // The old write→read→request order raced the host on the single `audio_in`
+    // buffer. Offline export almost always lost that race (near-zero gap between
+    // request and the next write), tearing wet blocks into stutter / overlap.
+    // Live hits the same bug whenever the host overruns the device period.
     let got = if insert.vsti_output_children.is_empty() {
         // Default single-track path (unchanged): fold the selected channels into
         // this track's stereo.
@@ -1688,6 +1695,11 @@ pub(crate) fn apply_external_bridge_insert_block(
         insert.scratch_r[..got].fill(0.0);
         got
     };
+
+    if is_effect {
+        // Current dry (pre-apply). Host will process this after `request_block`.
+        sink.write_input(&block_l[..frames], &block_r[..frames], frames);
+    }
 
     // Multi-out diagnostic: which plugin output channels actually carry signal
     // this block, and which the engine is folding. Tells separate-out silence

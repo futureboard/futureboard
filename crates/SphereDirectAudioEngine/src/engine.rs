@@ -5437,12 +5437,16 @@ mod bridge_insert_tests {
 
     #[test]
     fn serial_bridge_effect_chain_applies_both_gains() {
+        // Models the real one-block handshake: read previous wet → write next
+        // dry → request (which processes written dry into the next wet).
         #[derive(Debug)]
         struct MultSink {
             mult: f32,
-            done: AtomicU64,
-            buf_l: std::sync::Mutex<Vec<f32>>,
-            buf_r: std::sync::Mutex<Vec<f32>>,
+            fresh: AtomicU64,
+            in_l: std::sync::Mutex<Vec<f32>>,
+            in_r: std::sync::Mutex<Vec<f32>>,
+            out_l: std::sync::Mutex<Vec<f32>>,
+            out_r: std::sync::Mutex<Vec<f32>>,
         }
 
         impl PluginBridgeSink for MultSink {
@@ -5450,28 +5454,34 @@ mod bridge_insert_tests {
                 true
             }
             fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
-                let done = self.done.load(Ordering::Acquire);
-                if done == 0 {
+                if self.fresh.swap(0, Ordering::AcqRel) == 0 {
                     return 0;
                 }
-                self.done.store(0, Ordering::Release);
-                let bl = self.buf_l.lock().unwrap();
-                let br = self.buf_r.lock().unwrap();
+                let bl = self.out_l.lock().unwrap();
+                let br = self.out_r.lock().unwrap();
                 let n = frames.min(out_l.len()).min(out_r.len()).min(bl.len());
-                for i in 0..n {
-                    out_l[i] = bl[i] * self.mult;
-                    out_r[i] = br[i] * self.mult;
-                }
+                out_l[..n].copy_from_slice(&bl[..n]);
+                out_r[..n].copy_from_slice(&br[..n]);
                 n
             }
             fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
             fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
                 let n = frames.min(in_l.len()).min(in_r.len());
-                *self.buf_l.lock().unwrap() = in_l[..n].to_vec();
-                *self.buf_r.lock().unwrap() = in_r[..n].to_vec();
+                *self.in_l.lock().unwrap() = in_l[..n].to_vec();
+                *self.in_r.lock().unwrap() = in_r[..n].to_vec();
             }
             fn request_block(&self, _: u32) {
-                self.done.store(1, Ordering::Release);
+                let inl = self.in_l.lock().unwrap();
+                let inr = self.in_r.lock().unwrap();
+                let mut outl = self.out_l.lock().unwrap();
+                let mut outr = self.out_r.lock().unwrap();
+                outl.resize(inl.len(), 0.0);
+                outr.resize(inr.len(), 0.0);
+                for i in 0..inl.len() {
+                    outl[i] = inl[i] * self.mult;
+                    outr[i] = inr[i] * self.mult;
+                }
+                self.fresh.store(1, Ordering::Release);
             }
         }
 
@@ -5518,17 +5528,22 @@ mod bridge_insert_tests {
             smoothed_gain_l: 1.0,
             smoothed_gain_r: 1.0,
         };
+        // Pre-seed previous-cycle wet so the first read applies A×2 then B×3.
         let sink_a = Arc::new(MultSink {
             mult: 2.0,
-            done: AtomicU64::new(1),
-            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
-            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+            fresh: AtomicU64::new(1),
+            in_l: std::sync::Mutex::new(vec![0.0; 8]),
+            in_r: std::sync::Mutex::new(vec![0.0; 8]),
+            out_l: std::sync::Mutex::new(vec![2.0; 8]),
+            out_r: std::sync::Mutex::new(vec![2.0; 8]),
         });
         let sink_b = Arc::new(MultSink {
             mult: 3.0,
-            done: AtomicU64::new(1),
-            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
-            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+            fresh: AtomicU64::new(1),
+            in_l: std::sync::Mutex::new(vec![0.0; 8]),
+            in_r: std::sync::Mutex::new(vec![0.0; 8]),
+            out_l: std::sync::Mutex::new(vec![6.0; 8]),
+            out_r: std::sync::Mutex::new(vec![6.0; 8]),
         });
         track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
         track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
@@ -5545,9 +5560,11 @@ mod bridge_insert_tests {
         #[derive(Debug)]
         struct MultSink {
             mult: f32,
-            done: AtomicU64,
-            buf_l: std::sync::Mutex<Vec<f32>>,
-            buf_r: std::sync::Mutex<Vec<f32>>,
+            fresh: AtomicU64,
+            in_l: std::sync::Mutex<Vec<f32>>,
+            in_r: std::sync::Mutex<Vec<f32>>,
+            out_l: std::sync::Mutex<Vec<f32>>,
+            out_r: std::sync::Mutex<Vec<f32>>,
         }
 
         impl PluginBridgeSink for MultSink {
@@ -5555,28 +5572,34 @@ mod bridge_insert_tests {
                 true
             }
             fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
-                let done = self.done.load(Ordering::Acquire);
-                if done == 0 {
+                if self.fresh.swap(0, Ordering::AcqRel) == 0 {
                     return 0;
                 }
-                self.done.store(0, Ordering::Release);
-                let bl = self.buf_l.lock().unwrap();
-                let br = self.buf_r.lock().unwrap();
+                let bl = self.out_l.lock().unwrap();
+                let br = self.out_r.lock().unwrap();
                 let n = frames.min(out_l.len()).min(out_r.len()).min(bl.len());
-                for i in 0..n {
-                    out_l[i] = bl[i] * self.mult;
-                    out_r[i] = br[i] * self.mult;
-                }
+                out_l[..n].copy_from_slice(&bl[..n]);
+                out_r[..n].copy_from_slice(&br[..n]);
                 n
             }
             fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
             fn write_input(&self, in_l: &[f32], in_r: &[f32], frames: usize) {
                 let n = frames.min(in_l.len()).min(in_r.len());
-                *self.buf_l.lock().unwrap() = in_l[..n].to_vec();
-                *self.buf_r.lock().unwrap() = in_r[..n].to_vec();
+                *self.in_l.lock().unwrap() = in_l[..n].to_vec();
+                *self.in_r.lock().unwrap() = in_r[..n].to_vec();
             }
             fn request_block(&self, _: u32) {
-                self.done.store(1, Ordering::Release);
+                let inl = self.in_l.lock().unwrap();
+                let inr = self.in_r.lock().unwrap();
+                let mut outl = self.out_l.lock().unwrap();
+                let mut outr = self.out_r.lock().unwrap();
+                outl.resize(inl.len(), 0.0);
+                outr.resize(inr.len(), 0.0);
+                for i in 0..inl.len() {
+                    outl[i] = inl[i] * self.mult;
+                    outr[i] = inr[i] * self.mult;
+                }
+                self.fresh.store(1, Ordering::Release);
             }
         }
 
@@ -5641,16 +5664,20 @@ mod bridge_insert_tests {
         };
         let sink_a = Arc::new(MultSink {
             mult: 2.0,
-            done: AtomicU64::new(1),
-            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
-            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+            fresh: AtomicU64::new(1),
+            in_l: std::sync::Mutex::new(vec![0.0; 8]),
+            in_r: std::sync::Mutex::new(vec![0.0; 8]),
+            out_l: std::sync::Mutex::new(vec![2.0; 8]),
+            out_r: std::sync::Mutex::new(vec![2.0; 8]),
         });
         let sink_b = Arc::new(MissSink);
         let sink_c = Arc::new(MultSink {
             mult: 5.0,
-            done: AtomicU64::new(1),
-            buf_l: std::sync::Mutex::new(vec![0.0; 8]),
-            buf_r: std::sync::Mutex::new(vec![0.0; 8]),
+            fresh: AtomicU64::new(1),
+            in_l: std::sync::Mutex::new(vec![0.0; 8]),
+            in_r: std::sync::Mutex::new(vec![0.0; 8]),
+            out_l: std::sync::Mutex::new(vec![10.0; 8]),
+            out_r: std::sync::Mutex::new(vec![10.0; 8]),
         });
         track.inserts[0].bridge_sink = Some(sink_a as Arc<dyn PluginBridgeSink>);
         track.inserts[1].bridge_sink = Some(sink_b as Arc<dyn PluginBridgeSink>);
