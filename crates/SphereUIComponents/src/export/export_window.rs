@@ -26,8 +26,12 @@ use DirectAudio::{
 
 use crate::components::form::select::{select, SelectOption};
 use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
+use crate::components::text_input::{
+    bind_mouse_selection, text_field_with_callbacks_and_ime,
+};
 use crate::components::title_bar::external_window_titlebar_compact;
 use crate::components::title_bar::TITLEBAR_HEIGHT;
+use crate::components::{TextInputAction, TextInputState};
 use crate::theme::{self, Colors};
 use gpui::AppContext;
 
@@ -37,7 +41,7 @@ use super::export_settings::{
 };
 
 pub const EXPORT_WINDOW_WIDTH: f32 = 560.0;
-const EXPORT_WINDOW_HEIGHT: f32 = 548.0;
+const EXPORT_WINDOW_HEIGHT: f32 = 585.0;
 const BODY_PAD: f32 = 14.0;
 const ROW_GAP: f32 = 9.0;
 const LABEL_W: f32 = 96.0;
@@ -127,6 +131,8 @@ pub struct ExportArrangementWindow {
     audio_engine: Option<DirectAudio::AudioEngine>,
     defaults: ExportProjectDefaults,
     settings: ExportSettings,
+    /// Editable export stem (mixdown file name / stems folder prefix).
+    name_input: TextInputState,
     state: ExportJobState,
     open_select: Option<SelectField>,
     job: Option<ExportJob>,
@@ -147,6 +153,10 @@ impl ExportArrangementWindow {
         // opener can override with a project Exports folder.
         let file = ExportSettings::default_file_name(&project_name, settings.format);
         settings.output_path = Some(std::env::temp_dir().join(file));
+        let stem = export_stem_from_input(&project_name);
+        let mut name_input = TextInputState::new("export-file-name", cx.focus_handle())
+            .with_placeholder("Export name");
+        name_input.set_value(&stem);
         Self {
             project_name,
             snapshot,
@@ -154,6 +164,7 @@ impl ExportArrangementWindow {
             audio_engine,
             defaults,
             settings,
+            name_input,
             state: ExportJobState::Editing,
             open_select: None,
             job: None,
@@ -164,6 +175,37 @@ impl ExportArrangementWindow {
     /// Override the default output path (e.g. project Exports folder).
     pub fn set_default_output(&mut self, path: PathBuf) {
         self.settings.output_path = Some(path);
+        self.sync_name_from_path();
+    }
+
+    fn export_name(&self) -> String {
+        export_stem_from_input(&self.name_input.value)
+    }
+
+    /// Keep `output_path` in the same folder, with the name field as the stem.
+    fn sync_output_from_name(&mut self) {
+        let stem = self.export_name();
+        let parent = self
+            .settings
+            .output_path
+            .as_ref()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+            .unwrap_or_else(std::env::temp_dir);
+        let file = format!("{stem}.{}", self.settings.format.extension());
+        self.settings.output_path = Some(parent.join(file));
+    }
+
+    fn sync_name_from_path(&mut self) {
+        if let Some(stem) = self
+            .settings
+            .output_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            self.name_input.set_value(stem);
+        }
     }
 
     fn subtitle(&self) -> String {
@@ -191,6 +233,25 @@ impl ExportArrangementWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, ExportJobState::Editing | ExportJobState::Failed(_))
+            && self.name_input.is_focused(window)
+        {
+            let action = self.name_input.handle_key_ime(event, Some(cx));
+            self.sync_output_from_name();
+            match action {
+                TextInputAction::Submit => {
+                    self.start_export(cx);
+                }
+                TextInputAction::Cancel => {
+                    self.close(window, cx);
+                }
+                TextInputAction::Consumed | TextInputAction::Pass => {
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         match event.keystroke.key.as_str() {
             "escape" => {
                 if self.open_select.is_some() {
@@ -222,14 +283,14 @@ impl ExportArrangementWindow {
             let entity = cx.entity().clone();
             let format = self.settings.format;
             let mode = self.settings.mode;
-            let project_name = self.project_name.clone();
+            let export_name = self.export_name();
             let start = self
                 .settings
                 .output_path
                 .clone()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
                 .unwrap_or_else(std::env::temp_dir);
-            let file = ExportSettings::default_file_name(&self.project_name, format);
+            let file = format!("{export_name}.{}", format.extension());
             cx.spawn(async move |_this, cx| {
                 let dialog = rfd::AsyncFileDialog::new()
                     .set_title(if mode == ExportMode::Mixdown {
@@ -251,12 +312,11 @@ impl ExportArrangementWindow {
                     let path = if mode == ExportMode::Mixdown {
                         handle.path().to_path_buf()
                     } else {
-                        handle
-                            .path()
-                            .join(ExportSettings::default_file_name(&project_name, format))
+                        handle.path().join(format!("{export_name}.{}", format.extension()))
                     };
                     let _ = entity.update(cx, |this, cx| {
                         this.settings.output_path = Some(path);
+                        this.sync_name_from_path();
                         cx.notify();
                     });
                 }
@@ -274,6 +334,7 @@ impl ExportArrangementWindow {
 
     fn start_export(&mut self, cx: &mut Context<Self>) {
         self.open_select = None;
+        self.sync_output_from_name();
         let request = match self.settings.to_request(&self.snapshot, &self.defaults) {
             Ok(request) => request,
             Err(err) => {
@@ -299,7 +360,7 @@ impl ExportArrangementWindow {
             &request,
             self.settings.mode,
             &self.defaults,
-            &self.project_name,
+            &self.export_name(),
         );
         if self.settings.mode != ExportMode::Mixdown && batch_targets.is_empty() {
             self.state = ExportJobState::Failed("No source tracks are available to export.".into());
@@ -408,13 +469,21 @@ impl ExportArrangementWindow {
 // ── Rendering ────────────────────────────────────────────────────────────────
 
 impl Render for ExportArrangementWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Keep the destination path stem aligned with the name field (IME edits
+        // notify without going through handle_key).
+        if matches!(
+            self.state,
+            ExportJobState::Editing | ExportJobState::Failed(_)
+        ) {
+            self.sync_output_from_name();
+        }
         let target = cx.entity().clone();
         let title = "Export Arrangement".to_string();
 
         let body = match &self.state {
             ExportJobState::Editing | ExportJobState::Failed(_) => {
-                self.render_editing(target.clone())
+                self.render_editing(window, target.clone())
             }
             ExportJobState::Running(progress) => {
                 self.render_progress(progress.clone(), target.clone())
@@ -477,7 +546,11 @@ impl Render for ExportArrangementWindow {
 }
 
 impl ExportArrangementWindow {
-    fn render_editing(&self, target: gpui::Entity<Self>) -> gpui::AnyElement {
+    fn render_editing(
+        &self,
+        window: &Window,
+        target: gpui::Entity<Self>,
+    ) -> gpui::AnyElement {
         let invalid = self.settings.validate(&self.defaults).err();
 
         let mut col = div()
@@ -488,6 +561,7 @@ impl ExportArrangementWindow {
             .py(px(BODY_PAD))
             .gap(px(ROW_GAP))
             .child(section_label("DESTINATION"))
+            .child(self.name_row(window, target.clone()))
             .child(self.output_row(target.clone()))
             .child(self.mode_row(target.clone()))
             .child(section_label("FORMAT"))
@@ -532,6 +606,21 @@ impl ExportArrangementWindow {
                     .min_w(px(0.0))
                     .child(control.into_any_element()),
             )
+    }
+
+    fn name_row(&self, window: &Window, target: gpui::Entity<Self>) -> impl IntoElement {
+        let focused = self.name_input.is_focused(window);
+        let callbacks = bind_mouse_selection(target.clone(), |this| &mut this.name_input);
+        let control =
+            text_field_with_callbacks_and_ime(&self.name_input, focused, callbacks, target);
+        self.labeled(
+            if self.settings.mode == ExportMode::Mixdown {
+                "File name"
+            } else {
+                "Name"
+            },
+            control,
+        )
     }
 
     fn output_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
@@ -828,9 +917,7 @@ impl ExportArrangementWindow {
                     "mp3" => AudioFileFormat::Mp3,
                     _ => AudioFileFormat::Wav,
                 };
-                if let Some(path) = self.settings.normalized_output_path() {
-                    self.settings.output_path = Some(path);
-                }
+                self.sync_output_from_name();
             }
             SelectField::FormatOption => match self.settings.format {
                 AudioFileFormat::Wav => {
@@ -1195,6 +1282,18 @@ fn sanitize_file_stem(name: &str) -> String {
         sanitized
     }
 }
+
+/// Stem for the mixdown file / stems folder prefix. Empty input falls back to
+/// "Export" (not "Track" — that default is for unnamed mixer channels).
+fn export_stem_from_input(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "Export".to_string();
+    }
+    sanitize_file_stem(trimmed)
+}
+
+crate::impl_single_input_window_ime!(ExportArrangementWindow, name_input);
 
 // ── Small shared button helpers (compact, theme-token only) ──────────────────
 
