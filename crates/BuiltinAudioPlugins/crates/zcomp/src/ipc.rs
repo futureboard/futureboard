@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CompModel, Params, clamp, default_params};
+use builtin_dsp_core::clamp;
+
+use crate::{CompModel, Params, default_params};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const STATE_VERSION: u32 = 1;
@@ -25,8 +27,9 @@ pub const SIDECHAIN_INDEX: u32 = 9;
 pub const STEREO_LINK_INDEX: u32 = 10;
 pub const COLOR_INDEX: u32 = 11;
 pub const AUTO_RELEASE_INDEX: u32 = 12;
+pub const SC_LISTEN_INDEX: u32 = 13;
 
-pub const PARAM_COUNT: usize = 13;
+pub const PARAM_COUNT: usize = 14;
 
 /// Wire index *is* the position in this table. Append only.
 pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
@@ -43,6 +46,7 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "stereoLink",
     "color",
     "autoRelease",
+    "scListen",
 ];
 
 const RANGES: [(f32, f32); PARAM_COUNT] = [
@@ -59,6 +63,7 @@ const RANGES: [(f32, f32); PARAM_COUNT] = [
     (0.0, 100.0),   // stereoLink
     (0.0, 100.0),   // color
     (0.0, 0.0),     // autoRelease
+    (0.0, 0.0),     // scListen
 ];
 
 #[inline]
@@ -139,6 +144,7 @@ pub fn apply_wire_param(params: &mut Params, index: u32, value: f32) -> bool {
         STEREO_LINK_INDEX => params.stereo_link = clamp_wire(index, value),
         COLOR_INDEX => params.color = clamp_wire(index, value),
         AUTO_RELEASE_INDEX => params.auto_release = value >= 0.5,
+        SC_LISTEN_INDEX => params.sc_listen = value >= 0.5,
         _ => return false,
     }
     true
@@ -166,6 +172,7 @@ pub fn ui_values(params: &Params) -> Vec<(&'static str, f32)> {
         ("stereoLink", params.stereo_link),
         ("color", params.color),
         ("autoRelease", f32::from(params.auto_release)),
+        ("scListen", f32::from(params.sc_listen)),
     ]
 }
 

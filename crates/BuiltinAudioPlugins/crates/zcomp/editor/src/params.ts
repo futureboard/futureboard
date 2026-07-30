@@ -3,7 +3,7 @@
  * Rust remains authoritative — this only keeps knobs and sanitization honest.
  */
 
-import { defaults, type CompModel, type ZcompParams } from './bridge'
+import { defaults, type ZcompParams } from './bridge'
 
 export type ParamSpec = {
   id: keyof ZcompParams
@@ -13,6 +13,8 @@ export type ParamSpec = {
   step: number
   unit: string
   defaultValue: number
+  /** Engraved end-of-travel legends on the knob collar. */
+  scale?: readonly [string, string]
 }
 
 export const PARAM_SPECS = {
@@ -24,6 +26,7 @@ export const PARAM_SPECS = {
     step: 0.1,
     unit: 'dB',
     defaultValue: defaults.thresholdDb,
+    scale: ['-60', '0'],
   },
   ratio: {
     id: 'ratio',
@@ -33,6 +36,7 @@ export const PARAM_SPECS = {
     step: 0.1,
     unit: ':1',
     defaultValue: defaults.ratio,
+    scale: ['1', '20'],
   },
   attackMs: {
     id: 'attackMs',
@@ -42,6 +46,7 @@ export const PARAM_SPECS = {
     step: 0.01,
     unit: 'ms',
     defaultValue: defaults.attackMs,
+    scale: ['0.01', '120'],
   },
   releaseMs: {
     id: 'releaseMs',
@@ -51,6 +56,7 @@ export const PARAM_SPECS = {
     step: 1,
     unit: 'ms',
     defaultValue: defaults.releaseMs,
+    scale: ['10', '2.5k'],
   },
   kneeDb: {
     id: 'kneeDb',
@@ -60,6 +66,7 @@ export const PARAM_SPECS = {
     step: 0.1,
     unit: 'dB',
     defaultValue: defaults.kneeDb,
+    scale: ['0', '24'],
   },
   makeupDb: {
     id: 'makeupDb',
@@ -69,6 +76,7 @@ export const PARAM_SPECS = {
     step: 0.1,
     unit: 'dB',
     defaultValue: defaults.makeupDb,
+    scale: ['-24', '+24'],
   },
   mix: {
     id: 'mix',
@@ -78,6 +86,7 @@ export const PARAM_SPECS = {
     step: 1,
     unit: '%',
     defaultValue: defaults.mix,
+    scale: ['0', '100'],
   },
   sidechainHpfHz: {
     id: 'sidechainHpfHz',
@@ -87,6 +96,7 @@ export const PARAM_SPECS = {
     step: 1,
     unit: 'Hz',
     defaultValue: defaults.sidechainHpfHz,
+    scale: ['20', '500'],
   },
   stereoLink: {
     id: 'stereoLink',
@@ -96,6 +106,7 @@ export const PARAM_SPECS = {
     step: 1,
     unit: '%',
     defaultValue: defaults.stereoLink,
+    scale: ['0', '100'],
   },
   color: {
     id: 'color',
@@ -105,32 +116,11 @@ export const PARAM_SPECS = {
     step: 1,
     unit: '%',
     defaultValue: defaults.color,
+    scale: ['0', '100'],
   },
 } as const satisfies Record<string, ParamSpec>
 
 /** Matches `CompModel` / `model_coeffs` character in Rust — engraved, not marketing. */
-export const MODEL_CIRCUIT: Record<
-  CompModel,
-  { title: string; topology: string }
-> = {
-  comp2500: {
-    title: '2500',
-    topology: 'VCA feed-forward · soft dual knee · THD colour',
-  },
-  distressor: {
-    title: 'Distress',
-    topology: 'Aggressive detector · British grit · hard ratios',
-  },
-  avalon: {
-    title: 'Avalon',
-    topology: 'Class-A optical feedback · slow musical recovery',
-  },
-  ssl: {
-    title: 'SSL',
-    topology: 'Bus glue · soft knee · program auto-release',
-  },
-}
-
 export function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }

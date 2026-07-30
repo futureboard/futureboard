@@ -1,171 +1,107 @@
 /*
- * Z-Comp — multi-circuit compressor faceplate in the FA family language.
+ * Z-Comp — 2U multi-circuit dynamics processor faceplate.
  *
- * Craft comes from materials (painted metal, aluminum knobs, enamel VU), not
- * glow / glassmorphism. Switching Model retints the panel enamel and meter
- * face — the colour change stays, but it reads as different hardware skins.
+ * Character comes from materials: painted steel, brushed aluminum, enamel
+ * meter, engraved silkscreen, lamp-lit pushbuttons. No glow, no glass panes, no
+ * decorative gradients — every colour on this panel either is a material or
+ * reports a real value.
+ *
+ * Geometry contract
+ *   layout owner   .device (fixed design pixels, see device.ts)
+ *   scale owner    .stage via useDeviceScale — transform only, never layout
+ *   clip owner     .stage
+ *   state owner    App (params) / MeterBay + CurveDisplay (telemetry refs)
+ *   coordinates    design px inside .device; SVG user units inside each part
  */
 
-@property --panel-hi {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #2e343c;
-}
-@property --panel {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #1f242b;
-}
-@property --panel-lo {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #15191e;
-}
-@property --meter-face-hi {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #3a6fad;
-}
-@property --meter-face {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #2a5f9a;
-}
-@property --meter-face-lo {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #1a4574;
-}
-@property --meter-ink {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #f0f4f8;
-}
-@property --meter-hot {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #d4452e;
-}
-@property --btn-on {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #d8b35a;
-}
-@property --btn-on-ink {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #1a160e;
-}
-@property --focus {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #c9a24a;
-}
-
 :root {
-  --panel-hi: #2e343c;
-  --panel: #1f242b;
-  --panel-lo: #15191e;
-  --base: #0e1013;
-  --chassis: #0a0b0d;
+  /* Chassis and faceplate. */
+  --chassis: #08090b;
+  --panel-hi: #363d47;
+  --panel: #262c34;
+  --panel-lo: #171b21;
+  --panel-edge: #0d1013;
+  --inset: #0e1116;
+  --inset-deep: #07080b;
 
-  --inset: #101317;
-  --bezel: #4a5563;
-  --bezel-hi: #8a96a6;
-
-  --border: rgba(0, 0, 0, 0.55);
+  --border: rgba(0, 0, 0, 0.62);
   --border-hi: rgba(255, 255, 255, 0.1);
-  --border-soft: rgba(255, 255, 255, 0.06);
+  --border-soft: rgba(255, 255, 255, 0.055);
 
-  --engrave: #e6e9ee;
-  --engrave-muted: rgba(220, 226, 234, 0.58);
-  --readout: #c5ced8;
+  /* Silkscreen. */
+  --engrave: #e8ecf2;
+  --engrave-muted: rgba(224, 230, 238, 0.56);
+  --engrave-faint: rgba(224, 230, 238, 0.3);
+  --readout: #d6dee8;
 
-  --focus: #c9a24a;
-  --lamp: #e8a83a;
-  --lamp-soft: rgba(232, 168, 58, 0.4);
-  --clip: #c43a28;
+  /* Lamps and status. */
+  --lamp: #f0ad3c;
+  --lamp-soft: rgba(240, 173, 60, 0.4);
+  --clip: #d1402c;
+  --led-cool: #4fb08f;
+  --led-warm: #d8a84a;
 
-  --meter-face-hi: #3a6fad;
-  --meter-face: #2a5f9a;
-  --meter-face-lo: #1a4574;
-  --meter-ink: #f0f4f8;
-  --meter-hot: #d4452e;
+  /* Meter enamel — retinted per circuit. */
+  --meter-face-hi: #4076b4;
+  --meter-face: #2c6099;
+  --meter-face-lo: #17406e;
+  --meter-ink: #f2f6fa;
+  --meter-hot: #d8492f;
 
-  --btn: #1a1e24;
-  --btn-hi: #323942;
-  --btn-on: #d8b35a;
-  --btn-on-ink: #1a160e;
-  --drive: 0;
+  /* Circuit accent: lamp caps, value collars, curve trace. */
+  --accent: #8ec6e4;
+  --accent-ink: #0a1219;
 
-  --knob-lg: clamp(5.25rem, 10vw, 6.75rem);
-  --knob-sm: clamp(3rem, 5.5vw, 3.75rem);
-
-  --radius: 0.55rem;
-  --radius-sm: 0.4rem;
-  --radius-panel: 0.85rem;
-  --radius-well: 0.7rem;
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 0.75rem;
-  --space-4: 1rem;
-
-  --skin-ease: 320ms cubic-bezier(0.22, 0.8, 0.28, 1);
+  --radius: 4px;
+  --radius-sm: 3px;
 
   color-scheme: dark;
 }
 
-/* Model skins — enamel + VU face, not neon accents. */
-.unit[data-model='ssl'] {
-  --panel-hi: #2e343c;
-  --panel: #1f242b;
-  --panel-lo: #15191e;
-  --meter-face-hi: #3a6fad;
-  --meter-face: #2a5f9a;
-  --meter-face-lo: #1a4574;
-  --btn-on: #7eb8d4;
-  --btn-on-ink: #0e1820;
-  --focus: #7eb8d4;
+/* Circuit skins. Each unit is a different painted panel and meter enamel. */
+.device[data-model='ssl'] {
+  --accent: #8ec6e4;
+  --accent-ink: #0a1219;
 }
 
-.unit[data-model='comp2500'] {
-  --panel-hi: #2a3338;
-  --panel: #1c2428;
-  --panel-lo: #13191c;
-  --meter-face-hi: #4aa8b4;
-  --meter-face: #2f8794;
-  --meter-face-lo: #1c5e68;
-  --btn-on: #5ec4d4;
-  --btn-on-ink: #0c1a1c;
-  --focus: #5ec4d4;
+.device[data-model='comp2500'] {
+  --panel-hi: #2f3b40;
+  --panel: #222c31;
+  --panel-lo: #151c20;
+  --meter-face-hi: #4bb0bb;
+  --meter-face: #2f8b98;
+  --meter-face-lo: #1a5a65;
+  --accent: #63cddb;
+  --accent-ink: #06171a;
+  --led-cool: #4ec0b4;
 }
 
-.unit[data-model='distressor'] {
-  --panel-hi: #3a322c;
-  --panel: #28221e;
-  --panel-lo: #1a1613;
-  --meter-face-hi: #e0b56a;
-  --meter-face: #c9923e;
-  --meter-face-lo: #8a6024;
-  --meter-ink: #1c140a;
-  --meter-hot: #8a2418;
-  --btn-on: #d4a05e;
-  --btn-on-ink: #1a1208;
-  --focus: #d4a05e;
+.device[data-model='distressor'] {
+  --panel-hi: #423a31;
+  --panel: #2e2822;
+  --panel-lo: #1d1915;
+  --meter-face-hi: #e4bd74;
+  --meter-face: #cd9743;
+  --meter-face-lo: #8c6326;
+  --meter-ink: #1d1509;
+  --meter-hot: #8f2517;
+  --accent: #e0a95f;
+  --accent-ink: #1a1206;
+  --led-warm: #e0a95f;
 }
 
-.unit[data-model='avalon'] {
-  --panel-hi: #2e3832;
-  --panel: #1f2823;
-  --panel-lo: #141a16;
-  --meter-face-hi: #8fbf96;
-  --meter-face: #6a9a72;
-  --meter-face-lo: #43664a;
-  --meter-ink: #101610;
-  --meter-hot: #8a3218;
-  --btn-on: #7eb68a;
-  --btn-on-ink: #0e1610;
-  --focus: #7eb68a;
+.device[data-model='avalon'] {
+  --panel-hi: #313d36;
+  --panel: #222b26;
+  --panel-lo: #151b17;
+  --meter-face-hi: #97c69d;
+  --meter-face: #6d9f76;
+  --meter-face-lo: #446a4c;
+  --meter-ink: #101710;
+  --meter-hot: #8d3419;
+  --accent: #8cc898;
+  --accent-ink: #08130b;
+  --led-cool: #7fc08c;
 }
 
 * {
@@ -176,9 +112,7 @@ html,
 body,
 #root {
   width: 100%;
-  min-width: 760px;
   height: 100%;
-  min-height: 460px;
   margin: 0;
   overflow: hidden;
 }
@@ -186,8 +120,9 @@ body,
 body {
   background: var(--chassis);
   color: var(--engrave);
-  font-family: 'Helvetica Neue', Helvetica, Arial, 'Segoe UI', sans-serif;
-  font-size: 12px;
+  font-family:
+    'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, 'Segoe UI', sans-serif;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   font-synthesis: none;
   line-height: 1.2;
@@ -214,710 +149,237 @@ button {
 button:focus-visible,
 [role='slider']:focus-visible,
 [role='switch']:focus-visible,
-[role='radio']:focus-visible {
-  outline: 2px solid var(--focus);
+[role='radio']:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.unit {
-  display: grid;
-  place-items: center;
+/* ── Stage and chassis ─────────────────────────────────────────────────── */
+
+.stage {
+  position: relative;
   width: 100%;
   height: 100%;
-  padding: var(--space-3);
-  background: var(--chassis);
-  transition:
-    --panel-hi var(--skin-ease),
-    --panel var(--skin-ease),
-    --panel-lo var(--skin-ease),
-    --meter-face-hi var(--skin-ease),
-    --meter-face var(--skin-ease),
-    --meter-face-lo var(--skin-ease),
-    --meter-ink var(--skin-ease),
-    --meter-hot var(--skin-ease),
-    --btn-on var(--skin-ease),
-    --btn-on-ink var(--skin-ease),
-    --focus var(--skin-ease);
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #14171c 0%, var(--chassis) 70%);
 }
 
-.unit.is-skin-pulse .panel {
-  animation: skin-bloom 420ms cubic-bezier(0.2, 0.85, 0.25, 1);
+.device {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.55));
 }
 
-.unit.is-skin-pulse .meter-well {
-  animation: well-glow 420ms cubic-bezier(0.2, 0.85, 0.25, 1);
+.device.is-off .face > *:not(.head),
+.device.is-off .meter-bay,
+.device.is-off .curve {
+  filter: grayscale(0.5) brightness(0.72);
 }
 
-@keyframes skin-bloom {
-  0% {
-    filter: brightness(1);
-  }
-  35% {
-    filter: brightness(1.08);
-  }
-  100% {
-    filter: brightness(1);
-  }
-}
-
-@keyframes well-glow {
-  0% {
-    box-shadow:
-      inset 0 2px 5px rgba(0, 0, 0, 0.7),
-      0 1px 0 var(--border-hi);
-  }
-  40% {
-    box-shadow:
-      inset 0 2px 5px rgba(0, 0, 0, 0.7),
-      0 0 0 1px color-mix(in srgb, var(--btn-on) 35%, transparent),
-      0 0 18px color-mix(in srgb, var(--btn-on) 22%, transparent);
-  }
-  100% {
-    box-shadow:
-      inset 0 2px 5px rgba(0, 0, 0, 0.7),
-      0 1px 0 var(--border-hi);
-  }
-}
-
-.panel {
+/* Rack ears: folded steel with recessed hardware. */
+.ear {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  width: min(100%, 58rem);
-  padding: clamp(0.85rem, 2vw, 1.25rem);
+  justify-content: space-between;
+  align-items: center;
+  width: 36px;
+  padding: 22px 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-panel);
-  background: linear-gradient(
-    180deg,
-    var(--panel-hi) 0%,
-    var(--panel) 42%,
-    var(--panel-lo) 100%
-  );
+  background: linear-gradient(90deg, #22272e, #171b20 55%, #0f1216);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.ear:first-child {
+  border-radius: 5px 0 0 5px;
+}
+
+.ear:last-child {
+  border-radius: 0 5px 5px 0;
+}
+
+.screw {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(0, 0, 0, 0.5)),
+    #4a525c;
   box-shadow:
-    inset 0 1px 0 var(--border-hi),
-    0 14px 32px rgba(0, 0, 0, 0.5);
-  transition:
-    background var(--skin-ease),
-    filter 160ms ease,
-    opacity 160ms ease,
-    box-shadow var(--skin-ease);
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 1px 0 rgba(255, 255, 255, 0.07);
+  position: relative;
 }
 
-.panel.is-off .knobs,
-.panel.is-off .extras,
-.panel.is-off .models .bank,
-.panel.is-off .meter-well {
-  filter: grayscale(0.45) brightness(0.78);
-  opacity: 0.62;
+.screw::after {
+  position: absolute;
+  inset: 3px 1.5px;
+  content: '';
+  border-top: 1.5px solid rgba(0, 0, 0, 0.6);
+  transform: rotate(35deg);
+  transform-origin: center;
 }
 
-.top {
+/* Painted faceplate: vertical paint gradient over a fine brushed grain. */
+.face {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border-hi);
+  border-bottom: 1px solid var(--panel-edge);
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.022) 0 1px,
+      rgba(0, 0, 0, 0.02) 1px 3px
+    ),
+    linear-gradient(
+      180deg,
+      var(--panel-hi) 0%,
+      var(--panel) 46%,
+      var(--panel-lo) 100%
+    );
+}
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+
+.head {
   display: grid;
-  grid-template-columns: minmax(7.5rem, 11rem) minmax(0, 1fr) auto;
-  gap: var(--space-3);
-  align-items: start;
+  grid-template-columns: 206px minmax(0, 1fr) 208px 92px;
+  gap: 8px;
+  height: 202px;
 }
 
 .identity {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 10px;
   min-width: 0;
 }
 
-.wordmark {
+.nameplate {
   display: flex;
+  gap: 10px;
   align-items: center;
-  gap: 0.65rem;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #2c333b, #1a1f25);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
-.wordmark .z {
+.nameplate .mark {
   display: grid;
   place-items: center;
-  width: 2.1rem;
-  height: 2.1rem;
-  border: 1px solid var(--border-hi);
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(0, 0, 0, 0.6);
   border-radius: var(--radius-sm);
-  background: var(--inset);
-  color: var(--btn-on);
-  font-size: 0.95rem;
+  background: linear-gradient(180deg, #3b434d, #171b21);
+  color: var(--accent);
+  font-size: 17px;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  transition: color var(--skin-ease), border-color var(--skin-ease);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
-.wordmark strong {
-  display: block;
-  font-size: 0.95rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.wordmark em {
-  display: block;
-  margin-top: 0.15rem;
-  color: var(--engrave-muted);
-  font-size: 0.58rem;
-  font-style: normal;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.meter-bay {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 0.55rem;
-  align-items: stretch;
-  justify-self: center;
-  width: min(100%, 28rem);
-}
-
-.meter-well {
-  display: grid;
-  gap: 0.35rem;
-  justify-self: stretch;
-  width: 100%;
-  padding: 0.45rem;
-  border-radius: var(--radius-well);
-  background:
-    radial-gradient(
-      120% 80% at 50% 0%,
-      color-mix(in srgb, var(--btn-on) calc(var(--drive) * 18%), transparent),
-      transparent 62%
-    ),
-    #0c0e11;
-  box-shadow:
-    inset 0 2px 5px rgba(0, 0, 0, 0.7),
-    0 1px 0 var(--border-hi);
-  transition: box-shadow var(--skin-ease), background var(--skin-ease);
-}
-
-.gr-readout {
-  display: flex;
-  align-items: baseline;
-  gap: 0.35rem;
-  padding: 0 0.15rem 0.1rem;
-}
-
-.gr-readout span,
-.gr-readout small {
-  color: var(--engrave-muted);
-  font-size: 0.58rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.gr-readout output {
-  margin-left: auto;
-  color: var(--btn-on);
-  font-size: 1.05rem;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  transition: color var(--skin-ease);
-}
-
-.io-strip {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  justify-items: center;
-  gap: 0.28rem;
-  min-width: 1.85rem;
-  padding: 0.15rem 0;
-}
-
-.io-label {
-  color: var(--engrave-muted);
-  font-size: 0.55rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.clip-led {
-  width: 0.38rem;
-  height: 0.38rem;
-  border-radius: 50%;
-  background: #2a3038;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.55);
-}
-
-.clip-led.is-on {
-  background: var(--clip);
-  box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--clip) 40%, transparent),
-    0 0 8px color-mix(in srgb, var(--clip) 55%, transparent);
-}
-
-.io-ladder {
-  display: block;
-  width: 0.78rem;
-  height: 100%;
-  min-height: 6.8rem;
-  border-radius: 2px;
-  background: #07090c;
-  box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.75),
-    0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.io-strip output {
-  color: var(--engrave-muted);
-  font-size: 0.58rem;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-
-.io-strip:has(.clip-led.is-on) output {
-  color: var(--clip);
-}
-
-.circuit {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: center;
-  gap: 0.45rem 0.7rem;
-  margin: -0.15rem 0 0;
-  color: var(--engrave-muted);
-  font-size: 0.62rem;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-align: center;
-}
-
-.circuit strong {
-  color: var(--engrave);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.circuit span {
-  color: var(--engrave-muted);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: none;
-}
-
-.link {
-  width: 0.45rem;
-  height: 0.45rem;
-  margin: 0.15rem auto 0;
-  border-radius: 50%;
-  background: #3a4550;
-}
-
-.link.is-live {
-  background: var(--btn-on);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--btn-on) 28%, transparent);
-  transition: background var(--skin-ease), box-shadow var(--skin-ease);
-}
-
-.knob.is-disabled {
-  opacity: 0.48;
-}
-
-.knob.is-disabled .cap {
-  cursor: default;
-  filter: none;
-}
-
-.knob.is-disabled .readout {
-  color: var(--btn-on);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.side {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  align-items: stretch;
-}
-
-.meter-switch {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.2rem;
-  padding: 0.18rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--inset);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
-}
-
-.meter-switch button,
-.auto,
-.models .bank button {
-  height: 1.7rem;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--btn);
-  color: var(--engrave-muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition:
-    background var(--skin-ease),
-    color var(--skin-ease),
-    border-color var(--skin-ease),
-    box-shadow 140ms ease;
-}
-
-.meter-switch button.is-on,
-.auto.is-on,
-.models .bank button.is-on {
-  border-color: rgba(0, 0, 0, 0.35);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--btn-on) 88%, #fff), var(--btn-on));
-  color: var(--btn-on-ink);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.35),
-    0 1px 2px rgba(0, 0, 0, 0.35);
-}
-
-.power {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  height: 2rem;
-  padding: 0 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: linear-gradient(180deg, var(--btn-hi), var(--btn));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.power .lamp {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 50%;
-  background: #2a2e34;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
-}
-
-.power.is-on .lamp {
-  background: var(--lamp);
-  box-shadow:
-    0 0 0 2px var(--lamp-soft),
-    0 0 8px var(--lamp-soft);
-}
-
-.power .legend {
-  color: var(--engrave-muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.power.is-on .legend {
-  color: var(--engrave);
-}
-
-.models {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: var(--space-2);
-  align-items: center;
-}
-
-.bank-label {
-  color: var(--engrave-muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.bank {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.28rem;
-}
-
-.auto {
-  min-width: 5.2rem;
-  padding: 0 0.55rem;
-}
-
-.knobs,
-.extras {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: clamp(0.55rem, 1.8vw, 1.35rem);
-}
-
-.extras {
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--border-soft);
-}
-
-/* Aluminum knob — FA-76 language */
-.knob {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.35rem;
+.nameplate .titles {
   min-width: 0;
 }
 
-.cap {
-  width: var(--knob-lg);
-  height: var(--knob-lg);
-  cursor: ns-resize;
-  touch-action: none;
-  outline: none;
-  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.55));
-}
-
-.knob.sm .cap {
-  width: var(--knob-sm);
-  height: var(--knob-sm);
-}
-
-.cap.is-dragging {
-  filter: drop-shadow(0 5px 8px rgba(0, 0, 0, 0.65));
-}
-
-.cap svg {
+.nameplate strong {
   display: block;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-}
-
-.cap .rim {
-  stroke: rgba(0, 0, 0, 0.55);
-  stroke-width: 1;
-}
-
-.cap .body {
-  stroke: rgba(20, 24, 32, 0.7);
-  stroke-width: 1;
-}
-
-.cap .gloss {
-  fill: none;
-  stroke: rgba(255, 255, 255, 0.35);
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
-.cap .pointer {
-  fill: #11151c;
-}
-
-.plate {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.1rem;
-}
-
-.plate .name {
   color: var(--engrave);
-  font-size: 0.68rem;
+  font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.14em;
-  text-align: center;
-  text-transform: uppercase;
+  text-shadow:
+    0 -1px 0 rgba(0, 0, 0, 0.65),
+    0 1px 0 rgba(255, 255, 255, 0.14);
 }
 
-.plate .readout {
-  padding: 0.08rem 0.35rem;
-  border-radius: var(--radius-sm);
-  color: var(--readout);
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: text;
-}
-
-.plate .readout:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.plate .unit {
-  margin-left: 0.1rem;
-  font-size: 0.58rem;
-  opacity: 0.65;
-}
-
-.plate .input {
-  width: 3.6rem;
-  padding: 0.06rem 0.2rem;
-  border: 1px solid var(--border-hi);
-  border-radius: var(--radius-sm);
-  outline: none;
-  background: #0c1016;
-  color: var(--engrave);
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-align: center;
-  user-select: text;
-}
-
-/* VU face — FA cream/blue enamel family */
-.meter-bay.is-dark .meter {
-  filter: brightness(0.82) saturate(0.85);
-}
-
-.meter {
-  position: relative;
-}
-
-.meter svg {
+.nameplate em {
   display: block;
-  width: 100%;
-  height: auto;
-  border-radius: calc(var(--radius-sm) + 0.1rem);
+  margin-top: 3px;
   overflow: hidden;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 0 0 1px rgba(0, 0, 0, 0.55);
+  color: var(--engrave-muted);
+  font-size: 8.5px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.meter .arc {
-  fill: none;
-  stroke: var(--meter-ink);
-  stroke-width: 1.4;
-  opacity: 0.55;
-  transition: stroke var(--skin-ease);
-}
-
-.meter .arc.hot {
-  stroke: var(--meter-hot);
-  opacity: 0.9;
-  stroke-width: 2.1;
-}
-
-.meter .tick {
-  stroke: var(--meter-ink);
-  stroke-width: 1.05;
-  stroke-linecap: round;
-  opacity: 0.75;
-  transition: stroke var(--skin-ease);
-}
-
-.meter .tick.major {
-  stroke-width: 1.65;
-  opacity: 0.9;
-}
-
-.meter .tick.hot {
-  stroke: var(--meter-hot);
-}
-
-.meter .label {
-  fill: var(--meter-ink);
-  font-size: 7.5px;
-  font-weight: 700;
-  text-anchor: middle;
-  dominant-baseline: middle;
-  transition: fill var(--skin-ease);
-}
-
-.meter .label.hot {
-  fill: var(--meter-hot);
-}
-
-.meter .needle {
-  stroke: #1a120c;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-}
-
-.meter .hub {
-  fill: #2a241c;
-  stroke: #0c0a08;
-  stroke-width: 0.8;
-}
-
-.meter .caption {
-  fill: var(--meter-ink);
-  font-size: 7px;
+.maker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 2px;
+  color: var(--engrave-faint);
+  font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.18em;
-  text-anchor: middle;
-  opacity: 0.72;
-  transition: fill var(--skin-ease);
-}
-
-.meter .unit {
-  fill: var(--meter-ink);
-  font-size: 6.4px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-anchor: middle;
-  opacity: 0.45;
-  transition: fill var(--skin-ease);
-}
-
-.meter .bezel {
-  fill: none;
-  stroke: rgba(0, 0, 0, 0.35);
-  stroke-width: 1.35;
-  pointer-events: none;
-}
-
-.meter .parked {
-  fill: var(--meter-ink);
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-anchor: middle;
   text-transform: uppercase;
-  opacity: 0.45;
 }
 
-.clip-flag {
-  position: absolute;
-  right: 0.4rem;
-  bottom: 0.35rem;
-  height: 1.15rem;
-  padding: 0 0.4rem;
-  border: 1px solid rgba(0, 0, 0, 0.35);
-  border-radius: var(--radius-sm);
-  background: var(--clip);
-  color: #fff4ef;
-  font-size: 0.55rem;
-  font-weight: 750;
+.maker .link {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
   letter-spacing: 0.1em;
-  cursor: pointer;
-  box-shadow: 0 0 10px color-mix(in srgb, var(--clip) 45%, transparent);
 }
 
-/* Preset stepper — FA-76 language */
+.maker .link i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #333c45;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+
+.maker .link.is-live {
+  color: var(--engrave-muted);
+}
+
+.maker .link.is-live i {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Preset stepper. */
 .preset {
   display: grid;
-  grid-template-columns: 1.55rem minmax(0, 1fr) 1.55rem;
+  grid-template-columns: 24px minmax(0, 1fr) 24px;
   align-items: stretch;
-  width: 100%;
-  max-width: 11rem;
-  height: 1.85rem;
+  height: 28px;
   overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #2a3038, #161a20);
+  background: linear-gradient(180deg, #2b323a, #14181d);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 1px 2px rgba(0, 0, 0, 0.35);
+    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .preset .step {
   color: var(--engrave-muted);
-  font-size: 0.95rem;
+  font-size: 15px;
 }
 
 .preset .step:hover {
+  background: rgba(255, 255, 255, 0.05);
   color: var(--engrave);
-  background: rgba(255, 255, 255, 0.04);
 }
 
 .preset .select {
@@ -925,17 +387,16 @@ button:focus-visible,
   display: grid;
   place-items: center;
   min-width: 0;
-  border-inline: 1px solid rgba(0, 0, 0, 0.4);
+  border-inline: 1px solid rgba(0, 0, 0, 0.45);
 }
 
 .preset .select > span {
   overflow: hidden;
   width: 100%;
-  padding: 0 0.35rem;
-  color: var(--engrave);
-  font-size: 0.68rem;
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  padding: 0 6px;
+  color: var(--readout);
+  font-size: 11px;
+  font-weight: 600;
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -946,30 +407,790 @@ button:focus-visible,
   inset: 0;
   width: 100%;
   border: 0;
-  opacity: 0;
+  background: #191d23;
+  color: var(--engrave);
   cursor: pointer;
-  background: #1a1e24;
+  opacity: 0;
+}
+
+/* Engraved signal-path legend: the chain the DSP actually runs. */
+.signal-path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 4px;
+  margin: 4px 0 0;
+  padding: 0 2px;
+  color: var(--engrave-faint);
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.signal-path li:not(:last-child)::after {
+  margin-left: 6px;
+  content: '›';
+}
+
+/* ── Meter bay ────────────────────────────────────────────────────────── */
+
+.meter-bay {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 104px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.movement {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.glass {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 7px;
+  border: 1px solid #0a0c0f;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #23282f, #0e1115);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.65);
+}
+
+.glass.is-dark svg {
+  filter: brightness(0.8) saturate(0.8);
+}
+
+.glass svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+.glass .screw {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+}
+
+.glass .screw.tl {
+  top: 3px;
+  left: 3px;
+}
+.glass .screw.tr {
+  top: 3px;
+  right: 3px;
+}
+.glass .screw.bl {
+  bottom: 3px;
+  left: 3px;
+}
+.glass .screw.br {
+  bottom: 3px;
+  right: 3px;
+}
+
+.clip-flag {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  height: 17px;
+  padding: 0 6px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+  border-radius: var(--radius-sm);
+  background: var(--clip);
+  color: #fff2ee;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+/* Meter face internals. */
+.movement .arc {
+  fill: none;
+  stroke: var(--meter-ink);
+  stroke-width: 1.3;
+  opacity: 0.5;
+}
+
+.movement .arc.hot {
+  stroke: var(--meter-hot);
+  stroke-width: 2.2;
+  opacity: 0.92;
+}
+
+.movement .tick {
+  stroke: var(--meter-ink);
+  stroke-linecap: round;
+  stroke-width: 1;
+  opacity: 0.72;
+}
+
+.movement .tick.major {
+  stroke-width: 1.7;
+  opacity: 0.92;
+}
+
+.movement .tick.hot {
+  stroke: var(--meter-hot);
+}
+
+.movement .label {
+  fill: var(--meter-ink);
+  dominant-baseline: middle;
+  font-size: 8px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.movement .label.hot {
+  fill: var(--meter-hot);
+}
+
+.movement .caption {
+  fill: var(--meter-ink);
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  opacity: 0.75;
+  text-anchor: middle;
+}
+
+.movement .unit {
+  fill: var(--meter-ink);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  opacity: 0.5;
+  text-anchor: middle;
+}
+
+.movement .brand {
+  fill: var(--meter-ink);
+  font-size: 5.6px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  opacity: 0.42;
+}
+
+.movement .needle {
+  fill: #16100a;
+}
+
+.movement .parked {
+  fill: var(--meter-ink);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  opacity: 0.42;
+  text-anchor: middle;
+  text-transform: uppercase;
+}
+
+/* Reduction readout below the movement. */
+.gr-strip {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--inset-deep);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.gr-strip .tag,
+.gr-strip small {
+  color: var(--engrave-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.gr-strip output {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* IN / OUT LED ladders with an engraved dB scale between them. */
+.ladders {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 6px;
+  min-width: 0;
+}
+
+.io {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 4px;
+  justify-items: center;
+}
+
+.io-tag {
+  color: var(--engrave-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.clip-led {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2b3138;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.clip-led.is-on {
+  background: var(--clip);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--clip) 40%, transparent);
+}
+
+.ladder {
+  display: block;
+  width: 14px;
+  height: 100%;
+  min-height: 0;
+  border-radius: 2px;
+  background: var(--inset-deep);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.7),
+    0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.io output {
+  color: var(--engrave-muted);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.io:has(.clip-led.is-on) output {
+  color: var(--clip);
+}
+
+.io-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 22px 0 20px;
+  color: var(--engrave-faint);
+  font-size: 7.5px;
+  font-weight: 650;
+  text-align: center;
+}
+
+/* ── Master column ────────────────────────────────────────────────────── */
+
+.master {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.switchbank {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--inset);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.switchbank button {
+  height: 22px;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #333b45, #1c2128);
+  color: var(--engrave-muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.switchbank button.is-on {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 82%, #fff),
+    var(--accent)
+  );
+  color: var(--accent-ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.rocker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  height: 62px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #10141a 0%, #2a313a 46%, #1a1f26 100%);
+  box-shadow:
+    inset 0 2px 4px rgba(0, 0, 0, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.rocker .lamp {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2a2f36;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.rocker.is-on {
+  background: linear-gradient(180deg, #2c343d 0%, #1b2027 54%, #10141a 100%);
+}
+
+.rocker.is-on .lamp {
+  background: var(--lamp);
+  box-shadow:
+    0 0 0 2px var(--lamp-soft),
+    0 0 7px var(--lamp-soft);
+}
+
+.rocker .legend {
+  color: var(--engrave-muted);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rocker.is-on .legend {
   color: var(--engrave);
 }
 
-@media (max-width: 880px) {
-  .top {
-    grid-template-columns: 1fr;
-    justify-items: center;
-  }
+.master-tag {
+  color: var(--engrave-faint);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-align: center;
+  text-transform: uppercase;
+}
 
-  .identity,
-  .side,
-  .meter-bay {
-    width: min(100%, 28rem);
-  }
+/* ── Circuit bay ──────────────────────────────────────────────────────── */
 
-  .models {
-    grid-template-columns: 1fr;
-    justify-items: stretch;
-  }
+.circuit {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, #1d222a, #12161b);
+  box-shadow:
+    inset 0 1px 0 var(--border-soft),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+}
 
-  .auto {
-    width: 100%;
+.bay-label,
+.modes {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.bay-label {
+  color: var(--engrave-muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.bank {
+  display: grid;
+  grid-auto-flow: column;
+  gap: 5px;
+}
+
+.lamp-button {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #39414c, #1d222a);
+  color: var(--engrave-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.lamp-button i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #23282f;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.7);
+}
+
+.lamp-button:hover {
+  color: var(--engrave);
+}
+
+.lamp-button.is-on {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 84%, #fff),
+    var(--accent)
+  );
+  color: var(--accent-ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    0 1px 2px rgba(0, 0, 0, 0.42);
+}
+
+.lamp-button.is-on i {
+  background: var(--accent-ink);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.35);
+}
+
+/* Sidechain listen is an audition mode: it reads as armed, not as selected. */
+.lamp-button.alert.is-on {
+  background: linear-gradient(180deg, #f5c163, var(--lamp));
+  color: #201502;
+}
+
+.lamp-button.alert.is-on i {
+  background: #201502;
+}
+
+.engraved {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.engraved strong {
+  color: var(--engrave);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.engraved span {
+  overflow: hidden;
+  color: var(--engrave-faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+}
+
+/* ── Control rows ─────────────────────────────────────────────────────── */
+
+.controls {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: space-evenly;
+  min-height: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: start;
+  justify-items: center;
+}
+
+.row.trim {
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.knob {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: center;
+  min-width: 0;
+}
+
+.knob .cap {
+  position: relative;
+  width: 104px;
+  height: 104px;
+  cursor: ns-resize;
+  outline: none;
+  touch-action: none;
+  filter: drop-shadow(0 4px 5px rgba(0, 0, 0, 0.5));
+}
+
+.knob.sm .cap {
+  width: 70px;
+  height: 70px;
+}
+
+.knob .cap.is-dragging {
+  filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.6));
+}
+
+.knob .cap svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.knob.is-disabled {
+  opacity: 0.5;
+}
+
+.knob.is-disabled .cap {
+  cursor: default;
+}
+
+/* Engraved collar. */
+.knob .collar-track {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0.55);
+  stroke-linecap: round;
+  stroke-width: 3.4;
+}
+
+.knob .collar-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-width: 3.4;
+  opacity: 0.9;
+}
+
+.knob .tick {
+  stroke: var(--engrave-faint);
+  stroke-linecap: round;
+  stroke-width: 1.2;
+}
+
+.knob .tick.major {
+  stroke: var(--engrave-muted);
+  stroke-width: 1.8;
+}
+
+/* Machined body. */
+.knob .skirt {
+  stroke: rgba(0, 0, 0, 0.65);
+  stroke-width: 1;
+}
+
+.knob .flutes line {
+  stroke: rgba(0, 0, 0, 0.42);
+  stroke-width: 0.9;
+}
+
+.knob .face {
+  stroke: rgba(10, 13, 18, 0.75);
+  stroke-width: 1;
+}
+
+.knob .pointer {
+  fill: #0f1319;
+}
+
+.knob .hub {
+  fill: rgba(255, 255, 255, 0.16);
+}
+
+.knob .scale-min,
+.knob .scale-max {
+  position: absolute;
+  bottom: 4px;
+  color: var(--engrave-faint);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.knob .scale-min {
+  left: -1px;
+}
+
+.knob .scale-max {
+  right: -1px;
+}
+
+.knob .legend {
+  color: var(--engrave);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-shadow:
+    0 -1px 0 rgba(0, 0, 0, 0.6),
+    0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Recessed value plate under each knob. */
+.knob .plate {
+  min-width: 66px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-sm);
+  background: var(--inset-deep);
+  color: var(--readout);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: text;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+.knob .plate:hover:not(:disabled) {
+  color: #fff;
+}
+
+.knob .plate:disabled {
+  cursor: default;
+}
+
+.knob .plate .unit {
+  margin-left: 3px;
+  color: var(--engrave-faint);
+  font-size: 9px;
+}
+
+.knob .plate .auto {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.knob .entry {
+  width: 66px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: #0a0e13;
+  color: var(--engrave);
+  font-size: 11.5px;
+  font-weight: 650;
+  text-align: center;
+  user-select: text;
+}
+
+/* ── Transfer-curve window ────────────────────────────────────────────── */
+
+.curve {
+  display: flex;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #20252c, #0e1116);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.6);
+}
+
+.curve svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.curve .screen {
+  fill: #070a0d;
+  stroke: rgba(0, 0, 0, 0.8);
+}
+
+.curve .grid {
+  stroke: rgba(255, 255, 255, 0.07);
+  stroke-width: 0.6;
+}
+
+.curve .grid.edge {
+  stroke: rgba(255, 255, 255, 0.14);
+}
+
+.curve .unity {
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-dasharray: 2 3;
+  stroke-width: 0.8;
+}
+
+.curve .threshold {
+  stroke: var(--engrave-faint);
+  stroke-dasharray: 3 3;
+  stroke-width: 0.8;
+}
+
+.curve .transfer {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.curve .trace {
+  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+  stroke-width: 0.8;
+}
+
+.curve .dot {
+  fill: #fff;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+}
+
+.curve .axis {
+  fill: var(--engrave-faint);
+  font-size: 7px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+}
+
+.curve .caption {
+  fill: var(--engrave-muted);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .device {
+    transition: none;
   }
 }

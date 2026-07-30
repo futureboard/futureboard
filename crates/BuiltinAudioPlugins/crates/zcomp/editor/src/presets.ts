@@ -21,7 +21,8 @@ export type FactoryPreset = {
 function preset(name: string, patch: Partial<ZcompParams>): FactoryPreset {
   return {
     name,
-    params: { ...defaults, ...patch, power: true },
+    // Sidechain listen is an audition mode, never something a preset leaves on.
+    params: { ...defaults, ...patch, power: true, scListen: false },
   }
 }
 
@@ -148,7 +149,8 @@ export function paramsMatch(left: ZcompParams, right: ZcompParams) {
   if (
     left.power !== right.power ||
     left.model !== right.model ||
-    left.autoRelease !== right.autoRelease
+    left.autoRelease !== right.autoRelease ||
+    left.scListen !== right.scListen
   ) {
     return false
   }
@@ -170,6 +172,7 @@ export function postAllParams(params: ZcompParams) {
   postParam('power', params.power ? 1 : 0)
   postParam('model', MODEL_WIRE[params.model as CompModel])
   postParam('autoRelease', params.autoRelease ? 1 : 0)
+  postParam('scListen', params.scListen ? 1 : 0)
   for (const key of NUMERIC_KEYS) {
     postParam(key, params[key] as number)
   }
