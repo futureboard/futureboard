@@ -16,23 +16,23 @@
 
 :root {
   /* Chassis and faceplate. */
-  --chassis: #08090b;
-  --panel-hi: #363d47;
-  --panel: #262c34;
-  --panel-lo: #171b21;
-  --panel-edge: #0d1013;
-  --inset: #0e1116;
-  --inset-deep: #07080b;
+  --chassis: #090b0e;
+  --panel-hi: #343b43;
+  --panel: #252b32;
+  --panel-lo: #191e24;
+  --panel-edge: #0b0e11;
+  --inset: #11151a;
+  --inset-deep: #090c10;
 
   --border: rgba(0, 0, 0, 0.62);
   --border-hi: rgba(255, 255, 255, 0.1);
   --border-soft: rgba(255, 255, 255, 0.055);
 
   /* Silkscreen. */
-  --engrave: #e8ecf2;
-  --engrave-muted: rgba(224, 230, 238, 0.56);
-  --engrave-faint: rgba(224, 230, 238, 0.3);
-  --readout: #d6dee8;
+  --engrave: #f1f4f7;
+  --engrave-muted: rgba(229, 235, 241, 0.66);
+  --engrave-faint: rgba(220, 228, 236, 0.36);
+  --readout: #edf4f8;
 
   /* Lamps and status. */
   --lamp: #f0ad3c;
@@ -49,8 +49,8 @@
   --meter-hot: #d8492f;
 
   /* Circuit accent: lamp caps, value collars, curve trace. */
-  --accent: #8ec6e4;
-  --accent-ink: #0a1219;
+  --accent: #78d1dc;
+  --accent-ink: #071216;
 
   --radius: 4px;
   --radius-sm: 3px;
@@ -60,29 +60,23 @@
 
 /* Circuit skins. Each unit is a different painted panel and meter enamel. */
 .device[data-model='ssl'] {
-  --accent: #8ec6e4;
-  --accent-ink: #0a1219;
+  --accent: #79cfdd;
+  --accent-ink: #071317;
 }
 
 .device[data-model='comp2500'] {
-  --panel-hi: #2f3b40;
-  --panel: #222c31;
-  --panel-lo: #151c20;
-  --meter-face-hi: #4bb0bb;
-  --meter-face: #2f8b98;
-  --meter-face-lo: #1a5a65;
-  --accent: #63cddb;
+  --meter-face-hi: #66bac3;
+  --meter-face: #398d98;
+  --meter-face-lo: #1d5963;
+  --accent: #6fd5df;
   --accent-ink: #06171a;
   --led-cool: #4ec0b4;
 }
 
 .device[data-model='distressor'] {
-  --panel-hi: #423a31;
-  --panel: #2e2822;
-  --panel-lo: #1d1915;
-  --meter-face-hi: #e4bd74;
-  --meter-face: #cd9743;
-  --meter-face-lo: #8c6326;
+  --meter-face-hi: #dfb873;
+  --meter-face: #bc873d;
+  --meter-face-lo: #765221;
   --meter-ink: #1d1509;
   --meter-hot: #8f2517;
   --accent: #e0a95f;
@@ -91,12 +85,9 @@
 }
 
 .device[data-model='avalon'] {
-  --panel-hi: #313d36;
-  --panel: #222b26;
-  --panel-lo: #151b17;
-  --meter-face-hi: #97c69d;
-  --meter-face: #6d9f76;
-  --meter-face-lo: #446a4c;
+  --meter-face-hi: #9bc2a0;
+  --meter-face: #709a76;
+  --meter-face-lo: #466149;
   --meter-ink: #101710;
   --meter-hot: #8d3419;
   --accent: #8cc898;
@@ -163,7 +154,7 @@ input:focus-visible {
   height: 100%;
   overflow: hidden;
   background:
-    radial-gradient(120% 90% at 50% 0%, #14171c 0%, var(--chassis) 70%);
+    radial-gradient(100% 75% at 50% 8%, #171b20 0%, var(--chassis) 72%);
 }
 
 .device {
@@ -172,7 +163,7 @@ input:focus-visible {
   left: 50%;
   display: flex;
   transform-origin: 50% 50%;
-  filter: drop-shadow(0 18px 34px rgba(0, 0, 0, 0.55));
+  filter: drop-shadow(0 22px 42px rgba(0, 0, 0, 0.68));
 }
 
 .device.is-off .face > *:not(.head),
@@ -229,23 +220,22 @@ input:focus-visible {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 10px;
+  gap: 11px;
   min-width: 0;
   padding: 14px 16px 16px;
-  border-top: 1px solid var(--border-hi);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
   border-bottom: 1px solid var(--panel-edge);
   background:
-    repeating-linear-gradient(
-      90deg,
-      rgba(255, 255, 255, 0.022) 0 1px,
-      rgba(0, 0, 0, 0.02) 1px 3px
-    ),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.014) 0 1px, transparent 1px 4px),
     linear-gradient(
       180deg,
       var(--panel-hi) 0%,
-      var(--panel) 46%,
+      var(--panel) 42%,
       var(--panel-lo) 100%
     );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -18px 36px rgba(0, 0, 0, 0.12);
 }
 
 /* ── Header ───────────────────────────────────────────────────────────── */
@@ -271,7 +261,7 @@ input:focus-visible {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #2c333b, #1a1f25);
+  background: linear-gradient(180deg, #303842, #181d23);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.09),
     0 1px 2px rgba(0, 0, 0, 0.4);
@@ -284,11 +274,13 @@ input:focus-visible {
   height: 34px;
   border: 1px solid rgba(0, 0, 0, 0.6);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #3b434d, #171b21);
+  background: linear-gradient(180deg, #343d47, #11161b);
   color: var(--accent);
   font-size: 17px;
   font-weight: 700;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 0 12px rgba(0, 0, 0, 0.25);
 }
 
 .nameplate .titles {
@@ -454,12 +446,13 @@ input:focus-visible {
   flex: 1;
   min-height: 0;
   padding: 7px;
-  border: 1px solid #0a0c0f;
-  border-radius: 6px;
-  background: linear-gradient(180deg, #23282f, #0e1115);
+  border: 1px solid #07090c;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #292f36, #0c0f13);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.09),
-    inset 0 -2px 6px rgba(0, 0, 0, 0.65);
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.72),
+    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .glass.is-dark svg {
@@ -603,7 +596,7 @@ input:focus-visible {
   padding: 0 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--inset-deep);
+  background: linear-gradient(180deg, #0c1014, #07090c);
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
@@ -619,8 +612,8 @@ input:focus-visible {
 .gr-strip output {
   margin-left: auto;
   color: var(--accent);
-  font-size: 16px;
-  font-weight: 650;
+  font-size: 17px;
+  font-weight: 700;
   letter-spacing: -0.01em;
 }
 
@@ -709,7 +702,7 @@ input:focus-visible {
   padding: 3px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--inset);
+  background: #0c1014;
   box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.55);
 }
 
@@ -717,7 +710,7 @@ input:focus-visible {
   height: 22px;
   border: 1px solid rgba(0, 0, 0, 0.45);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #333b45, #1c2128);
+  background: linear-gradient(180deg, #343c45, #171c22);
   color: var(--engrave-muted);
   font-size: 9.5px;
   font-weight: 700;
@@ -746,7 +739,7 @@ input:focus-visible {
   height: 62px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #10141a 0%, #2a313a 46%, #1a1f26 100%);
+  background: linear-gradient(180deg, #0e1217 0%, #2b323a 48%, #151a20 100%);
   box-shadow:
     inset 0 2px 4px rgba(0, 0, 0, 0.55),
     inset 0 -1px 0 rgba(255, 255, 255, 0.06);
@@ -801,12 +794,13 @@ input:focus-visible {
   align-items: center;
   height: 46px;
   padding: 0 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(0, 0, 0, 0.7);
   border-radius: var(--radius);
-  background: linear-gradient(180deg, #1d222a, #12161b);
+  background: linear-gradient(180deg, #20262d, #101419);
   box-shadow:
-    inset 0 1px 0 var(--border-soft),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.62),
+    0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .bay-label,
@@ -838,7 +832,7 @@ input:focus-visible {
   padding: 0 11px;
   border: 1px solid rgba(0, 0, 0, 0.55);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #39414c, #1d222a);
+  background: linear-gradient(180deg, #3b444e, #1a2026);
   color: var(--engrave-muted);
   font-size: 10px;
   font-weight: 700;
@@ -921,8 +915,8 @@ input:focus-visible {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 6px;
-  justify-content: space-evenly;
+  gap: 8px;
+  justify-content: space-around;
   min-height: 0;
 }
 
@@ -934,8 +928,9 @@ input:focus-visible {
 }
 
 .row.trim {
-  padding-top: 8px;
-  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.22);
 }
 
 .knob {
@@ -953,7 +948,7 @@ input:focus-visible {
   cursor: ns-resize;
   outline: none;
   touch-action: none;
-  filter: drop-shadow(0 4px 5px rgba(0, 0, 0, 0.5));
+  filter: drop-shadow(0 5px 6px rgba(0, 0, 0, 0.58));
 }
 
 .knob.sm .cap {
@@ -983,7 +978,7 @@ input:focus-visible {
 /* Engraved collar. */
 .knob .collar-track {
   fill: none;
-  stroke: rgba(0, 0, 0, 0.55);
+  stroke: rgba(0, 0, 0, 0.68);
   stroke-linecap: round;
   stroke-width: 3.4;
 }
@@ -992,8 +987,8 @@ input:focus-visible {
   fill: none;
   stroke: var(--accent);
   stroke-linecap: round;
-  stroke-width: 3.4;
-  opacity: 0.9;
+  stroke-width: 3.1;
+  opacity: 0.96;
 }
 
 .knob .tick {
@@ -1051,8 +1046,8 @@ input:focus-visible {
 
 .knob .legend {
   color: var(--engrave);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 10.5px;
+  font-weight: 750;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   text-shadow:
@@ -1065,14 +1060,16 @@ input:focus-visible {
   min-width: 66px;
   height: 20px;
   padding: 0 8px;
-  border: 1px solid rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(0, 0, 0, 0.7);
   border-radius: var(--radius-sm);
-  background: var(--inset-deep);
+  background: linear-gradient(180deg, #0d1115, #07090c);
   color: var(--readout);
   font-size: 11.5px;
   font-weight: 650;
   cursor: text;
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.7);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.78),
+    0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .knob .plate:hover:not(:disabled) {
@@ -1118,11 +1115,12 @@ input:focus-visible {
   display: flex;
   padding: 6px;
   border: 1px solid var(--border);
-  border-radius: 5px;
-  background: linear-gradient(180deg, #20252c, #0e1116);
+  border-radius: 7px;
+  background: linear-gradient(180deg, #272d34, #0b0e12);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 -2px 5px rgba(0, 0, 0, 0.6);
+    inset 0 1px 0 rgba(255, 255, 255, 0.11),
+    inset 0 -3px 7px rgba(0, 0, 0, 0.72),
+    0 1px 2px rgba(0, 0, 0, 0.34);
 }
 
 .curve svg {
@@ -1132,12 +1130,12 @@ input:focus-visible {
 }
 
 .curve .screen {
-  fill: #070a0d;
+  fill: #06090c;
   stroke: rgba(0, 0, 0, 0.8);
 }
 
 .curve .grid {
-  stroke: rgba(255, 255, 255, 0.07);
+  stroke: rgba(255, 255, 255, 0.085);
   stroke-width: 0.6;
 }
 
@@ -1161,7 +1159,7 @@ input:focus-visible {
   fill: none;
   stroke: var(--accent);
   stroke-linejoin: round;
-  stroke-width: 1.8;
+  stroke-width: 2.1;
 }
 
 .curve .trace {

@@ -54,6 +54,12 @@ pub const BUILTIN_EDITOR_HEIGHT: f32 = 760.0;
 pub const BUILTIN_EDITOR_MIN_WIDTH: f32 = 900.0;
 pub const BUILTIN_EDITOR_MIN_HEIGHT: f32 = 620.0;
 
+/// Z-Comp's reference browser viewport. Its faceplate is designed at
+/// 1020 × 600 inside this 1024 × 720 canvas, so native chrome must be added
+/// outside the browser rectangle rather than taking space from it.
+const ZCOMP_EDITOR_CONTENT_WIDTH: f32 = 1024.0;
+const ZCOMP_EDITOR_CONTENT_HEIGHT: f32 = 720.0;
+
 /// Height of the GPUI-drawn header strip above the browser rect. Uses the
 /// shared external-dialog titlebar height so the browser rect and the chrome
 /// can never disagree about where the content starts.
@@ -67,6 +73,17 @@ const SCROLL_LINE_HEIGHT: f32 = 20.0;
 /// the same way `HEADER_H` is — the browser must never be told to draw under
 /// it, and the sidebar must never be told to draw over the browser.
 const SIDEBAR_W: f32 = 208.0;
+
+fn default_editor_window_size(plugin_id: &str) -> (f32, f32) {
+    if host::origin_for_plugin_id(plugin_id) == Some("zcomp") {
+        (
+            SIDEBAR_W + ZCOMP_EDITOR_CONTENT_WIDTH,
+            HEADER_H + ZCOMP_EDITOR_CONTENT_HEIGHT,
+        )
+    } else {
+        (BUILTIN_EDITOR_WIDTH, BUILTIN_EDITOR_HEIGHT)
+    }
+}
 
 /// Identity of one DSP insert that can be shown in a shared built-in editor.
 /// `track_id`/`insert_id` are the same stable, session-monotonic ids
@@ -172,6 +189,7 @@ struct InstanceRemovedMsg {
     r#type: &'static str,
     protocol_version: u32,
     instance_id: String,
+    binding_generation: u64,
 }
 
 /// Native -> React: one ~30 Hz telemetry frame for the bound instance.
@@ -181,6 +199,7 @@ struct MetersMsg {
     r#type: &'static str,
     protocol_version: u32,
     instance_id: String,
+    binding_generation: u64,
     in_peak: f32,
     in_rms: f32,
     out_peak: f32,
@@ -716,6 +735,7 @@ impl BuiltinPluginEditorWindow {
                     r#type: "futureboard.instanceRemoved",
                     protocol_version: BRIDGE_PROTOCOL_VERSION,
                     instance_id: wire_instance_id(&removed),
+                    binding_generation: self.binding_generation,
                 });
             }
             match self.instances.first().map(|i| i.instance_key.clone()) {
@@ -1242,6 +1262,7 @@ impl BuiltinPluginEditorWindow {
                         r#type: "futureboard.meters",
                         protocol_version: BRIDGE_PROTOCOL_VERSION,
                         instance_id: wire_instance_id(active),
+                        binding_generation: self.binding_generation,
                         in_peak: frame.in_peak,
                         in_rms: frame.in_rms,
                         out_peak: frame.out_peak,
@@ -2067,15 +2088,16 @@ pub fn open_builtin_editor_window(
     let parent_y: f32 = owner_bounds.origin.y.into();
     let parent_w: f32 = owner_bounds.size.width.into();
     let parent_h: f32 = owner_bounds.size.height.into();
+    let (editor_width, editor_height) = default_editor_window_size(&plugin_id);
     let origin = Point {
-        x: px(parent_x + ((parent_w - BUILTIN_EDITOR_WIDTH) / 2.0).max(24.0)),
-        y: px(parent_y + ((parent_h - BUILTIN_EDITOR_HEIGHT) / 2.0).max(24.0)),
+        x: px(parent_x + ((parent_w - editor_width) / 2.0).max(24.0)),
+        y: px(parent_y + ((parent_h - editor_height) / 2.0).max(24.0)),
     };
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(Bounds {
         origin,
-        size: size(px(BUILTIN_EDITOR_WIDTH), px(BUILTIN_EDITOR_HEIGHT)),
+        size: size(px(editor_width), px(editor_height)),
     }));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
@@ -2154,6 +2176,18 @@ mod tests {
         let rect = content_rect(bounds(1000.0, 700.0), 1.0, SIDEBAR_W);
         assert_eq!(rect.x, SIDEBAR_W as i32);
         assert_eq!(rect.width, 1000 - SIDEBAR_W as i32);
+    }
+
+    #[test]
+    fn zcomp_window_preserves_the_full_editor_canvas() {
+        let (width, height) = default_editor_window_size("builtin:zcomp");
+        let rect = content_rect(bounds(width, height), 1.0, SIDEBAR_W);
+        assert_eq!(rect.width, ZCOMP_EDITOR_CONTENT_WIDTH as i32);
+        assert_eq!(rect.height, ZCOMP_EDITOR_CONTENT_HEIGHT as i32);
+        assert_eq!(
+            default_editor_window_size("builtin:equz8"),
+            (BUILTIN_EDITOR_WIDTH, BUILTIN_EDITOR_HEIGHT)
+        );
     }
 
     /// The browser is told to lay out in logical pixels, so a window-space

@@ -195,11 +195,6 @@
           </div>
 
           <div class="knobs">
-            <svg class="curve" viewBox="0 0 200 62" aria-hidden="true">
-              <path
-                d="M12 48 C 46 40, 66 14, 100 14 C 134 14, 154 40, 188 12"
-              />
-            </svg>
             <FlatKnob
               spec={PARAMS.thresholdDb}
               value={params.thresholdDb}
@@ -447,27 +442,9 @@
   }
 
   .knobs {
-    position: relative;
     display: flex;
     align-items: flex-end;
     gap: 1.35rem;
-  }
-
-  .curve {
-    position: absolute;
-    top: -0.35rem;
-    left: 0;
-    z-index: 0;
-    width: 100%;
-    height: 3.4rem;
-    pointer-events: none;
-  }
-
-  .curve path {
-    fill: none;
-    stroke: rgba(74, 163, 255, 0.32);
-    stroke-width: 1.5;
-    stroke-linecap: round;
   }
 
   .footer {

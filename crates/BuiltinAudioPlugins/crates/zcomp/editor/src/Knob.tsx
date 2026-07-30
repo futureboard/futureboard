@@ -190,21 +190,21 @@ export function Knob({
         <svg viewBox={`0 0 ${VIEW} ${VIEW}`} aria-hidden="true">
           <defs>
             <linearGradient id={`${uid}-skirt`} x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0" stopColor="#5c6472" />
-              <stop offset="0.45" stopColor="#2b313a" />
-              <stop offset="1" stopColor="#13171d" />
+              <stop offset="0" stopColor="#66717d" />
+              <stop offset="0.42" stopColor="#303740" />
+              <stop offset="1" stopColor="#11151a" />
             </linearGradient>
             <linearGradient id={`${uid}-cap`} x1="0.15" x2="0.85" y1="0" y2="1">
-              <stop offset="0" stopColor="#e4e9f1" />
-              <stop offset="0.28" stopColor="#a8b1bf" />
-              <stop offset="0.52" stopColor="#6e7684" />
-              <stop offset="0.74" stopColor="#99a2b0" />
-              <stop offset="1" stopColor="#4a515c" />
+              <stop offset="0" stopColor="#f2f5f7" />
+              <stop offset="0.25" stopColor="#b9c1c9" />
+              <stop offset="0.52" stopColor="#707985" />
+              <stop offset="0.74" stopColor="#a8b0b9" />
+              <stop offset="1" stopColor="#4b535d" />
             </linearGradient>
             <radialGradient id={`${uid}-dish`} cx="0.35" cy="0.3" r="0.8">
-              <stop offset="0" stopColor="rgba(255,255,255,0.35)" />
-              <stop offset="0.6" stopColor="rgba(255,255,255,0.04)" />
-              <stop offset="1" stopColor="rgba(0,0,0,0.35)" />
+              <stop offset="0" stopColor="rgba(255,255,255,0.42)" />
+              <stop offset="0.55" stopColor="rgba(255,255,255,0.05)" />
+              <stop offset="1" stopColor="rgba(0,0,0,0.42)" />
             </radialGradient>
           </defs>
 

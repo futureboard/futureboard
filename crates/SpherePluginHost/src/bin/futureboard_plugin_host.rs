@@ -253,6 +253,7 @@ enum BuiltinDsp {
     Transient(transient::Dsp),
     WrapSynth(wrapsynth::Dsp),
     Zcomp(zcomp::Dsp),
+    MixStation(mixstation::Dsp),
 }
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
@@ -304,6 +305,7 @@ impl BuiltinHostProcessor {
             "transient" => Some(Self::transient(sample_rate, state_json)),
             "wrapsynth" => Some(Self::wrapsynth(sample_rate, state_json)),
             "zcomp" => Some(Self::zcomp(sample_rate, state_json)),
+            "mixstation" => Some(Self::mixstation(sample_rate, state_json)),
             _ => None,
         }
     }
@@ -603,6 +605,35 @@ impl BuiltinHostProcessor {
         }
     }
 
+    fn mixstation(sample_rate: u32, state_json: Option<&str>) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let mut dsp = mixstation::Dsp::new(sr);
+        if let Some(json) = state_json {
+            match mixstation::ipc::MixStationState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state version={}",
+                        state.version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
+        // State restore happens before publication to the producer. Start at
+        // the restored trims rather than audibly ramping from the defaults.
+        dsp.reset();
+        Self {
+            dsp: UnsafeCell::new(BuiltinDsp::MixStation(dsp)),
+            spectrum: UnsafeCell::new(SpectrumAnalyzer::new(sr)),
+            nam_loader: None,
+            ir_loader: None,
+            sample_rate: sr,
+        }
+    }
+
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         match unsafe { &mut *self.dsp.get() } {
@@ -679,6 +710,13 @@ impl BuiltinHostProcessor {
                 }
             }
             BuiltinDsp::Zcomp(dsp) => {
+                for i in 0..frames {
+                    let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+                    interleaved[i * 2] = l;
+                    interleaved[i * 2 + 1] = r;
+                }
+            }
+            BuiltinDsp::MixStation(dsp) => {
                 for i in 0..frames {
                     let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
                     interleaved[i * 2] = l;
@@ -784,6 +822,18 @@ impl BuiltinHostProcessor {
                     out_clip: f.out_clip,
                 })
             }
+            BuiltinDsp::MixStation(dsp) => {
+                let f = dsp.meter_frame();
+                Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+                    in_peak: f.in_peak,
+                    in_rms: f.in_rms,
+                    out_peak: f.out_peak,
+                    out_rms: f.out_rms,
+                    gain_reduction_db: f.gain_reduction_db,
+                    in_clip: f.in_clip,
+                    out_clip: f.out_clip,
+                })
+            }
             BuiltinDsp::Transient(dsp) => {
                 let f = dsp.meter_frame();
                 Some(SpherePluginHost::audio_bridge::BuiltinMeterFrame {
@@ -824,6 +874,7 @@ impl BuiltinHostProcessor {
             BuiltinDsp::Echospace(dsp) => dsp.latency_samples(),
             BuiltinDsp::WrapSynth(_) => 0,
             BuiltinDsp::Zcomp(dsp) => dsp.latency_samples(),
+            BuiltinDsp::MixStation(dsp) => dsp.latency_samples(),
         }
     }
 
@@ -869,6 +920,9 @@ impl BuiltinHostProcessor {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
             BuiltinDsp::Zcomp(dsp) => {
+                let _ = dsp.apply_wire_param(param_id, value);
+            }
+            BuiltinDsp::MixStation(dsp) => {
                 let _ = dsp.apply_wire_param(param_id, value);
             }
         }
@@ -1343,6 +1397,100 @@ mod builtin_processor_tests {
         let fallback = BuiltinHostProcessor::zcomp(48_000, Some("not json"));
         fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn mixstation_publishes_its_complete_meter_frame() {
+        let processor = BuiltinHostProcessor::mixstation(48_000, None);
+        processor.apply_param(
+            mixstation::ui_param_index("compEnabled").expect("compressor in wire table"),
+            1.0,
+        );
+        processor.apply_param(
+            mixstation::ui_param_index("slot1Module").expect("slot in wire table"),
+            3.0,
+        );
+        processor.apply_param(
+            mixstation::ui_param_index("compThresholdDb").expect("threshold in wire table"),
+            -30.0,
+        );
+        processor.apply_param(
+            mixstation::ui_param_index("compRatio").expect("ratio in wire table"),
+            10.0,
+        );
+
+        let loud = [0.75f32; 64];
+        let mut output = [0.0f32; 128];
+        for _ in 0..64 {
+            processor.process_block(&loud, &loud, &mut output, 64);
+        }
+        let frame = processor
+            .meter_frame()
+            .expect("mixstation always publishes a frame");
+        assert!(frame.in_peak > 0.0);
+        assert!(frame.in_rms > 0.0);
+        assert!(frame.out_peak > 0.0);
+        assert!(frame.out_rms > 0.0);
+        assert!(frame.gain_reduction_db > 1.0);
+        assert!(!frame.in_clip);
+        assert!(!frame.out_clip);
+        assert_eq!(processor.latency_samples(), 0);
+    }
+
+    #[test]
+    fn mixstation_restores_state_and_takes_wire_params() {
+        let mut params = mixstation::default_params();
+        params.power = false;
+        let json = mixstation::ipc::MixStationState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::mixstation(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i]);
+            assert_eq!(output[i * 2 + 1], in_r[i]);
+        }
+
+        restored.apply_param(
+            mixstation::ui_param_index("power").expect("power in wire table"),
+            1.0,
+        );
+        restored.apply_param(
+            mixstation::ui_param_index("inputTrimDb").expect("trim in wire table"),
+            6.0,
+        );
+        restored.apply_param(mixstation::UI_PARAM_IDS.len() as u32, 1.0);
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        let fallback = BuiltinHostProcessor::mixstation(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn mixstation_restored_trim_is_active_on_the_first_sample() {
+        let mut params = mixstation::default_params();
+        params.input_trim_db = 6.0;
+        params.filters_enabled = false;
+        params.eq_enabled = false;
+        params.comp_enabled = false;
+        params.sat_enabled = false;
+        params.width_enabled = false;
+        params.limiter_enabled = false;
+        let json = mixstation::ipc::MixStationState::new(params)
+            .to_json()
+            .expect("state serializes");
+        let restored = BuiltinHostProcessor::mixstation(48_000, Some(&json));
+        let mut output = [0.0f32; 2];
+        restored.process_block(&[0.25], &[0.25], &mut output, 1);
+        let expected = 0.25 * builtin_dsp_core::db_to_linear(6.0);
+        assert!((output[0] - expected).abs() < 1.0e-6);
+        assert!((output[1] - expected).abs() < 1.0e-6);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 import type { CompModel, ZcompParams } from './bridge'
 import { clamp } from './meter'
 
-/** Design canvas. 900 x 620 is the editor window minimum, minus native chrome. */
+/** Fixed faceplate inside the native shell's default 1024 x 720 browser viewport. */
 export const DEVICE_WIDTH = 1020
 export const DEVICE_HEIGHT = 600
 

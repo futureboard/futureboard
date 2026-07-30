@@ -74,6 +74,13 @@ const CATALOG: &[BuiltinEntry] = &[
         has_editor: true,
     },
     BuiltinEntry {
+        stem: "mixstation",
+        name: "MixStation",
+        category: "Effect",
+        kind: PluginKind::Effect,
+        has_editor: true,
+    },
+    BuiltinEntry {
         stem: "echospace",
         name: "EchoSpace",
         category: "Delay",
@@ -203,6 +210,7 @@ pub const AUDIO_BRIDGE_STEMS: &[&str] = &[
     "transient",
     "wrapsynth",
     "zcomp",
+    "mixstation",
 ];
 
 /// Whether this built-in currently has an out-of-process audio DSP runtime.
@@ -330,6 +338,10 @@ mod tests {
             Some("mikoplugin://zcomp/index.html")
         );
         assert_eq!(
+            builtin_editor_url(&builtin_id("mixstation")).as_deref(),
+            Some("mikoplugin://mixstation/index.html")
+        );
+        assert_eq!(
             builtin_editor_url(&builtin_id("fa76")).as_deref(),
             Some("mikoplugin://fa76/index.html")
         );
@@ -370,6 +382,8 @@ mod tests {
         assert!(builtin_audio_bridge_supported("builtin:fa2a"));
         assert!(builtin_audio_bridge_supported("zcomp"));
         assert!(builtin_audio_bridge_supported("builtin:zcomp"));
+        assert!(builtin_audio_bridge_supported("mixstation"));
+        assert!(builtin_audio_bridge_supported("builtin:mixstation"));
         assert!(builtin_audio_bridge_supported("fa76"));
         assert!(builtin_audio_bridge_supported("builtin:fa76"));
         assert!(builtin_audio_bridge_supported("burnlimit"));
@@ -407,6 +421,10 @@ mod tests {
         assert_eq!(builtin_display_name("echospace"), Some("EchoSpace"));
         assert_eq!(builtin_display_name("builtin:fa2a"), Some("FA-2A"));
         assert_eq!(builtin_display_name("builtin:zcomp"), Some("Z-Comp"));
+        assert_eq!(
+            builtin_display_name("builtin:mixstation"),
+            Some("MixStation")
+        );
         assert_eq!(builtin_display_name("builtin:fa76"), Some("FA-76"));
         assert_eq!(builtin_display_name("builtin:burnlimit"), Some("BurnLimit"));
         assert_eq!(builtin_display_name("builtin:clipper67"), Some("67Clipper"));

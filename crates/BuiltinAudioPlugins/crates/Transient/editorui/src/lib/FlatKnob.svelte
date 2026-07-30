@@ -126,6 +126,7 @@
         transform="rotate(135 40 40)"
       />
       <circle cx="40" cy="40" r="22" class="body" />
+      <circle cx="40" cy="40" r="17.5" class="face" />
       <g style="transform: rotate({pointerAngle}deg); transform-origin: 40px 40px">
         <rect class="pointer" x="39" y="14" width="2" height="10" rx="1" />
       </g>
@@ -157,6 +158,7 @@
     cursor: ns-resize;
     touch-action: none;
     outline: none;
+    filter: drop-shadow(0 0.28rem 0.32rem rgba(0, 0, 0, 0.5));
   }
 
   svg {
@@ -166,25 +168,31 @@
   }
 
   .track {
-    stroke: rgba(255, 255, 255, 0.1);
-    stroke-width: 5;
+    stroke: rgba(231, 239, 243, 0.11);
+    stroke-width: 4;
     stroke-linecap: round;
   }
 
   .fill {
     stroke: var(--accent);
-    stroke-width: 5;
+    stroke-width: 4;
     stroke-linecap: round;
   }
 
   .body {
-    fill: #14181f;
-    stroke: rgba(255, 255, 255, 0.08);
+    fill: #11161a;
+    stroke: rgba(255, 255, 255, 0.13);
+    stroke-width: 1;
+  }
+
+  .face {
+    fill: #20272d;
+    stroke: rgba(0, 0, 0, 0.5);
     stroke-width: 1;
   }
 
   .pointer {
-    fill: #f5f7fa;
+    fill: #f4f7f8;
   }
 
   .knob.dragging .fill {
@@ -204,8 +212,8 @@
 
   .value {
     color: var(--text);
-    font-size: 0.72rem;
-    font-weight: 650;
+    font-size: 0.74rem;
+    font-weight: 680;
     letter-spacing: -0.02em;
   }
 
@@ -216,7 +224,7 @@
   }
 
   .name {
-    color: var(--text-muted);
+    color: var(--text-faint);
     font-size: 0.55rem;
     font-weight: 650;
     letter-spacing: 0.1em;

@@ -77,7 +77,7 @@
     gap: var(--s3);
     height: 100%;
     padding: var(--s3) var(--s2) var(--s2);
-    background: rgba(255, 255, 255, 0.02);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.08));
     border-left: 1px solid var(--border);
   }
 
@@ -104,7 +104,22 @@
     min-height: 0;
     overflow: hidden;
     border-radius: var(--r-sm);
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.48);
+    background: #0a0e11;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.58);
+  }
+
+  .bar::after {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    content: '';
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0 0.42rem,
+      rgba(4, 7, 9, 0.72) 0.42rem 0.48rem
+    );
+    pointer-events: none;
   }
 
   .fill {
@@ -116,15 +131,15 @@
   }
 
   .fill.in {
-    background: #2f6ea8;
+    background: linear-gradient(180deg, #69a9dc, #2f6ea8);
   }
 
   .fill.out {
-    background: var(--accent);
+    background: linear-gradient(180deg, var(--accent-soft), #319c92);
   }
 
   .fill.gr {
-    background: var(--red);
+    background: linear-gradient(180deg, #ff7a69, var(--red));
   }
 
   .clip-led {
@@ -143,7 +158,7 @@
   }
 
   .label {
-    color: var(--text-muted);
+    color: var(--text-faint);
     font-size: 0.5rem;
     font-weight: 650;
     letter-spacing: 0.1em;
@@ -155,6 +170,7 @@
     align-items: baseline;
     justify-content: center;
     gap: 0.2rem;
+    min-height: 1.7rem;
     padding-top: var(--s1);
     border-top: 1px solid var(--border);
   }

@@ -28,6 +28,7 @@ pub use equz8;
 pub use fa2a;
 pub use fa76;
 pub use meowsyn;
+pub use mixstation;
 pub use transient;
 pub use wrapsynth;
 pub use zcomp;
@@ -49,6 +50,7 @@ pub fn focus_descriptors() -> Vec<PluginDescriptor> {
         meowsyn::descriptor(),
         wrapsynth::descriptor(),
         zcomp::descriptor(),
+        mixstation::descriptor(),
     ]
 }
 
@@ -72,6 +74,7 @@ mod tests {
         assert!(ids.contains(&meowsyn::PLUGIN_ID));
         assert!(ids.contains(&wrapsynth::PLUGIN_ID));
         assert!(ids.contains(&zcomp::PLUGIN_ID));
+        assert!(ids.contains(&mixstation::PLUGIN_ID));
     }
 
     #[test]
@@ -83,6 +86,7 @@ mod tests {
         let mut fet = fa76::Dsp::new(48_000.0);
         let mut channel = c1073::Dsp::new(48_000.0);
         let mut ultimate = zcomp::Dsp::new(48_000.0);
+        let mut strip = mixstation::Dsp::new(48_000.0);
 
         for dsp in [
             &mut eq as &mut dyn StereoEffect,
@@ -92,6 +96,7 @@ mod tests {
             &mut fet,
             &mut channel,
             &mut ultimate,
+            &mut strip,
         ] {
             let (l, r) = dsp.process_stereo(0.2, -0.1);
             assert!(l.is_finite() && r.is_finite());

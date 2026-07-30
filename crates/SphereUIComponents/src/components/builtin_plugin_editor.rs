@@ -82,6 +82,7 @@ pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
         transient::ui::UI_ORIGIN => transient::ui_param_index(param_id),
         wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_index(param_id),
         zcomp::ui::UI_ORIGIN => zcomp::ui_param_index(param_id),
+        mixstation::ui::UI_ORIGIN => mixstation::ui_param_index(param_id),
         _ => None,
     }
 }
@@ -127,6 +128,7 @@ mod state_mirror {
         Transient(Box<transient::Params>),
         WrapSynth(Box<wrapsynth::Params>),
         Zcomp(Box<zcomp::Params>),
+        MixStation(Box<mixstation::Params>),
     }
 
     impl BuiltinParams {
@@ -143,6 +145,7 @@ mod state_mirror {
                 Self::Transient(_) => transient::ui::UI_ORIGIN,
                 Self::WrapSynth(_) => wrapsynth::ui::UI_ORIGIN,
                 Self::Zcomp(_) => zcomp::ui::UI_ORIGIN,
+                Self::MixStation(_) => mixstation::ui::UI_ORIGIN,
             }
         }
 
@@ -174,6 +177,9 @@ mod state_mirror {
                     Some(Self::WrapSynth(Box::new(wrapsynth::default_params())))
                 }
                 zcomp::ui::UI_ORIGIN => Some(Self::Zcomp(Box::new(zcomp::default_params()))),
+                mixstation::ui::UI_ORIGIN => {
+                    Some(Self::MixStation(Box::new(mixstation::default_params())))
+                }
                 _ => None,
             }
         }
@@ -219,6 +225,7 @@ mod state_mirror {
             transient::ui::UI_ORIGIN => transient::ui_param_id(wire_index).is_some(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui_param_id(wire_index).is_some(),
             zcomp::ui::UI_ORIGIN => zcomp::ui_param_id(wire_index).is_some(),
+            mixstation::ui::UI_ORIGIN => mixstation::ui_param_id(wire_index).is_some(),
             _ => false,
         };
         if !known {
@@ -262,6 +269,9 @@ mod state_mirror {
             }
             Some(BuiltinParams::Zcomp(params)) => {
                 let _ = zcomp::ipc::apply_wire_param(params, wire_index, value);
+            }
+            Some(BuiltinParams::MixStation(params)) => {
+                let _ = mixstation::ipc::apply_wire_param(params, wire_index, value);
             }
             None => {}
         }
@@ -310,6 +320,9 @@ mod state_mirror {
             zcomp::ui::UI_ORIGIN => zcomp::ipc::ZcompState::from_json(text)
                 .ok()
                 .map(|state| BuiltinParams::Zcomp(Box::new(state.params))),
+            mixstation::ui::UI_ORIGIN => mixstation::ipc::MixStationState::from_json(text)
+                .ok()
+                .map(|state| BuiltinParams::MixStation(Box::new(state.params))),
             _ => None,
         };
         let Some(parsed) = parsed else {
@@ -386,6 +399,11 @@ mod state_mirror {
             }
             BuiltinParams::Zcomp(params) if origin == zcomp::ui::UI_ORIGIN => {
                 zcomp::ipc::ZcompState::new((**params).clone())
+                    .to_json()
+                    .ok()?
+            }
+            BuiltinParams::MixStation(params) if origin == mixstation::ui::UI_ORIGIN => {
+                mixstation::ipc::MixStationState::new((**params).clone())
                     .to_json()
                     .ok()?
             }
@@ -471,6 +489,13 @@ mod state_mirror {
                 zcomp::ipc::ui_values(params)
                     .into_iter()
                     .filter_map(|(id, value)| zcomp::ui_param_index(id).map(|i| (i, value)))
+                    .collect()
+            }
+            Some(BuiltinParams::MixStation(params)) if origin == mixstation::ui::UI_ORIGIN => {
+                mixstation::ipc::ui_values(params)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| (index as u32, value))
                     .collect()
             }
             _ => Vec::new(),
@@ -871,6 +896,7 @@ mod imp {
             transient::ui::UI_ORIGIN => transient::ui::TransientUi::resolve_ui_asset(path)?,
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::resolve_ui_asset(path)?,
             zcomp::ui::UI_ORIGIN => zcomp::ui::ZcompUi::resolve_ui_asset(path)?,
+            mixstation::ui::UI_ORIGIN => mixstation::ui::MixStationUi::resolve_ui_asset(path)?,
             _ => return None,
         };
         Some(SchemeAsset {
@@ -897,6 +923,7 @@ mod imp {
                 | transient::ui::UI_ORIGIN
                 | wrapsynth::ui::UI_ORIGIN
                 | zcomp::ui::UI_ORIGIN
+                | mixstation::ui::UI_ORIGIN
         )
     }
 
@@ -914,6 +941,7 @@ mod imp {
             transient::ui::UI_ORIGIN => transient::ui::TransientUi::is_embedded(),
             wrapsynth::ui::UI_ORIGIN => wrapsynth::ui::WrapSynthUi::is_embedded(),
             zcomp::ui::UI_ORIGIN => zcomp::ui::ZcompUi::is_embedded(),
+            mixstation::ui::UI_ORIGIN => mixstation::ui::MixStationUi::is_embedded(),
             _ => false,
         }
     }
@@ -1848,6 +1876,10 @@ mod tests {
         assert_eq!(origin_for_plugin_id("builtin:burnlimit"), Some("burnlimit"));
         assert_eq!(origin_for_plugin_id("builtin:clipper67"), Some("clipper67"));
         assert_eq!(origin_for_plugin_id("builtin:transient"), Some("transient"));
+        assert_eq!(
+            origin_for_plugin_id("builtin:mixstation"),
+            Some("mixstation")
+        );
     }
 
     /// Regression guard for the bug that left the editor unopenable in the real
@@ -1864,6 +1896,7 @@ mod tests {
         assert_eq!(origin_for_plugin_id("burnlimit"), Some("burnlimit"));
         assert_eq!(origin_for_plugin_id("clipper67"), Some("clipper67"));
         assert_eq!(origin_for_plugin_id("transient"), Some("transient"));
+        assert_eq!(origin_for_plugin_id("mixstation"), Some("mixstation"));
         assert_eq!(
             origin_for_plugin_id("rodharerist"),
             origin_for_plugin_id("builtin:rodharerist"),
@@ -1895,6 +1928,8 @@ mod tests {
             "rodharerist",
             "builtin:equz8",
             "equz8",
+            "builtin:mixstation",
+            "mixstation",
         ] {
             assert!(
                 SpherePluginHost::is_builtin_ref(id),
@@ -1940,7 +1975,7 @@ mod tests {
     fn builtins_with_an_editor_are_hostable_and_the_rest_are_not() {
         // These embed a UI in any build that ran their build script against a
         // built dist; either way they must never be `NotCompiledIn` here.
-        for id in ["builtin:rodharerist", "builtin:equz8"] {
+        for id in ["builtin:rodharerist", "builtin:equz8", "builtin:mixstation"] {
             assert_ne!(availability(id), HostAvailability::NotCompiledIn);
         }
         // A catalogued built-in that ships no editor bundle is refused by name,
@@ -1986,5 +2021,43 @@ mod tests {
         assert!(builtin_param_index("builtin:equz8", "band3_freq").is_some());
         assert!(builtin_param_index("builtin:equz8", "not-a-param").is_none());
         assert!(builtin_param_index("builtin:compresser", "band3_freq").is_none());
+        assert_eq!(
+            builtin_param_index("builtin:mixstation", "inputTrimDb"),
+            Some(mixstation::ipc::INPUT_TRIM_INDEX)
+        );
+        assert!(builtin_param_index("builtin:mixstation", "not-a-param").is_none());
+    }
+
+    #[cfg(feature = "builtin-plugin-editor")]
+    #[test]
+    fn mixstation_state_defaults_apply_serialize_seed_and_replay() {
+        let insert = "test-mixstation-state-round-trip";
+        let trim = builtin_param_index("mixstation", "inputTrimDb").expect("trim index");
+        builtin_state_apply("mixstation", insert, trim, 7.5);
+
+        let bytes = builtin_state_bytes("mixstation", insert).expect("state serializes");
+        let state = mixstation::ipc::MixStationState::from_json(
+            std::str::from_utf8(&bytes).expect("state is UTF-8"),
+        )
+        .expect("state parses");
+        assert_eq!(state.params.input_trim_db, 7.5);
+        assert_eq!(
+            builtin_state_replay("mixstation", insert)
+                .into_iter()
+                .find(|(index, _)| *index == trim),
+            Some((trim, 7.5))
+        );
+
+        let seeded_insert = "test-mixstation-state-seed";
+        builtin_state_seed("builtin:mixstation", seeded_insert, &bytes);
+        let seeded = builtin_state_bytes("mixstation", seeded_insert).expect("seed persisted");
+        let seeded_state = mixstation::ipc::MixStationState::from_json(
+            std::str::from_utf8(&seeded).expect("seed is UTF-8"),
+        )
+        .expect("seed parses");
+        assert_eq!(seeded_state.params.input_trim_db, 7.5);
+
+        builtin_state_remove(insert);
+        builtin_state_remove(seeded_insert);
     }
 }

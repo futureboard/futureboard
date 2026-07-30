@@ -7,24 +7,25 @@
  */
 
 :root {
-  --bg: #05080a;
-  --panel: #10161a;
-  --panel-hi: #182026;
-  --inset: #0a0e11;
-  --stage: #06090b;
-  --float: rgba(16, 22, 26, 0.92);
+  --bg: #07090b;
+  --panel: #12171b;
+  --panel-hi: #1a2126;
+  --inset: #0b0f12;
+  --stage: #070a0c;
+  --float: #12181c;
 
-  --border: rgba(255, 255, 255, 0.075);
-  --border-hi: rgba(255, 255, 255, 0.14);
+  --border: rgba(231, 239, 243, 0.085);
+  --border-hi: rgba(235, 242, 246, 0.16);
 
-  --text: #eef4f7;
-  --text-muted: rgba(170, 190, 199, 0.58);
-  --readout: #eef4f7;
+  --text: #f2f5f6;
+  --text-muted: rgba(197, 209, 215, 0.62);
+  --text-faint: rgba(183, 198, 205, 0.38);
+  --readout: #f3f7f8;
 
-  --accent: #2ec4b6;
-  --accent-soft: #3fd4c6;
-  --accent-dim: rgba(46, 196, 182, 0.16);
-  --red: #e8483a;
+  --accent: #69d2c8;
+  --accent-soft: #86e2da;
+  --accent-dim: rgba(105, 210, 200, 0.15);
+  --red: #f05a4a;
   --red-soft: rgba(232, 72, 58, 0.7);
   --amber: #e8a23a;
 
@@ -69,12 +70,15 @@ body,
 }
 
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(100% 80% at 50% 0%, #11171b 0%, var(--bg) 72%);
   color: var(--text);
-  font-family: 'IBM Plex Sans', 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-family: 'Mona Sans Variable', 'Mona Sans', 'Segoe UI', sans-serif;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  font-feature-settings: 'tnum' 1;
+  font-feature-settings:
+    'tnum' 1,
+    'ss01' 1;
   line-height: 1.2;
   letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
@@ -93,6 +97,14 @@ button {
     color var(--ease),
     background-color var(--ease),
     border-color var(--ease);
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+button:active {
+  transform: translateY(1px);
 }
 
 button:focus-visible,

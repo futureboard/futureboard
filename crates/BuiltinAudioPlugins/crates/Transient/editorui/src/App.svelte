@@ -25,7 +25,6 @@
   import LevelMeters from './lib/LevelMeters.svelte'
   import PresetControl from './lib/PresetControl.svelte'
   import WaveDisplay from './lib/WaveDisplay.svelte'
-  import logo from './assets/logo.svg'
 
   /**
    * Local view of the parameters. Rust is the authority: this starts at the
@@ -132,7 +131,15 @@
   <div class="panel">
     <header class="chrome">
       <div class="brand">
-        <img class="logo" src={logo} alt="Transient" />
+        <span class="wordmark">TRANSIENT</span>
+        <span
+          class="connection"
+          class:live={connected}
+          title={connected ? 'Linked to the host' : 'No host instance bound'}
+        >
+          <i></i>
+          {connected ? 'Linked' : 'Standby'}
+        </span>
       </div>
 
       <PresetControl
@@ -173,12 +180,8 @@
         />
 
         <div class="control-panel">
+          <span class="section-label">Shape</span>
           <div class="knobs">
-            <svg class="curve" viewBox="0 0 240 62" aria-hidden="true">
-              <path
-                d="M16 44 C 48 12, 72 12, 100 28 C 128 44, 160 52, 224 36"
-              />
-            </svg>
             <FlatKnob
               spec={PARAMS.attack}
               value={params.attack}
@@ -244,26 +247,26 @@
     display: grid;
     width: 100%;
     height: 100%;
-    padding: var(--s3);
+    padding: 0;
     background: var(--bg);
   }
 
   .panel {
     display: grid;
     grid-template-rows: var(--chrome-h) minmax(0, 1fr) auto;
-    gap: var(--s3);
+    gap: 0.65rem;
     width: 100%;
     height: 100%;
-    max-width: 68rem;
-    max-height: 36rem;
-    margin: auto;
-    padding: var(--s3) var(--s4);
-    border: 1px solid var(--border-hi);
-    border-radius: calc(var(--r) + 0.15rem);
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    padding: 0.7rem 0.9rem 0.8rem;
+    border: 0;
+    border-radius: 0;
     background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 28%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 24%),
       var(--panel);
-    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.4);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
   }
 
   .chrome {
@@ -277,12 +280,43 @@
   .brand {
     display: flex;
     align-items: center;
+    gap: 0.8rem;
     min-width: 0;
   }
 
-  .logo {
-    width: min(100%, 10.5rem);
-    height: auto;
+  .wordmark {
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 760;
+    letter-spacing: 0.09em;
+  }
+
+  .connection {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text-faint);
+    font-size: 0.55rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .connection i {
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 50%;
+    background: #343b41;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.75);
+  }
+
+  .connection.live {
+    color: var(--text-muted);
+  }
+
+  .connection.live i {
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-dim);
   }
 
   .chrome-actions {
@@ -294,13 +328,15 @@
 
   .readout-chip {
     display: flex;
-    align-items: baseline;
+    align-items: center;
+    justify-content: center;
     gap: 0.3rem;
     height: var(--chrome-h);
     padding: 0 0.6rem;
     border-radius: 999px;
     border: 1px solid var(--border);
-    background: var(--inset);
+    background: linear-gradient(180deg, #101519, #090d10);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
   }
 
   .rlabel {
@@ -308,6 +344,7 @@
     font-size: 0.6rem;
     font-weight: 700;
     letter-spacing: 0.08em;
+    line-height: 1;
   }
 
   .rvalue {
@@ -316,6 +353,7 @@
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: -0.02em;
+    line-height: 1;
     text-align: right;
   }
 
@@ -335,7 +373,11 @@
     font-size: 0.65rem;
     font-weight: 650;
     letter-spacing: 0.04em;
-    background: var(--inset);
+    line-height: 1;
+    background: linear-gradient(180deg, #171d21, #0c1013);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.035),
+      0 1px 2px rgba(0, 0, 0, 0.25);
     white-space: nowrap;
   }
 
@@ -345,8 +387,8 @@
   }
 
   .chip.on {
-    color: var(--text);
-    border-color: rgba(46, 196, 182, 0.5);
+    color: #eafffc;
+    border-color: rgba(105, 210, 200, 0.48);
     background: var(--accent-dim);
   }
 
@@ -356,9 +398,12 @@
     grid-template-columns: minmax(0, 1fr) 5.75rem;
     min-height: 0;
     overflow: hidden;
-    border: 1px solid var(--border);
+    border: 1px solid rgba(0, 0, 0, 0.72);
     border-radius: var(--r);
     background: var(--stage);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+      inset 0 12px 24px rgba(0, 0, 0, 0.22);
   }
 
   .wave-wrap {
@@ -378,38 +423,30 @@
     left: var(--s3);
     z-index: 3;
     display: flex;
-    align-items: center;
-    gap: var(--s4);
-    padding: 0.75rem 1.1rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.55rem;
+    padding: 0.7rem 1.1rem 0.85rem;
     border: 1px solid var(--border-hi);
     border-radius: var(--r);
     background: var(--float);
-    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(8px);
+    box-shadow:
+      0 16px 32px rgba(0, 0, 0, 0.52),
+      inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  }
+
+  .section-label {
+    color: var(--text-faint);
+    font-size: 0.52rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
   }
 
   .knobs {
-    position: relative;
     display: flex;
     align-items: flex-end;
     gap: 1.35rem;
-  }
-
-  .curve {
-    position: absolute;
-    top: -0.35rem;
-    left: 0;
-    z-index: 0;
-    width: 100%;
-    height: 3.4rem;
-    pointer-events: none;
-  }
-
-  .curve path {
-    fill: none;
-    stroke: rgba(46, 196, 182, 0.32);
-    stroke-width: 1.5;
-    stroke-linecap: round;
   }
 
   .footer {
@@ -418,6 +455,7 @@
     justify-content: space-between;
     gap: var(--s4);
     min-height: var(--footer-h);
+    padding: 0 0.15rem;
   }
 
   .toggles {

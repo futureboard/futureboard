@@ -17,6 +17,7 @@ dependencies = [
  "fa2a",
  "fa76",
  "meowsyn",
+ "mixstation",
  "transient",
  "wrapsynth",
  "zcomp",
@@ -4849,6 +4850,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mixstation"
+version = "0.1.0"
+dependencies = [
+ "builtin_dsp_core",
+ "builtin_ui_embed",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7469,6 +7480,7 @@ dependencies = [
  "fa2a",
  "fa76",
  "libc",
+ "mixstation",
  "napi",
  "napi-build",
  "napi-derive",
@@ -7532,6 +7544,7 @@ dependencies = [
  "gpui",
  "image",
  "midir",
+ "mixstation",
  "pollster 0.4.0",
  "raw-window-handle",
  "rfd",

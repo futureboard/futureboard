@@ -36,6 +36,7 @@ builtin-plugin-editor = [
     "dep:transient",
     "dep:wrapsynth",
     "dep:zcomp",
+    "dep:mixstation",
     "dep:builtin-ui-embed",
 ]
 
@@ -76,6 +77,7 @@ clipper67 = { workspace = true, optional = true }
 transient = { workspace = true, optional = true }
 wrapsynth = { workspace = true, optional = true }
 zcomp = { workspace = true, optional = true }
+mixstation = { workspace = true, optional = true }
 builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true
