@@ -41,6 +41,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        backend_root.join("src/host_ui_mac.mm").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         backend_root
             .join("include/sphere_plugin_host_vst3.h")
             .display()
@@ -76,9 +80,13 @@ fn main() {
     if target_os_for_au() == "macos" {
         build
             .file(backend_root.join("src/au_scanner.mm"))
+            // AppKit application + event pump for the host process, without
+            // which a plug-in editor window never appears (see the file header).
+            .file(backend_root.join("src/host_ui_mac.mm"))
             .flag("-fobjc-arc");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");
         println!("cargo:rustc-link-lib=framework=CoreAudio");
+        println!("cargo:rustc-link-lib=framework=AppKit");
     } else {
         build.file(backend_root.join("src/au_scanner_stub.cpp"));
     }

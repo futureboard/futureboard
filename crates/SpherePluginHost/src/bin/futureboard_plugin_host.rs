@@ -5583,7 +5583,29 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    pub fn com_init() {}
+    /// AppKit application + cooperative event pump for this process. Plug-in
+    /// editor windows on macOS are AppKit windows owned here, so the IPC loop
+    /// must drain the NSApplication event queue or the editor never appears.
+    #[cfg(target_os = "macos")]
+    mod appkit {
+        unsafe extern "C" {
+            pub fn sphere_plugin_host_mac_ui_init();
+            pub fn sphere_plugin_host_mac_ui_pump() -> std::os::raw::c_uint;
+            pub fn sphere_plugin_host_mac_ui_wait(
+                timeout_ms: std::os::raw::c_uint,
+            ) -> std::os::raw::c_int;
+            pub fn sphere_plugin_host_mac_ui_wake();
+        }
+    }
+
+    /// Windows initializes COM here; macOS brings up AppKit. Both give the UI
+    /// thread what the platform's plug-in editors require before any view exists.
+    pub fn com_init() {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            appkit::sphere_plugin_host_mac_ui_init()
+        };
+    }
     pub fn ensure_dpi_awareness() {}
     pub fn system_dpi() -> u32 {
         96
@@ -5606,6 +5628,11 @@ mod platform {
         false
     }
     pub fn pump_messages() -> u32 {
+        #[cfg(target_os = "macos")]
+        {
+            return unsafe { appkit::sphere_plugin_host_mac_ui_pump() } as u32;
+        }
+        #[cfg(not(target_os = "macos"))]
         0
     }
     pub fn plugin_debug() -> bool {
@@ -5617,10 +5644,25 @@ mod platform {
     pub fn set_editor_roots(_roots: Vec<u64>) {}
     pub fn plugin_editor_snapshot(_reason: &str) {}
     pub fn log_capture_on_open(_host_hwnd: u64) {}
-    pub fn wake_ui_thread(_thread_id: u64) {}
+    pub fn wake_ui_thread(_thread_id: u64) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            appkit::sphere_plugin_host_mac_ui_wake()
+        };
+    }
+    /// Wait for UI input, bounded by `timeout_ms`. On macOS this also runs the
+    /// main run loop, which is what services plug-in timers, Core Animation
+    /// commits and main-queue blocks while an editor is open.
     pub fn wait_for_input(timeout_ms: u32) -> bool {
-        std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
-        false
+        #[cfg(target_os = "macos")]
+        {
+            return unsafe { appkit::sphere_plugin_host_mac_ui_wait(timeout_ms) } != 0;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
+            false
+        }
     }
     pub fn log_window_tree_changes(
         _roots: &[u64],

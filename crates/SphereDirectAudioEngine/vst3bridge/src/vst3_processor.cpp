@@ -3729,6 +3729,29 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
   return open_editor_linux(
       processor, window_id_copy.c_str(),
       title_copy.empty() ? "Plugin Editor" : title_copy.c_str(), width, height);
+#elif defined(__APPLE__)
+  // Host-owned model on macOS, same shape as Linux: AppKit has no public
+  // cross-process NSView embedding, so `parent_hwnd` cannot be a parent here —
+  // it is only the main app's owner reference. The editor therefore lives in a
+  // top-level NSWindow owned by this process, created through the standalone
+  // editor path (open_editor_mac), which attaches the IPlugView to an NSView it
+  // owns.
+  (void)parent_hwnd;
+  (void)x;
+  (void)y;
+  if (!processor || !processor->controller) {
+    set_last_error("embed editor: processor/controller missing");
+    return 0;
+  }
+  processor->editor_user_closed.store(false, std::memory_order_release);
+  {
+    std::string title_copy = processor->editor_title;
+    std::string window_id_copy = processor->editor_window_id;
+    return open_editor_mac(
+        processor, window_id_copy.c_str(),
+        title_copy.empty() ? "Plugin Editor" : title_copy.c_str(), width,
+        height);
+  }
 #else
   (void)processor;
   (void)parent_hwnd;
@@ -3855,6 +3878,9 @@ sphere_daux_vst3_embed_detach(SphereDauxVst3Processor *processor) {
   // Host-owned top-level: close the GTK window + detach the view. The audio
   // instance stays alive (close_editor_linux only tears down the editor).
   close_editor_linux(processor);
+#elif defined(__APPLE__)
+  // Host-owned top-level NSWindow; the audio instance stays alive.
+  close_editor_mac(processor);
 #else
   (void)processor;
 #endif
@@ -3880,10 +3906,10 @@ sphere_daux_vst3_embed_attach_hwnd(SphereDauxVst3Processor *processor) {
     return reinterpret_cast<unsigned long long>(processor->editor_attach_hwnd);
   }
   return 0;
-#elif defined(__linux__)
-  // No cross-process HWND on Linux; the host-owned window lives in this
+#elif defined(__linux__) || defined(__APPLE__)
+  // No cross-process window handle here; the host-owned window lives in this
   // process. Return the opaque editor handle so the host records a non-zero
-  // host_hwnd (its message-pump calls are no-ops on Linux).
+  // host_hwnd (its Win32 message-pump calls are no-ops on these platforms).
   if (!processor)
     return 0;
   return processor->editor_native_window ? processor->editor_handle : 0;
@@ -3900,7 +3926,7 @@ sphere_daux_vst3_embed_is_valid(SphereDauxVst3Processor *processor) {
           IsWindow(processor->editor_attach_hwnd))
              ? 1
              : 0;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
   return (processor && processor->editor_native_window) ? 1 : 0;
 #else
   (void)processor;
@@ -3912,7 +3938,7 @@ extern "C" int
 sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
   return daux_embed_has_visible_ui(processor) ? 1 : 0;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
   return (processor && processor->editor_attached) ? 1 : 0;
 #else
   (void)processor;
@@ -3926,8 +3952,8 @@ sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor *processor) {
   if (!processor || !processor->embed_mode)
     return -1;
   return processor->embed_host_kind; // 0 child, 1 tool, 2 detached
-#elif defined(__linux__)
-  // Always a detached top-level window on Linux (host-owned model).
+#elif defined(__linux__) || defined(__APPLE__)
+  // Always a detached top-level window here (host-owned model).
   return (processor && processor->editor_native_window) ? 2 : -1;
 #else
   (void)processor;
@@ -3945,7 +3971,7 @@ sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor *processor) {
   return processor->embed_user_closed.exchange(false, std::memory_order_acq_rel)
              ? 1
              : 0;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
   if (!processor)
     return 0;
   return processor->editor_user_closed.exchange(false, std::memory_order_acq_rel)
@@ -3982,7 +4008,7 @@ sphere_daux_vst3_embed_set_instance_label(SphereDauxVst3Processor *processor,
   if (!processor)
     return;
   processor->embed_instance_label = instance_id ? instance_id : "";
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
   if (!processor)
     return;
   processor->editor_window_id = instance_id ? instance_id : "";
@@ -4002,7 +4028,7 @@ sphere_daux_vst3_set_editor_title(SphereDauxVst3Processor *processor,
   if (!processor)
     return;
   processor->editor_title = title ? title : "";
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
   if (!processor)
     return;
   processor->editor_title = title ? title : "";
