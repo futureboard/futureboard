@@ -5,7 +5,7 @@
 //! scattering platform conditionals.
 
 use gpui::{
-    Pixels, Point, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions, point, px,
+    point, px, Pixels, Point, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions,
 };
 
 /// Product name shared by native window chrome and OS-level window metadata.

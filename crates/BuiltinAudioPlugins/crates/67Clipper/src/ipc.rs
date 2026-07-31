@@ -42,14 +42,14 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
 /// own arms in [`apply_wire_param`]. Single source of truth for clamping, so
 /// [`sanitize_params`] and the wire path cannot drift apart.
 const RANGES: [(f32, f32); PARAM_COUNT] = [
-    (0.0, 0.0),    // power
-    (0.0, 0.0),    // mode
-    (-24.0, 0.0),  // thresholdDb
-    (0.0, 100.0),  // shape
-    (-6.0, 0.0),   // ceilingDb
-    (0.0, 100.0),  // mix
-    (0.0, 0.0),    // stereoLink
-    (0.0, 0.0),    // dcFilter
+    (0.0, 0.0),   // power
+    (0.0, 0.0),   // mode
+    (-24.0, 0.0), // thresholdDb
+    (0.0, 100.0), // shape
+    (-6.0, 0.0),  // ceilingDb
+    (0.0, 100.0), // mix
+    (0.0, 0.0),   // stereoLink
+    (0.0, 0.0),   // dcFilter
 ];
 
 #[inline]
@@ -202,7 +202,11 @@ mod tests {
         assert!(!apply_wire_param(&mut params, u32::MAX, 1.0));
         assert!(!apply_wire_param(&mut params, PARAM_COUNT as u32, 1.0));
         assert!(!apply_wire_param(&mut params, THRESHOLD_INDEX, f32::NAN));
-        assert!(!apply_wire_param(&mut params, THRESHOLD_INDEX, f32::INFINITY));
+        assert!(!apply_wire_param(
+            &mut params,
+            THRESHOLD_INDEX,
+            f32::INFINITY
+        ));
         assert!(!apply_ui_param(&mut params, "notAParam", 1.0));
     }
 

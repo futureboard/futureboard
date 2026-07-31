@@ -6,8 +6,8 @@
 //! aggressive and can stereo-link its detector.
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear, linear_to_db,
-    mix, time_constant,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
+    linear_to_db, mix, time_constant,
 };
 use serde::{Deserialize, Serialize};
 
@@ -554,8 +554,7 @@ impl Dsp {
     }
 
     fn clip_gr(driven_l: f32, driven_r: f32, wet_l: f32, wet_r: f32) -> f32 {
-        Self::sample_gr(driven_l, wet_l)
-            .max(Self::sample_gr(driven_r, wet_r))
+        Self::sample_gr(driven_l, wet_l).max(Self::sample_gr(driven_r, wet_r))
     }
 }
 

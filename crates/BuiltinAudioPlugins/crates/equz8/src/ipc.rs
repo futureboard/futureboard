@@ -46,8 +46,7 @@ pub const BAND_DYN_RANGE: u32 = 2;
 pub const BAND_DYN_ATTACK: u32 = 3;
 pub const BAND_DYN_RELEASE: u32 = 4;
 
-pub const PARAM_COUNT: usize =
-    DYN_BASE_INDEX as usize + BAND_COUNT * DYN_STRIDE as usize;
+pub const PARAM_COUNT: usize = DYN_BASE_INDEX as usize + BAND_COUNT * DYN_STRIDE as usize;
 
 pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "power",
@@ -371,10 +370,7 @@ mod tests {
     fn dynamic_wires_follow_solo() {
         assert_eq!(DYN_BASE_INDEX, SOLO_INDEX + 1);
         assert_eq!(dyn_wire_index(0, BAND_DYN_ENABLED), DYN_BASE_INDEX);
-        assert_eq!(
-            ui_param_index("band1_dynEnabled"),
-            Some(DYN_BASE_INDEX)
-        );
+        assert_eq!(ui_param_index("band1_dynEnabled"), Some(DYN_BASE_INDEX));
         assert_eq!(
             ui_param_index("band8_releaseMs"),
             Some(DYN_BASE_INDEX + 8 * DYN_STRIDE - 1)

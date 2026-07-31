@@ -774,7 +774,7 @@ fn report_load_failure(ctx: LoadFailedContext, cx: &mut App) {
 
 fn report_load_failure_on_welcome(ctx: LoadFailedContext, cx: &mut App) {
     use sphere_ui_components::components::message_box_dialog::{
-        open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
+        open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResponseCb,
     };
 
     let welcome = ensure_welcome_window(cx);
@@ -795,8 +795,7 @@ fn report_load_failure_on_welcome(ctx: LoadFailedContext, cx: &mut App) {
         default_id: 0,
         cancel_id: Some(0),
     };
-    let on_response: Arc<dyn Fn(MessageBoxResult, &mut gpui::Window, &mut App) + Send + Sync> =
-        Arc::new(|_result, _window, _cx| {});
+    let on_response: MessageBoxResponseCb = Arc::new(|_result, _window, _cx| {});
     if let Err(error) = open_message_box_window(owner_bounds, options, on_response, cx) {
         eprintln!("[SessionLoad] failure dialog unavailable: {error}");
     }

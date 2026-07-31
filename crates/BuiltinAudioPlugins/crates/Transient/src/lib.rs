@@ -336,7 +336,8 @@ impl Dsp {
         let body_weight = 1.0 - transient_weight;
 
         let attack_db = attack_amt * MAX_SHAPE_DB * transient_weight;
-        let sustain_db = sustain_amt * MAX_SHAPE_DB * body_weight * (slow / (slow + 1.0e-3)).min(1.0);
+        let sustain_db =
+            sustain_amt * MAX_SHAPE_DB * body_weight * (slow / (slow + 1.0e-3)).min(1.0);
         db_to_linear(attack_db + sustain_db)
     }
 }

@@ -42,14 +42,14 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
 /// own arms in [`apply_wire_param`]. Single source of truth for clamping, so
 /// [`sanitize_params`] and the wire path cannot drift apart.
 const RANGES: [(f32, f32); PARAM_COUNT] = [
-    (0.0, 0.0),     // power
-    (0.0, 0.0),     // ratio
-    (-12.0, 36.0),  // inputDb
-    (-36.0, 12.0),  // outputDb
-    (20.0, 800.0),  // attackUs
+    (0.0, 0.0),      // power
+    (0.0, 0.0),      // ratio
+    (-12.0, 36.0),   // inputDb
+    (-36.0, 12.0),   // outputDb
+    (20.0, 800.0),   // attackUs
     (50.0, 1_100.0), // releaseMs
-    (0.0, 100.0),   // mix
-    (0.0, 500.0),   // sidechainHpfHz
+    (0.0, 100.0),    // mix
+    (0.0, 500.0),    // sidechainHpfHz
 ];
 
 #[inline]

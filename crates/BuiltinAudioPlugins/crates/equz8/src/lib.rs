@@ -498,7 +498,11 @@ impl StereoEffect for Dsp {
                     };
                     let (attack, release, last) = {
                         let state = &self.dyn_state[index];
-                        (state.attack_coeff, state.release_coeff, state.last_applied_db)
+                        (
+                            state.attack_coeff,
+                            state.release_coeff,
+                            state.last_applied_db,
+                        )
                     };
                     let envelope = {
                         let state = &mut self.dyn_state[index];

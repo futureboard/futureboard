@@ -101,18 +101,14 @@ fn dialog_audio_output_routing(
         other => {
             if let Some(name) = other.strip_prefix("Bus - ") {
                 if let Some((id, _)) = bus_targets.iter().find(|(_, n)| n == name) {
-                    return TrackOutputRouting::Bus {
-                        bus_id: id.clone(),
-                    };
+                    return TrackOutputRouting::Bus { bus_id: id.clone() };
                 }
             }
             if let Some((id, _)) = bus_targets
                 .iter()
                 .find(|(id, name)| id == other || name == other)
             {
-                return TrackOutputRouting::Bus {
-                    bus_id: id.clone(),
-                };
+                return TrackOutputRouting::Bus { bus_id: id.clone() };
             }
             TrackOutputRouting::Main
         }
@@ -419,8 +415,7 @@ impl StudioLayout {
                     let selected_input_device = this.selected_input_device_channels(cx);
                     let mut bridge_inserts = Vec::new();
                     let _ = this.timeline.update(cx, |timeline, cx| {
-                        let route_selected_to_new_bus =
-                            dialog.selected_kind == AddTrackKind::Bus;
+                        let route_selected_to_new_bus = dialog.selected_kind == AddTrackKind::Bus;
                         let selected_for_bus: Vec<String> = if route_selected_to_new_bus {
                             let mut ids = timeline.state.selection.selected_track_ids.clone();
                             if ids.is_empty() {
@@ -483,9 +478,7 @@ impl StudioLayout {
                             }
                             if matches!(
                                 dialog.selected_kind,
-                                AddTrackKind::Audio
-                                    | AddTrackKind::Instrument
-                                    | AddTrackKind::Midi
+                                AddTrackKind::Audio | AddTrackKind::Instrument | AddTrackKind::Midi
                             ) {
                                 let output = dialog_audio_output_routing(
                                     &dialog.output_label,

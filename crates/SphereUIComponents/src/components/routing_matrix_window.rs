@@ -220,8 +220,8 @@ impl Render for RoutingMatrixWindow {
                 // Bus/Return destination that is not the source itself.
                 // Bus/return → bus/return chains are allowed; the engine rejects
                 // cycles when the graph is planned.
-                let toggleable = dest.accepts_sends
-                    && dest.track_id.as_deref() != Some(track.id.as_str());
+                let toggleable =
+                    dest.accepts_sends && dest.track_id.as_deref() != Some(track.id.as_str());
 
                 let mut cell = div()
                     .flex()

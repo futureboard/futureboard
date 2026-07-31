@@ -453,9 +453,10 @@ fn cubase_event_gain(raw: f64) -> f32 {
 /// (sample period) covers linear. A Domain that embeds a tempo track without
 /// an explicit Type is also treated as musical.
 fn track_timebase(list_node: Node<'_, '_>) -> TrackTimebase {
-    let Some(domain) = list_node.children().find(|child| {
-        child.has_tag_name("member") && child.attribute("name") == Some("Domain")
-    }) else {
+    let Some(domain) = list_node
+        .children()
+        .find(|child| child.has_tag_name("member") && child.attribute("name") == Some("Domain"))
+    else {
         return TrackTimebase::Samples;
     };
     if let Some(kind) = prim_f64(domain, "Type") {
@@ -659,9 +660,9 @@ fn media_file(archive: &Archive<'_, '_>, clip: Node<'_, '_>) -> Option<MediaFile
 /// Sample offset into the source from `AudioCluster/Segments[0]/Offset`.
 fn segment_source_offset(archive: &Archive<'_, '_>, clip: Node<'_, '_>) -> Option<f64> {
     let cluster = archive.child_class(clip, "AudioCluster")?;
-    let segments = cluster.children().find(|child| {
-        child.has_tag_name("list") && child.attribute("name") == Some("Segments")
-    })?;
+    let segments = cluster
+        .children()
+        .find(|child| child.has_tag_name("list") && child.attribute("name") == Some("Segments"))?;
     let first = segments
         .children()
         .find(|child| child.has_tag_name("item") || child.has_tag_name("obj"))?;

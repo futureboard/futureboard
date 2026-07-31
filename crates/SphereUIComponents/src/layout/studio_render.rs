@@ -609,15 +609,20 @@ impl Render for StudioLayout {
                 // Timeline's Add button fires while Timeline is mid-update
                 // (`cx.listener`). Opening the dialog must not `timeline.read`
                 // until that lease ends — defer like automation-control.
-                StudioLayout::defer_update_in_window(&this, window, cx, move |this, _window, cx| {
-                    this.open_add_track_external_window_with_context(
-                        AddTrackKind::Audio,
-                        request.track_count,
-                        request.has_master_track,
-                        None,
-                        cx,
-                    );
-                });
+                StudioLayout::defer_update_in_window(
+                    &this,
+                    window,
+                    cx,
+                    move |this, _window, cx| {
+                        this.open_add_track_external_window_with_context(
+                            AddTrackKind::Audio,
+                            request.track_count,
+                            request.has_master_track,
+                            None,
+                            cx,
+                        );
+                    },
+                );
             })
         };
         let _ = self.timeline.update(cx, |timeline, _cx| {

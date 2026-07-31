@@ -26,9 +26,7 @@ use DirectAudio::{
 
 use crate::components::form::select::{select, SelectOption};
 use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
-use crate::components::text_input::{
-    bind_mouse_selection, text_field_with_callbacks_and_ime,
-};
+use crate::components::text_input::{bind_mouse_selection, text_field_with_callbacks_and_ime};
 use crate::components::title_bar::external_window_titlebar_compact;
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::components::{TextInputAction, TextInputState};
@@ -233,8 +231,10 @@ impl ExportArrangementWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.state, ExportJobState::Editing | ExportJobState::Failed(_))
-            && self.name_input.is_focused(window)
+        if matches!(
+            self.state,
+            ExportJobState::Editing | ExportJobState::Failed(_)
+        ) && self.name_input.is_focused(window)
         {
             let action = self.name_input.handle_key_ime(event, Some(cx));
             self.sync_output_from_name();
@@ -312,7 +312,9 @@ impl ExportArrangementWindow {
                     let path = if mode == ExportMode::Mixdown {
                         handle.path().to_path_buf()
                     } else {
-                        handle.path().join(format!("{export_name}.{}", format.extension()))
+                        handle
+                            .path()
+                            .join(format!("{export_name}.{}", format.extension()))
                     };
                     let _ = entity.update(cx, |this, cx| {
                         this.settings.output_path = Some(path);
@@ -546,11 +548,7 @@ impl Render for ExportArrangementWindow {
 }
 
 impl ExportArrangementWindow {
-    fn render_editing(
-        &self,
-        window: &Window,
-        target: gpui::Entity<Self>,
-    ) -> gpui::AnyElement {
+    fn render_editing(&self, window: &Window, target: gpui::Entity<Self>) -> gpui::AnyElement {
         let invalid = self.settings.validate(&self.defaults).err();
 
         let mut col = div()

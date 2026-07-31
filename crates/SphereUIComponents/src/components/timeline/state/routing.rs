@@ -446,12 +446,7 @@ impl TimelineState {
     }
 
     pub fn create_return_and_send(&mut self, track_id: &str) -> Option<(String, String)> {
-        if self
-            .tracks
-            .iter()
-            .find(|track| track.id == track_id)
-            .is_none()
-        {
+        if !self.tracks.iter().any(|track| track.id == track_id) {
             return None;
         }
         let next_return = self
@@ -739,7 +734,7 @@ mod tests {
         let mut state = TimelineState::default();
         state.tracks.clear();
         let audio_id = create_track(&mut state, TrackType::Audio, "Drums");
-        let bus_id = state.create_bus_track(&[audio_id.clone()]);
+        let bus_id = state.create_bus_track(std::slice::from_ref(&audio_id));
         let bus = state.find_track(&bus_id).unwrap();
         assert_eq!(bus.track_type, TrackType::Bus);
         assert!(is_arrangement_hidden_track(bus));

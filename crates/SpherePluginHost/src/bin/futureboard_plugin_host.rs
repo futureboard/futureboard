@@ -242,6 +242,13 @@ type LoadedRegistry = HashMap<String, LoadedPlugin>;
 /// what they *have* (block-boundary hand-off, meters, latency), and a
 /// lowest-common-denominator trait would force every core to pretend it has all
 /// three. Keep in sync with `SpherePluginHost::builtin::AUDIO_BRIDGE_STEMS`.
+///
+/// The variants differ in size by tens of kilobytes, which costs nothing here:
+/// exactly one is built per insert, in place inside an `Arc`'d
+/// `BuiltinHostProcessor`, and it is never moved or collected. Boxing the large
+/// variants to even out the enum would only add a pointer hop to every
+/// `process_block` on the audio producer thread.
+#[allow(clippy::large_enum_variant)]
 enum BuiltinDsp {
     Rodhareist(rodharerist::Dsp),
     Equz8(equz8::Dsp),
@@ -5934,10 +5941,12 @@ mod platform {
     pub fn pump_messages() -> u32 {
         #[cfg(target_os = "macos")]
         {
-            return unsafe { appkit::sphere_plugin_host_mac_ui_pump() } as u32;
+            unsafe { appkit::sphere_plugin_host_mac_ui_pump() as u32 }
         }
         #[cfg(not(target_os = "macos"))]
-        0
+        {
+            0
+        }
     }
     pub fn plugin_debug() -> bool {
         false
@@ -5960,7 +5969,7 @@ mod platform {
     pub fn wait_for_input(timeout_ms: u32) -> bool {
         #[cfg(target_os = "macos")]
         {
-            return unsafe { appkit::sphere_plugin_host_mac_ui_wait(timeout_ms) } != 0;
+            unsafe { appkit::sphere_plugin_host_mac_ui_wait(timeout_ms) != 0 }
         }
         #[cfg(not(target_os = "macos"))]
         {

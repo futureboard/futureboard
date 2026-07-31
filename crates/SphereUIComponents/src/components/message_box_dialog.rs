@@ -118,7 +118,9 @@ pub struct MessageBoxResult {
     pub response: usize,
 }
 
-type ResponseCb = Arc<dyn Fn(MessageBoxResult, &mut Window, &mut App) + Send + Sync>;
+/// What a message box hands back when a button is chosen. Public so callers
+/// can name the callback type instead of respelling the whole `dyn Fn`.
+pub type MessageBoxResponseCb = Arc<dyn Fn(MessageBoxResult, &mut Window, &mut App) + Send + Sync>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MessageBoxButtonStyle {
@@ -233,7 +235,10 @@ fn message_box_button(
         .child(label)
 }
 
-fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> impl IntoElement {
+fn message_box_body(
+    options: &MessageBoxOptions,
+    on_response: MessageBoxResponseCb,
+) -> impl IntoElement {
     let buttons = normalized_buttons(options);
     let len = buttons.len();
     let accent = kind_accent(options.kind);
@@ -329,7 +334,7 @@ fn message_box_body(options: &MessageBoxOptions, on_response: ResponseCb) -> imp
 
 pub struct MessageBoxWindow {
     options: MessageBoxOptions,
-    on_response: ResponseCb,
+    on_response: MessageBoxResponseCb,
     focus_handle: FocusHandle,
     responded: bool,
 }
@@ -337,7 +342,7 @@ pub struct MessageBoxWindow {
 impl MessageBoxWindow {
     pub fn new(
         options: MessageBoxOptions,
-        on_response: ResponseCb,
+        on_response: MessageBoxResponseCb,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -447,7 +452,7 @@ impl Render for MessageBoxWindow {
 pub fn open_message_box_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     options: MessageBoxOptions,
-    on_response: ResponseCb,
+    on_response: MessageBoxResponseCb,
     cx: &mut App,
 ) -> Result<WindowHandle<MessageBoxWindow>, String> {
     use crate::window_position::{apply_owner_display, centered_window_bounds};

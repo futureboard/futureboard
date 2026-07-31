@@ -4,21 +4,21 @@
 mod macos {
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     use dispatch2::{DispatchQueue, DispatchTime};
-    use gpui::{div, prelude::*, px, size};
     use gpui::{Bounds, Context, Render, Window, WindowBounds as GpuiWindowBounds, WindowOptions};
-    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
+    use gpui::{div, prelude::*, px, size};
+    use sphere_webview::client::{BrowserLifecycle, plugin_browser_client_with_surface};
     use sphere_webview::osr::OsrSurface;
     use sphere_webview::runtime::{
-        execute_subprocess, platform_browser_subprocess, CefRuntime, CefRuntimeConfig,
-        NativeParent, ProcessDispatch, WebView, WebViewConfig, WindowBounds,
+        CefRuntime, CefRuntimeConfig, NativeParent, ProcessDispatch, WebView, WebViewConfig,
+        WindowBounds, execute_subprocess, platform_browser_subprocess,
     };
     use sphere_webview::scheme::{
-        plugin_scheme_app, plugin_scheme_app_with_message_pump, MessagePumpSchedule,
+        MessagePumpSchedule, plugin_scheme_app, plugin_scheme_app_with_message_pump,
     };
 
     thread_local! {
@@ -195,14 +195,15 @@ mod macos {
         )
         .expect("CEF probe initialization failed");
         RUNTIME.with(|slot| {
-            assert!(slot
-                .borrow_mut()
-                .replace(ProbeHost {
-                    browser: None,
-                    runtime,
-                    _app: app,
-                })
-                .is_none());
+            assert!(
+                slot.borrow_mut()
+                    .replace(ProbeHost {
+                        browser: None,
+                        runtime,
+                        _app: app,
+                    })
+                    .is_none()
+            );
         });
         eprintln!(
             "[cef-probe] event=initialize-end thread={:?}",

@@ -908,7 +908,7 @@ mod font_stack_tests {
 
         let fallbacks = font.fallbacks.expect("Thai font needs a fallback list");
         let list = fallbacks.fallback_list();
-        assert!(!list.iter().any(|entry| *entry == primary));
+        assert!(!list.contains(&primary));
         assert!(list.iter().any(|entry| *entry == SYSTEM_UI_FONT_FAMILY));
     }
 

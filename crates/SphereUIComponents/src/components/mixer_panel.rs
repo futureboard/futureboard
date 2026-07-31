@@ -57,11 +57,7 @@ pub use split::*;
 
 /// True when a mixer strip should paint as selected (multi-select aware).
 #[inline]
-fn mixer_strip_is_selected(
-    track_id: &str,
-    primary: Option<&str>,
-    selected_ids: &[String],
-) -> bool {
+fn mixer_strip_is_selected(track_id: &str, primary: Option<&str>, selected_ids: &[String]) -> bool {
     if !selected_ids.is_empty() {
         selected_ids.iter().any(|id| id == track_id)
     } else {
@@ -1646,8 +1642,7 @@ fn vsti_output_sub_strip(
             }
         }
     }
-    let is_selected = focus_highlight
-        || selected_track_id == Some(child_track.id.as_str());
+    let is_selected = focus_highlight || selected_track_id == Some(child_track.id.as_str());
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =

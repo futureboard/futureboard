@@ -566,6 +566,9 @@ impl Drop for HardwareMidiInput {
     }
 }
 
+/// Only the midir input path feeds this; macOS opens no hardware input yet
+/// (see `open_hardware_midi_inputs`), so nothing decodes bytes there.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn decode_midi_bytes(bytes: &[u8]) -> Option<MidiInputEvent> {
     if bytes.is_empty() {
         return None;
@@ -1111,8 +1114,8 @@ impl MidiThreadScope {
 fn wait_for_midi_tick(duration: Duration) {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
-        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
+        TIMER_ALL_ACCESS, WaitForSingleObject,
     };
 
     struct HighResolutionTimer(windows::Win32::Foundation::HANDLE);

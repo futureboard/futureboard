@@ -3859,29 +3859,28 @@ impl StudioLayout {
     pub(super) fn request_track_insert_parameters(&self, track_id: &str, cx: &Context<Self>) {
         let timeline = self.timeline.read(cx);
         let state = &timeline.state;
-        let instance_ids: Vec<String> = if track_id
-            == crate::components::timeline::timeline_state::MASTER_TRACK_ID
-        {
-            state
-                .master
-                .inserts
-                .iter()
-                .filter(|insert| !insert.is_empty())
-                .map(|insert| insert.id.clone())
-                .collect()
-        } else {
-            state
-                .find_track(track_id)
-                .map(|track| {
-                    track
-                        .inserts
-                        .iter()
-                        .filter(|insert| !insert.is_empty())
-                        .map(|insert| insert.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        let instance_ids: Vec<String> =
+            if track_id == crate::components::timeline::timeline_state::MASTER_TRACK_ID {
+                state
+                    .master
+                    .inserts
+                    .iter()
+                    .filter(|insert| !insert.is_empty())
+                    .map(|insert| insert.id.clone())
+                    .collect()
+            } else {
+                state
+                    .find_track(track_id)
+                    .map(|track| {
+                        track
+                            .inserts
+                            .iter()
+                            .filter(|insert| !insert.is_empty())
+                            .map(|insert| insert.id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
         for instance_id in instance_ids {
             self.request_bridge_insert_parameters(&instance_id);
         }

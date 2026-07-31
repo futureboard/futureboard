@@ -24,26 +24,20 @@ pub const PARAM_COUNT: usize = 6;
 /// Wire index *is* the position in this table; the editor and the host both
 /// resolve through it, so the order is part of the persisted contract. Append
 /// only.
-pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
-    "power",
-    "attack",
-    "sustain",
-    "speed",
-    "mix",
-    "stereoLink",
-];
+pub const UI_PARAM_IDS: [&str; PARAM_COUNT] =
+    ["power", "attack", "sustain", "speed", "mix", "stereoLink"];
 
 /// Inclusive `(min, max)` for every continuous parameter, indexed by wire
 /// index. Booleans carry `(0, 0)` and are handled by their own arms in
 /// [`apply_wire_param`]. Single source of truth for clamping, so
 /// [`sanitize_params`] and the wire path cannot drift apart.
 const RANGES: [(f32, f32); PARAM_COUNT] = [
-    (0.0, 0.0),     // power
+    (0.0, 0.0),      // power
     (-100.0, 100.0), // attack
     (-100.0, 100.0), // sustain
-    (0.0, 100.0),   // speed
-    (0.0, 100.0),   // mix
-    (0.0, 0.0),     // stereoLink
+    (0.0, 100.0),    // speed
+    (0.0, 100.0),    // mix
+    (0.0, 0.0),      // stereoLink
 ];
 
 #[inline]

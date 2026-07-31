@@ -843,7 +843,9 @@ mod tests {
         // `Queued`.
         let media = PathBuf::from("/tmp/cubase_archive/Audio/kick.wav");
         let mut project = FutureboardProject::new("imported");
-        project.assets.push(audio_asset("a1", Some(media.clone()), None));
+        project
+            .assets
+            .push(audio_asset("a1", Some(media.clone()), None));
         project.tracks.push(ProjectTrack {
             id: "t1".into(),
             name: "KICK".into(),
@@ -896,10 +898,7 @@ mod tests {
             routing: Default::default(),
             inserts: Vec::new(),
             automation_lanes: Vec::new(),
-            clips: vec![audio_clip(
-                "a1",
-                Some(PathBuf::from("/elsewhere/kick.wav")),
-            )],
+            clips: vec![audio_clip("a1", Some(PathBuf::from("/elsewhere/kick.wav")))],
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,

@@ -30,12 +30,12 @@ use cef::rc::Rc as _;
 // blocks, so every one of these traits has to be nameable here.
 use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
-    wrap_app, wrap_browser_process_handler, wrap_resource_handler, wrap_scheme_handler_factory,
     App, BrowserProcessHandler, CefString, CefStringUtf16, ImplApp, ImplBrowserProcessHandler,
     ImplCommandLine, ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler,
     ImplResponse, ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler,
     SchemeHandlerFactory, SchemeOptions, WrapApp, WrapBrowserProcessHandler, WrapResourceHandler,
-    WrapSchemeHandlerFactory,
+    WrapSchemeHandlerFactory, wrap_app, wrap_browser_process_handler, wrap_resource_handler,
+    wrap_scheme_handler_factory,
 };
 
 /// Scheme built-in plugin editors are served under. Must match

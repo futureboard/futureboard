@@ -180,11 +180,11 @@ impl StudioLayout {
                                 timeline.state.transport.loop_end_beats = end;
                             }
                         } else {
-                            let still_default =
-                                (timeline.state.transport.loop_start_beats - 0.0).abs()
-                                    < f32::EPSILON
-                                    && (timeline.state.transport.loop_end_beats - 16.0).abs()
-                                        < f32::EPSILON;
+                            let still_default = (timeline.state.transport.loop_start_beats - 0.0)
+                                .abs()
+                                < f32::EPSILON
+                                && (timeline.state.transport.loop_end_beats - 16.0).abs()
+                                    < f32::EPSILON;
                             if still_default {
                                 // Still on the empty-project default — seed one bar
                                 // around the playhead so enabling Loop is visible.

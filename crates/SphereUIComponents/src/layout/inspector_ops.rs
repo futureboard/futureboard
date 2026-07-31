@@ -407,7 +407,8 @@ impl StudioLayout {
             let color = *color;
             let changed = timeline_color.update(cx, |t, cx| {
                 let mut changed = t.state.set_track_color(&id, color);
-                if t.state.is_track_selected(&id) && t.state.selection.selected_track_ids.len() > 1 {
+                if t.state.is_track_selected(&id) && t.state.selection.selected_track_ids.len() > 1
+                {
                     for other in t.state.selection.selected_track_ids.clone() {
                         if other == id {
                             continue;

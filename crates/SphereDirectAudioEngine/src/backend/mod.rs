@@ -303,8 +303,7 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
             name: "DAUx ALSA".into(),
             available: true,
             is_default: false,
-            description: "ALSA PCM — native Linux path (works with PipeWire's ALSA plugin)"
-                .into(),
+            description: "ALSA PCM — native Linux path (works with PipeWire's ALSA plugin)".into(),
         });
     }
 

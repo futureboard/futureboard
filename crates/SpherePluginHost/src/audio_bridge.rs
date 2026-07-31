@@ -453,9 +453,9 @@ impl SharedAudioBuffer {
         // Clear any leftover stereo frames so a later larger block_frames never
         // re-reads a stale dry tail from a shorter write.
         let clear_from = n * 2;
-        let clear_len = (MAX_BLOCK_FRAMES * 2).saturating_sub(clear_from).min(
-            AUDIO_BUF_LEN.saturating_sub(clear_from),
-        );
+        let clear_len = (MAX_BLOCK_FRAMES * 2)
+            .saturating_sub(clear_from)
+            .min(AUDIO_BUF_LEN.saturating_sub(clear_from));
         if clear_len > 0 {
             unsafe {
                 std::ptr::write_bytes(dst.add(clear_from), 0, clear_len);

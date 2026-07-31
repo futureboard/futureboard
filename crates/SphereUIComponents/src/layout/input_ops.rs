@@ -11,9 +11,7 @@ use crate::components::plugin_picker::{
     sync_selection_from_highlight, visible_plugin_id_at, PluginPickerState,
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
-use crate::components::timeline::timeline_state::{
-    is_project_routing_track, ClipType, TrackType,
-};
+use crate::components::timeline::timeline_state::{is_project_routing_track, ClipType, TrackType};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::{

@@ -184,15 +184,11 @@ pub fn configure_cef_application() -> Result<()> {
             // class; the Rust host creates the equivalent declaration here.
             let mut protocol = runtime::objc_getProtocol(CEF_APP_PROTOCOL.as_ptr().cast());
             if protocol.is_null() {
-                let parent =
-                    runtime::objc_getProtocol(CR_APP_CONTROL_PROTOCOL.as_ptr().cast());
+                let parent = runtime::objc_getProtocol(CR_APP_CONTROL_PROTOCOL.as_ptr().cast());
                 if parent.is_null() {
-                    return Err(
-                        "CEF framework did not register CrAppControlProtocol".to_owned()
-                    );
+                    return Err("CEF framework did not register CrAppControlProtocol".to_owned());
                 }
-                let created =
-                    runtime::objc_allocateProtocol(CEF_APP_PROTOCOL.as_ptr().cast());
+                let created = runtime::objc_allocateProtocol(CEF_APP_PROTOCOL.as_ptr().cast());
                 if created.is_null() {
                     return Err("could not allocate CefAppProtocol".to_owned());
                 }

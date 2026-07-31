@@ -172,9 +172,7 @@ pub fn render_project_sample(
             for insert in &mut master.inserts {
                 if insert.kind_tag != crate::runtime::RuntimeInsertKind::NativePlugin {
                     let plugin_id = canonical_plugin_id(&insert.kind);
-                    insert
-                        .dsp
-                        .refresh_process_params(plugin_id, &insert.params);
+                    insert.dsp.refresh_process_params(plugin_id, &insert.params);
                 }
                 let (l, r) = apply_insert(out_l, out_r, insert);
                 out_l = l;
@@ -2192,9 +2190,7 @@ pub fn apply_insert_block(
     }
     if insert.kind_tag != crate::runtime::RuntimeInsertKind::NativePlugin {
         let plugin_id = canonical_plugin_id(&insert.kind);
-        insert
-            .dsp
-            .refresh_process_params(plugin_id, &insert.params);
+        insert.dsp.refresh_process_params(plugin_id, &insert.params);
         for i in 0..block_l.len().min(block_r.len()) {
             let (l, r) = apply_insert(block_l[i], block_r[i], insert);
             block_l[i] = l;
@@ -3043,14 +3039,7 @@ mod bridge_bypass_tests {
         let mut block_r = vec![0.1, 0.1, 0.1];
         let scratch_l = vec![0.5, -0.3, 0.0];
         let scratch_r = vec![0.0, 0.4, -0.6];
-        apply_bridge_insert_output(
-            false,
-            3,
-            &mut block_l,
-            &mut block_r,
-            &scratch_l,
-            &scratch_r,
-        );
+        apply_bridge_insert_output(false, 3, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
         let approx = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
         assert!(approx(&block_l, &[0.7, -0.1, 0.2]), "got {block_l:?}");
         assert!(approx(&block_r, &[0.1, 0.5, -0.5]), "got {block_r:?}");
@@ -3064,7 +3053,11 @@ mod bridge_bypass_tests {
         let scratch_l = vec![0.5, 0.5, 0.0, 0.0];
         let scratch_r = vec![0.5, 0.5, 0.0, 0.0];
         apply_bridge_insert_output(true, 2, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
-        assert_eq!(block_l, vec![1.0, 1.0, 1.0, 1.0], "partial effect must not splice");
+        assert_eq!(
+            block_l,
+            vec![1.0, 1.0, 1.0, 1.0],
+            "partial effect must not splice"
+        );
         assert_eq!(block_r, vec![1.0, 1.0, 1.0, 1.0]);
     }
 

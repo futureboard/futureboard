@@ -149,27 +149,13 @@ pub(crate) fn open_on_host(
             config.mmcss_priority,
         ) {
             Ok(stream) => {
-                // Prefer what ALSA actually negotiated over what we predicted.
-                // The negotiated-buffer extension is provided by our Linux cpal
-                // fork only; other backends report the requested callback size.
-                #[cfg(target_os = "linux")]
-                let buf_size = match stream.negotiated_buffer() {
-                    Some(negotiated) => {
-                        if negotiated.period_frames != *callback_frames {
-                            eprintln!(
-                                "[DAUx cpal] {label}: asked for {callback_frames} frames/callback, \
-                                 device negotiated {} (ring {})",
-                                negotiated.period_frames, negotiated.ring_frames
-                            );
-                        }
-                        negotiated.period_frames
-                    }
-                    None => match stream_config.buffer_size {
-                        BufferSize::Fixed(_) => *callback_frames,
-                        BufferSize::Default => 0,
-                    },
-                };
-                #[cfg(not(target_os = "linux"))]
+                // `callback_frames` is what the chosen candidate predicts the
+                // callback block will be: on ALSA the period cpal derives from
+                // the ring it was handed (see `period_candidates`), elsewhere
+                // the requested size itself. cpal exposes no way to read back
+                // what the device really negotiated, so the prediction is the
+                // only answer available; `BufferSize::Default` means we never
+                // asked, so report 0 rather than guess.
                 let buf_size = match stream_config.buffer_size {
                     BufferSize::Fixed(_) => *callback_frames,
                     BufferSize::Default => 0,
@@ -245,90 +231,6 @@ fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
 #[cfg(not(target_os = "linux"))]
 fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
     vec![("requested", period, period)]
-}
-
-#[cfg(test)]
-mod buffer_size_tests {
-    use super::period_candidates;
-
-    /// The reported buffer size must be the block the callback actually
-    /// receives, not the value handed to cpal — those differ on ALSA.
-    #[test]
-    fn reported_size_is_the_callback_block() {
-        for (_, fixed, callback) in period_candidates(256) {
-            assert!(fixed > 0 && callback > 0, "no candidate may report zero");
-            #[cfg(target_os = "linux")]
-            assert_eq!(
-                callback,
-                fixed / super::ALSA_PERIODS_PER_BUFFER,
-                "cpal derives the ALSA period as a quarter of the ring"
-            );
-            #[cfg(not(target_os = "linux"))]
-            assert_eq!(callback, fixed, "the two agree off ALSA");
-        }
-    }
-
-    /// The preferred ALSA candidate must ask for a ring four times the
-    /// requested period, so the callback block comes back at the requested
-    /// size instead of a quarter of it. This is the actual stutter fix.
-    ///
-    /// Verified against real hardware: requesting 256 yields a 64-frame period
-    /// and underruns on an idle callback, while requesting 1024 yields the
-    /// 256-frame period we actually want, with none.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn preferred_alsa_candidate_preserves_the_requested_period() {
-        let (_, fixed, callback) = period_candidates(256)[0];
-        assert_eq!(fixed, 1024, "ring should hold four 256-frame periods");
-        assert_eq!(callback, 256, "callback block should match the request");
-    }
-
-    /// A callback can be handed the whole ring, and `request_block` clamps at
-    /// `MAX_BRIDGE_BLOCK_FRAMES`, so no ring may exceed it — otherwise bridged
-    /// plugin audio loses the tail of every late block.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn ring_never_exceeds_what_the_plugin_bridge_can_carry() {
-        let max = crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES as u32;
-        for period in [32, 64, 128, 256, 512, 1024, 2048, 4096] {
-            for (label, fixed, _) in period_candidates(period) {
-                assert!(
-                    fixed <= max.max(period),
-                    "{label}: ring {fixed} exceeds the {max}-frame bridge block \
-                     for a {period}-frame period"
-                );
-            }
-        }
-    }
-
-    /// Large periods must still gain whatever headroom fits rather than being
-    /// forced back to a single-period ring.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn large_periods_keep_the_headroom_that_fits() {
-        assert_eq!(period_candidates(512)[0].1, 2048, "512 fits four periods");
-        assert_eq!(period_candidates(1024)[0].1, 2048, "1024 fits two");
-        assert_eq!(period_candidates(2048)[0].1, 2048, "2048 fits one");
-    }
-
-    /// A bare-ring retry must still be offered, since `set_buffer_size` is an
-    /// exact match on ALSA and the larger ring is often refused.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn alsa_falls_back_before_surrendering_to_the_device_default() {
-        let candidates = period_candidates(256);
-        assert_eq!(candidates.len(), 2, "a retry must exist");
-        assert_eq!(candidates[1].1, 256, "retry asks for the bare value");
-    }
-
-    /// Small periods must not report a zero-frame callback block, which would
-    /// zero out the reported latency.
-    #[test]
-    fn tiny_periods_never_report_zero() {
-        for (_, _, callback) in period_candidates(2) {
-            assert!(callback >= 1, "callback frames must stay positive");
-        }
-    }
 }
 
 // ── Stream builders ───────────────────────────────────────────────────────────
@@ -498,14 +400,6 @@ where
             move |err| {
                 glitch_counter.fetch_add(1, Ordering::Relaxed);
                 match err {
-                    // The device ran dry and recovered. Counted rather than
-                    // logged: underruns arrive in bursts, and one eprintln per
-                    // xrun would itself starve the callback. This variant is an
-                    // ALSA-only extension in our cpal fork.
-                    #[cfg(target_os = "linux")]
-                    cpal::StreamError::Underrun => {
-                        err_shared.device_xruns.fetch_add(1, Ordering::Relaxed);
-                    }
                     // Device vanished mid-stream (unplug / default-device
                     // change): flag it so the control thread can surface
                     // DeviceLost and attempt recovery.
@@ -816,5 +710,89 @@ fn set_mmcss_pro_audio() -> bool {
             eprintln!("[DAUx] MMCSS set failed (may require elevated privileges)");
         }
         ok
+    }
+}
+
+#[cfg(test)]
+mod buffer_size_tests {
+    use super::period_candidates;
+
+    /// The reported buffer size must be the block the callback actually
+    /// receives, not the value handed to cpal — those differ on ALSA.
+    #[test]
+    fn reported_size_is_the_callback_block() {
+        for (_, fixed, callback) in period_candidates(256) {
+            assert!(fixed > 0 && callback > 0, "no candidate may report zero");
+            #[cfg(target_os = "linux")]
+            assert_eq!(
+                callback,
+                fixed / super::ALSA_PERIODS_PER_BUFFER,
+                "cpal derives the ALSA period as a quarter of the ring"
+            );
+            #[cfg(not(target_os = "linux"))]
+            assert_eq!(callback, fixed, "the two agree off ALSA");
+        }
+    }
+
+    /// The preferred ALSA candidate must ask for a ring four times the
+    /// requested period, so the callback block comes back at the requested
+    /// size instead of a quarter of it. This is the actual stutter fix.
+    ///
+    /// Verified against real hardware: requesting 256 yields a 64-frame period
+    /// and underruns on an idle callback, while requesting 1024 yields the
+    /// 256-frame period we actually want, with none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preferred_alsa_candidate_preserves_the_requested_period() {
+        let (_, fixed, callback) = period_candidates(256)[0];
+        assert_eq!(fixed, 1024, "ring should hold four 256-frame periods");
+        assert_eq!(callback, 256, "callback block should match the request");
+    }
+
+    /// A callback can be handed the whole ring, and `request_block` clamps at
+    /// `MAX_BRIDGE_BLOCK_FRAMES`, so no ring may exceed it — otherwise bridged
+    /// plugin audio loses the tail of every late block.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ring_never_exceeds_what_the_plugin_bridge_can_carry() {
+        let max = crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES as u32;
+        for period in [32, 64, 128, 256, 512, 1024, 2048, 4096] {
+            for (label, fixed, _) in period_candidates(period) {
+                assert!(
+                    fixed <= max.max(period),
+                    "{label}: ring {fixed} exceeds the {max}-frame bridge block \
+                     for a {period}-frame period"
+                );
+            }
+        }
+    }
+
+    /// Large periods must still gain whatever headroom fits rather than being
+    /// forced back to a single-period ring.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn large_periods_keep_the_headroom_that_fits() {
+        assert_eq!(period_candidates(512)[0].1, 2048, "512 fits four periods");
+        assert_eq!(period_candidates(1024)[0].1, 2048, "1024 fits two");
+        assert_eq!(period_candidates(2048)[0].1, 2048, "2048 fits one");
+    }
+
+    /// A bare-ring retry must still be offered, since `set_buffer_size` is an
+    /// exact match on ALSA and the larger ring is often refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn alsa_falls_back_before_surrendering_to_the_device_default() {
+        let candidates = period_candidates(256);
+        assert_eq!(candidates.len(), 2, "a retry must exist");
+        assert_eq!(candidates[1].1, 256, "retry asks for the bare value");
+    }
+
+    /// Small periods must not report a zero-frame callback block, which would
+    /// zero out the reported latency.
+    #[test]
+    fn tiny_periods_never_report_zero() {
+        for (_, _, callback) in period_candidates(2) {
+            assert!(callback >= 1, "callback frames must stay positive");
+        }
     }
 }

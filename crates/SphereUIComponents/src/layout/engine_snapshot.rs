@@ -1886,8 +1886,7 @@ mod tests {
                 .and_then(|t| t.inserts.iter().find(|i| i.id == slot))
                 .expect("insert in export snapshot");
             assert_eq!(
-                insert.kind,
-                "external-bridge-plugin",
+                insert.kind, "external-bridge-plugin",
                 "export must mirror live bridge inserts so offline render can drive bridge sinks"
             );
             assert!(

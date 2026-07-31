@@ -37,15 +37,15 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
 ];
 
 const RANGES: [(f32, f32); PARAM_COUNT] = [
-    (0.0, 0.0),     // power
-    (0.0, 0.0),     // style
-    (-12.0, 24.0),  // gainDb
-    (-6.0, 0.0),    // ceilingDb
+    (0.0, 0.0),      // power
+    (0.0, 0.0),      // style
+    (-12.0, 24.0),   // gainDb
+    (-6.0, 0.0),     // ceilingDb
     (20.0, 2_000.0), // releaseMs
-    (0.0, 10.0),    // lookaheadMs
-    (0.0, 0.0),     // truePeak
-    (0.0, 100.0),   // mix
-    (0.0, 0.0),     // stereoLink
+    (0.0, 10.0),     // lookaheadMs
+    (0.0, 0.0),      // truePeak
+    (0.0, 100.0),    // mix
+    (0.0, 0.0),      // stereoLink
 ];
 
 #[inline]
@@ -169,11 +169,7 @@ mod tests {
     fn state_round_trips() {
         let mut params = default_params();
         assert!(apply_ui_param(&mut params, "gainDb", 6.0));
-        assert!(apply_ui_param(
-            &mut params,
-            "style",
-            Style::Clip.to_wire()
-        ));
+        assert!(apply_ui_param(&mut params, "style", Style::Clip.to_wire()));
         let json = BurnLimitState::new(params).to_json().unwrap();
         let decoded = BurnLimitState::from_json(&json).unwrap();
         assert_eq!(decoded.params.gain_db, 6.0);

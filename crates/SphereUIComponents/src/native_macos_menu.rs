@@ -132,7 +132,7 @@ pub fn install_native_macos_menu(cx: &mut App) {
 mod macos {
     use gpui::{App, Menu, MenuItem as GpuiMenuItem, SharedString, SystemMenuType};
 
-    use super::{APP_WINDOW_TITLE, ApplicationMenuEntry};
+    use super::{ApplicationMenuEntry, APP_WINDOW_TITLE};
     use crate::menu::{MenuItem as AppMenuItem, MenuItemKind, MenuManifest};
 
     #[derive(Clone, PartialEq, gpui::Action)]

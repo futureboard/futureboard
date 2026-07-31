@@ -1,9 +1,7 @@
 use gpui::{App, Context};
 
 use crate::components;
-use crate::components::timeline::timeline_state::{
-    MidiChannel, TrackMidiInputRouting, TrackType,
-};
+use crate::components::timeline::timeline_state::{MidiChannel, TrackMidiInputRouting, TrackType};
 use sphere_midi_service::{
     HardwareMidiInputMessage, MidiInputEvent, MidiInputRouteStatus, MidiInputRouter,
     MidiInputSource, MidiInputTarget, VirtualKeyboardEvent,
@@ -378,8 +376,11 @@ impl StudioLayout {
             if let Some(target) = self.resolve_virtual_keyboard_target(cx).target {
                 // Re-check the fallback track still accepts this device.
                 if let Some(track) = state.find_track(&target.track_id) {
-                    if track_accepts_hardware_midi(&track.routing.midi_input, device_id, device_name)
-                    {
+                    if track_accepts_hardware_midi(
+                        &track.routing.midi_input,
+                        device_id,
+                        device_name,
+                    ) {
                         targets.push(target);
                     }
                 }

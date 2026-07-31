@@ -67,10 +67,7 @@ impl InsertPickerWindow {
     }
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.snapshot
-            .search_input
-            .focus_handle
-            .focus(window, cx);
+        self.snapshot.search_input.focus_handle.focus(window, cx);
         self.needs_search_focus = false;
     }
 

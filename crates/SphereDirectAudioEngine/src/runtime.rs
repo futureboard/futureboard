@@ -1127,8 +1127,8 @@ impl RuntimeProject {
     /// Arc clones only — no allocation.
     pub fn resolve_bridge_sinks(&mut self) {
         let sinks = &self.plugin_bridge_sinks;
-        let min_scratch = DEFAULT_AUDIO_BLOCK_CAPACITY
-            .max(crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES);
+        let min_scratch =
+            DEFAULT_AUDIO_BLOCK_CAPACITY.max(crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES);
         for track in &mut self.tracks {
             for insert in &mut track.inserts {
                 if insert.kind_tag == RuntimeInsertKind::ExternalBridge {

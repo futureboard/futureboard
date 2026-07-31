@@ -981,8 +981,7 @@ impl StudioLayout {
             // invalidation was deferred behind it, the strip highlight visibly
             // lagged even though the model had already changed.
             timeline_select.update(cx, |t, _cx| {
-                t.state
-                    .select_track_with_modifiers(&id, additive, range);
+                t.state.select_track_with_modifiers(&id, additive, range);
             });
             // Queue the lightweight mixer repaint first so selection feedback is
             // not blocked by Timeline/Inspector/tree work.
@@ -1196,13 +1195,13 @@ impl StudioLayout {
                 {
                     let _dispatch = crate::perf::PerfScope::enter("MixerMuteCommandDispatch");
                     if let Some(engine) = audio_engine.as_ref() {
-                        let ids: Vec<String> = timeline_mute.read(cx).state.selection.selected_track_ids
-                            .iter()
-                            .cloned()
-                            .collect();
-                        let batch = if ids.len() > 1
-                            && ids.iter().any(|selected| selected == &id)
-                        {
+                        let ids: Vec<String> = timeline_mute
+                            .read(cx)
+                            .state
+                            .selection
+                            .selected_track_ids
+                            .to_vec();
+                        let batch = if ids.len() > 1 && ids.iter().any(|selected| selected == &id) {
                             ids
                         } else {
                             vec![id.clone()]
@@ -1317,12 +1316,8 @@ impl StudioLayout {
                             .state
                             .selection
                             .selected_track_ids
-                            .iter()
-                            .cloned()
-                            .collect();
-                        let batch = if ids.len() > 1
-                            && ids.iter().any(|selected| selected == &id)
-                        {
+                            .to_vec();
+                        let batch = if ids.len() > 1 && ids.iter().any(|selected| selected == &id) {
                             ids
                         } else {
                             vec![id.clone()]

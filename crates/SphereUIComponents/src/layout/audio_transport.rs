@@ -2939,7 +2939,11 @@ mod x11_cursor {
                     return None;
                 }
                 let root = (xlib.XDefaultRootWindow)(display);
-                Some(Mutex::new(Conn { xlib, display, root }))
+                Some(Mutex::new(Conn {
+                    xlib,
+                    display,
+                    root,
+                }))
             }
         })
         .as_ref()

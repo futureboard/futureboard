@@ -478,6 +478,11 @@ pub struct SharedState {
     /// equivalent elsewhere). Distinct from `output_xruns`, which counts the
     /// *software* monitor ring running dry: this one means the hardware ran out
     /// of samples, so the user heard a click.
+    ///
+    /// No backend can report these yet, so it reads 0 everywhere: cpal recovers
+    /// from an ALSA xrun inside its own stream worker without telling the error
+    /// callback, and the other hosts have no equivalent signal. Wiring it up
+    /// needs a backend that can observe the underrun first.
     pub device_xruns: AtomicU64,
     pub mmcss_active: AtomicBool,
     /// Set by a backend when the audio device disappears mid-stream (USB
