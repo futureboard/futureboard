@@ -211,7 +211,7 @@ pub fn external_window_titlebar_with_icon(
         .gap(px(8.0))
         .h_full()
         .flex_shrink_0();
-    if let Some(path) = icon_path {
+    if let Some(path) = icon_path.filter(|_| policy.show_titlebar_icon()) {
         title_row = title_row.child(
             svg()
                 .path(path)
@@ -266,7 +266,7 @@ pub fn external_window_titlebar_with_icon(
                 assets::ICON_X_PATH,
                 move |window, cx| on_close(window, cx),
             ));
-    } else {
+    } else if policy.needs_drawn_close_fallback() {
         bar = bar.child(
             div()
                 .id(close_id)
@@ -302,6 +302,24 @@ pub fn external_window_titlebar_compact(
     let on_close = on_close.clone();
     let title_text = crate::platform_chrome::branded_window_title(&title.into());
 
+    let close_button = policy.needs_drawn_close_fallback().then(|| {
+        div()
+            .id(close_id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(WINDOW_CONTROL_WIDTH))
+            .h(px(TITLEBAR_HEIGHT))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .hover(|s| s.bg(Colors::surface_control_hover()))
+            .occlude()
+            .on_click(move |_, window, cx| on_close(window, cx))
+            .child(
+                window_control_icon(WindowControlArea::Close, assets::ICON_X_PATH, "X")
+                    .text_color(Colors::text_faint()),
+            )
+    });
+
     div()
         .flex()
         .flex_row()
@@ -325,7 +343,47 @@ pub fn external_window_titlebar_compact(
                 .child(title_text),
         )
         .child(draggable_spacer())
+        .children(close_button)
+}
+
+pub type WindowChromeCloseCb = std::sync::Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>;
+
+/// Title bar for a window opened without platform caption controls, whose close
+/// affordance exists only while closing is actually allowed. Used by the session
+/// transaction window: during a handoff nothing may close it, and once it holds a
+/// terminal error the same bar exposes the real dismiss action.
+pub fn chromeless_window_titlebar(
+    title: impl Into<String>,
+    close_id: impl Into<gpui::ElementId>,
+    on_close: Option<WindowChromeCloseCb>,
+) -> impl IntoElement {
+    let policy = PlatformChromePolicy::chromeless_dialog();
+    let title_text = crate::platform_chrome::branded_window_title(&title.into());
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(policy.titlebar_height_px))
+        .pl(policy.external_titlebar_left_padding())
+        .pr(px(CHROME_PAD_X))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_titlebar())
         .child(
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .flex_shrink_0()
+                .text_size(px(CHROME_TITLE_SIZE))
+                .font(theme::ui_font())
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_primary())
+                .child(title_text),
+        )
+        .child(draggable_spacer())
+        .children(on_close.map(|on_close| {
             div()
                 .id(close_id)
                 .flex()
@@ -334,14 +392,14 @@ pub fn external_window_titlebar_compact(
                 .w(px(WINDOW_CONTROL_WIDTH))
                 .h(px(TITLEBAR_HEIGHT))
                 .cursor(gpui::CursorStyle::PointingHand)
-                .hover(|s| s.bg(Colors::surface_control_hover()))
+                .hover(|s| s.bg(Colors::accent_danger()))
                 .occlude()
                 .on_click(move |_, window, cx| on_close(window, cx))
                 .child(
                     window_control_icon(WindowControlArea::Close, assets::ICON_X_PATH, "X")
                         .text_color(Colors::text_faint()),
-                ),
-        )
+                )
+        }))
 }
 
 fn external_window_control_button(

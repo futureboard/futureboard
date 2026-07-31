@@ -25,6 +25,15 @@ cursor on Windows.
 On macOS and Linux, the same styles currently fall back to the closest native
 system cursor so the API remains cross-platform.
 
+## macOS Traffic-Light Guard
+
+`MacWindowState::move_traffic_light` now returns early when any of the three
+standard window buttons is missing. AppKit removes all of them while a window is
+presented as a sheet, and a style mask without `.miniaturizable` never creates
+the minimize button, so the previous unconditional `frame` message was sent to a
+nil button and aborted the process. Futureboard opens non-minimizable windows for
+dialogs and session transactions, so this guard is required.
+
 ## Maintenance Notes
 
 When updating GPUI from upstream, preserve these Futureboard patches or port

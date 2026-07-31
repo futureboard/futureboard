@@ -7,6 +7,102 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use gpui::App;
 
+use crate::menu::{MenuItem as AppMenuItem, MenuItemKind};
+use crate::platform_chrome::APP_WINDOW_TITLE;
+
+/// Commands that macOS keeps in the application menu instead of File/Edit/Help.
+const APPLICATION_MENU_COMMANDS: &[&str] = &[
+    "app:about",
+    "app:check-for-updates",
+    "app:preferences",
+    "app:quit",
+];
+
+/// One row of the macOS application menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationMenuEntry {
+    /// Runs a manifest command id through the shared dispatcher.
+    Command {
+        label: String,
+        command: &'static str,
+    },
+    Separator,
+    /// Submenu populated by the system.
+    Services {
+        label: &'static str,
+    },
+}
+
+/// Rows of the macOS application menu, in AppKit order.
+///
+/// AppKit renders the first menu of the main menu as the application menu: it
+/// replaces the title with the process name and owns the About / Settings /
+/// Quit slots. Without this leading menu the manifest's first menu — File —
+/// becomes the application menu, so its items are reachable only under the app
+/// name and every later menu shifts one place to the left.
+pub fn application_menu_entries() -> Vec<ApplicationMenuEntry> {
+    vec![
+        ApplicationMenuEntry::Command {
+            label: format!("About {APP_WINDOW_TITLE}"),
+            command: "app:about",
+        },
+        ApplicationMenuEntry::Command {
+            label: "Check for Updates...".to_string(),
+            command: "app:check-for-updates",
+        },
+        ApplicationMenuEntry::Separator,
+        ApplicationMenuEntry::Command {
+            label: "Settings...".to_string(),
+            command: "app:preferences",
+        },
+        ApplicationMenuEntry::Separator,
+        ApplicationMenuEntry::Services { label: "Services" },
+        ApplicationMenuEntry::Separator,
+        ApplicationMenuEntry::Command {
+            label: format!("Quit {APP_WINDOW_TITLE}"),
+            command: "app:quit",
+        },
+    ]
+}
+
+/// Manifest items with the application-menu commands removed and the
+/// separators they orphaned collapsed.
+pub fn items_without_application_menu_commands(items: &[AppMenuItem]) -> Vec<AppMenuItem> {
+    let kept: Vec<AppMenuItem> = items
+        .iter()
+        .filter(|item| {
+            !item
+                .command
+                .as_deref()
+                .is_some_and(|command| APPLICATION_MENU_COMMANDS.contains(&command))
+        })
+        .map(|item| {
+            let mut item = item.clone();
+            if !item.children.is_empty() {
+                item.children = items_without_application_menu_commands(&item.children);
+            }
+            item
+        })
+        .collect();
+
+    collapse_separators(kept)
+}
+
+fn collapse_separators(items: Vec<AppMenuItem>) -> Vec<AppMenuItem> {
+    let is_separator = |item: &AppMenuItem| item.kind == MenuItemKind::Separator;
+    let mut collapsed: Vec<AppMenuItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if is_separator(&item) && collapsed.last().is_none_or(&is_separator) {
+            continue;
+        }
+        collapsed.push(item);
+    }
+    while collapsed.last().is_some_and(&is_separator) {
+        collapsed.pop();
+    }
+    collapsed
+}
+
 static COMMAND_DISPATCHER: OnceLock<Mutex<Option<Arc<dyn Fn(&str, &mut App) + Send + Sync>>>> =
     OnceLock::new();
 
@@ -34,8 +130,9 @@ pub fn install_native_macos_menu(cx: &mut App) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use gpui::{App, Menu, MenuItem as GpuiMenuItem, SharedString};
+    use gpui::{App, Menu, MenuItem as GpuiMenuItem, SharedString, SystemMenuType};
 
+    use super::{APP_WINDOW_TITLE, ApplicationMenuEntry};
     use crate::menu::{MenuItem as AppMenuItem, MenuItemKind, MenuManifest};
 
     #[derive(Clone, PartialEq, gpui::Action)]
@@ -55,17 +152,40 @@ mod macos {
         });
 
         let manifest = MenuManifest::load();
-        let menus: Vec<Menu> = manifest
-            .menus
-            .iter()
-            .map(|menu| Menu {
-                name: menu.label.clone().into(),
-                items: convert_items(&menu.items),
-                disabled: false,
+        let mut menus: Vec<Menu> = Vec::with_capacity(manifest.menus.len() + 1);
+        menus.push(application_menu());
+        menus.extend(manifest.menus.iter().map(|menu| Menu {
+            name: menu.label.clone().into(),
+            items: convert_items(&super::items_without_application_menu_commands(&menu.items)),
+            disabled: false,
+        }));
+
+        cx.set_menus(menus);
+    }
+
+    /// The leading menu AppKit titles with the process name.
+    fn application_menu() -> Menu {
+        let items = super::application_menu_entries()
+            .into_iter()
+            .map(|entry| match entry {
+                ApplicationMenuEntry::Separator => GpuiMenuItem::separator(),
+                ApplicationMenuEntry::Services { label } => {
+                    GpuiMenuItem::os_submenu(label, SystemMenuType::Services)
+                }
+                ApplicationMenuEntry::Command { label, command } => GpuiMenuItem::action(
+                    label,
+                    RunMenuCommand {
+                        command_id: SharedString::new_static(command),
+                    },
+                ),
             })
             .collect();
 
-        cx.set_menus(menus);
+        Menu {
+            name: APP_WINDOW_TITLE.into(),
+            items,
+            disabled: false,
+        }
     }
 
     fn convert_items(items: &[AppMenuItem]) -> Vec<GpuiMenuItem> {
@@ -104,4 +224,97 @@ mod macos {
 #[cfg(target_os = "macos")]
 fn install_native_macos_menu_inner(cx: &mut App) {
     macos::install(cx);
+}
+
+#[cfg(test)]
+mod application_menu_tests {
+    use super::*;
+    use crate::menu::MenuManifest;
+
+    fn menu_items(id: &str) -> Vec<AppMenuItem> {
+        let manifest = MenuManifest::load();
+        let menu = manifest
+            .menus
+            .iter()
+            .find(|menu| menu.id == id)
+            .unwrap_or_else(|| panic!("manifest menu {id}"));
+        items_without_application_menu_commands(&menu.items)
+    }
+
+    fn commands(items: &[AppMenuItem]) -> Vec<&str> {
+        items
+            .iter()
+            .filter_map(|item| item.command.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn the_application_menu_leads_with_about_and_ends_with_quit() {
+        let entries = application_menu_entries();
+
+        assert_eq!(
+            entries.first(),
+            Some(&ApplicationMenuEntry::Command {
+                label: format!("About {APP_WINDOW_TITLE}"),
+                command: "app:about",
+            })
+        );
+        assert_eq!(
+            entries.last(),
+            Some(&ApplicationMenuEntry::Command {
+                label: format!("Quit {APP_WINDOW_TITLE}"),
+                command: "app:quit",
+            })
+        );
+    }
+
+    #[test]
+    fn the_application_menu_covers_every_relocated_command() {
+        let entries = application_menu_entries();
+        for command in APPLICATION_MENU_COMMANDS {
+            assert!(
+                entries.iter().any(|entry| matches!(
+                    entry,
+                    ApplicationMenuEntry::Command { command: id, .. } if id == command
+                )),
+                "application menu is missing {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_menu_keeps_its_own_items() {
+        let items = menu_items("file");
+        let commands = commands(&items);
+
+        assert!(commands.contains(&"project:new"));
+        assert!(commands.contains(&"project:open"));
+        assert!(commands.contains(&"project:save"));
+        assert!(commands.contains(&"project:close"));
+        assert!(!commands.contains(&"app:quit"));
+    }
+
+    #[test]
+    fn relocated_items_leave_no_orphan_separator() {
+        for id in ["file", "edit", "help"] {
+            let items = menu_items(id);
+            assert!(
+                !commands(&items)
+                    .iter()
+                    .any(|command| APPLICATION_MENU_COMMANDS.contains(command)),
+                "{id} still offers an application-menu command"
+            );
+            assert_ne!(
+                items.last().map(|item| item.kind.clone()),
+                Some(MenuItemKind::Separator),
+                "{id} ends with a dangling separator"
+            );
+            assert!(
+                !items
+                    .windows(2)
+                    .any(|pair| pair.iter().all(|item| item.kind == MenuItemKind::Separator)),
+                "{id} has consecutive separators"
+            );
+        }
+    }
 }

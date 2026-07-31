@@ -13,8 +13,10 @@ use sphere_ui_components::layout::{
 use sphere_ui_components::loading_session::{
     begin_pre_studio_workspace_prepare, begin_project_session_load,
     begin_studio_project_session_load, begin_studio_session_shutdown, complete_project_lifecycle,
-    show_loading_session_error, update_loading_session_progress, LoadFailedContext,
-    LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot, SessionShutdownReason,
+    is_loading_session_window_open, is_project_lifecycle_busy, set_return_to_welcome_handler,
+    show_loading_session_error, update_loading_session_progress, FailureSurface, LoadFailedContext,
+    LoadedSessionPackage, ProjectLifecycleTarget, ReplacementSurfaces, SessionRollbackSnapshot,
+    SessionShutdownReason,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
@@ -49,11 +51,13 @@ fn set_discord_presence(presence: sphere_discord_rpc::Presence) {
     }
 }
 
-/// Retains the studio window handle at app scope so GPUI never drops the last
-/// window during LoadingSession → Studio transitions.
+/// Retains shell window handles at app scope so GPUI never drops the last window
+/// during Welcome → LoadingSession → Studio transitions, and so Welcome can be
+/// retired (or reused) only once a replacement surface actually exists.
 #[derive(Default)]
 struct NativeShellWindows {
     studio: Option<WindowHandle<StudioLayout>>,
+    welcome: Option<WindowHandle<WelcomeWindow>>,
 }
 
 impl Global for NativeShellWindows {}
@@ -64,6 +68,12 @@ pub fn setup(cx: &mut App) {
         mode: AppMode::Welcome,
     });
     cx.set_global(NativeShellWindows::default());
+    // A terminal error on the session transaction window needs a real way out.
+    // Only the shell owns Welcome, so it supplies that route.
+    set_return_to_welcome_handler(Arc::new(|cx: &mut App| {
+        ensure_welcome_window(cx);
+        finish_loading_to_welcome(cx);
+    }));
     sphere_ui_components::settings::install_settings_change_listener(Arc::new(|settings| {
         set_discord_enabled(settings.general.discord_rpc_enabled);
     }));
@@ -258,6 +268,68 @@ fn studio_shell_alive(cx: &App) -> bool {
         .unwrap_or(false)
 }
 
+/// Windows Welcome can currently be handed off to.
+fn replacement_surfaces(cx: &App) -> ReplacementSurfaces {
+    ReplacementSurfaces {
+        transaction_window_open: is_loading_session_window_open(cx),
+        studio_mounted: studio_shell_alive(cx),
+    }
+}
+
+/// Close Welcome only when another window is already on screen. Retiring it any
+/// earlier leaves the app with nothing visible — and nothing to report a failed
+/// handoff on if the studio never mounts.
+fn retire_welcome_if_replaced(welcome_window: &mut gpui::Window, cx: &mut App) {
+    if !replacement_surfaces(cx).may_retire_welcome() {
+        eprintln!("[WindowLifecycle] kept Welcome — no replacement surface yet");
+        return;
+    }
+    cx.update_global::<NativeShellWindows, _>(|shell, _| {
+        shell.welcome = None;
+    });
+    welcome_window.remove_window();
+}
+
+/// Retire a Welcome window that survived a handoff because the transaction ran
+/// without its own window.
+fn retire_welcome_window(cx: &mut App) {
+    let Some(welcome) = cx
+        .try_global::<NativeShellWindows>()
+        .and_then(|shell| shell.welcome)
+    else {
+        return;
+    };
+    cx.update_global::<NativeShellWindows, _>(|shell, _| {
+        shell.welcome = None;
+    });
+    let _ = welcome.update(cx, |_view, window, _cx| window.remove_window());
+    eprintln!("[WindowLifecycle] retired Welcome after replacement window opened");
+}
+
+/// Bring the start screen back, reusing the live Welcome window when the handoff
+/// never retired it so the user never gets a second copy.
+fn ensure_welcome_window(cx: &mut App) -> Option<WindowHandle<WelcomeWindow>> {
+    if let Some(handle) = cx
+        .try_global::<NativeShellWindows>()
+        .and_then(|shell| shell.welcome)
+    {
+        if handle
+            .update(cx, |_view, window, _cx| window.activate_window())
+            .is_ok()
+        {
+            set_app_mode(cx, AppMode::Welcome);
+            eprintln!("[WindowLifecycle] reused live Welcome window");
+            return Some(handle);
+        }
+        cx.update_global::<NativeShellWindows, _>(|shell, _| {
+            shell.welcome = None;
+        });
+    }
+    open_welcome_window(cx);
+    cx.try_global::<NativeShellWindows>()
+        .and_then(|shell| shell.welcome)
+}
+
 fn log_window_registry(cx: &App, stage: &str) {
     let studio_alive = studio_shell_alive(cx);
     let loader_alive = sphere_ui_components::loading_session::is_loading_session_window_open(cx);
@@ -292,6 +364,9 @@ fn finish_loading_to_studio(cx: &mut App) {
             return;
         }
         complete_project_lifecycle(cx, ProjectLifecycleTarget::Studio);
+        // Welcome is still up when the transaction ran without its own window.
+        // The studio shell is the confirmed replacement, so retire it now.
+        retire_welcome_window(cx);
         if let Some(studio) = cx
             .try_global::<NativeShellWindows>()
             .and_then(|shell| shell.studio)
@@ -334,7 +409,17 @@ fn transition_loaded_package_to_existing_studio(
     if install_result.is_err() {
         eprintln!("[ProjectSwitch] install into existing studio failed");
         set_app_mode(cx, AppMode::LoadFailed);
-        show_loading_session_error(cx, "Could not install the loaded project into the studio.");
+        report_load_failure(
+            LoadFailedContext {
+                title: "Open Project Failed".to_string(),
+                message: "The loaded project could not be installed into the studio.".to_string(),
+                detail: None,
+                path: None,
+                open_options: ProjectOpenOptions::default(),
+                rollback: None,
+            },
+            cx,
+        );
         return;
     }
     eprintln!("[SessionLoad] install complete");
@@ -350,21 +435,38 @@ fn transition_loaded_package_to_existing_studio(
 fn open_welcome_window(cx: &mut App) {
     set_app_mode(cx, AppMode::Welcome);
     let callbacks = WelcomeCallbacks {
-        on_action: Arc::new(|action, welcome_window, cx| match action {
-            // Always open the LoadingSession shell before retiring Welcome.
-            // On Linux, QuitMode::LastWindowClosed would otherwise quit the app
-            // the moment Welcome closes with no replacement window yet.
-            WelcomeAction::OpenProjectFile(path) => {
-                begin_load_project_from_welcome(path, ProjectOpenOptions::default(), cx);
-                welcome_window.remove_window();
+        on_action: Arc::new(|action, welcome_window, cx| {
+            // Welcome now outlives the start of a handoff whenever the session
+            // transaction has no window of its own, so it must refuse to start a
+            // second transaction on top of the one already running.
+            if is_project_lifecycle_busy() {
+                eprintln!(
+                    "[WindowLifecycle] ignored Welcome action — session transaction in flight"
+                );
+                return;
             }
-            WelcomeAction::OpenRecent(path) => {
-                begin_load_project_from_welcome(path, ProjectOpenOptions { from_recent: true }, cx);
-                welcome_window.remove_window();
-            }
-            other => {
-                open_studio_for_action(other, cx);
-                welcome_window.remove_window();
+            match action {
+                // Retire Welcome only once the session transaction window (or the
+                // studio shell itself) is up. On Linux, QuitMode::LastWindowClosed
+                // would otherwise quit the app the moment Welcome closes with no
+                // replacement window yet; on macOS the user would be left staring at
+                // nothing while the workspace prepares headless.
+                WelcomeAction::OpenProjectFile(path) => {
+                    begin_load_project_from_welcome(path, ProjectOpenOptions::default(), cx);
+                    retire_welcome_if_replaced(welcome_window, cx);
+                }
+                WelcomeAction::OpenRecent(path) => {
+                    begin_load_project_from_welcome(
+                        path,
+                        ProjectOpenOptions { from_recent: true },
+                        cx,
+                    );
+                    retire_welcome_if_replaced(welcome_window, cx);
+                }
+                other => {
+                    open_studio_for_action(other, cx);
+                    retire_welcome_if_replaced(welcome_window, cx);
+                }
             }
         }),
         footer_action: {
@@ -393,12 +495,23 @@ fn open_welcome_window(cx: &mut App) {
             }
         },
     };
-    let _welcome = cx
-        .open_window(welcome_window_options(cx), |_window, cx| {
-            cx.new(|cx| WelcomeWindow::new(callbacks, cx.focus_handle()))
-        })
-        .expect("failed to open welcome window");
-    boot::log("welcome window shown");
+    let welcome_options = welcome_window_options(cx);
+    match cx.open_window(welcome_options, |_window, cx| {
+        cx.new(|cx| WelcomeWindow::new(callbacks, cx.focus_handle()))
+    }) {
+        Ok(handle) => {
+            cx.update_global::<NativeShellWindows, _>(|shell, _| {
+                shell.welcome = Some(handle);
+            });
+            boot::log("welcome window shown");
+        }
+        Err(error) => {
+            // Never panic here: a caller recovering from a failed handoff still
+            // has the transaction window or a message box to report on.
+            eprintln!("[WindowLifecycle] welcome window open failed: {error}");
+            boot::log(&format!("welcome window open failed: {error}"));
+        }
+    }
 }
 
 fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut App) {
@@ -411,15 +524,24 @@ fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut A
                 eprintln!("[StudioMount] mounted after ready");
                 finish_loading_to_studio(cx);
             }
-            Err(error) => {
-                eprintln!("[StudioOpen] studio window open failed: {error}");
-                set_app_mode(cx, AppMode::LoadFailed);
-                show_loading_session_error(
-                    cx,
-                    format!("Could not open the studio workspace.\n\nDetails: {error}"),
-                );
-            }
+            Err(error) => report_studio_open_failure(error, cx),
         },
+    );
+}
+
+fn report_studio_open_failure(error: String, cx: &mut App) {
+    eprintln!("[StudioOpen] studio window open failed: {error}");
+    set_app_mode(cx, AppMode::LoadFailed);
+    report_load_failure(
+        LoadFailedContext {
+            title: "Open Workspace Failed".to_string(),
+            message: "The studio workspace window could not be opened.".to_string(),
+            detail: Some(format!("Details: {error}")),
+            path: None,
+            open_options: ProjectOpenOptions::default(),
+            rollback: None,
+        },
+        cx,
     );
 }
 
@@ -437,14 +559,7 @@ fn transition_prepared_package_to_studio(
             eprintln!("[StudioMount] mounted after workspace prepare");
             finish_loading_to_studio(cx);
         }
-        Err(error) => {
-            eprintln!("[StudioOpen] studio window open failed: {error}");
-            set_app_mode(cx, AppMode::LoadFailed);
-            show_loading_session_error(
-                cx,
-                format!("Could not open the studio workspace.\n\nDetails: {error}"),
-            );
-        }
+        Err(error) => report_studio_open_failure(error, cx),
     });
 }
 
@@ -617,20 +732,74 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
             Err(error) => {
                 eprintln!("[StudioOpen] rollback studio open failed: {error}");
                 set_app_mode(cx, AppMode::LoadFailed);
-                show_loading_session_error(
+                report_load_failure(
+                    LoadFailedContext {
+                        title: ctx.title,
+                        message: ctx.message,
+                        detail: Some(format!("Rollback failed: {error}")),
+                        path: ctx.path,
+                        open_options: ctx.open_options,
+                        rollback: None,
+                    },
                     cx,
-                    format!(
-                        "{}\n\n{}\n\nRollback failed: {error}",
-                        ctx.title, ctx.message
-                    ),
                 );
             }
         }
         return;
     }
     set_app_mode(cx, AppMode::LoadFailed);
-    open_welcome_window(cx);
+    report_load_failure(ctx, cx);
+}
+
+/// Show why a pre-studio transaction failed and leave one obvious way forward.
+/// The user is never dropped back onto a fresh Welcome screen with no reason.
+fn report_load_failure(ctx: LoadFailedContext, cx: &mut App) {
+    match replacement_surfaces(cx).failure_surface() {
+        FailureSurface::TransactionWindow => {
+            let detail = ctx
+                .detail
+                .as_deref()
+                .map(|detail| format!("\n\n{detail}"))
+                .unwrap_or_default();
+            if show_loading_session_error(cx, ctx.title.clone(), format!("{}{detail}", ctx.message))
+            {
+                eprintln!("[SessionLoad] failure shown on transaction window");
+                return;
+            }
+            report_load_failure_on_welcome(ctx, cx);
+        }
+        FailureSurface::WelcomeWindow => report_load_failure_on_welcome(ctx, cx),
+    }
+}
+
+fn report_load_failure_on_welcome(ctx: LoadFailedContext, cx: &mut App) {
+    use sphere_ui_components::components::message_box_dialog::{
+        open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResult,
+    };
+
+    let welcome = ensure_welcome_window(cx);
     complete_project_lifecycle(cx, ProjectLifecycleTarget::Welcome);
+
+    let owner_bounds = welcome.and_then(|handle| {
+        handle
+            .update(cx, |_view, window, _cx| window.bounds())
+            .ok()
+            .filter(|bounds| sphere_ui_components::window_position::is_valid_owner_bounds(*bounds))
+    });
+    let options = MessageBoxOptions {
+        kind: MessageBoxKind::Error,
+        title: ctx.title,
+        message: ctx.message,
+        detail: ctx.detail,
+        buttons: vec!["OK".to_string()],
+        default_id: 0,
+        cancel_id: Some(0),
+    };
+    let on_response: Arc<dyn Fn(MessageBoxResult, &mut gpui::Window, &mut App) + Send + Sync> =
+        Arc::new(|_result, _window, _cx| {});
+    if let Err(error) = open_message_box_window(owner_bounds, options, on_response, cx) {
+        eprintln!("[SessionLoad] failure dialog unavailable: {error}");
+    }
 }
 
 /// What the freshly opened workspace should do once its window exists.

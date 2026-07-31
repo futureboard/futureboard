@@ -141,7 +141,14 @@ ureq = "3"
 
 gpui = { path = "crates/gpui", version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 gpui_linux = { path = "crates/gpui/crates/gpui_linux", default-features = false }
-gpui_macos = { path = "crates/gpui/crates/gpui_macos", default-features = false }
+# `default-features = false` keeps the macOS backend from pulling `gpui/default`,
+# but it also strips `gpui_macos`'s own `font-kit` feature. Without that feature
+# `MacPlatform::new` installs `gpui::NoopTextSystem`, whose `add_fonts` reports
+# success and whose font metrics are synthetic: every surface lays out and paints
+# normally except the glyphs, so all text is invisible. Enable it explicitly.
+gpui_macos = { path = "crates/gpui/crates/gpui_macos", default-features = false, features = [
+    "font-kit",
+] }
 gpui_macros = { path = "crates/gpui/crates/gpui_macros" }
 gpui_platform = { path = "crates/gpui/crates/gpui_platform", default-features = false }
 gpui_shared_string = { path = "crates/gpui/crates/gpui_shared_string" }

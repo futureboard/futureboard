@@ -530,6 +530,14 @@ impl MacWindowState {
                     standardWindowButton: NSWindowButton::NSWindowZoomButton
                 ];
 
+                // A window can lack any of the standard buttons: the style mask
+                // may omit them, and AppKit removes all three while the window
+                // is presented as a sheet. Asking a nil button for its frame
+                // aborts the process, so leave the buttons where AppKit put them.
+                if close_button.is_null() || min_button.is_null() || zoom_button.is_null() {
+                    return;
+                }
+
                 let mut close_button_frame: CGRect = msg_send![close_button, frame];
                 let mut min_button_frame: CGRect = msg_send![min_button, frame];
                 let mut zoom_button_frame: CGRect = msg_send![zoom_button, frame];
