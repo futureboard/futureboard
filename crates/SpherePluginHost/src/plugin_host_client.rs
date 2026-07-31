@@ -548,6 +548,27 @@ impl PluginHostClient {
         })
     }
 
+    /// `component_id` is the scanner's `au:<type>:<subtype>:<manufacturer>`
+    /// identifier; Audio Units have no module path. `state_b64` carries the
+    /// persisted ClassInfo blob, applied before the instance reaches the audio
+    /// producer (same restore window as the built-ins).
+    pub fn load_au_plugin(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        component_id: impl Into<String>,
+        sample_rate: u32,
+        max_block_size: u32,
+        state_b64: Option<String>,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::LoadAudioUnit {
+            plugin_instance_id: plugin_instance_id.into(),
+            component_id: component_id.into(),
+            sample_rate,
+            max_block_size,
+            state_b64,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn open_editor(
         &mut self,

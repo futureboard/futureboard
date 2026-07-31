@@ -642,8 +642,7 @@ impl StudioLayout {
         reason: SessionShutdownReason,
         cx: &Context<Self>,
     ) -> SessionShutdownSnapshot {
-        use crate::components::plugin_picker::STUB_PLUGIN_ID;
-        use crate::components::timeline::timeline_state::{InsertPluginFormat, TrackType};
+        use crate::components::timeline::timeline_state::TrackType;
 
         let state = &self.timeline.read(cx).state;
         let mut plugin_targets = Vec::new();
@@ -656,10 +655,7 @@ impl StudioLayout {
                 instrument_track_ids.push(track.id.clone());
             }
             for (index, slot) in track.inserts.iter().enumerate() {
-                if slot.plugin_id.as_deref() == Some(STUB_PLUGIN_ID) {
-                    continue;
-                }
-                if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+                if !slot.is_bridge_hosted_external_module() {
                     continue;
                 }
                 let is_instrument = is_instrument_track
@@ -676,10 +672,7 @@ impl StudioLayout {
         }
 
         for slot in &state.master.inserts {
-            if slot.plugin_id.as_deref() == Some(STUB_PLUGIN_ID) {
-                continue;
-            }
-            if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+            if !slot.is_bridge_hosted_external_module() {
                 continue;
             }
             plugin_targets.push(PluginUnloadTarget {

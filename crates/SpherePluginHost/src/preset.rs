@@ -98,9 +98,10 @@ fn clear_pst_files_recursive(dir: &Path) -> Result<u32, String> {
     Ok(deleted)
 }
 
-/// Validate that a plug-in binary exists before registration.
+/// Validate that a plug-in binary exists before registration. Formats with no
+/// module file (AU, addressed by component id) have nothing to check here.
 pub fn validate_plugin_for_registration(plugin: &RegistryPlugin) -> Result<(), String> {
-    if !plugin.path.exists() {
+    if plugin.format.has_module_file() && !plugin.path.exists() {
         return Err(format!(
             "Plug-in binary is missing: {}",
             plugin.path.display()

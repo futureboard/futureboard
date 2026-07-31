@@ -176,6 +176,15 @@ impl InsertPluginFormat {
             InsertPluginFormat::Unknown => "?",
         }
     }
+
+    /// Whether this format's plug-in is a file on disk. An Audio Unit is
+    /// addressed by component id (`au:<type>:<subtype>:<manufacturer>`) with no
+    /// module to stat, so `plugin_path` holds that identifier and a
+    /// missing-file check would report every AU as broken. Mirrors
+    /// `SpherePluginHost::registry::PluginFormat::has_module_file`.
+    pub fn has_module_file(self) -> bool {
+        !matches!(self, InsertPluginFormat::Au)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +341,34 @@ impl InsertSlotState {
 
     pub fn is_empty(&self) -> bool {
         self.plugin_id.is_none()
+    }
+
+    /// Whether the plug-in host process can load this insert as an external
+    /// module over the shared-audio bridge — the question the engine-sink wiring
+    /// and the restore batch both ask before touching a slot.
+    ///
+    /// A VST3 needs a module path on disk. An Audio Unit has none: it is
+    /// addressed by the component id in `plugin_id`, so requiring a path would
+    /// silently skip every AU insert.
+    ///
+    /// Built-ins are deliberately excluded. They are identified by a
+    /// `plugin_id` prefix rather than by format, and callers that host them
+    /// handle them on their own branch.
+    pub fn is_bridge_hosted_external_module(&self) -> bool {
+        if self.plugin_id.as_deref() == Some(crate::components::plugin_picker::STUB_PLUGIN_ID) {
+            return false;
+        }
+        match self.plugin_format {
+            Some(InsertPluginFormat::Vst3) => self
+                .plugin_path
+                .as_ref()
+                .is_some_and(|path| !path.as_os_str().is_empty()),
+            Some(InsertPluginFormat::Au) => self
+                .plugin_id
+                .as_deref()
+                .is_some_and(|component_id| !component_id.trim().is_empty()),
+            _ => false,
+        }
     }
 }
 

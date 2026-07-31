@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use builtin_dsp_core::{Instrument, StereoEffect};
+use SpherePluginHost::au_host::{AuHostProcessor, AuTransport};
 use SpherePluginHost::audio_bridge::{
     bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, SharedMidiEvent, AUDIO_BUF_LEN,
     MAX_BLOCK_FRAMES, MAX_CHANNELS,
@@ -944,6 +945,24 @@ impl BuiltinHostProcessor {
 }
 
 type SharedBuiltinProcessors = Arc<Mutex<Arc<HashMap<String, Arc<BuiltinHostProcessor>>>>>;
+
+/// Live Audio Unit instances, keyed by insert `plugin_instance_id`. Same
+/// copy-on-write shape as the built-in map: the producer clones the outer `Arc`
+/// once per wake, and load/unload rebuild through `Arc::make_mut`.
+type SharedAuProcessors = Arc<Mutex<Arc<HashMap<String, Arc<AuHostProcessor>>>>>;
+
+/// Resolve an instance id to its Audio Unit, if that is the runtime hosting it.
+/// Instance-keyed commands use this to answer for AU before falling through to
+/// the VST3 preview engine, which is where they used to go unconditionally.
+fn au_instance(
+    processors: &SharedAuProcessors,
+    plugin_instance_id: &str,
+) -> Option<Arc<AuHostProcessor>> {
+    processors
+        .lock()
+        .ok()
+        .and_then(|map| map.get(plugin_instance_id).cloned())
+}
 
 #[cfg(test)]
 mod builtin_processor_tests {
@@ -1924,10 +1943,27 @@ fn shutdown_host(
 /// Runs on the dedicated audio producer thread (`run_audio_producer`), woken
 /// by the engine's kick event per requested block. Removing the
 /// `render_single_voice` Vec allocs is a remaining refinement.
+/// Which runtime owns the instance whose block is being produced.
+///
+/// Resolved once per block at the producer's call site so the branches below
+/// never re-derive the format. Adding a variant here deliberately breaks every
+/// `match` in `service_audio_bridge`, which is the list of questions a new
+/// runtime has to answer: MIDI, parameters, channel count, process, readiness,
+/// and latency.
+#[derive(Copy, Clone)]
+enum BlockRuntime<'a> {
+    /// Hosted by `BridgeAudioShared`, looked up by instance id.
+    Vst3,
+    /// A Futureboard built-in DSP owned by this process.
+    Builtin(&'a BuiltinHostProcessor),
+    /// A macOS Audio Unit owned by this process.
+    Au(&'a AuHostProcessor),
+}
+
 fn service_audio_bridge(
     region: &SharedAudioRegion,
     dsp: &BridgeAudioShared,
-    builtin: Option<&BuiltinHostProcessor>,
+    runtime: BlockRuntime<'_>,
     plugin_instance_id: &str,
 ) {
     let bridge = region.bridge();
@@ -1947,10 +1983,12 @@ fn service_audio_bridge(
     // broadcast to every loaded plugin.
     let mut midi_count = 0u32;
     while let Some(ev) = bridge.midi.try_pop() {
-        if let Some(builtin) = builtin {
-            builtin.apply_midi(ev);
-        } else {
-            dsp.apply_shared_midi(plugin_instance_id, ev);
+        match runtime {
+            BlockRuntime::Builtin(builtin) => builtin.apply_midi(ev),
+            BlockRuntime::Vst3 => dsp.apply_shared_midi(plugin_instance_id, ev),
+            // Audio Units schedule events inside the slice, so the ring's
+            // `sample_offset` survives the hop (the built-in path drops it).
+            BlockRuntime::Au(au) => au.apply_midi(ev),
         }
         midi_count += 1;
     }
@@ -1966,12 +2004,15 @@ fn service_audio_bridge(
     // process() below). Per-instance ring, like MIDI — never broadcast.
     let mut param_count = 0u32;
     while let Some(ev) = bridge.params.try_pop() {
-        match builtin {
+        match runtime {
             // Built-in DSP: apply at block boundary (control-rate; the wire
             // index resolves to an `apply_ui_param` id). `sample_offset` is
             // intentionally ignored.
-            Some(b) => b.apply_param(ev.param_id, ev.value),
-            None => dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value),
+            BlockRuntime::Builtin(b) => b.apply_param(ev.param_id, ev.value),
+            BlockRuntime::Vst3 => dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value),
+            // Normalized 0..1 like VST3; the AU layer denormalizes through the
+            // parameter's own plain min/max.
+            BlockRuntime::Au(au) => au.apply_param(ev.param_id, ev.value),
         }
         param_count += 1;
     }
@@ -1990,53 +2031,95 @@ fn service_audio_bridge(
     }
     // Analyser capture, before the DSP touches anything: the editor's spectrum
     // overlay shows the signal arriving at the insert.
-    if let Some(b) = builtin {
+    if let BlockRuntime::Builtin(b) = runtime {
         b.capture_spectrum(&in_l[..frames], &in_r[..frames]);
     }
-    let output_channels = builtin.map_or_else(
-        || {
-            dsp.main_audio_output_channel_count_for_instance(plugin_instance_id)
-                .unwrap_or_else(|| bridge.plugin_output_channels())
-                .max(1)
-                .min(MAX_CHANNELS as u32) as usize
-        },
-        |_| 2,
-    );
+    let output_channels = match runtime {
+        BlockRuntime::Builtin(_) => 2,
+        BlockRuntime::Vst3 => dsp
+            .main_audio_output_channel_count_for_instance(plugin_instance_id)
+            .unwrap_or_else(|| bridge.plugin_output_channels())
+            .max(1)
+            .min(MAX_CHANNELS as u32) as usize,
+        // Fixed by the stream format negotiated at open, so this needs no
+        // instance lookup.
+        BlockRuntime::Au(au) => au.output_channels().max(1).min(MAX_CHANNELS as u32) as usize,
+    };
     bridge.set_plugin_output_channels(output_channels as u32);
     let mut interleaved = [0.0f32; AUDIO_BUF_LEN];
     let len = (frames * output_channels).min(AUDIO_BUF_LEN);
-    let produced_channels = if let Some(builtin) = builtin {
-        builtin.process_block(
-            &in_l[..frames],
-            &in_r[..frames],
-            &mut interleaved[..len],
-            frames,
-        );
-        2
-    } else {
-        // Real transport ProcessContext published by the engine for this block.
-        let bt = bridge.load_transport();
-        let transport = DirectAudio::RuntimeTransportContext {
-            tempo_bpm: bt.tempo_bpm,
-            time_sig_num: bt.time_sig_num,
-            time_sig_den: bt.time_sig_den,
-            project_time_samples: bt.project_time_samples,
-            ppq_position: bt.ppq_position,
-            bar_position_ppq: bt.bar_position_ppq,
-            playing: bt.playing,
-            recording: bt.recording,
-        };
-        dsp.render_single_voice_interleaved(
-            plugin_instance_id,
-            frames,
-            &in_l[..frames],
-            &in_r[..frames],
-            &mut interleaved[..len],
-            output_channels,
-            transport,
-        )
-        .max(1)
-        .min(output_channels)
+    let produced_channels = match runtime {
+        BlockRuntime::Builtin(builtin) => {
+            builtin.process_block(
+                &in_l[..frames],
+                &in_r[..frames],
+                &mut interleaved[..len],
+                frames,
+            );
+            2
+        }
+        BlockRuntime::Vst3 => {
+            // Real transport ProcessContext published by the engine for this block.
+            let bt = bridge.load_transport();
+            let transport = DirectAudio::RuntimeTransportContext {
+                tempo_bpm: bt.tempo_bpm,
+                time_sig_num: bt.time_sig_num,
+                time_sig_den: bt.time_sig_den,
+                project_time_samples: bt.project_time_samples,
+                ppq_position: bt.ppq_position,
+                bar_position_ppq: bt.bar_position_ppq,
+                playing: bt.playing,
+                recording: bt.recording,
+            };
+            dsp.render_single_voice_interleaved(
+                plugin_instance_id,
+                frames,
+                &in_l[..frames],
+                &in_r[..frames],
+                &mut interleaved[..len],
+                output_channels,
+                transport,
+            )
+            .max(1)
+            .min(output_channels)
+        }
+        BlockRuntime::Au(au) => {
+            let bt = bridge.load_transport();
+            let transport = AuTransport {
+                tempo_bpm: bt.tempo_bpm,
+                ppq_position: bt.ppq_position,
+                bar_position_ppq: bt.bar_position_ppq,
+                project_time_samples: bt.project_time_samples,
+                time_sig_num: bt.time_sig_num,
+                time_sig_den: bt.time_sig_den,
+                playing: i32::from(bt.playing),
+                recording: i32::from(bt.recording),
+            };
+            let produced = au.render(
+                &in_l[..frames],
+                &in_r[..frames],
+                &mut interleaved[..len],
+                frames,
+                output_channels,
+                transport,
+            ) as usize;
+            if produced > 0 {
+                produced.min(output_channels)
+            } else {
+                // A failed render must not mute the track. Pass the dry signal
+                // through instead, the same choice the engine makes when the
+                // bridge misses a deadline.
+                let channels = output_channels.min(2);
+                for frame in 0..frames {
+                    let base = frame * output_channels;
+                    interleaved[base] = in_l[frame];
+                    if channels > 1 {
+                        interleaved[base + 1] = in_r[frame];
+                    }
+                }
+                channels
+            }
+        }
     };
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
@@ -2051,8 +2134,13 @@ fn service_audio_bridge(
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
     }
-    let dsp_ready = builtin.is_some()
-        || (dsp.dsp_ready() && (dsp.has_loaded_instances() || dsp.continuous_mode()));
+    let dsp_ready = match runtime {
+        // Both are live the moment their instance is published to the producer.
+        BlockRuntime::Builtin(_) | BlockRuntime::Au(_) => true,
+        BlockRuntime::Vst3 => {
+            dsp.dsp_ready() && (dsp.has_loaded_instances() || dsp.continuous_mode())
+        }
+    };
     // SAFETY: the host owns `audio_out` for this block — the engine waits on
     // `done_seq` (published below) before reading it.
     unsafe {
@@ -2062,14 +2150,17 @@ fn service_audio_bridge(
     // Built-in DSP telemetry: publish the DSP's own post-trim meter frame so
     // the editor's meters show what the chain actually saw (producer thread —
     // the sole legal DSP accessor).
-    if let Some(frame) = builtin.and_then(BuiltinHostProcessor::meter_frame) {
-        bridge.store_builtin_meters(&frame);
-    }
-    // Analyser frame, at the analyser's own rate — `analyze_spectrum` returns
-    // `None` on the blocks in between, so this publishes ~30 times a second
-    // rather than once per block.
-    if let Some(bins) = builtin.and_then(BuiltinHostProcessor::analyze_spectrum) {
-        bridge.store_spectrum(&bins);
+    //
+    // Analyser frames follow at the analyser's own rate — `analyze_spectrum`
+    // returns `None` on the blocks in between, so that publishes ~30 times a
+    // second rather than once per block.
+    if let BlockRuntime::Builtin(b) = runtime {
+        if let Some(frame) = b.meter_frame() {
+            bridge.store_builtin_meters(&frame);
+        }
+        if let Some(bins) = b.analyze_spectrum() {
+            bridge.store_spectrum(&bins);
+        }
     }
     bridge.set_dsp_output_ready(dsp_ready);
     // Publish the plugin's reported latency so the engine can surface it (and,
@@ -2080,12 +2171,13 @@ fn service_audio_bridge(
         .fetch_add(1, Ordering::Relaxed)
         .is_multiple_of(64)
     {
-        let latency = if let Some(b) = builtin {
+        let latency = match runtime {
             // A loaded NAM capture's receptive field is the built-in chain's
             // only latency contributor today.
-            Some(b.latency_samples().min(i32::MAX as usize) as i32)
-        } else {
-            dsp.voice_latency_samples(plugin_instance_id)
+            BlockRuntime::Builtin(b) => Some(b.latency_samples().min(i32::MAX as usize) as i32),
+            BlockRuntime::Vst3 => dsp.voice_latency_samples(plugin_instance_id),
+            // `kAudioUnitProperty_Latency`, read on the same 64-block cadence.
+            BlockRuntime::Au(au) => Some(au.latency_samples().min(i32::MAX as u32) as i32),
         };
         if let Some(latency) = latency {
             bridge
@@ -2313,6 +2405,7 @@ const AUDIO_PRODUCER_STACK_BYTES: usize = 8 * 1024 * 1024;
 fn run_audio_producer(
     regions: SharedAudioRegions,
     builtins: SharedBuiltinProcessors,
+    audio_units: SharedAuProcessors,
     dsp: Arc<BridgeAudioShared>,
     shutdown: Arc<AtomicBool>,
     kick: Option<BridgeKickEvent>,
@@ -2331,14 +2424,23 @@ fn run_audio_producer(
             .lock()
             .map(|map| Arc::clone(&map))
             .unwrap_or_default();
+        let au_snapshot = audio_units
+            .lock()
+            .map(|map| Arc::clone(&map))
+            .unwrap_or_default();
         for (instance_id, region) in snapshot.iter() {
             let before = region.bridge().done_seq.load(Ordering::Relaxed);
-            service_audio_bridge(
-                region.as_ref(),
-                &dsp,
-                builtin_snapshot.get(instance_id).map(Arc::as_ref),
-                instance_id,
-            );
+            // One instance id belongs to exactly one runtime: the load command
+            // decided which map it went into.
+            let runtime = match (
+                builtin_snapshot.get(instance_id),
+                au_snapshot.get(instance_id),
+            ) {
+                (Some(builtin), _) => BlockRuntime::Builtin(builtin.as_ref()),
+                (None, Some(au)) => BlockRuntime::Au(au.as_ref()),
+                (None, None) => BlockRuntime::Vst3,
+            };
+            service_audio_bridge(region.as_ref(), &dsp, runtime, instance_id);
             if region.bridge().done_seq.load(Ordering::Relaxed) != before {
                 diagnostics.record(region.bridge());
             }
@@ -2411,9 +2513,11 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     let region_slots: SharedAudioRegions = Arc::new(Mutex::new(Arc::new(HashMap::new())));
     let builtin_processors: SharedBuiltinProcessors =
         Arc::new(Mutex::new(Arc::new(HashMap::new())));
+    let au_processors: SharedAuProcessors = Arc::new(Mutex::new(Arc::new(HashMap::new())));
     {
         let slots = region_slots.clone();
         let builtins = builtin_processors.clone();
+        let audio_units = au_processors.clone();
         let dsp = preview.lock().bridge_shared();
         let shutdown = shutdown.clone();
         // Producer wake event, shared with the engine-side sink. Keyed by the
@@ -2445,7 +2549,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             // thread entry, aborting the whole host process before any plugin
             // was even loaded. Ask for a stack that is not a coincidence.
             .stack_size(AUDIO_PRODUCER_STACK_BYTES)
-            .spawn(move || run_audio_producer(slots, builtins, dsp, shutdown, kick))
+            .spawn(move || run_audio_producer(slots, builtins, audio_units, dsp, shutdown, kick))
             .expect("spawn plugin-host audio producer");
     }
 
@@ -2532,6 +2636,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             &mut preview_output_started,
                             &region_slots,
                             &builtin_processors,
+                            &au_processors,
                             &mut out,
                         )
                     });
@@ -2890,6 +2995,7 @@ fn dispatch(
     preview_output_started: &mut bool,
     region_slots: &SharedAudioRegions,
     builtin_processors: &SharedBuiltinProcessors,
+    au_processors: &SharedAuProcessors,
     out: &mut io::Stdout,
 ) {
     match cmd {
@@ -3086,6 +3192,102 @@ fn dispatch(
             );
             eprintln!(
                 "[plugin-host-builtin] loaded instance={plugin_instance_id} plugin={stem} sr={sample_rate} block={max_block_size}"
+            );
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginLoaded {
+                    plugin_instance_id,
+                    name,
+                },
+            );
+        }
+        HostCommand::LoadAudioUnit {
+            plugin_instance_id,
+            component_id,
+            sample_rate,
+            max_block_size,
+            state_b64,
+        } => {
+            use base64::Engine as _;
+            hlog!(
+                "[plugin-host] LoadAudioUnit instance={plugin_instance_id} component={component_id} sr={sample_rate} block={max_block_size}"
+            );
+            if loaded.contains_key(&plugin_instance_id) {
+                let name = loaded
+                    .get(&plugin_instance_id)
+                    .map(|plugin| plugin.name.clone())
+                    .unwrap_or_else(|| component_id.clone());
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginAlreadyLoaded {
+                        plugin_instance_id,
+                        name,
+                    },
+                );
+                return;
+            }
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginLoading {
+                    plugin_instance_id: plugin_instance_id.clone(),
+                },
+            );
+            let state = state_b64.as_deref().map(|b64| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "[plugin-host-au] instance={plugin_instance_id} state base64 invalid: {error}"
+                        );
+                        Vec::new()
+                    })
+            });
+            // Instantiation, initialization, and the state restore all happen
+            // here on the IPC thread, before the instance is published to the
+            // audio producer — the same race-free window the built-in load uses.
+            let processor =
+                AuHostProcessor::open(&component_id, sample_rate, max_block_size, state.as_deref());
+            let processor = match processor {
+                Ok(processor) => processor,
+                Err(error) => {
+                    eprintln!(
+                        "[plugin-host-au] load FAILED instance={plugin_instance_id} component={component_id} error={error}"
+                    );
+                    let _ = ipc::write_frame(
+                        out,
+                        &HostEvent::PluginLoadFailed {
+                            plugin_instance_id,
+                            error,
+                        },
+                    );
+                    return;
+                }
+            };
+            // The component id is the only name the host has; the catalog owns
+            // the display name and the app already knows it.
+            let name = component_id.clone();
+            eprintln!(
+                "[plugin-host-au] loaded instance={plugin_instance_id} component={component_id} \
+                 out_channels={} midi={} instrument={} params={}",
+                processor.output_channels(),
+                processor.accepts_midi(),
+                processor.is_instrument(),
+                processor.parameters().len()
+            );
+            if let Ok(mut processors) = au_processors.lock() {
+                Arc::make_mut(&mut processors)
+                    .insert(plugin_instance_id.clone(), Arc::new(processor));
+            }
+            loaded.insert(
+                plugin_instance_id.clone(),
+                LoadedPlugin {
+                    plugin_path: String::new(),
+                    class_id: component_id,
+                    name: name.clone(),
+                    sample_rate,
+                    max_block_size,
+                    processing_ready: true,
+                },
             );
             let _ = ipc::write_frame(
                 out,
@@ -3423,6 +3625,10 @@ fn dispatch(
             preview.lock().preview_all_notes_off(&plugin_instance_id);
         }
         HostCommand::MidiPanic { plugin_instance_id } => {
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                au.midi_panic();
+                return;
+            }
             preview.lock().midi_panic(&plugin_instance_id);
         }
         HostCommand::UnloadPlugin { plugin_instance_id } => {
@@ -3433,6 +3639,14 @@ fn dispatch(
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
             if let Ok(mut processors) = builtin_processors.lock() {
+                Arc::make_mut(&mut processors).remove(&plugin_instance_id);
+            }
+            if let Ok(mut processors) = au_processors.lock() {
+                // Silence the unit before it leaves the producer's snapshot, so
+                // an instrument cannot strand a held note in the tail.
+                if let Some(au) = processors.get(&plugin_instance_id) {
+                    au.midi_panic();
+                }
                 Arc::make_mut(&mut processors).remove(&plugin_instance_id);
             }
             if let Ok(mut slots) = region_slots.lock() {
@@ -3540,6 +3754,28 @@ fn dispatch(
             eprintln!(
                 "[plugin-bridge] PrepareProcessing instance={plugin_instance_id} sr={sample_rate} block={max_block_size}"
             );
+            // An Audio Unit negotiated its format at open, so there is nothing
+            // to prepare — report what it settled on rather than failing the
+            // instance for not being in the VST3 preview engine.
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                let channels = au.output_channels().max(1);
+                eprintln!(
+                    "[plugin-host-au] prepared instance={plugin_instance_id} sr={sample_rate} block={max_block_size} outputs={channels}"
+                );
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::ProcessingPrepared {
+                        plugin_instance_id,
+                        sample_rate,
+                        max_block_size,
+                        output_channels: channels,
+                        // One main bus; multi-out AU is a later slice.
+                        output_bus_channels: vec![channels],
+                    },
+                );
+                let _ = input_channels;
+                return;
+            }
             let mut preview_guard = preview.lock();
             if !preview_guard.has_instance(&plugin_instance_id) {
                 drop(preview_guard);
@@ -3584,6 +3820,27 @@ fn dispatch(
         }
         HostCommand::GetPluginState { plugin_instance_id } => {
             use base64::Engine as _;
+            // AU state is a single opaque blob (the unit's ClassInfo binary
+            // plist), so it travels in `component_b64` with no controller half.
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                let state = au.state();
+                let ok = state.is_some();
+                let bytes = state.unwrap_or_default();
+                eprintln!(
+                    "[plugin-host-au] get_state instance={plugin_instance_id} ok={ok} bytes={}",
+                    bytes.len()
+                );
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginState {
+                        plugin_instance_id,
+                        ok,
+                        component_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        controller_b64: String::new(),
+                    },
+                );
+                return;
+            }
             let state = preview.lock().get_instance_state(&plugin_instance_id);
             let ok = state.is_some();
             let state = state.unwrap_or_default();
@@ -3605,6 +3862,35 @@ fn dispatch(
             );
         }
         HostCommand::GetPluginParameters { plugin_instance_id } => {
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                let parameters: Vec<ipc::HostPluginParameter> = au
+                    .parameters()
+                    .iter()
+                    .map(|parameter| ipc::HostPluginParameter {
+                        id: parameter.id,
+                        title: parameter.title.clone(),
+                        // Audio Units expose one name per parameter.
+                        short_title: parameter.title.clone(),
+                        unit: parameter.unit.clone(),
+                        automatable: parameter.automatable,
+                        hidden: parameter.hidden,
+                        read_only: parameter.read_only,
+                    })
+                    .collect();
+                eprintln!(
+                    "[plugin-host-au] get_parameters instance={plugin_instance_id} count={}",
+                    parameters.len()
+                );
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginParameters {
+                        plugin_instance_id,
+                        ok: true,
+                        parameters,
+                    },
+                );
+                return;
+            }
             let params = preview
                 .lock()
                 .list_parameters_for_instance(&plugin_instance_id);
@@ -3641,6 +3927,24 @@ fn dispatch(
             controller_b64,
         } => {
             use base64::Engine as _;
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&component_b64)
+                    .unwrap_or_default();
+                let ok = !bytes.is_empty() && au.set_state(&bytes);
+                eprintln!(
+                    "[plugin-host-au] set_state instance={plugin_instance_id} bytes={} ok={ok}",
+                    bytes.len()
+                );
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginStateSet {
+                        plugin_instance_id,
+                        ok,
+                    },
+                );
+                return;
+            }
             let decode = |label: &str, b64: &str| -> Vec<u8> {
                 base64::engine::general_purpose::STANDARD
                     .decode(b64)

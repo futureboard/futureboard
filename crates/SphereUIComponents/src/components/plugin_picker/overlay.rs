@@ -566,7 +566,7 @@ fn empty_state_body(
             ("No plugins match this search.".to_string(), None)
         }
         CatalogStatus::Ready if au_scan_error.is_some() => (
-            "AudioUnit unavailable.".to_string(),
+            "Audio Units unavailable.".to_string(),
             Some("VST3 and CLAP plug-ins are still available.".to_string()),
         ),
         CatalogStatus::Ready => (

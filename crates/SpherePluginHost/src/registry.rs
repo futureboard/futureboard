@@ -48,6 +48,17 @@ impl PluginFormat {
             _ => Self::Unknown,
         }
     }
+
+    /// Whether a plug-in of this format is a file the app can stat.
+    ///
+    /// Audio Units are registered with the system by component id
+    /// (`au:<type>:<subtype>:<manufacturer>`) and expose no path a host can
+    /// open, so the scanner stores that identifier in the `path` field. Every
+    /// check that reads a missing file as a missing plug-in has to ask this
+    /// first, or every AU reports itself as broken.
+    pub fn has_module_file(self) -> bool {
+        !matches!(self, Self::Au)
+    }
 }
 
 /// Effect vs instrument (heuristic classification; matches Electron).
@@ -116,7 +127,11 @@ impl RegistryPlugin {
     /// Insert onto a track is supported for wired formats (or any built-in) once
     /// the preset is ready.
     pub fn supports_insert(&self) -> bool {
-        (self.is_builtin() || matches!(self.format, PluginFormat::Vst3 | PluginFormat::Clap))
+        (self.is_builtin()
+            || matches!(
+                self.format,
+                PluginFormat::Vst3 | PluginFormat::Clap | PluginFormat::Au
+            ))
             && self.status == PluginStatus::PresetReady
     }
 
@@ -507,9 +522,10 @@ pub fn registry_plugin_from_scan(info: &PluginInfo, scanned_at_ms: i64) -> Regis
     let preset_root = default_preset_root();
     let preset_path = preset_path_for_plugin(&preset_root, format, kind, &info.name);
     let path = PathBuf::from(&info.path);
-    let status = if !path.exists() {
-        PluginStatus::MissingPreset
-    } else if preset_path.exists() {
+    // A format with no module file (AU) has nothing to stat, so readiness rests
+    // on the preset alone.
+    let module_present = !format.has_module_file() || path.exists();
+    let status = if module_present && preset_path.exists() {
         PluginStatus::PresetReady
     } else {
         PluginStatus::MissingPreset
@@ -960,9 +976,6 @@ impl PluginRegistry {
                         _ => PluginScanStatus::Failed,
                     };
                     plugin.error_message = descriptor.error_message.clone();
-                    if plugin.format == PluginFormat::Au {
-                        plugin.status = PluginStatus::MissingPreset;
-                    }
                     plugins.push(plugin);
                 }
                 record_au_scan_success(&mut au_cache_state, scanned_at);

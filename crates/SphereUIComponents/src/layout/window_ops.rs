@@ -37,6 +37,10 @@ fn add_track_instrument_plugins_from_catalog(
                     plugin.kind == PluginKind::Instrument
                         && plugin.supports_insert()
                         && plugin.scan_status.is_usable()
+                        // Audio Unit hosting currently covers effect inserts.
+                        // Listing AU instruments here would offer a track the
+                        // instrument path cannot finish creating yet.
+                        && plugin.format != RegistryPluginFormat::Au
                 })
                 .cloned()
                 .collect()

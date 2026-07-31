@@ -305,6 +305,55 @@ impl PluginBridgeRuntime {
         Ok(())
     }
 
+    /// `descriptor.class_id` is the AU component id; Audio Units have no module
+    /// path. `state` is the persisted opaque ClassInfo blob, sent base64-encoded
+    /// with the load so the host applies it before the instance reaches the
+    /// audio producer — the same race-free restore the built-ins use.
+    pub fn send_load_au_plugin(
+        &mut self,
+        descriptor: BridgePluginDescriptor,
+        sample_rate: u32,
+        max_block_size: u32,
+        state: Option<&[u8]>,
+    ) -> Result<(), PluginHostClientError> {
+        use base64::Engine as _;
+        let _ = self.configure_audio_bridge(sample_rate, max_block_size);
+        if self.loaded.contains_key(&descriptor.insert_id) {
+            eprintln!(
+                "[plugin-bridge] LoadAudioUnit skipped instance={} reason=already_loaded",
+                descriptor.insert_id
+            );
+            return Ok(());
+        }
+        let instance = descriptor.insert_id.clone();
+        let state_b64 = state
+            .filter(|bytes| !bytes.is_empty())
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
+        eprintln!(
+            "[plugin-bridge] sending LoadAudioUnit instance={} component={} state_bytes={}",
+            instance,
+            descriptor.class_id,
+            state.map(<[u8]>::len).unwrap_or(0)
+        );
+        self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
+        self.client.load_au_plugin(
+            instance.clone(),
+            descriptor.class_id.clone(),
+            sample_rate,
+            max_block_size,
+            state_b64,
+        )?;
+        self.loaded.insert(
+            instance,
+            BridgeLoadedPlugin {
+                descriptor,
+                host_pid: self.host_pid,
+                confirmed: false,
+            },
+        );
+        Ok(())
+    }
+
     pub fn send_load_plugin(
         &mut self,
         descriptor: BridgePluginDescriptor,

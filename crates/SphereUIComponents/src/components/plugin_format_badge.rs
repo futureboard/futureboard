@@ -49,10 +49,12 @@ fn format_icon_badge(path: &'static str) -> AnyElement {
 
 fn text_format_badge(format: PluginFormat) -> AnyElement {
     let (fg, bg, border) = match format {
+        // A hosted format with no brand icon: read as a plain identity label,
+        // not as the warning tone reserved for formats we cannot load.
         PluginFormat::Au => (
-            Colors::status_warning(),
-            gpui::rgba(0xE5C07B18),
-            Colors::status_warning(),
+            Colors::text_secondary(),
+            Colors::surface_input(),
+            Colors::border_default(),
         ),
         _ => (
             Colors::text_faint(),

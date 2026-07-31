@@ -308,10 +308,17 @@ fn build_engine_inserts_for(
                     return None;
                 }
                 let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(plugin_id);
-                if slot.plugin_format != Some(InsertPluginFormat::Vst3) && !is_builtin {
+                let is_audio_unit =
+                    !is_builtin && slot.plugin_format == Some(InsertPluginFormat::Au);
+                if !is_builtin
+                    && !is_audio_unit
+                    && slot.plugin_format != Some(InsertPluginFormat::Vst3)
+                {
                     return None;
                 }
-                let path = if is_builtin {
+                // Neither a built-in nor an Audio Unit has a module path; the AU
+                // component id travels in `classId` like any other identity.
+                let path = if is_builtin || is_audio_unit {
                     String::new()
                 } else {
                     slot.plugin_path
@@ -324,9 +331,18 @@ fn build_engine_inserts_for(
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
+                // The engine distinguishes built-in parameter handling from
+                // bridged plug-ins by this field, so it has to name the real
+                // format rather than call everything external VST3.
                 params.insert(
                     "format".to_string(),
-                    serde_json::json!(if is_builtin { "BuiltIn" } else { "VST3" }),
+                    serde_json::json!(if is_builtin {
+                        "BuiltIn"
+                    } else if is_audio_unit {
+                        "AU"
+                    } else {
+                        "VST3"
+                    }),
                 );
                 params.insert("modulePath".to_string(), serde_json::json!(path));
                 params.insert("path".to_string(), serde_json::json!(path));
@@ -1411,6 +1427,73 @@ mod tests {
             assert_eq!(l.velocity, e.velocity);
             assert_eq!(l.start_beat, e.start_beat);
         }
+    }
+
+    #[test]
+    fn audio_unit_insert_reaches_the_engine_as_an_au_bridge_descriptor() {
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "FX".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        let component = "au:61756678:64656c79:6170706c";
+        // An Audio Unit stores its component id where a VST3 stores a module
+        // path; nothing on disk answers to that string.
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            component.to_string(),
+            Some(std::path::PathBuf::from(component)),
+            InsertPluginFormat::Au,
+            None,
+            "AUDelay".to_string(),
+        );
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let insert = snap
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .and_then(|track| track.inserts.first())
+            .expect("audio unit insert must survive the graph build");
+        assert_eq!(insert.kind, "external-bridge-plugin");
+        assert_eq!(
+            insert
+                .params
+                .get("format")
+                .and_then(serde_json::Value::as_str),
+            Some("AU"),
+            "the engine must see the real format, not VST3"
+        );
+        assert_eq!(
+            insert
+                .params
+                .get("classId")
+                .and_then(serde_json::Value::as_str),
+            Some(component)
+        );
+        assert_eq!(
+            insert
+                .params
+                .get("modulePath")
+                .and_then(serde_json::Value::as_str),
+            Some(""),
+            "an Audio Unit has no module path to hand the host"
+        );
     }
 
     #[test]

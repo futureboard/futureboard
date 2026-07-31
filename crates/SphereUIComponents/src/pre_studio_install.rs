@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::progress_dialog::ProgressBarValue;
 use crate::components::timeline::timeline_state::{
-    InsertPluginFormat, PluginRuntimeBackend, PluginRuntimeState, TimelineState, TrackType,
-    MASTER_TRACK_ID,
+    PluginRuntimeBackend, PluginRuntimeState, TimelineState, TrackType, MASTER_TRACK_ID,
 };
 use crate::layout::engine_snapshot::build_engine_project_snapshot;
 use crate::layout::plugin_bridge_runtime::{
@@ -210,14 +209,8 @@ fn target_from_slot(
         .plugin_id
         .as_deref()
         .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
-    if !is_builtin {
-        if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
-            return None;
-        }
-        let path = slot.plugin_path.as_ref()?;
-        if path.as_os_str().is_empty() {
-            return None;
-        }
+    if !is_builtin && !slot.is_bridge_hosted_external_module() {
+        return None;
     }
     Some(RestoreTarget {
         track_id: track_id.to_string(),
@@ -451,7 +444,7 @@ fn sync_bridge_sinks(
     timeline_state: &TimelineState,
     reason: &'static str,
 ) {
-    let slots = bridge_vst3_slots(timeline_state);
+    let slots = bridge_hosted_insert_slots(timeline_state);
     let Ok(runtime) = runtime.lock() else {
         return;
     };
@@ -470,7 +463,7 @@ fn sync_bridge_sinks(
     }
 }
 
-fn bridge_vst3_slots(state: &TimelineState) -> Vec<(String, String)> {
+fn bridge_hosted_insert_slots(state: &TimelineState) -> Vec<(String, String)> {
     let mut slots: Vec<(String, String)> = state
         .tracks
         .iter()
@@ -478,14 +471,7 @@ fn bridge_vst3_slots(state: &TimelineState) -> Vec<(String, String)> {
             track
                 .inserts
                 .iter()
-                .filter(|slot| {
-                    slot.plugin_id.as_deref() != Some(STUB_PLUGIN_ID)
-                        && slot.plugin_format == Some(InsertPluginFormat::Vst3)
-                        && slot
-                            .plugin_path
-                            .as_ref()
-                            .is_some_and(|path| !path.as_os_str().is_empty())
-                })
+                .filter(|slot| slot.is_bridge_hosted_external_module())
                 .map(|slot| (track.id.clone(), slot.id.clone()))
         })
         .collect();
@@ -494,14 +480,7 @@ fn bridge_vst3_slots(state: &TimelineState) -> Vec<(String, String)> {
             .master
             .inserts
             .iter()
-            .filter(|slot| {
-                slot.plugin_id.as_deref() != Some(STUB_PLUGIN_ID)
-                    && slot.plugin_format == Some(InsertPluginFormat::Vst3)
-                    && slot
-                        .plugin_path
-                        .as_ref()
-                        .is_some_and(|path| !path.as_os_str().is_empty())
-            })
+            .filter(|slot| slot.is_bridge_hosted_external_module())
             .map(|slot| (MASTER_TRACK_ID.to_string(), slot.id.clone())),
     );
     slots

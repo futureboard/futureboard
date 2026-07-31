@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// [`HostEvent`]. The client sends it in [`HostCommand::Hello`] and the host
 /// echoes its own in [`HostEvent::Ready`]; a mismatch should be surfaced, not
 /// silently tolerated.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Commands sent **client → host** (written to the host's stdin).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,22 @@ pub enum HostCommand {
         /// cannot race the graph sync. `None` = start at defaults.
         #[serde(default)]
         state_json: Option<String>,
+    },
+    /// Instantiate a macOS Audio Unit in the host process. AU has no module
+    /// path: `component_id` is the scanner's `au:<type>:<subtype>:<manufacturer>`
+    /// identifier, which resolves to an AudioComponentDescription. Like the
+    /// built-ins, AU is hosted only here — there is no in-process engine path —
+    /// so state travels with the load rather than through a later command, and is
+    /// applied before the instance is published to the audio producer.
+    LoadAudioUnit {
+        plugin_instance_id: String,
+        component_id: String,
+        sample_rate: u32,
+        max_block_size: u32,
+        /// Opaque state bytes (base64 of the unit's ClassInfo binary plist), as
+        /// produced by [`HostEvent::PluginState`]. `None` = factory defaults.
+        #[serde(default)]
+        state_b64: Option<String>,
     },
     /// Attach a VST3 editor view into an HWND owned by the main app.
     ///
@@ -632,6 +648,11 @@ mod tests {
             pid: 42,
         })
         .unwrap();
-        assert_eq!(json, r#"{"event":"Ready","protocol_version":4,"pid":42}"#);
+        // Built from the constant on purpose: this test pins the tag and field
+        // names, not the version number, which is meant to move.
+        assert_eq!(
+            json,
+            format!(r#"{{"event":"Ready","protocol_version":{PROTOCOL_VERSION},"pid":42}}"#)
+        );
     }
 }

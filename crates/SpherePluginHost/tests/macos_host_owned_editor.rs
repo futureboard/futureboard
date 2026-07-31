@@ -128,10 +128,18 @@ fn host_owned_editor_attaches_without_a_parent_window() {
         "editor reported an unusable size {width}x{height}"
     );
 
+    // Report whatever the host says while the editor is up (EditorClosed when
+    // the window is closed by hand, EditorUnresponsive if the pump stalls).
     let hold = hold_after_attach();
     if !hold.is_zero() {
         eprintln!("[test] holding the editor open for {}ms", hold.as_millis());
-        std::thread::sleep(hold);
+        let until = Instant::now() + hold;
+        while Instant::now() < until {
+            match client.try_recv_event() {
+                Some(event) => eprintln!("[test] while open: {event:?}"),
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 
     client.close_editor(INSTANCE_ID).expect("send close_editor");

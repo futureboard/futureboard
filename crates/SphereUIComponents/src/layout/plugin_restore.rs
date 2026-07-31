@@ -7,7 +7,7 @@ use gpui::{App, Context};
 use super::StudioLayout;
 use crate::components::progress_dialog::ProgressBarValue;
 use crate::components::timeline::timeline_state::{
-    InsertPluginFormat, PluginRuntimeBackend, PluginRuntimeState, TrackType, MASTER_TRACK_ID,
+    PluginRuntimeBackend, PluginRuntimeState, TrackType, MASTER_TRACK_ID,
 };
 
 const PLUGIN_RESTORE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -284,7 +284,13 @@ impl StudioLayout {
             .plugin_id
             .as_deref()
             .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
-        if !is_builtin && !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
+        // An Audio Unit has no module file to find; the host's instantiate
+        // reports whether the component is installed.
+        let has_module_file = slot
+            .plugin_format
+            .is_none_or(|format| format.has_module_file());
+        if !is_builtin && has_module_file && !slot.plugin_path.as_ref().is_some_and(|p| p.exists())
+        {
             let reason = slot
                 .plugin_path
                 .as_ref()
@@ -460,14 +466,8 @@ fn target_from_slot(
         .plugin_id
         .as_deref()
         .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
-    if !is_builtin {
-        if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
-            return None;
-        }
-        let path = slot.plugin_path.as_ref()?;
-        if path.as_os_str().is_empty() {
-            return None;
-        }
+    if !is_builtin && !slot.is_bridge_hosted_external_module() {
+        return None;
     }
     Some(PluginRestoreTarget {
         track_id: track_id.to_string(),

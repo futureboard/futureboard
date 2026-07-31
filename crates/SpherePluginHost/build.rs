@@ -45,6 +45,14 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        backend_root.join("src/au_host.mm").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        backend_root.join("include/sphere_au_host.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         backend_root
             .join("include/sphere_plugin_host_vst3.h")
             .display()
@@ -83,12 +91,17 @@ fn main() {
             // AppKit application + event pump for the host process, without
             // which a plug-in editor window never appears (see the file header).
             .file(backend_root.join("src/host_ui_mac.mm"))
+            // Audio Unit runtime: hosted in this process like the built-ins, so
+            // there is no engine-side in-process path for AU.
+            .file(backend_root.join("src/au_host.mm"))
             .flag("-fobjc-arc");
         println!("cargo:rustc-link-lib=framework=AudioToolbox");
         println!("cargo:rustc-link-lib=framework=CoreAudio");
         println!("cargo:rustc-link-lib=framework=AppKit");
     } else {
-        build.file(backend_root.join("src/au_scanner_stub.cpp"));
+        build
+            .file(backend_root.join("src/au_scanner_stub.cpp"))
+            .file(backend_root.join("src/au_host_stub.cpp"));
     }
 
     build.compile("sphere_plugin_host_vst3");

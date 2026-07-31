@@ -6,6 +6,11 @@
 #![allow(clippy::needless_pass_by_value)]
 #![allow(non_snake_case)]
 
+/// Audio Unit runtime, hosted in the plug-in host process like the built-ins
+/// (AU has no in-process engine path). Non-macOS links a stub whose `open`
+/// reports the platform, so the host's block path and dispatch can name AU
+/// without a `cfg` at every branch.
+pub mod au_host;
 pub mod au_scanner;
 /// Stage 2 lock-free shared-memory audio bridge layout (audio in/out, MIDI ring,
 /// parameter-automation ring, status/latency/meter block) shared by the engine

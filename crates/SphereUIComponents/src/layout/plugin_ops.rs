@@ -2842,7 +2842,7 @@ impl StudioLayout {
         };
         let Some((plugin_id_out, plugin_path, plugin_format, vendor, display_name)) = descriptor
         else {
-            eprintln!("[PluginAdd] plugin instance failed to create reason=plugin_not_in_vst3_registry id={plugin_id}");
+            eprintln!("[PluginAdd] plugin instance failed to create reason=plugin_not_in_registry id={plugin_id}");
             self.plugin_picker = PluginPickerState::closed();
             cx.notify();
             return None;
@@ -2882,7 +2882,10 @@ impl StudioLayout {
             // a cheap no-op that keeps every add paired with a close.
             self.close_insert_editor(&track_id, &slot_id, cx);
             let log_display_name = display_name.clone();
-            eprintln!("[PluginAdd] VST3 plugin selected id={plugin_id} name={log_display_name}");
+            eprintln!(
+                "[PluginAdd] plugin selected format={} id={plugin_id} name={log_display_name}",
+                plugin_format.label()
+            );
             eprintln!("[PluginAdd] track={track_id} slot={slot_id} plugin={log_display_name}");
             eprintln!("[PluginAdd] insert added to track track={track_id} slot={slot_id}");
             eprintln!("[PluginAdd] runtime_instance_id={slot_id}");
@@ -2899,8 +2902,9 @@ impl StudioLayout {
                 );
             });
             let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&bridge_class_id);
+            let is_audio_unit = !is_builtin && plugin_format == InsertPluginFormat::Au;
             let bridge_enabled = super::plugin_bridge_runtime::bridge_enabled()
-                && (plugin_format == InsertPluginFormat::Vst3 || is_builtin);
+                && (is_builtin || is_audio_unit || plugin_format == InsertPluginFormat::Vst3);
             if bridge_enabled {
                 use crate::components::timeline::timeline_state::{
                     PluginRuntimeBackend, PluginRuntimeState,
@@ -2970,6 +2974,15 @@ impl StudioLayout {
                                         sample_rate,
                                         max_block_size,
                                         state_json,
+                                    )
+                                } else if is_audio_unit {
+                                    // A freshly added insert has no persisted
+                                    // state; the unit opens at its defaults.
+                                    runtime.send_load_au_plugin(
+                                        descriptor,
+                                        sample_rate,
+                                        max_block_size,
+                                        None,
                                     )
                                 } else {
                                     runtime.send_load_plugin(
@@ -3306,8 +3319,11 @@ impl StudioLayout {
         cx: &mut Context<Self>,
         source: &'static str,
     ) {
-        if plugin_format == crate::components::timeline::timeline_state::InsertPluginFormat::Vst3
-            && super::plugin_bridge_runtime::bridge_enabled()
+        use crate::components::timeline::timeline_state::InsertPluginFormat;
+        if matches!(
+            plugin_format,
+            InsertPluginFormat::Vst3 | InsertPluginFormat::Au
+        ) && super::plugin_bridge_runtime::bridge_enabled()
         {
             let display_name = self
                 .timeline
@@ -3475,11 +3491,9 @@ impl StudioLayout {
             .retain(|id, _| seen.contains(id));
     }
 
-    /// All (track_id, insert_id) pairs with external-bridge VST3 inserts.
-    fn bridge_vst3_insert_slots(&self, cx: &App) -> Vec<(String, String)> {
-        use crate::components::plugin_picker::STUB_PLUGIN_ID;
-        use crate::components::timeline::timeline_state::InsertPluginFormat;
-
+    /// All (track_id, insert_id) pairs whose insert is hosted by the plug-in
+    /// host process over the shared-audio bridge.
+    fn bridge_hosted_insert_slots(&self, cx: &App) -> Vec<(String, String)> {
         if !super::plugin_bridge_runtime::bridge_enabled() {
             return Vec::new();
         }
@@ -3492,14 +3506,7 @@ impl StudioLayout {
                 track
                     .inserts
                     .iter()
-                    .filter(|slot| {
-                        slot.plugin_id.as_deref() != Some(STUB_PLUGIN_ID)
-                            && slot.plugin_format == Some(InsertPluginFormat::Vst3)
-                            && slot
-                                .plugin_path
-                                .as_ref()
-                                .is_some_and(|path| !path.as_os_str().is_empty())
-                    })
+                    .filter(|slot| slot.is_bridge_hosted_external_module())
                     .map(|slot| (track.id.clone(), slot.id.clone()))
             })
             .collect();
@@ -3508,14 +3515,7 @@ impl StudioLayout {
                 .master
                 .inserts
                 .iter()
-                .filter(|slot| {
-                    slot.plugin_id.as_deref() != Some(STUB_PLUGIN_ID)
-                        && slot.plugin_format == Some(InsertPluginFormat::Vst3)
-                        && slot
-                            .plugin_path
-                            .as_ref()
-                            .is_some_and(|path| !path.as_os_str().is_empty())
-                })
+                .filter(|slot| slot.is_bridge_hosted_external_module())
                 .map(|slot| {
                     (
                         crate::components::timeline::timeline_state::MASTER_TRACK_ID.to_string(),
@@ -3529,7 +3529,7 @@ impl StudioLayout {
     /// All inserts whose audio is rendered through the shared-memory bridge,
     /// including Futureboard built-ins that have no module path.
     fn bridge_audio_insert_slots(&self, cx: &App) -> Vec<(String, String)> {
-        let mut slots = self.bridge_vst3_insert_slots(cx);
+        let mut slots = self.bridge_hosted_insert_slots(cx);
         if !super::plugin_bridge_runtime::bridge_enabled() {
             return slots;
         }
@@ -3594,7 +3594,7 @@ impl StudioLayout {
             }
         });
 
-        let slots = self.bridge_vst3_insert_slots(cx);
+        let slots = self.bridge_hosted_insert_slots(cx);
         if slots.is_empty() {
             return;
         }
@@ -3939,7 +3939,8 @@ impl StudioLayout {
         };
         let class_id = slot.plugin_id.clone().unwrap_or_default();
         let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&class_id);
-        if slot.plugin_format != Some(InsertPluginFormat::Vst3) && !is_builtin {
+        let is_audio_unit = !is_builtin && slot.plugin_format == Some(InsertPluginFormat::Au);
+        if !is_builtin && !is_audio_unit && slot.plugin_format != Some(InsertPluginFormat::Vst3) {
             return false;
         }
         let path = slot.plugin_path.as_ref();
@@ -3954,11 +3955,15 @@ impl StudioLayout {
         eprintln!("[PluginRestore] creating runtime instance...");
         if is_builtin {
             eprintln!("[PluginRestore] resolved built-in={class_id}");
+        } else if is_audio_unit {
+            eprintln!("[PluginRestore] resolved audio unit component={class_id}");
         } else {
             eprintln!("[PluginRestore] resolved path={path_string}");
         }
 
-        if !is_builtin && path.is_none_or(|path| !path.exists()) {
+        // An Audio Unit has no module file, so a missing path says nothing about
+        // whether the component is installed — the host's load reports that.
+        if !is_builtin && !is_audio_unit && path.is_none_or(|path| !path.exists()) {
             let reason = path
                 .map(|path| format!("Plugin file not found: {}", path.display()))
                 .unwrap_or_else(|| "Plugin file not found".to_string());
@@ -4040,6 +4045,17 @@ impl StudioLayout {
                                 max_block_size,
                                 state_json,
                             )
+                        } else if is_audio_unit {
+                            // Like the built-ins, an AU takes its persisted state
+                            // with the load: the host applies it before the
+                            // instance reaches the audio producer, so there is no
+                            // separate SetPluginState to race the graph sync.
+                            runtime.send_load_au_plugin(
+                                descriptor,
+                                sample_rate,
+                                max_block_size,
+                                slot.vst3_state.as_deref().map(Vec::as_slice),
+                            )
                         } else {
                             runtime.send_load_plugin(descriptor, sample_rate, max_block_size)
                         };
@@ -4058,10 +4074,15 @@ impl StudioLayout {
                         }
                         eprintln!(
                             "[PluginRestore] runtime instance created instance_id={slot_id} source={}",
-                            if is_builtin { class_id.as_str() } else { path_string.as_str() }
+                            if is_builtin || is_audio_unit {
+                                class_id.as_str()
+                            } else {
+                                path_string.as_str()
+                            }
                         );
-                        // Restore opaque VST3 state only for external modules.
-                        if !is_builtin {
+                        // Restore opaque VST3 state only for external modules;
+                        // built-in and AU state already travelled with the load.
+                        if !is_builtin && !is_audio_unit {
                             if let Some(state) = slot.vst3_state.as_ref() {
                                 if let Err(error) = runtime.send_plugin_state(slot_id, state) {
                                     eprintln!(

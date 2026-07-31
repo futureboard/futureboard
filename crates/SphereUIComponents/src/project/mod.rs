@@ -767,8 +767,15 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
             };
             let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&plugin.plugin_uid);
             let bridge = SpherePluginHost::plugin_host_client::plugin_host_bridge_enabled()
-                && (plugin_format == InsertPluginFormat::Vst3 || is_builtin);
+                && (matches!(
+                    plugin_format,
+                    InsertPluginFormat::Vst3 | InsertPluginFormat::Au
+                ) || is_builtin);
+            // Only a format with a module file can be missing from disk; an
+            // Audio Unit's absence surfaces when the host tries to instantiate
+            // its component id.
             let path_missing = !is_builtin
+                && plugin_format.has_module_file()
                 && plugin
                     .plugin_path
                     .as_ref()
@@ -2201,6 +2208,68 @@ mod vsti_substrip_persistence_tests {
             fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
             Some(json_state),
             "built-in plugin's JSON state bytes must survive save/load"
+        );
+    }
+
+    /// An Audio Unit is addressed by component id, so `plugin_path` holds a
+    /// string that will never exist on disk. Project load must not read that as
+    /// a broken plugin: the slot has to come back loadable, bridge-hosted, and
+    /// still carrying its opaque ClassInfo bytes.
+    #[test]
+    fn audio_unit_insert_loads_without_a_module_file_on_disk() {
+        use crate::components::timeline::timeline_state::{InsertLoadStatus, PluginRuntimeBackend};
+
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Vocal".into(),
+            color: crate::color::auto_color_for_index(0),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        let component = "au:61756678:64656c79:6170706c";
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            component.to_string(),
+            Some(PathBuf::from(component)),
+            InsertPluginFormat::Au,
+            None,
+            "AUDelay".to_string(),
+        );
+        let class_info = vec![7u8, 8, 9];
+        {
+            let slots = state.insert_slots_mut(&track_id).expect("slots");
+            let fx = slots.iter_mut().find(|s| s.id == slot).expect("fx slot");
+            fx.vst3_state = Some(std::sync::Arc::new(class_info.clone()));
+        }
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let fx = restored
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.inserts.iter().find(|s| s.id == slot))
+            .expect("audio unit insert restored");
+        assert_eq!(fx.plugin_format, Some(InsertPluginFormat::Au));
+        assert_eq!(
+            fx.load_status,
+            InsertLoadStatus::Loading,
+            "a component id that is not a file must not read as a missing plugin"
+        );
+        assert_eq!(fx.runtime_backend, PluginRuntimeBackend::ExternalBridge);
+        assert!(fx.is_bridge_hosted_external_module());
+        assert_eq!(
+            fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
+            Some(class_info),
+            "the AU's opaque ClassInfo bytes must survive save/load"
         );
     }
 }

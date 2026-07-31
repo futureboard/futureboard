@@ -142,8 +142,15 @@ unsigned long long open_editor_mac(SphereDauxVst3Processor *proc,
     // (view size is set by the plugin; we match the NS window to it)
     NSRect embed_frame = embed.frame;
     if (embed_frame.size.width > 0 && embed_frame.size.height > 0) {
-      NSRect window_frame = [window frameRectForContentRect:embed_frame];
+      // The embed frame is view-local, so its origin is (0,0) — the screen's
+      // bottom-left corner in window coordinates. Take only the size and
+      // re-center, or the window jumps into the corner of the display.
+      NSRect content_rect =
+          NSMakeRect(0.0, 0.0, embed_frame.size.width, embed_frame.size.height);
+      NSRect window_frame = [window frameRectForContentRect:content_rect];
+      window_frame.origin = window.frame.origin;
       [window setFrame:window_frame display:NO];
+      [window center];
     }
   }
 
