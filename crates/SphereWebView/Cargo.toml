@@ -21,6 +21,8 @@ required-features = ["cef-runtime"]
 cef = { workspace = true, optional = true }
 download-cef = { workspace = true, optional = true }
 thiserror.workspace = true
+tempfile = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 ureq = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -41,7 +43,7 @@ gpui_macos.workspace = true
 [features]
 default = []
 # Links the cef-rs bindings. Install the SDK first with the installer example.
-cef-runtime = ["dep:cef", "dep:windows-sys", "dep:x11-dl", "dep:objc2", "dep:objc2-foundation"]
+cef-runtime = ["dep:cef", "dep:windows-sys", "dep:x11-dl", "dep:objc2", "dep:objc2-foundation", "dep:tempfile", "dep:url"]
 # Enables the explicit, user-invoked CEF downloader/extractor.
 installer = ["dep:download-cef", "dep:ureq"]
 

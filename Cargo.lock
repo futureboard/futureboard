@@ -88,8 +88,10 @@ dependencies = [
  "gpui_macos",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
+ "tempfile",
  "thiserror 2.0.18",
  "ureq",
+ "url",
  "windows-sys 0.61.2",
  "x11-dl",
 ]

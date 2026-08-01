@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, CefStringUtf16, Client, DisplayHandler, Errorcode, Frame, ImplBrowser,
-    ImplClient, ImplDisplayHandler, ImplFrame, ImplKeyboardHandler, ImplLifeSpanHandler,
-    ImplLoadHandler, ImplRequest, ImplRequestHandler, KeyEvent, KeyEventType, KeyboardHandler,
-    LifeSpanHandler, LoadHandler, LogSeverity, RenderHandler, Request, RequestHandler,
-    TerminationStatus, TransitionType, WrapClient, WrapDisplayHandler, WrapKeyboardHandler,
-    WrapLifeSpanHandler, WrapLoadHandler, WrapRequestHandler, wrap_client, wrap_display_handler,
-    wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_request_handler,
+    Browser, BrowserSettings, CefString, CefStringUtf16, Client, DictionaryValue, DisplayHandler,
+    Errorcode, Frame, ImplBrowser, ImplClient, ImplDisplayHandler, ImplFrame, ImplKeyboardHandler,
+    ImplLifeSpanHandler, ImplLoadHandler, ImplRequest, ImplRequestHandler, KeyEvent, KeyEventType,
+    KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, PopupFeatures, RenderHandler,
+    Request, RequestHandler, TerminationStatus, TransitionType, WindowInfo, WindowOpenDisposition,
+    WrapClient, WrapDisplayHandler, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRequestHandler, wrap_client, wrap_display_handler, wrap_keyboard_handler,
+    wrap_life_span_handler, wrap_load_handler, wrap_request_handler,
 };
 
 use crate::scheme::{PLUGIN_SCHEME, cef_diagnostics_enabled};
@@ -156,6 +157,32 @@ wrap_life_span_handler! {
     }
 
     impl LifeSpanHandler {
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: ::std::os::raw::c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            user_gesture: ::std::os::raw::c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
+        ) -> ::std::os::raw::c_int {
+            let url = target_url.map(ToString::to_string).unwrap_or_default();
+            let opened = user_gesture != 0 && open_external_https(&url);
+            eprintln!(
+                "[cef-lifecycle] event=PopupBlocked external_opened={opened}"
+            );
+            // Built-in plugin pages never own a second CEF browser. A valid,
+            // user-initiated HTTPS link is handed to the native OS above.
+            1
+        }
+
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             let id = browser_id(browser);
             self.lifecycle.mark_after_created(id);
@@ -332,16 +359,29 @@ wrap_request_handler! {
             _browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             request: Option<&mut Request>,
-            _user_gesture: ::std::os::raw::c_int,
+            user_gesture: ::std::os::raw::c_int,
             _is_redirect: ::std::os::raw::c_int,
         ) -> ::std::os::raw::c_int {
             let Some(request) = request else { return 0 };
             let url = CefStringUtf16::from(&request.url()).to_string();
-            if is_allowed_navigation(&url, &self.allowed_origin, self.control_url.as_deref()) {
-                0
-            } else {
-                eprintln!("[cef-lifecycle] event=NavigationBlocked url={url:?}");
-                1
+            match navigation_decision(
+                &url,
+                &self.allowed_origin,
+                self.control_url.as_deref(),
+                user_gesture != 0,
+            ) {
+                NavigationDecision::Allow => 0,
+                NavigationDecision::OpenExternalHttps => {
+                    let opened = open_external_https(&url);
+                    eprintln!(
+                        "[cef-lifecycle] event=ExternalNavigationIntercepted opened={opened}"
+                    );
+                    1
+                }
+                NavigationDecision::Block => {
+                    eprintln!("[cef-lifecycle] event=NavigationBlocked");
+                    1
+                }
             }
         }
 
@@ -383,6 +423,57 @@ fn is_allowed_navigation(url: &str, allowed_origin: &str, control_url: Option<&s
     }
     let lower = url.to_ascii_lowercase();
     lower == allowed_origin || lower.starts_with(&format!("{allowed_origin}/"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationDecision {
+    Allow,
+    OpenExternalHttps,
+    Block,
+}
+
+fn navigation_decision(
+    url: &str,
+    allowed_origin: &str,
+    control_url: Option<&str>,
+    user_gesture: bool,
+) -> NavigationDecision {
+    if is_allowed_navigation(url, allowed_origin, control_url) {
+        NavigationDecision::Allow
+    } else if user_gesture && is_safe_external_https(url) {
+        NavigationDecision::OpenExternalHttps
+    } else {
+        NavigationDecision::Block
+    }
+}
+
+fn is_safe_external_https(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+#[cfg(target_os = "macos")]
+fn open_external_https(url: &str) -> bool {
+    use std::process::{Command, Stdio};
+
+    is_safe_external_https(url)
+        && Command::new("/usr/bin/open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_external_https(_url: &str) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -620,6 +711,31 @@ mod tests {
                 None
             ));
         }
+    }
+
+    #[test]
+    fn intercepts_only_user_initiated_safe_https_links() {
+        let origin = "mikoplugin://rodharerist";
+        assert_eq!(
+            navigation_decision("https://futureboard.app/help", origin, None, true),
+            NavigationDecision::OpenExternalHttps
+        );
+        for url in [
+            "http://futureboard.app/help",
+            "https://user:password@futureboard.app/help",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(
+                navigation_decision(url, origin, None, true),
+                NavigationDecision::Block,
+                "{url}"
+            );
+        }
+        assert_eq!(
+            navigation_decision("https://futureboard.app/help", origin, None, false),
+            NavigationDecision::Block
+        );
     }
 
     #[test]

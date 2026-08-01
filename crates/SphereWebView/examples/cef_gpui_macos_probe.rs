@@ -18,7 +18,13 @@ mod macos {
         WindowBounds, execute_subprocess, platform_browser_subprocess,
     };
     use sphere_webview::scheme::{
-        MessagePumpSchedule, plugin_scheme_app, plugin_scheme_app_with_message_pump,
+        MessagePumpSchedule, SchemeAsset, plugin_scheme_app, plugin_scheme_app_with_message_pump,
+        register_plugin_scheme_factory,
+    };
+
+    const PROBE_DOCUMENT: SchemeAsset = SchemeAsset {
+        bytes: b"<!doctype html><style>body{background:#111;color:#eee}</style><p>probe</p>",
+        mime_type: "text/html; charset=utf-8",
     };
 
     thread_local! {
@@ -37,7 +43,7 @@ mod macos {
     }
 
     struct ProbeHost {
-        browser: Option<ProbeBrowser>,
+        browsers: Vec<ProbeBrowser>,
         runtime: CefRuntime,
         _app: sphere_webview::runtime::cef::App,
     }
@@ -198,52 +204,66 @@ mod macos {
             assert!(
                 slot.borrow_mut()
                     .replace(ProbeHost {
-                        browser: None,
+                        browsers: Vec::new(),
                         runtime,
                         _app: app,
                     })
                     .is_none()
             );
         });
+        register_plugin_scheme_factory(
+            Arc::new(|origin, path| {
+                (matches!(origin, "probe-a" | "probe-b") && path == "/index.html")
+                    .then_some(PROBE_DOCUMENT)
+            }),
+            None,
+        )
+        .expect("register probe mikoplugin scheme");
         eprintln!(
             "[cef-probe] event=initialize-end thread={:?}",
             std::thread::current().id()
         );
     }
 
-    fn create_browser() {
+    fn create_browsers() {
         RUNTIME.with(|slot| {
             let mut slot = slot.borrow_mut();
             let host = slot.as_mut().expect("runtime not initialized");
-            assert!(host.browser.is_none(), "probe browser already exists");
-            let surface = OsrSurface::new(2, 2, 1.0);
-            let (mut client, lifecycle) =
-                plugin_browser_client_with_surface("about:blank", Some(surface.clone()));
-            let config = WebViewConfig::new(
-                "about:blank",
-                WindowBounds::new(0, 0, 2, 2).expect("valid probe bounds"),
-            )
-            .windowless(surface.clone());
-            let view = unsafe {
-                host.runtime
-                    .create_webview_detached(
-                        NativeParent::from_raw(std::ptr::null_mut()),
-                        config,
-                        Some(&mut client),
-                    )
-                    .expect("create probe OSR browser")
-            };
-            eprintln!(
-                "[cef-probe] event=browser-created browser_id={} thread={:?}",
-                view.browser_identifier(),
-                std::thread::current().id()
-            );
-            host.browser = Some(ProbeBrowser {
-                view,
-                _client: client,
-                lifecycle,
-                surface,
-            });
+            assert!(host.browsers.is_empty(), "probe browsers already exist");
+            for url in [
+                "mikoplugin://probe-a/index.html",
+                "mikoplugin://probe-a/index.html",
+                "mikoplugin://probe-b/index.html",
+            ] {
+                let surface = OsrSurface::new(2, 2, 1.0);
+                let (mut client, lifecycle) =
+                    plugin_browser_client_with_surface(url, Some(surface.clone()));
+                let config = WebViewConfig::new(
+                    url,
+                    WindowBounds::new(0, 0, 2, 2).expect("valid probe bounds"),
+                )
+                .windowless(surface.clone());
+                let view = unsafe {
+                    host.runtime
+                        .create_webview_detached(
+                            NativeParent::from_raw(std::ptr::null_mut()),
+                            config,
+                            Some(&mut client),
+                        )
+                        .expect("create probe OSR browser")
+                };
+                eprintln!(
+                    "[cef-probe] event=browser-created browser_id={} thread={:?}",
+                    view.browser_identifier(),
+                    std::thread::current().id()
+                );
+                host.browsers.push(ProbeBrowser {
+                    view,
+                    _client: client,
+                    lifecycle,
+                    surface,
+                });
+            }
         });
     }
 
@@ -311,9 +331,9 @@ mod macos {
             .expect("open minimal GPUI probe window");
             if let Some(async_creation) = browser_async {
                 if async_creation {
-                    DispatchQueue::main().exec_async(create_browser);
+                    DispatchQueue::main().exec_async(create_browsers);
                 } else {
-                    create_browser();
+                    create_browsers();
                 }
             }
             if pump_mode == PumpMode::IntegratedManualOnce {
@@ -359,33 +379,39 @@ mod macos {
                     .await;
                 eprintln!("[cef-probe] event=duration-complete");
                 RUNTIME.with(|slot| {
-                    if let Some(browser) = slot
-                        .borrow()
-                        .as_ref()
-                        .and_then(|host| host.browser.as_ref())
-                    {
+                    if let Some(host) = slot.borrow().as_ref() {
+                        let ready = host
+                            .browsers
+                            .iter()
+                            .filter(|browser| {
+                                browser.lifecycle.after_created()
+                                    && browser.lifecycle.javascript_executed()
+                                    && browser.surface.generation() > 0
+                            })
+                            .count();
                         eprintln!(
-                            "[cef-probe] event=browser-status after_created={} paint_generation={} before_close={}",
-                            browser.lifecycle.after_created(),
-                            browser.surface.generation(),
-                            browser.lifecycle.before_close()
+                            "[cef-probe] event=browser-status total={} ready={ready}",
+                            host.browsers.len()
                         );
-                        let _ = browser.view.close(false);
+                        assert_eq!(ready, 3, "all probe plugin instances must load and paint");
+                        for browser in &host.browsers {
+                            let _ = browser.view.close(false);
+                        }
                     }
                 });
-                cx.background_executor()
-                    .timer(Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 RUNTIME.with(|slot| {
-                    if let Some(browser) = slot
-                        .borrow()
-                        .as_ref()
-                        .and_then(|host| host.browser.as_ref())
-                    {
+                    if let Some(host) = slot.borrow().as_ref() {
+                        let closed = host
+                            .browsers
+                            .iter()
+                            .filter(|browser| browser.lifecycle.before_close())
+                            .count();
                         eprintln!(
-                            "[cef-probe] event=browser-close-status before_close={}",
-                            browser.lifecycle.before_close()
+                            "[cef-probe] event=browser-close-status total={} closed={closed}",
+                            host.browsers.len()
                         );
+                        assert_eq!(closed, 3, "all probe browsers must close cleanly");
                     }
                 });
                 pump.shutdown();

@@ -1082,7 +1082,6 @@ mod imp {
                 )
             })?;
         let config = CefRuntimeConfig {
-            cache_path: cef_cache_dir(),
             remote_debugging_port: debug_port(),
             browser_subprocess: match sphere_webview::runtime::platform_browser_subprocess() {
                 Ok(subprocess) => subprocess,
@@ -1835,15 +1834,6 @@ mod imp {
     #[cfg(not(target_os = "windows"))]
     fn hwnd_to_cef(handle: u64) -> sphere_webview::runtime::cef::sys::cef_window_handle_t {
         handle as _
-    }
-
-    /// Per-user cache directory. CEF requires a writable path; an unwritable or
-    /// missing one degrades to in-memory, which is acceptable for an editor UI.
-    fn cef_cache_dir() -> Option<std::path::PathBuf> {
-        let base = dirs::cache_dir()?;
-        let dir = base.join("Futureboard").join("cef");
-        std::fs::create_dir_all(&dir).ok()?;
-        Some(dir)
     }
 
     /// Optional normal-page control. The exact URL is also whitelisted by the

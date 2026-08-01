@@ -422,6 +422,66 @@ enum InboundMsg {
     Unknown,
 }
 
+/// The CEF bridge is an untrusted local-UI boundary, not a secure-storage
+/// channel. Native owns every credential and persistent secret. Check JSON
+/// object keys structurally (never raw string contents, which may be preset or
+/// model data) before accepting inbound messages or exposing outbound state.
+fn bridge_value_contains_forbidden_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(name, value)| {
+            is_forbidden_secret_field(name) || bridge_value_contains_forbidden_secret(value)
+        }),
+        serde_json::Value::Array(values) => {
+            values.iter().any(bridge_value_contains_forbidden_secret)
+        }
+        _ => false,
+    }
+}
+
+fn is_forbidden_secret_field(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "password"
+            | "passphrase"
+            | "accesstoken"
+            | "refreshtoken"
+            | "oauthtoken"
+            | "oauthcredential"
+            | "authorization"
+            | "sessioncookie"
+            | "clientsecret"
+            | "apikey"
+            | "secretkey"
+            | "stripesecretkey"
+            | "licensekey"
+            | "licensedata"
+            | "activationkey"
+            | "activationtoken"
+            | "activationdata"
+            | "paymentsessionsecret"
+            | "cloudcredentials"
+            | "keychainvalue"
+            | "macoskeychainvalue"
+            | "encryptionkey"
+            | "privatekey"
+            | "credentials"
+    )
+}
+
+fn parse_inbound_message(raw: &[u8]) -> Result<InboundMsg, &'static str> {
+    let value: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|_| "invalid JSON or message shape")?;
+    if bridge_value_contains_forbidden_secret(&value) {
+        return Err("secret-bearing field rejected at CEF trust boundary");
+    }
+    serde_json::from_value(value).map_err(|_| "invalid JSON or message shape")
+}
+
 /// UI-thread-only forwarder for one resolved parameter edit:
 /// `(instance, wire index, raw editor-unit value)` toward the engine's
 /// realtime command path (`AudioEngine::set_insert_param`), which pushes the
@@ -843,7 +903,16 @@ impl BuiltinPluginEditorWindow {
     }
 
     fn post_to_view(&self, msg: &impl serde::Serialize) {
-        let Ok(json) = serde_json::to_string(msg) else {
+        let Ok(value) = serde_json::to_value(msg) else {
+            eprintln!("[plugin-bridge] outbound serialization failed");
+            return;
+        };
+        if bridge_value_contains_forbidden_secret(&value) {
+            eprintln!("[plugin-bridge] outbound secret-bearing message rejected");
+            return;
+        }
+        let Ok(json) = serde_json::to_string(&value) else {
+            eprintln!("[plugin-bridge] outbound JSON encoding failed");
             return;
         };
         host::send_to_view(self.view_id, &format!("window.postMessage({json}, \"*\");"));
@@ -1449,7 +1518,7 @@ impl BuiltinPluginEditorWindow {
         if matches!(self.status, Status::Attaching | Status::Attached) {
             if let Some(origin) = host::origin_for_plugin_id(&self.plugin_id) {
                 for raw in host::take_inbound(origin) {
-                    match serde_json::from_slice::<InboundMsg>(&raw) {
+                    match parse_inbound_message(&raw) {
                         Ok(msg) => self.handle_inbound(msg, cx),
                         Err(error) => eprintln!(
                             "[plugin-bridge] malformed inbound message plugin={} err={error}",
@@ -2338,6 +2407,51 @@ mod tests {
             br#"{"type":"futureboard.bridgeReady","pluginId":"rodharerist","bridgeVersion":1}"#;
         let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
         assert!(matches!(msg, InboundMsg::BridgeReady { .. }));
+    }
+
+    #[test]
+    fn cef_bridge_accepts_non_secret_plugin_state() {
+        let value = serde_json::json!({
+            "type": "futureboard.selectInstance",
+            "state": {"params": {"threshold": -18.0, "mode": "vintage"}}
+        });
+        assert!(!bridge_value_contains_forbidden_secret(&value));
+    }
+
+    #[test]
+    fn cef_bridge_rejects_secret_fields_in_either_direction() {
+        for field in [
+            "accessToken",
+            "refresh_token",
+            "password",
+            "licenseKey",
+            "activationData",
+            "paymentSessionSecret",
+            "macOSKeychainValue",
+            "encryption-key",
+        ] {
+            let mut secret = serde_json::Map::new();
+            secret.insert(field.to_owned(), serde_json::json!("must-not-cross"));
+            let value = serde_json::json!({"state": secret});
+            assert!(bridge_value_contains_forbidden_secret(&value), "{field}");
+        }
+
+        let inbound = br#"{
+            "type":"futureboard.bridgeReady",
+            "pluginId":"rodharerist",
+            "bridgeVersion":1,
+            "accessToken":"must-not-cross"
+        }"#;
+        assert!(parse_inbound_message(inbound).is_err());
+    }
+
+    #[test]
+    fn cef_bridge_does_not_scan_opaque_file_contents_as_json() {
+        let value = serde_json::json!({
+            "type": "futureboard.fileContent",
+            "content": "{\"accessToken\":\"preset-text-not-a-bridge-field\"}"
+        });
+        assert!(!bridge_value_contains_forbidden_secret(&value));
     }
 
     #[test]

@@ -18,6 +18,12 @@ const OPAQUE_BACKGROUND: u32 = 0xFF11_1318;
 /// Windowless paint rate cap. CEF clamps this to 1..=60.
 const WINDOWLESS_FRAME_RATE: i32 = 60;
 
+/// Futureboard uses CEF only as an ephemeral renderer for local built-in UI.
+/// Application persistence and every secret remain native-owned.
+pub const CEF_EPHEMERAL_LOCAL_UI: bool = true;
+const CEF_PERSIST_SESSION_COOKIES: i32 = 0;
+const CEF_EXCLUDE_DEFAULT_COOKIE_SCHEMES: i32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessDispatch {
     BrowserProcess,
@@ -211,8 +217,6 @@ pub fn platform_browser_subprocess() -> Result<BrowserSubprocess, CefRuntimeErro
 /// message pump and must be driven from the creating UI thread.
 #[derive(Debug, Clone, Default)]
 pub struct CefRuntimeConfig {
-    pub cache_path: Option<PathBuf>,
-    pub root_cache_path: Option<PathBuf>,
     pub locale: Option<String>,
     pub user_agent: Option<String>,
     pub remote_debugging_port: Option<u16>,
@@ -333,6 +337,7 @@ impl WebViewConfig {
 pub struct CefRuntime {
     owner_thread: ThreadId,
     shutdown: bool,
+    ephemeral_root_cache: Option<tempfile::TempDir>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -354,8 +359,9 @@ impl CefRuntime {
             BrowserSubprocess::CurrentExecutable => identity.executable.as_path(),
             BrowserSubprocess::SeparateExecutable(path) => path.as_path(),
         };
+        let ephemeral_root_cache = create_ephemeral_root_cache()?;
         eprintln!(
-            "[cef-runtime] initialize begin executable={} process_type={:?} subprocess_model={} subprocess_path={} cache_path={} root_cache_path={} resources_path=<cef-default> locales_path=<cef-default> message_loop=manual-do-work windowless={} remote_debugging_port={} thread={:?}",
+            "[cef-runtime] initialize begin executable={} process_type={:?} subprocess_model={} subprocess_path={} cache_path=<memory> root_cache_path=<temporary> resources_path=<cef-default> locales_path=<cef-default> message_loop=manual-do-work windowless={} remote_debugging_port={} thread={:?}",
             identity.executable.display(),
             identity.process_type.as_deref().unwrap_or("<browser>"),
             match &config.browser_subprocess {
@@ -363,25 +369,18 @@ impl CefRuntime {
                 BrowserSubprocess::SeparateExecutable(_) => "separate",
             },
             resolved_subprocess.display(),
-            display_optional_path(config.cache_path.as_ref()),
-            display_optional_path(config.root_cache_path.as_ref()),
             config.windowless_rendering,
             config.remote_debugging_port.unwrap_or(0),
             thread::current().id(),
         );
-        let settings = cef::Settings {
-            no_sandbox: 1,
-            multi_threaded_message_loop: 0,
-            external_message_pump: i32::from(config.external_message_pump),
-            windowless_rendering_enabled: i32::from(config.windowless_rendering),
-            cache_path: cef_path(config.cache_path.as_ref()),
-            root_cache_path: cef_path(config.root_cache_path.as_ref()),
+        let settings = build_settings(
+            &config,
             browser_subprocess_path,
-            locale: cef_string(config.locale.as_deref()),
-            user_agent: cef_string(config.user_agent.as_deref()),
-            remote_debugging_port: config.remote_debugging_port.unwrap_or(0) as i32,
-            ..Default::default()
-        };
+            ephemeral_root_cache.path(),
+        );
+        if let Err(error) = validate_ephemeral_settings(&settings) {
+            return Err(error);
+        }
         if cef::initialize(
             Some(args.as_main_args()),
             Some(&settings),
@@ -392,6 +391,7 @@ impl CefRuntime {
             eprintln!("[cef-runtime] initialize result=false");
             return Err(CefRuntimeError::InitializeFailed);
         }
+        log_local_ui_runtime_summary();
         eprintln!(
             "[cef-runtime] initialize result=true owner_thread={:?}",
             thread::current().id()
@@ -400,6 +400,7 @@ impl CefRuntime {
         Ok(Self {
             owner_thread: thread::current().id(),
             shutdown: false,
+            ephemeral_root_cache: Some(ephemeral_root_cache),
             _not_send: PhantomData,
         })
     }
@@ -464,6 +465,8 @@ impl CefRuntime {
             Some(&cef::CefString::from(config.url.as_str())),
             Some(&browser_settings),
             None,
+            // All built-in plugin browsers deliberately share the global,
+            // ephemeral request context configured during initialization.
             None,
         );
         let Some(browser) = browser else {
@@ -531,9 +534,21 @@ impl CefRuntime {
             );
             cef::shutdown();
             self.shutdown = true;
+            self.cleanup_ephemeral_root();
             eprintln!("[cef-runtime] shutdown complete");
         }
         Ok(())
+    }
+
+    fn cleanup_ephemeral_root(&mut self) {
+        let Some(directory) = self.ephemeral_root_cache.take() else {
+            return;
+        };
+        if let Err(error) = directory.close() {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[cef-runtime] temporary storage cleanup failed: {error}");
+            }
+        }
     }
 
     fn ensure_thread(&self) -> Result<(), CefRuntimeError> {
@@ -542,6 +557,98 @@ impl CefRuntime {
         }
         Ok(())
     }
+}
+
+fn build_settings(
+    config: &CefRuntimeConfig,
+    browser_subprocess_path: cef::CefString,
+    ephemeral_root_cache_path: &Path,
+) -> cef::Settings {
+    cef::Settings {
+        no_sandbox: 1,
+        multi_threaded_message_loop: 0,
+        external_message_pump: i32::from(config.external_message_pump),
+        windowless_rendering_enabled: i32::from(config.windowless_rendering),
+        // Empty cache_path is CEF's incognito mode: no profile-specific
+        // cookies, preferences, localStorage, IndexedDB, or HTTP cache is
+        // persisted. A non-persistent root is still required because an empty
+        // root_cache_path can fall back to CEF's generic user-data directory.
+        cache_path: cef::CefString::default(),
+        root_cache_path: cef::CefString::from(ephemeral_root_cache_path.to_string_lossy().as_ref()),
+        persist_session_cookies: CEF_PERSIST_SESSION_COOKIES,
+        // Built-in pages do not use cookies. Empty list + exclude defaults
+        // disables http/https/ws/wss cookies and does not make
+        // mikoplugin:// cookieable.
+        cookieable_schemes_list: cef::CefString::default(),
+        cookieable_schemes_exclude_defaults: CEF_EXCLUDE_DEFAULT_COOKIE_SCHEMES,
+        browser_subprocess_path,
+        locale: cef_string(config.locale.as_deref()),
+        user_agent: cef_string(config.user_agent.as_deref()),
+        remote_debugging_port: config.remote_debugging_port.unwrap_or(0) as i32,
+        ..Default::default()
+    }
+}
+
+/// Settings for any future isolated request context. Production currently uses
+/// only the global context, but keeping this constructor beside the global
+/// policy prevents a later browser path from accidentally gaining persistence.
+pub fn ephemeral_request_context_settings() -> cef::RequestContextSettings {
+    cef::RequestContextSettings {
+        cache_path: cef::CefString::default(),
+        persist_session_cookies: CEF_PERSIST_SESSION_COOKIES,
+        cookieable_schemes_list: cef::CefString::default(),
+        cookieable_schemes_exclude_defaults: CEF_EXCLUDE_DEFAULT_COOKIE_SCHEMES,
+        ..Default::default()
+    }
+}
+
+fn validate_ephemeral_settings(settings: &cef::Settings) -> Result<(), CefRuntimeError> {
+    let cache_path = settings.cache_path.to_string();
+    let root_cache_path = settings.root_cache_path.to_string();
+    let cookieable_schemes = settings.cookieable_schemes_list.to_string();
+    validate_ephemeral_values(
+        &cache_path,
+        &root_cache_path,
+        settings.persist_session_cookies,
+        &cookieable_schemes,
+        settings.cookieable_schemes_exclude_defaults,
+    )
+}
+
+fn validate_ephemeral_values(
+    cache_path: &str,
+    root_cache_path: &str,
+    persist_session_cookies: i32,
+    cookieable_schemes: &str,
+    exclude_default_cookie_schemes: i32,
+) -> Result<(), CefRuntimeError> {
+    if !CEF_EPHEMERAL_LOCAL_UI
+        || !cache_path.is_empty()
+        || root_cache_path.is_empty()
+        || persist_session_cookies != CEF_PERSIST_SESSION_COOKIES
+        || !cookieable_schemes.is_empty()
+        || exclude_default_cookie_schemes != CEF_EXCLUDE_DEFAULT_COOKIE_SCHEMES
+    {
+        return Err(CefRuntimeError::PersistentStorageForbidden);
+    }
+    Ok(())
+}
+
+fn create_ephemeral_root_cache() -> Result<tempfile::TempDir, CefRuntimeError> {
+    tempfile::Builder::new()
+        .prefix("futureboard-cef-ephemeral-")
+        .tempdir()
+        .map_err(CefRuntimeError::EphemeralStorage)
+}
+
+fn log_local_ui_runtime_summary() {
+    eprintln!("CEF local UI runtime: enabled");
+    eprintln!("CEF storage mode: ephemeral");
+    eprintln!("CEF persistent session cookies: disabled");
+    eprintln!("CEF persistent preferences: disabled");
+    #[cfg(target_os = "macos")]
+    eprintln!("CEF mock Keychain: enabled");
+    eprintln!("CEF external navigation: restricted");
 }
 
 impl Drop for CefRuntime {
@@ -553,6 +660,7 @@ impl Drop for CefRuntime {
             );
             cef::shutdown();
             self.shutdown = true;
+            self.cleanup_ephemeral_root();
             eprintln!("[cef-runtime] shutdown complete source=drop");
         } else if !self.shutdown {
             eprintln!(
@@ -739,18 +847,8 @@ impl WebView<'_> {
     }
 }
 
-fn cef_path(path: Option<&PathBuf>) -> cef::CefString {
-    path.map(|path| cef::CefString::from(path.to_string_lossy().as_ref()))
-        .unwrap_or_default()
-}
-
 fn cef_string(value: Option<&str>) -> cef::CefString {
     value.map(cef::CefString::from).unwrap_or_default()
-}
-
-fn display_optional_path(path: Option<&PathBuf>) -> String {
-    path.map(|path| path.display().to_string())
-        .unwrap_or_else(|| "<cef-default>".to_owned())
 }
 
 #[cfg(target_os = "macos")]
@@ -863,6 +961,10 @@ fn platform_set_bounds(
 pub enum CefRuntimeError {
     #[error("CEF initialization failed")]
     InitializeFailed,
+    #[error("persistent CEF browser storage is forbidden for the local UI runtime")]
+    PersistentStorageForbidden,
+    #[error("failed to create temporary CEF storage: {0}")]
+    EphemeralStorage(std::io::Error),
     #[error("CEF browser creation failed")]
     CreateBrowserFailed,
     #[error("CEF operations must run on the runtime's creating thread")]
@@ -947,6 +1049,31 @@ mod tests {
             ProcessDispatch::from_exit_code(9),
             ProcessDispatch::SubprocessExit(9)
         );
+    }
+
+    #[test]
+    fn global_policy_enforces_ephemeral_cookie_free_storage() {
+        // Do not construct a non-empty CefString in a unit-test process: the
+        // pinned CEF binding requires its bundled framework to be loaded first.
+        assert!(validate_ephemeral_values("", "/temporary", 0, "", 1).is_ok());
+    }
+
+    #[test]
+    fn custom_request_context_policy_is_ephemeral_and_cookie_free() {
+        let settings = ephemeral_request_context_settings();
+
+        assert!(settings.cache_path.to_string().is_empty());
+        assert_eq!(settings.persist_session_cookies, 0);
+        assert!(settings.cookieable_schemes_list.to_string().is_empty());
+        assert_eq!(settings.cookieable_schemes_exclude_defaults, 1);
+    }
+
+    #[test]
+    fn startup_validation_rejects_a_persistent_profile() {
+        assert!(matches!(
+            validate_ephemeral_values("persistent-profile", "/temporary", 0, "", 1),
+            Err(CefRuntimeError::PersistentStorageForbidden)
+        ));
     }
 
     #[cfg(target_os = "macos")]

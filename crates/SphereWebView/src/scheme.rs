@@ -42,6 +42,17 @@ use cef::{
 /// `builtin_audio_plugins::ui::PLUGIN_URL_SCHEME`.
 pub const PLUGIN_SCHEME: &str = "mikoplugin";
 
+/// Chromium's macOS credential store is unnecessary for Futureboard's local,
+/// ephemeral CEF renderer. The CEF API expects switch names without `--`.
+pub const MACOS_CEF_USE_MOCK_KEYCHAIN: &str = "use-mock-keychain";
+const CEF_DISABLE_PINCH: &str = "disable-pinch";
+
+fn local_ui_command_line_switches(target_os: &str) -> &'static [&'static str] {
+    const COMMON: &[&str] = &[CEF_DISABLE_PINCH];
+    const MACOS: &[&str] = &[CEF_DISABLE_PINCH, MACOS_CEF_USE_MOCK_KEYCHAIN];
+    if target_os == "macos" { MACOS } else { COMMON }
+}
+
 /// Reserved path React's bridge client POSTs JSON envelopes to
 /// (`futureboard.requestSelectInstance`, `instanceReady`, `bridgeReady`,
 /// `rodhareist.setParam`, ...). Not a real asset path — intercepted before it
@@ -235,7 +246,9 @@ wrap_app! {
             if let Some(command_line) = command_line {
                 // Built-in plugin editors have a fixed layout; browser pinch
                 // zoom must never resize their document.
-                command_line.append_switch(Some(&CefString::from("disable-pinch")));
+                for switch in local_ui_command_line_switches(std::env::consts::OS) {
+                    command_line.append_switch(Some(&CefString::from(*switch)));
+                }
             }
         }
 
@@ -757,6 +770,17 @@ pub enum SchemeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_keychain_switch_is_macos_only_and_has_no_cli_prefix() {
+        let macos = local_ui_command_line_switches("macos");
+        assert!(macos.contains(&MACOS_CEF_USE_MOCK_KEYCHAIN));
+        assert!(!MACOS_CEF_USE_MOCK_KEYCHAIN.starts_with("--"));
+
+        for target in ["windows", "linux"] {
+            assert!(!local_ui_command_line_switches(target).contains(&MACOS_CEF_USE_MOCK_KEYCHAIN));
+        }
+    }
 
     #[test]
     fn minimal_test_document_stays_below_one_hundred_bytes() {
