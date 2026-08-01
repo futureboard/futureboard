@@ -266,3 +266,65 @@ fn an_unknown_component_fails_the_load_with_a_reason() {
     eprintln!("[test] load failure reported: {error}");
     client.shutdown().ok();
 }
+
+/// Optional real custom-view contract. Set this to an installed AU component
+/// id (for example a UADx entry from the registry) when validating vendor UI:
+///
+/// `FUTUREBOARD_TEST_AU_EDITOR_COMPONENT=au:... cargo test -p sphere-plugin-host
+/// --features plugin-host-bin --test macos_au_host custom_audio_unit_editor --
+/// --nocapture`
+#[test]
+fn custom_audio_unit_editor_opens_in_the_host_process() {
+    let Ok(component_id) = std::env::var("FUTUREBOARD_TEST_AU_EDITOR_COMPONENT") else {
+        eprintln!("skipping: set FUTUREBOARD_TEST_AU_EDITOR_COMPONENT to an installed AU id");
+        return;
+    };
+    let mut client = PluginHostClient::spawn_bridge().expect("spawn plugin host");
+    assert!(
+        wait_for(&client, Duration::from_secs(15), |event| matches!(
+            event,
+            HostEvent::Ready { .. }
+        )
+        .then_some(()))
+        .is_some(),
+        "host never reported Ready"
+    );
+
+    client
+        .load_au_plugin(INSTANCE_ID, &component_id, SAMPLE_RATE, BLOCK_FRAMES, None)
+        .expect("send load_au_plugin");
+    let loaded = wait_for(&client, Duration::from_secs(30), |event| match event {
+        HostEvent::PluginLoaded { .. } | HostEvent::PluginAlreadyLoaded { .. } => Some(Ok(())),
+        HostEvent::PluginLoadFailed { error, .. } => Some(Err(error)),
+        _ => None,
+    })
+    .expect("host never answered LoadAudioUnit");
+    loaded.unwrap_or_else(|error| panic!("audio unit load failed: {error}"));
+
+    client
+        .open_editor(INSTANCE_ID, &component_id, &component_id, 0, 900, 600, 96)
+        .expect("send open_editor");
+    let attached = wait_for(&client, Duration::from_secs(30), |event| match event {
+        HostEvent::EditorAttached {
+            preferred_width,
+            preferred_height,
+            host_hwnd,
+            ..
+        } => Some(Ok((preferred_width, preferred_height, host_hwnd))),
+        HostEvent::EditorAttachFailed { error, .. } => Some(Err(error)),
+        _ => None,
+    })
+    .expect("host never answered OpenEditor");
+    let (width, height, handle) =
+        attached.unwrap_or_else(|error| panic!("audio unit editor failed: {error}"));
+    assert!(handle != 0, "host returned no Cocoa editor window handle");
+    assert!(
+        width >= 32 && height >= 32,
+        "host returned unusable AU editor size {width}x{height}"
+    );
+    eprintln!("[test] AU editor attached size={width}x{height} handle=0x{handle:x}");
+
+    client.close_editor(INSTANCE_ID).expect("send close_editor");
+    client.unload_plugin(INSTANCE_ID).ok();
+    client.shutdown().ok();
+}

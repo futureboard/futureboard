@@ -1876,12 +1876,16 @@ impl StudioLayout {
             self.plugin_editors.open.remove(&key);
         }
 
-        // NB: built-ins already returned near the top of this function — the
-        // gate below is VST3-only by design.
+        // NB: built-ins already returned near the top of this function. VST3
+        // and Audio Unit editors are both host-owned native windows; an AU is
+        // addressed by component id and therefore does not require a module
+        // file path.
         let path = plugin_path.filter(|p| !p.trim().is_empty());
-        let editable = plugin_format == Some(InsertPluginFormat::Vst3)
-            && path.is_some()
-            && plugin_id.is_some();
+        let editable = match plugin_format {
+            Some(InsertPluginFormat::Vst3) => path.is_some() && plugin_id.is_some(),
+            Some(InsertPluginFormat::Au) => plugin_id.is_some(),
+            _ => false,
+        };
         if !editable {
             eprintln!(
                 "[PluginEditor] cannot open: not editable fmt={plugin_format:?} path={path:?}"

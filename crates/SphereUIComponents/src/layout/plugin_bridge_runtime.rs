@@ -67,7 +67,7 @@ pub(crate) fn bridge_region_name(instance_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::bridge_region_name;
+    use super::{bridge_region_name, normalize_persisted_au_state};
 
     #[test]
     fn bridge_region_names_are_unique_per_insert_instance() {
@@ -80,6 +80,33 @@ mod tests {
         assert!(a.contains("insert-track1-1"));
         assert!(b.contains("insert-track1-2"));
     }
+
+    #[test]
+    fn raw_audio_unit_state_is_preserved() {
+        let raw = b"bplist00opaque-audio-unit-state";
+        assert_eq!(normalize_persisted_au_state(raw), raw);
+    }
+
+    #[test]
+    fn legacy_vst3_wrapped_audio_unit_state_is_unwrapped() {
+        let raw = b"bplist00legacy-audio-unit-state";
+        let packed = DirectAudio::Vst3PluginState {
+            component: raw.to_vec(),
+            controller: Vec::new(),
+        }
+        .to_packed_bytes();
+        assert_eq!(normalize_persisted_au_state(&packed), raw);
+    }
+}
+
+/// Early AU bridge builds accidentally persisted ClassInfo inside the VST3
+/// `FBV3` envelope. Accept both forms so existing projects load, while all new
+/// saves keep the Audio Unit's opaque bytes unchanged.
+fn normalize_persisted_au_state(state: &[u8]) -> Vec<u8> {
+    DirectAudio::Vst3PluginState::from_packed_bytes(state)
+        .filter(|legacy| legacy.controller.is_empty() && !legacy.component.is_empty())
+        .map(|legacy| legacy.component)
+        .unwrap_or_else(|| state.to_vec())
 }
 
 impl PluginBridgeRuntime {
@@ -326,14 +353,17 @@ impl PluginBridgeRuntime {
             return Ok(());
         }
         let instance = descriptor.insert_id.clone();
-        let state_b64 = state
+        let state = state
             .filter(|bytes| !bytes.is_empty())
+            .map(normalize_persisted_au_state);
+        let state_b64 = state
+            .as_deref()
             .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
         eprintln!(
             "[plugin-bridge] sending LoadAudioUnit instance={} component={} state_bytes={}",
             instance,
             descriptor.class_id,
-            state.map(<[u8]>::len).unwrap_or(0)
+            state.as_deref().map(<[u8]>::len).unwrap_or(0)
         );
         self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
         self.client.load_au_plugin(
@@ -593,12 +623,12 @@ impl PluginBridgeRuntime {
         self.loaded.contains_key(plugin_instance_id)
     }
 
-    /// Capture current VST3 states from the host for `instance_ids`
+    /// Capture current plugin states from the host for `instance_ids`
     /// (request/response over IPC with a bounded wait — call on save, not per
     /// frame). Unrelated events arriving while waiting are queued for the
-    /// normal `drain_events` pump. Returns packed state bytes per instance
-    /// (`Vst3PluginState::to_packed_bytes`); instances with no state or that
-    /// timed out are simply absent.
+    /// normal `drain_events` pump. VST3 state is returned in the host's packed
+    /// component/controller form; Audio Unit ClassInfo remains opaque raw
+    /// bytes. Instances with no state or that timed out are simply absent.
     pub fn request_plugin_states(
         &mut self,
         instance_ids: &[String],
@@ -645,17 +675,29 @@ impl PluginBridgeRuntime {
                             .decode(b64)
                             .unwrap_or_default()
                     };
-                    let state = DirectAudio::Vst3PluginState {
-                        component: decode(&component_b64),
-                        controller: decode(&controller_b64),
-                    };
+                    let component = decode(&component_b64);
+                    let controller = decode(&controller_b64);
+                    let is_audio_unit = self
+                        .loaded
+                        .get(&plugin_instance_id)
+                        .is_some_and(|loaded| loaded.descriptor.class_id.starts_with("au:"));
                     eprintln!(
                         "[plugin-bridge] plugin state captured instance={plugin_instance_id} component_bytes={} controller_bytes={}",
-                        state.component.len(),
-                        state.controller.len()
+                        component.len(),
+                        controller.len()
                     );
-                    if !state.is_empty() {
-                        results.insert(plugin_instance_id, state.to_packed_bytes());
+                    if is_audio_unit {
+                        if !component.is_empty() {
+                            results.insert(plugin_instance_id, component);
+                        }
+                    } else {
+                        let state = DirectAudio::Vst3PluginState {
+                            component,
+                            controller,
+                        };
+                        if !state.is_empty() {
+                            results.insert(plugin_instance_id, state.to_packed_bytes());
+                        }
                     }
                 }
                 ClientEvent::Disconnected => {
@@ -675,15 +717,32 @@ impl PluginBridgeRuntime {
         results
     }
 
-    /// Restore a packed VST3 state (from the project file) onto a loaded
-    /// instance. Sent after `LoadPlugin`/`PrepareProcessing`; the host applies
-    /// it serialized against block production and replies `PluginStateSet`.
+    /// Restore state (from the project file) onto a loaded instance. VST3 uses
+    /// its packed component/controller envelope; AU accepts raw ClassInfo and
+    /// legacy FBV3-wrapped ClassInfo. The host applies it serialized against
+    /// block production and replies `PluginStateSet`.
     pub fn send_plugin_state(
         &mut self,
         instance_id: &str,
         packed: &[u8],
     ) -> Result<(), PluginHostClientError> {
         use base64::Engine as _;
+        let is_audio_unit = self
+            .loaded
+            .get(instance_id)
+            .is_some_and(|loaded| loaded.descriptor.class_id.starts_with("au:"));
+        if is_audio_unit {
+            let state = normalize_persisted_au_state(packed);
+            eprintln!(
+                "[plugin-bridge] sending SetPluginState instance={instance_id} au_state_bytes={}",
+                state.len()
+            );
+            return self.client.set_plugin_state(
+                instance_id,
+                base64::engine::general_purpose::STANDARD.encode(state),
+                String::new(),
+            );
+        }
         let Some(state) = DirectAudio::Vst3PluginState::from_packed_bytes(packed) else {
             eprintln!(
                 "[plugin-bridge] SetPluginState skipped instance={instance_id}: unrecognized packed state ({} bytes)",

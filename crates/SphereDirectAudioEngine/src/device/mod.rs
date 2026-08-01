@@ -38,7 +38,12 @@ pub(crate) fn list_output_devices_for_host(host: &cpal::Host) -> Vec<JsAudioDevi
             let list: Vec<JsAudioDeviceInfo> = devices
                 .filter_map(|dev| {
                     let name = dev.name().ok()?;
-                    let cfg = dev.default_output_config().ok()?;
+                    let cfg = dev.default_output_config().ok().or_else(|| {
+                        dev.supported_output_configs()
+                            .ok()?
+                            .next()
+                            .map(|range| range.with_max_sample_rate())
+                    })?;
                     Some(JsAudioDeviceInfo {
                         id: name.clone(),
                         name: name.clone(),
@@ -75,7 +80,12 @@ pub(crate) fn list_input_devices_for_host(host: &cpal::Host) -> Vec<JsAudioDevic
             let list: Vec<JsAudioDeviceInfo> = devices
                 .filter_map(|dev| {
                     let name = dev.name().ok()?;
-                    let cfg = dev.default_input_config().ok()?;
+                    let cfg = dev.default_input_config().ok().or_else(|| {
+                        dev.supported_input_configs()
+                            .ok()?
+                            .next()
+                            .map(|range| range.with_max_sample_rate())
+                    })?;
                     Some(JsAudioDeviceInfo {
                         id: name.clone(),
                         name: name.clone(),

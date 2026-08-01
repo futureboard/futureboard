@@ -64,6 +64,38 @@ void sphere_daux_editor_notify_resize(
     int                      width,
     int                      height);
 
+/// Query the current IPlugView size. Unlike the initial create-view result,
+/// this reflects editors that choose their final dimensions in attached().
+int sphere_daux_editor_get_view_size(
+    SphereDauxVst3Processor* proc,
+    int*                     out_width,
+    int*                     out_height);
+
+/// Return whether the current view supports host/user resizing.
+int sphere_daux_editor_can_resize(SphereDauxVst3Processor* proc);
+
+/// Apply the VST3 size contract to a proposed content size. Fixed-size views
+/// snap to getSize(); resizable views run checkSizeConstraint().
+int sphere_daux_editor_constrain_view_size(
+    SphereDauxVst3Processor* proc,
+    int*                     io_width,
+    int*                     io_height);
+
+/// Store the native editor content size used by the host-owned macOS/Linux
+/// window so the IPC EditorAttached event reports the real size.
+void sphere_daux_editor_set_content_size(
+    SphereDauxVst3Processor* proc,
+    int                      width,
+    int                      height);
+
+#if defined(__APPLE__)
+/// Resize the AppKit content area for a plug-in initiated resizeView request.
+int sphere_daux_editor_apply_plugin_resize(
+    SphereDauxVst3Processor* proc,
+    int                      width,
+    int                      height);
+#endif
+
 /// Detach and release the IPlugView (calls IPlugView::removed()).
 /// Safe to call even when no view is currently attached.
 void sphere_daux_editor_detach_view(SphereDauxVst3Processor* proc);

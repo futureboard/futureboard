@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use crate::components::plugin_picker::STUB_PLUGIN_ID;
 use crate::components::progress_dialog::ProgressBarValue;
 use crate::components::timeline::timeline_state::{
-    PluginRuntimeBackend, PluginRuntimeState, TimelineState, TrackType, MASTER_TRACK_ID,
+    InsertPluginFormat, PluginRuntimeBackend, PluginRuntimeState, TimelineState, TrackType,
+    MASTER_TRACK_ID,
 };
 use crate::layout::engine_snapshot::build_engine_project_snapshot;
 use crate::layout::plugin_bridge_runtime::{
@@ -243,7 +244,11 @@ fn restore_bridge_target(
         .plugin_id
         .as_deref()
         .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
-    if !is_builtin && !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
+    let is_audio_unit = !is_builtin && slot.plugin_format == Some(InsertPluginFormat::Au);
+    let has_module_file = slot
+        .plugin_format
+        .is_none_or(InsertPluginFormat::has_module_file);
+    if !is_builtin && has_module_file && !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
         let reason = slot
             .plugin_path
             .as_ref()
@@ -289,6 +294,13 @@ fn restore_bridge_target(
             .as_deref()
             .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
         bridge.send_load_builtin_plugin(descriptor, sample_rate, max_block_size, state_json)
+    } else if is_audio_unit {
+        bridge.send_load_au_plugin(
+            descriptor,
+            sample_rate,
+            max_block_size,
+            slot.vst3_state.as_deref().map(|bytes| bytes.as_slice()),
+        )
     } else {
         bridge.send_load_plugin(descriptor, sample_rate, max_block_size)
     };
@@ -302,7 +314,9 @@ fn restore_bridge_target(
         );
         return RestoreOutcome::Failed;
     }
-    if !is_builtin {
+    // Built-ins and Audio Units receive their state as part of the load so it
+    // is applied before the instance is published to the audio producer.
+    if !is_builtin && !is_audio_unit {
         if let Some(state) = slot.vst3_state.as_ref() {
             let _ = bridge.send_plugin_state(&target.slot_id, state);
         }

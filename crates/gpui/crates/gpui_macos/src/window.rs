@@ -85,6 +85,8 @@ const NSNormalWindowLevel: NSInteger = 0;
 #[allow(non_upper_case_globals)]
 const NSFloatingWindowLevel: NSInteger = 3;
 #[allow(non_upper_case_globals)]
+const NSModalPanelWindowLevel: NSInteger = 8;
+#[allow(non_upper_case_globals)]
 const NSPopUpWindowLevel: NSInteger = 101;
 #[allow(non_upper_case_globals)]
 const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
@@ -950,6 +952,12 @@ impl MacWindow {
                         let _: () =
                             msg_send![parent, beginSheet: native_window completionHandler: nil];
                         sheet_parent = Some(parent);
+                    } else {
+                        // Keep application-modal dialogs above floating utility
+                        // and editor windows even when Futureboard deliberately
+                        // presents the dialog without an AppKit sheet parent.
+                        native_window.setLevel_(NSModalPanelWindowLevel);
+                        let _: () = msg_send![native_window, setHidesOnDeactivate: NO];
                     }
                 }
             }

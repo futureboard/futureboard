@@ -672,6 +672,8 @@ mod imp {
 
     pub fn pump() {}
 
+    pub fn pump_after_input() {}
+
     pub fn open_view(
         _view_id: ViewId,
         _editor_id: &str,
@@ -1566,15 +1568,28 @@ mod imp {
     /// CEF may synchronously dispatch Win32 messages; keeping every GPUI borrow
     /// out of this stack is what prevents `AppCell` double-borrow panics.
     pub fn pump() {
+        pump_impl(false);
+    }
+
+    /// Process a discrete user input event without waiting for the periodic
+    /// editor tick. The caller schedules this after the GPUI event handler has
+    /// released its entity/App borrows, so CEF may safely re-enter the platform
+    /// message loop.
+    pub fn pump_after_input() {
+        pump_impl(true);
+    }
+
+    fn pump_impl(force: bool) {
         let Some(_guard) = PumpGuard::enter() else {
             return;
         };
         const MIN_PUMP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
         let should_pump = LAST_CEF_PUMP.with(|last| {
             let now = std::time::Instant::now();
-            if last
-                .get()
-                .is_some_and(|previous| now.duration_since(previous) < MIN_PUMP_INTERVAL)
+            if !force
+                && last
+                    .get()
+                    .is_some_and(|previous| now.duration_since(previous) < MIN_PUMP_INTERVAL)
             {
                 false
             } else {
@@ -1853,9 +1868,10 @@ pub use imp::install_process_app;
 #[cfg(feature = "builtin-plugin-editor")]
 pub use imp::shutdown;
 pub use imp::{
-    availability, close_view, init_at_boot, is_view_open, open_view, preload, pump, reload_view,
-    send_to_view, send_view_input, set_view_bounds, take_global_play_pause_requests, take_inbound,
-    take_view_events, view_frame_generation, with_view_frame,
+    availability, close_view, init_at_boot, is_view_open, open_view, preload, pump,
+    pump_after_input, reload_view, send_to_view, send_view_input, set_view_bounds,
+    take_global_play_pause_requests, take_inbound, take_view_events, view_frame_generation,
+    with_view_frame,
 };
 
 #[cfg(test)]

@@ -99,4 +99,30 @@ SPHERE_AU_HOST_API int sphere_au_set_state(
   return 0;
 }
 
+SPHERE_AU_HOST_API unsigned long long sphere_au_open_editor(
+    SphereAuInstance* /*instance*/,
+    const char* /*title*/,
+    unsigned int /*preferred_width*/,
+    unsigned int /*preferred_height*/,
+    unsigned int* out_width,
+    unsigned int* out_height) {
+  if (out_width != nullptr) {
+    *out_width = 0;
+  }
+  if (out_height != nullptr) {
+    *out_height = 0;
+  }
+  return 0;
+}
+
+SPHERE_AU_HOST_API void sphere_au_close_editor(SphereAuInstance* /*instance*/) {}
+
+SPHERE_AU_HOST_API int sphere_au_focus_editor(SphereAuInstance* /*instance*/) {
+  return 0;
+}
+
+SPHERE_AU_HOST_API int sphere_au_take_editor_user_close(SphereAuInstance* /*instance*/) {
+  return 0;
+}
+
 }  // extern "C"

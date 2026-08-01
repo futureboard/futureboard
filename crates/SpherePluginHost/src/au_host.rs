@@ -117,15 +117,27 @@ extern "C" {
         data: *const c_uchar,
         len: usize,
     ) -> c_int;
+    fn sphere_au_open_editor(
+        instance: *mut SphereAuInstance,
+        title: *const c_char,
+        preferred_width: c_uint,
+        preferred_height: c_uint,
+        out_width: *mut c_uint,
+        out_height: *mut c_uint,
+    ) -> u64;
+    fn sphere_au_close_editor(instance: *mut SphereAuInstance);
+    fn sphere_au_focus_editor(instance: *mut SphereAuInstance) -> c_int;
+    fn sphere_au_take_editor_user_close(instance: *mut SphereAuInstance) -> c_int;
 }
 
 /// Owns the native instance pointer and closes it exactly once.
 struct AuInstancePtr(*mut SphereAuInstance);
 
-// SAFETY: every use goes through the owning `Mutex`, so the pointer is only
-// ever dereferenced by one thread at a time. Audio Units are not documented as
-// thread-affine for render (hosts render them on their own audio threads), and
-// the control calls here are the same ones a host makes off the render thread.
+// SAFETY: render/state/parameter calls go through the owning `Mutex`. Cocoa
+// editor calls only touch the native instance's editor fields and intentionally
+// run without holding that render mutex: real AU hosts create and manage views
+// on the main thread while the Audio Unit continues rendering. `&self` keeps
+// the native instance alive for the full duration of every such call.
 unsafe impl Send for AuInstancePtr {}
 unsafe impl Sync for AuInstancePtr {}
 
@@ -164,6 +176,13 @@ impl std::fmt::Debug for AuHostProcessor {
 }
 
 impl AuHostProcessor {
+    /// Snapshot the stable native pointer, releasing the render mutex before a
+    /// potentially slow Cocoa plug-in view factory runs. Holding this mutex
+    /// while UADx constructs its view can otherwise stall audio for >100 ms.
+    fn editor_instance(&self) -> *mut SphereAuInstance {
+        self.instance.lock().0
+    }
+
     /// Instantiate and initialize `component_id`, then apply `state` (a binary
     /// plist from [`Self::state`]) before the processor is published to the
     /// audio producer — the only window where touching it from this thread is
@@ -349,6 +368,50 @@ impl AuHostProcessor {
         }
         let instance = self.instance.lock();
         unsafe { sphere_au_set_state(instance.0, bytes.as_ptr(), bytes.len()) != 0 }
+    }
+
+    /// Open the unit's custom Cocoa view in the plugin-host process. The
+    /// returned handle identifies the host-owned NSWindow; the dimensions are
+    /// the actual custom view bounds reported by the unit.
+    pub fn open_editor(
+        &self,
+        title: &str,
+        preferred_width: u32,
+        preferred_height: u32,
+    ) -> Option<(u64, u32, u32)> {
+        let title = CString::new(title).ok()?;
+        let instance = self.editor_instance();
+        let mut width = 0;
+        let mut height = 0;
+        let handle = unsafe {
+            sphere_au_open_editor(
+                instance,
+                title.as_ptr(),
+                preferred_width,
+                preferred_height,
+                &mut width,
+                &mut height,
+            )
+        };
+        (handle != 0).then_some((handle, width.max(1), height.max(1)))
+    }
+
+    pub fn close_editor(&self) {
+        let instance = self.editor_instance();
+        unsafe { sphere_au_close_editor(instance) };
+    }
+
+    pub fn focus_editor(&self) -> bool {
+        let instance = self.editor_instance();
+        unsafe { sphere_au_focus_editor(instance) != 0 }
+    }
+
+    pub fn take_editor_user_close(&self) -> bool {
+        let Some(instance) = self.instance.try_lock() else {
+            return false;
+        };
+        let instance = instance.0;
+        unsafe { sphere_au_take_editor_user_close(instance) != 0 }
     }
 }
 

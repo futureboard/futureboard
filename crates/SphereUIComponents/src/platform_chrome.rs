@@ -176,10 +176,9 @@ impl PlatformChromePolicy {
     /// rendering the whole client surface, which is what Futureboard wants.
     /// AppKit instead presents an owned dialog as a sheet glued to the parent
     /// titlebar: it ignores the requested bounds, removes the window's standard
-    /// buttons, and duplicates the dialog chrome GPUI already draws. An unowned
-    /// `Dialog` is no better, because GPUI backs it with an `NSPanel` that hides
-    /// itself whenever the app deactivates while sitting at the normal window
-    /// level anyway. Futureboard dialogs are plain windows on macOS.
+    /// buttons, and duplicates the dialog chrome GPUI already draws. Futureboard
+    /// therefore uses an unparented dialog panel on macOS; GPUI keeps it at the
+    /// native modal-panel level so floating utility windows cannot cover it.
     pub fn use_platform_owned_dialogs() -> bool {
         Self::current().kind != PlatformChromeKind::MacOS
     }
@@ -314,11 +313,7 @@ pub fn external_dialog_window_options_partial() -> WindowOptions {
         titlebar: Some(PlatformChromePolicy::external_dialog_titlebar_options()),
         focus: true,
         show: true,
-        kind: if platform_owned {
-            WindowKind::Dialog
-        } else {
-            WindowKind::Normal
-        },
+        kind: WindowKind::Dialog,
         dialog_parenting: platform_owned,
         is_movable: true,
         is_resizable: false,
@@ -341,12 +336,10 @@ pub fn session_transaction_window_options() -> WindowOptions {
     options.dialog_parenting = false;
 
     if PlatformChromePolicy::current().kind == PlatformChromeKind::MacOS {
-        // `WindowKind::Normal` already comes from the dialog defaults, so the
-        // handoff window is an `NSWindow` that survives app deactivation instead
-        // of an `NSPanel` that hides itself while Welcome is already retired and
-        // Studio is not mounted yet. Dropping `TitlebarOptions` also builds the
-        // style mask without `NSWindowStyleMaskClosable`, so no traffic light can
-        // close a window whose lifetime belongs to the running transaction.
+        // The unparented dialog panel remains visible during app deactivation.
+        // Dropping `TitlebarOptions` also builds the style mask without
+        // `NSWindowStyleMaskClosable`, so no traffic light can close a window
+        // whose lifetime belongs to the running transaction.
         options.titlebar = None;
     }
 
@@ -417,6 +410,14 @@ mod chrome_policy_tests {
             dialog.traffic_light_left_padding_px,
             MACOS_TRAFFIC_LIGHT_PADDING_PX
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_external_dialogs_use_unparented_modal_panels() {
+        let options = external_dialog_window_options_partial();
+        assert_eq!(options.kind, WindowKind::Dialog);
+        assert!(!options.dialog_parenting);
     }
 
     #[cfg(not(target_os = "macos"))]

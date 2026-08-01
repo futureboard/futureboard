@@ -679,6 +679,76 @@ void daux_editor_clear_frame(SphereDauxVst3Processor *processor) {
 }
 #endif // _WIN32
 
+#if defined(__APPLE__)
+// AppKit counterpart of the Windows PluginEditorFrame. Some VST3 editors only
+// settle on their real size from attached(), then report it through
+// IPlugFrame::resizeView. Without a frame macOS kept the original fallback
+// window while the plug-in painted a smaller NSView into one corner.
+class MacPluginEditorFrame final : public Steinberg::IPlugFrame {
+public:
+  explicit MacPluginEditorFrame(SphereDauxVst3Processor *owner)
+      : owner_(owner) {}
+
+  Steinberg::tresult PLUGIN_API resizeView(
+      Steinberg::IPlugView *view, Steinberg::ViewRect *new_size) override {
+    if (!owner_ || !view || !new_size ||
+        view != owner_->editor_view.get())
+      return Steinberg::kInvalidArgument;
+    if (resize_in_progress_)
+      return Steinberg::kResultFalse;
+
+    int width = static_cast<int>(new_size->right - new_size->left);
+    int height = static_cast<int>(new_size->bottom - new_size->top);
+    if (width <= 0 || height <= 0)
+      return Steinberg::kInvalidArgument;
+
+    resize_in_progress_ = true;
+    const bool applied =
+        sphere_daux_editor_apply_plugin_resize(owner_, width, height) != 0;
+    if (applied) {
+      Steinberg::ViewRect current{};
+      const auto size_result = view->getSize(&current);
+      if ((size_result != Steinberg::kResultTrue &&
+           size_result != Steinberg::kResultOk) ||
+          current.left != new_size->left || current.top != new_size->top ||
+          current.right != new_size->right ||
+          current.bottom != new_size->bottom) {
+        Steinberg::ViewRect local{0, 0,
+                                  static_cast<Steinberg::int32>(width),
+                                  static_cast<Steinberg::int32>(height)};
+        view->onSize(&local);
+      }
+    }
+    resize_in_progress_ = false;
+    std::fprintf(stderr,
+                 "[SphereVST3/mac] resizeView requested=%dx%d applied=%d\n",
+                 width, height, applied ? 1 : 0);
+    return applied ? Steinberg::kResultTrue : Steinberg::kResultFalse;
+  }
+
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
+    if (!obj)
+      return Steinberg::kInvalidArgument;
+    if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::IPlugFrame::iid) ||
+        Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+      *obj = static_cast<Steinberg::IPlugFrame *>(this);
+      addRef();
+      return Steinberg::kResultTrue;
+    }
+    *obj = nullptr;
+    return Steinberg::kNoInterface;
+  }
+
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
+  Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+
+private:
+  SphereDauxVst3Processor *owner_;
+  bool resize_in_progress_{false};
+};
+#endif
+
 // ── Bridge implementations for platform editor TUs
 // ──────────────────────────── These give editor_mac.mm and editor_linux.cpp
 // access to the TU-private globals (g_last_error, g_next_editor_handle) and the
@@ -700,6 +770,12 @@ extern "C" int sphere_daux_editor_create_view(SphereDauxVst3Processor *proc,
                                               int *out_width, int *out_height) {
   if (!proc || !proc->controller)
     return 0;
+#if defined(__APPLE__)
+  if (proc->editor_view && proc->editor_frame)
+    proc->editor_view->setFrame(nullptr);
+  delete proc->editor_frame;
+  proc->editor_frame = nullptr;
+#endif
   proc->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       proc->controller->createView(Steinberg::Vst::ViewType::kEditor));
   if (!proc->editor_view) {
@@ -715,6 +791,12 @@ extern "C" int sphere_daux_editor_create_view(SphereDauxVst3Processor *proc,
     proc->editor_view = nullptr;
     return 0;
   }
+#if defined(__APPLE__)
+  proc->editor_frame = new MacPluginEditorFrame(proc);
+  const auto frame_result = proc->editor_view->setFrame(proc->editor_frame);
+  std::fprintf(stderr, "[SphereVST3/mac] IPlugView::setFrame result=%d\n",
+               (int)frame_result);
+#endif
   Steinberg::ViewRect rect{};
   if (proc->editor_view->getSize(&rect) == Steinberg::kResultTrue) {
     const int w = rect.right - rect.left;
@@ -736,6 +818,11 @@ extern "C" int sphere_daux_editor_attach_view(SphereDauxVst3Processor *proc,
   std::fprintf(stderr, "[SphereVST3] IPlugView::attached('%s') result=%d\n",
                platform_type, (int)res);
   if (res != Steinberg::kResultTrue && res != Steinberg::kResultOk) {
+#if defined(__APPLE__)
+    proc->editor_view->setFrame(nullptr);
+    delete proc->editor_frame;
+    proc->editor_frame = nullptr;
+#endif
     proc->editor_view = nullptr;
     proc->editor_attached = false;
     return 0;
@@ -770,6 +857,72 @@ extern "C" void sphere_daux_editor_notify_resize(SphereDauxVst3Processor *proc,
   proc->editor_view->onSize(&rect);
 }
 
+extern "C" int
+sphere_daux_editor_get_view_size(SphereDauxVst3Processor *proc, int *out_width,
+                                 int *out_height) {
+  if (!proc || !proc->editor_view)
+    return 0;
+  Steinberg::ViewRect rect{};
+  const auto result = proc->editor_view->getSize(&rect);
+  const int width = static_cast<int>(rect.right - rect.left);
+  const int height = static_cast<int>(rect.bottom - rect.top);
+  if ((result != Steinberg::kResultTrue && result != Steinberg::kResultOk) ||
+      width <= 0 || height <= 0)
+    return 0;
+  if (out_width)
+    *out_width = width;
+  if (out_height)
+    *out_height = height;
+  return 1;
+}
+
+extern "C" int
+sphere_daux_editor_can_resize(SphereDauxVst3Processor *proc) {
+  if (!proc || !proc->editor_view)
+    return 0;
+  const auto result = proc->editor_view->canResize();
+  return (result == Steinberg::kResultTrue || result == Steinberg::kResultOk)
+             ? 1
+             : 0;
+}
+
+extern "C" int sphere_daux_editor_constrain_view_size(
+    SphereDauxVst3Processor *proc, int *io_width, int *io_height) {
+  if (!proc || !proc->editor_view || !io_width || !io_height ||
+      *io_width <= 0 || *io_height <= 0)
+    return 0;
+
+  Steinberg::ViewRect rect{0, 0, static_cast<Steinberg::int32>(*io_width),
+                           static_cast<Steinberg::int32>(*io_height)};
+  if (sphere_daux_editor_can_resize(proc)) {
+    const auto result = proc->editor_view->checkSizeConstraint(&rect);
+    if (result != Steinberg::kResultTrue && result != Steinberg::kResultOk) {
+      // A resizable declaration with a rejected constraint must not leave the
+      // AppKit shell at an unapproved size. Snap back to the current getSize.
+      return sphere_daux_editor_get_view_size(proc, io_width, io_height);
+    }
+  } else {
+    if (!sphere_daux_editor_get_view_size(proc, io_width, io_height))
+      return 0;
+    return 1;
+  }
+  const int width = static_cast<int>(rect.right - rect.left);
+  const int height = static_cast<int>(rect.bottom - rect.top);
+  if (width <= 0 || height <= 0)
+    return 0;
+  *io_width = width;
+  *io_height = height;
+  return 1;
+}
+
+extern "C" void sphere_daux_editor_set_content_size(
+    SphereDauxVst3Processor *proc, int width, int height) {
+  if (!proc || width <= 0 || height <= 0)
+    return;
+  proc->editor_content_width = width;
+  proc->editor_content_height = height;
+}
+
 extern "C" void sphere_daux_editor_detach_view(SphereDauxVst3Processor *proc) {
   if (!proc)
     return;
@@ -779,6 +932,12 @@ extern "C" void sphere_daux_editor_detach_view(SphereDauxVst3Processor *proc) {
                  "[SphereVST3] IPlugView::removed() result=%d handle=%llu\n",
                  (int)res, proc->editor_handle);
   }
+#if defined(__APPLE__)
+  if (proc->editor_view)
+    proc->editor_view->setFrame(nullptr);
+  delete proc->editor_frame;
+  proc->editor_frame = nullptr;
+#endif
   proc->editor_view = nullptr;
   proc->editor_attached = false;
 }
@@ -797,6 +956,8 @@ extern "C" void sphere_daux_editor_store_native(
   proc->editor_title = title ? title : "";
   proc->editor_requested_width = requested_width;
   proc->editor_requested_height = requested_height;
+  proc->editor_content_width = requested_width;
+  proc->editor_content_height = requested_height;
 }
 
 extern "C" void sphere_daux_editor_clear_native(SphereDauxVst3Processor *proc) {
@@ -810,6 +971,8 @@ extern "C" void sphere_daux_editor_clear_native(SphereDauxVst3Processor *proc) {
   proc->editor_title.clear();
   proc->editor_requested_width = 0;
   proc->editor_requested_height = 0;
+  proc->editor_content_width = 0;
+  proc->editor_content_height = 0;
 }
 
 extern "C" void *
@@ -4119,6 +4282,10 @@ sphere_daux_vst3_editor_resizable(SphereDauxVst3Processor *processor) {
   if (!processor || !processor->editor_view)
     return -1;
   return daux_editor_view_resizable(processor) ? 1 : 0;
+#elif defined(__APPLE__) || defined(__linux__)
+  if (!processor || !processor->editor_view)
+    return -1;
+  return sphere_daux_editor_can_resize(processor);
 #else
   (void)processor;
   return -1;
@@ -4137,6 +4304,16 @@ sphere_daux_vst3_embed_content_size(SphereDauxVst3Processor *processor,
     *out_width = processor->embed_content_w;
   if (out_height)
     *out_height = processor->embed_content_h;
+  return 1;
+#elif defined(__APPLE__) || defined(__linux__)
+  if (!processor || !processor->editor_native_window ||
+      processor->editor_content_width <= 0 ||
+      processor->editor_content_height <= 0)
+    return 0;
+  if (out_width)
+    *out_width = processor->editor_content_width;
+  if (out_height)
+    *out_height = processor->editor_content_height;
   return 1;
 #else
   (void)processor;

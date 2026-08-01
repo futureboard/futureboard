@@ -2787,6 +2787,26 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     }
                 }
             }
+            let au_refresh_targets: Vec<(String, Arc<AuHostProcessor>)> = au_processors
+                .lock()
+                .ok()
+                .map(|processors| {
+                    registry
+                        .keys()
+                        .filter_map(|id| {
+                            processors
+                                .get(id)
+                                .cloned()
+                                .map(|processor| (id.clone(), processor))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (instance_id, processor) in au_refresh_targets {
+                if processor.take_editor_user_close() {
+                    user_closed.push(instance_id);
+                }
+            }
             user_closed
         });
         for instance_id in user_closed_editors {
@@ -2800,7 +2820,11 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             // matching the CloseEditor command handler — this is a rare one-shot
             // on user close, never a per-tick operation, so it cannot spin the
             // pump on the DSP mutex.
-            preview.lock().editor_detach_for_instance(&instance_id);
+            if let Some(au) = au_instance(&au_processors, &instance_id) {
+                au.close_editor();
+            } else {
+                preview.lock().editor_detach_for_instance(&instance_id);
+            }
             let _ = ipc::write_frame(
                 &mut out,
                 &HostEvent::EditorClosed {
@@ -3474,6 +3498,46 @@ fn dispatch(
             platform::log_window_identity_chain("open_requested_owner", requested_owner);
             platform::log_window_identity_chain("open_parent_hwnd", parent_hwnd);
             platform::log_window_identity_chain("open_resolved_owner", resolved_owner);
+            // Audio Units do not expose a VST3 IEditController/IPlugView. Their
+            // custom Cocoa view belongs to the already-loaded AuHostProcessor,
+            // so open it directly in this host process and report the same
+            // host-owned editor lifecycle the Studio consumes for VST3.
+            if let Some(au) = au_instance(au_processors, &plugin_instance_id) {
+                match au.open_editor(&display_title, width, height) {
+                    Some((handle, preferred_width, preferred_height)) => {
+                        registry.insert(
+                            plugin_instance_id.clone(),
+                            EditorState {
+                                plugin_instance_id: plugin_instance_id.clone(),
+                                host_hwnd: handle,
+                                owner_hwnd: resolved_owner,
+                                display_title: display_title.clone(),
+                                state: "Open",
+                            },
+                        );
+                        eprintln!(
+                            "[plugin-host-au] editor attached instance={plugin_instance_id} handle=0x{handle:x} size={preferred_width}x{preferred_height}"
+                        );
+                        let _ = ipc::write_frame(
+                            out,
+                            &HostEvent::EditorAttached {
+                                plugin_instance_id,
+                                result: 0,
+                                preferred_width,
+                                preferred_height,
+                                resizable: false,
+                                host_hwnd: handle,
+                            },
+                        );
+                    }
+                    None => emit_attach_failed(
+                        out,
+                        &plugin_instance_id,
+                        "Audio Unit did not provide a Cocoa editor view",
+                    ),
+                }
+                return;
+            }
             schedule_unified_editor_attach(
                 &plugin_instance_id,
                 resolved_owner,
@@ -3570,11 +3634,16 @@ fn dispatch(
             registry.remove(&plugin_instance_id);
             pending_editor_attaches.remove(&plugin_instance_id);
             pending_resizes.remove(&plugin_instance_id);
-            preview
-                .lock()
-                .editor_detach_for_instance(&plugin_instance_id);
+            let au = au_instance(au_processors, &plugin_instance_id);
+            if let Some(au) = au.as_ref() {
+                au.close_editor();
+            } else {
+                preview
+                    .lock()
+                    .editor_detach_for_instance(&plugin_instance_id);
+            }
             delayed_redraws.retain(|entry| entry.instance_id != plugin_instance_id);
-            let still_active = preview.lock().has_instance(&plugin_instance_id);
+            let still_active = au.is_some() || preview.lock().has_instance(&plugin_instance_id);
             eprintln!("[PluginEditor] detached editor only plugin_id={plugin_instance_id}");
             eprintln!(
                 "[PluginRuntime] instance remains alive plugin_id={plugin_instance_id} active={still_active}"

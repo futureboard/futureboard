@@ -19,7 +19,101 @@
 
 #import <dispatch/dispatch.h>
 
+#include <cmath>
 #include <cstdio>
+
+namespace {
+
+constexpr int kMinEditorDimension = 16;
+constexpr int kMaxEditorDimension = 8192;
+
+bool daux_plugin_root_view_size(NSView *embed, int *out_width,
+                                int *out_height) {
+  if (!embed)
+    return false;
+  CGFloat best_area = 0.0;
+  NSSize best = NSZeroSize;
+  // VST3 Cocoa editors attach their native root as a direct child of the host
+  // NSView. Some wrappers leave getSize() at the host's requested fallback but
+  // give this root its real fixed dimensions; use the largest visible root.
+  for (NSView *child in embed.subviews) {
+    if (child.hidden)
+      continue;
+    NSSize size = child.frame.size;
+    if (size.width < kMinEditorDimension ||
+        size.height < kMinEditorDimension || size.width > kMaxEditorDimension ||
+        size.height > kMaxEditorDimension)
+      continue;
+    const CGFloat area = size.width * size.height;
+    if (area > best_area) {
+      best_area = area;
+      best = size;
+    }
+  }
+  if (best_area <= 0.0)
+    return false;
+  if (out_width)
+    *out_width = (int)std::llround(best.width);
+  if (out_height)
+    *out_height = (int)std::llround(best.height);
+  return true;
+}
+
+} // namespace
+
+void daux_resize_editor_content(SphereDauxVst3Processor *proc, int width,
+                                int height, bool notify_plugin,
+                                const char *reason) {
+  if (!proc || width < kMinEditorDimension || height < kMinEditorDimension ||
+      width > kMaxEditorDimension || height > kMaxEditorDimension)
+    return;
+
+  if (!NSThread.isMainThread) {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      daux_resize_editor_content(proc, width, height, notify_plugin, reason);
+    });
+    return;
+  }
+
+  void *window_ptr = sphere_daux_editor_get_native_window(proc);
+  void *embed_ptr = sphere_daux_editor_get_native_embed(proc);
+  void *delegate_ptr = sphere_daux_editor_get_native_delegate(proc);
+  if (!window_ptr || !embed_ptr)
+    return;
+
+  NSWindow *window = (__bridge NSWindow *)window_ptr;
+  NSView *embed = (__bridge NSView *)embed_ptr;
+  DauxEditorWindowDelegate *delegate =
+      delegate_ptr ? (__bridge DauxEditorWindowDelegate *)delegate_ptr : nil;
+  NSRect old_frame = window.frame;
+  NSRect content = NSMakeRect(0.0, 0.0, (CGFloat)width, (CGFloat)height);
+  NSRect frame = [window frameRectForContentRect:content];
+  // AppKit screen coordinates grow upward. Keep the titlebar/top-left fixed so
+  // a plug-in resize never makes the editor jump around the display.
+  frame.origin.x = old_frame.origin.x;
+  frame.origin.y = NSMaxY(old_frame) - frame.size.height;
+
+  delegate.applyingHostResize = YES;
+  [window setFrame:frame display:YES];
+  [embed setFrame:content];
+  delegate.applyingHostResize = NO;
+  sphere_daux_editor_set_content_size(proc, width, height);
+
+  if (notify_plugin)
+    sphere_daux_editor_notify_resize(proc, width, height);
+  std::fprintf(stderr,
+               "[SphereVST3/mac] content resize reason=%s size=%dx%d\n",
+               reason ? reason : "unknown", width, height);
+}
+
+extern "C" int sphere_daux_editor_apply_plugin_resize(
+    SphereDauxVst3Processor *proc, int width, int height) {
+  if (!proc || width < kMinEditorDimension || height < kMinEditorDimension ||
+      width > kMaxEditorDimension || height > kMaxEditorDimension)
+    return 0;
+  daux_resize_editor_content(proc, width, height, false, "resizeView");
+  return sphere_daux_editor_get_native_window(proc) != nullptr ? 1 : 0;
+}
 
 /// Open a floating NSWindow containing an NSView that hosts the plugin's GUI.
 /// May be called from any thread; dispatches to the main thread synchronously.
@@ -62,9 +156,11 @@ unsigned long long open_editor_mac(SphereDauxVst3Processor *proc,
 
   NSRect content_rect = NSMakeRect(0.0, 0.0, (CGFloat)editor_width,
                                    (CGFloat)editor_height);
+  bool editor_resizable = sphere_daux_editor_can_resize(proc) != 0;
   NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                            NSWindowStyleMaskResizable |
                             NSWindowStyleMaskMiniaturizable;
+  if (editor_resizable)
+    style |= NSWindowStyleMaskResizable;
 
   NSWindow *window = [[NSWindow alloc] initWithContentRect:content_rect
                                                  styleMask:style
@@ -106,7 +202,7 @@ unsigned long long open_editor_mac(SphereDauxVst3Processor *proc,
   sphere_daux_editor_store_native(
       proc, win_retained, embed_retained, delegate_retained, handle,
       window_id ? window_id : "", (title && *title) ? title : "Plugin Editor",
-      width, height);
+      editor_width, editor_height);
 
   if (!sphere_daux_editor_attach_view(proc, (__bridge void *)embed, "NSView")) {
     std::fprintf(
@@ -133,26 +229,43 @@ unsigned long long open_editor_mac(SphereDauxVst3Processor *proc,
     return 0;
   }
 
+  // A few editors only answer canResize reliably after attached(). Keep the
+  // AppKit chrome in sync with that final answer, as the Windows host does.
+  const bool attached_resizable = sphere_daux_editor_can_resize(proc) != 0;
+  if (attached_resizable != editor_resizable) {
+    NSWindowStyleMask updated_style = window.styleMask;
+    if (attached_resizable)
+      updated_style |= NSWindowStyleMaskResizable;
+    else
+      updated_style &= ~NSWindowStyleMaskResizable;
+    [window setStyleMask:updated_style];
+  }
+
   // ── Step 6: Resize window to plugin's post-attach preferred size ──────────
 
-  // Some plugins resize themselves inside attached(); re-query and adjust.
-  // sphere_daux_editor_notify_resize already calls IPlugView::onSize so we only
-  // need to resize the NSWindow frame here.
-  {
-    // (view size is set by the plugin; we match the NS window to it)
-    NSRect embed_frame = embed.frame;
-    if (embed_frame.size.width > 0 && embed_frame.size.height > 0) {
-      // The embed frame is view-local, so its origin is (0,0) — the screen's
-      // bottom-left corner in window coordinates. Take only the size and
-      // re-center, or the window jumps into the corner of the display.
-      NSRect content_rect =
-          NSMakeRect(0.0, 0.0, embed_frame.size.width, embed_frame.size.height);
-      NSRect window_frame = [window frameRectForContentRect:content_rect];
-      window_frame.origin = window.frame.origin;
-      [window setFrame:window_frame display:NO];
-      [window center];
-    }
+  // Some plug-ins (Kontakt among them) only finalize getSize() in attached().
+  // The old code read embed.frame here, which was still the requested fallback
+  // size and therefore left blank space above/right of the actual editor.
+  int attached_width = editor_width;
+  int attached_height = editor_height;
+  int reported_width = 0;
+  int reported_height = 0;
+  if (sphere_daux_editor_get_view_size(proc, &attached_width,
+                                       &attached_height)) {
+    editor_width = attached_width;
+    editor_height = attached_height;
   }
+  if (daux_plugin_root_view_size(embed, &reported_width, &reported_height) &&
+      (reported_width != editor_width || reported_height != editor_height)) {
+    std::fprintf(stderr,
+                 "[SphereVST3/mac] native root overrides stale getSize "
+                 "getSize=%dx%d root=%dx%d\n",
+                 editor_width, editor_height, reported_width, reported_height);
+    editor_width = reported_width;
+    editor_height = reported_height;
+  }
+  daux_resize_editor_content(proc, editor_width, editor_height, false,
+                             "attached.getSize");
 
   // ── Step 7: Show the window ───────────────────────────────────────────────
 

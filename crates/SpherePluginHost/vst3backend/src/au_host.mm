@@ -13,6 +13,8 @@
 //   * Everything the render path touches is sized at open time. No allocation,
 //     no Objective-C messaging, no locking below `sphere_au_render`.
 
+#import <AppKit/AppKit.h>
+#import <AudioToolbox/AUCocoaUIView.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioToolbox/AudioUnitUtilities.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -267,6 +269,14 @@ struct SphereAuInstance {
   bool is_instrument = false;
   bool initialized = false;
 
+  // Cocoa editor objects are retained explicitly so their lifetime is
+  // independent of local ARC scopes. The editor is host-owned; closing it does
+  // not dispose the Audio Unit used by the audio producer.
+  void* editor_window = nullptr;
+  void* editor_view = nullptr;
+  void* editor_delegate = nullptr;
+  bool editor_user_closed = false;
+
   /// Deinterleaved output planes, `max_frames` apart. Also backs an interleaved
   /// layout when the unit insisted on one.
   std::vector<float> output_scratch;
@@ -290,6 +300,23 @@ struct SphereAuInstance {
     return reinterpret_cast<AudioBufferList*>(buffer_list_storage.data());
   }
 };
+
+static void mark_au_editor_user_closed(SphereAuInstance* instance) {
+  if (instance != nullptr) {
+    instance->editor_user_closed = true;
+  }
+}
+
+@interface SphereAuEditorWindowDelegate : NSObject <NSWindowDelegate>
+@property(nonatomic, assign) SphereAuInstance* instance;
+@end
+
+@implementation SphereAuEditorWindowDelegate
+- (void)windowWillClose:(NSNotification*)notification {
+  (void)notification;
+  mark_au_editor_user_closed(self.instance);
+}
+@end
 
 namespace {
 
@@ -667,6 +694,7 @@ SPHERE_AU_HOST_API void sphere_au_close(SphereAuInstance* instance) {
   if (instance == nullptr) {
     return;
   }
+  sphere_au_close_editor(instance);
   if (instance->unit != nullptr) {
     if (instance->initialized) {
       AudioUnitUninitialize(instance->unit);
@@ -911,6 +939,206 @@ SPHERE_AU_HOST_API int sphere_au_set_state(
   changed.mScope = kAudioUnitScope_Global;
   changed.mElement = 0;
   AUParameterListenerNotify(nullptr, nullptr, &changed);
+  return 1;
+}
+
+SPHERE_AU_HOST_API unsigned long long sphere_au_open_editor(
+    SphereAuInstance* instance,
+    const char* title,
+    unsigned int preferred_width,
+    unsigned int preferred_height,
+    unsigned int* out_width,
+    unsigned int* out_height) {
+  if (out_width != nullptr) {
+    *out_width = 0;
+  }
+  if (out_height != nullptr) {
+    *out_height = 0;
+  }
+  if (instance == nullptr || instance->unit == nullptr) {
+    return 0;
+  }
+  if (![NSThread isMainThread]) {
+    __block unsigned long long handle = 0;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      handle = sphere_au_open_editor(
+          instance, title, preferred_width, preferred_height, out_width, out_height);
+    });
+    return handle;
+  }
+
+  if (instance->editor_window != nullptr) {
+    NSWindow* window = (__bridge NSWindow*)instance->editor_window;
+    NSView* view = (__bridge NSView*)instance->editor_view;
+    if (out_width != nullptr) {
+      *out_width = static_cast<unsigned int>(std::max<CGFloat>(view.frame.size.width, 1.0));
+    }
+    if (out_height != nullptr) {
+      *out_height = static_cast<unsigned int>(std::max<CGFloat>(view.frame.size.height, 1.0));
+    }
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    return reinterpret_cast<unsigned long long>((__bridge void*)window);
+  }
+
+  UInt32 cocoa_info_size = 0;
+  Boolean writable = false;
+  OSStatus status = AudioUnitGetPropertyInfo(
+      instance->unit, kAudioUnitProperty_CocoaUI, kAudioUnitScope_Global, 0,
+      &cocoa_info_size, &writable);
+  if (status != noErr || cocoa_info_size < sizeof(AudioUnitCocoaViewInfo)) {
+    std::fprintf(
+        stderr,
+        "[plugin-host-au] Cocoa editor unavailable property_status=%d bytes=%u\n",
+        static_cast<int>(status), cocoa_info_size);
+    return 0;
+  }
+
+  std::vector<unsigned char> cocoa_info_storage(cocoa_info_size, 0);
+  auto* cocoa_info =
+      reinterpret_cast<AudioUnitCocoaViewInfo*>(cocoa_info_storage.data());
+  status = AudioUnitGetProperty(
+      instance->unit, kAudioUnitProperty_CocoaUI, kAudioUnitScope_Global, 0,
+      cocoa_info, &cocoa_info_size);
+  if (status != noErr || cocoa_info->mCocoaAUViewBundleLocation == nullptr ||
+      cocoa_info->mCocoaAUViewClass[0] == nullptr) {
+    std::fprintf(
+        stderr,
+        "[plugin-host-au] Cocoa editor metadata failed status=%d\n",
+        static_cast<int>(status));
+    return 0;
+  }
+
+  NSURL* bundle_url = (__bridge NSURL*)cocoa_info->mCocoaAUViewBundleLocation;
+  NSString* factory_name = (__bridge NSString*)cocoa_info->mCocoaAUViewClass[0];
+  NSBundle* bundle = [NSBundle bundleWithURL:bundle_url];
+  NSError* load_error = nil;
+  if (bundle == nil || ![bundle loadAndReturnError:&load_error]) {
+    std::fprintf(
+        stderr, "[plugin-host-au] Cocoa editor bundle load failed: %s\n",
+        load_error.localizedDescription.UTF8String ?: "unknown error");
+    return 0;
+  }
+
+  Class factory_class = NSClassFromString(factory_name);
+  id factory = factory_class != Nil ? [[factory_class alloc] init] : nil;
+  if (factory == nil || ![factory conformsToProtocol:@protocol(AUCocoaUIBase)]) {
+    std::fprintf(
+        stderr, "[plugin-host-au] Cocoa editor factory unavailable class=%s\n",
+        factory_name.UTF8String ?: "<unknown>");
+    return 0;
+  }
+
+  id<AUCocoaUIBase> cocoa_factory = (id<AUCocoaUIBase>)factory;
+  NSView* view = [cocoa_factory uiViewForAudioUnit:instance->unit
+                                         withSize:NSZeroSize];
+  if (view == nil) {
+    std::fprintf(stderr, "[plugin-host-au] Cocoa editor factory returned no view\n");
+    return 0;
+  }
+
+  NSSize size = view.frame.size;
+  if (size.width < 32.0 || size.height < 32.0) {
+    size = NSMakeSize(
+        std::max<unsigned int>(preferred_width, 640),
+        std::max<unsigned int>(preferred_height, 360));
+    [view setFrameSize:size];
+  }
+  NSRect content_rect = NSMakeRect(0.0, 0.0, size.width, size.height);
+  NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                            NSWindowStyleMaskMiniaturizable;
+  NSWindow* window = [[NSWindow alloc] initWithContentRect:content_rect
+                                                 styleMask:style
+                                                   backing:NSBackingStoreBuffered
+                                                     defer:NO];
+  NSString* window_title = [NSString
+      stringWithUTF8String:(title != nullptr && title[0] != '\0') ? title : "Audio Unit"];
+  window.title = window_title;
+  window.backgroundColor = NSColor.blackColor;
+  window.level = NSFloatingWindowLevel;
+  window.releasedWhenClosed = NO;
+  window.contentView = view;
+  [window center];
+
+  SphereAuEditorWindowDelegate* delegate = [[SphereAuEditorWindowDelegate alloc] init];
+  delegate.instance = instance;
+  window.delegate = delegate;
+
+  instance->editor_window = (__bridge_retained void*)window;
+  instance->editor_view = (__bridge_retained void*)view;
+  instance->editor_delegate = (__bridge_retained void*)delegate;
+  instance->editor_user_closed = false;
+
+  [window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+  if (out_width != nullptr) {
+    *out_width = static_cast<unsigned int>(std::max<CGFloat>(size.width, 1.0));
+  }
+  if (out_height != nullptr) {
+    *out_height = static_cast<unsigned int>(std::max<CGFloat>(size.height, 1.0));
+  }
+  const auto handle =
+      reinterpret_cast<unsigned long long>((__bridge void*)window);
+  std::fprintf(
+      stderr, "[plugin-host-au] Cocoa editor opened handle=0x%llx size=%ux%u\n",
+      handle, out_width != nullptr ? *out_width : 0,
+      out_height != nullptr ? *out_height : 0);
+  return handle;
+}
+
+SPHERE_AU_HOST_API void sphere_au_close_editor(SphereAuInstance* instance) {
+  if (instance == nullptr || instance->editor_window == nullptr) {
+    return;
+  }
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{ sphere_au_close_editor(instance); });
+    return;
+  }
+
+  void* window_ptr = instance->editor_window;
+  void* view_ptr = instance->editor_view;
+  void* delegate_ptr = instance->editor_delegate;
+  instance->editor_window = nullptr;
+  instance->editor_view = nullptr;
+  instance->editor_delegate = nullptr;
+  instance->editor_user_closed = false;
+
+  NSWindow* window = (__bridge_transfer NSWindow*)window_ptr;
+  window.delegate = nil;
+  [window orderOut:nil];
+  [window close];
+  if (view_ptr != nullptr) {
+    NSView* view = (__bridge_transfer NSView*)view_ptr;
+    [view removeFromSuperview];
+  }
+  if (delegate_ptr != nullptr) {
+    SphereAuEditorWindowDelegate* delegate =
+        (__bridge_transfer SphereAuEditorWindowDelegate*)delegate_ptr;
+    delegate.instance = nullptr;
+  }
+  std::fprintf(stderr, "[plugin-host-au] Cocoa editor closed\n");
+}
+
+SPHERE_AU_HOST_API int sphere_au_focus_editor(SphereAuInstance* instance) {
+  if (instance == nullptr || instance->editor_window == nullptr) {
+    return 0;
+  }
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{ sphere_au_focus_editor(instance); });
+    return 1;
+  }
+  NSWindow* window = (__bridge NSWindow*)instance->editor_window;
+  [window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+  return 1;
+}
+
+SPHERE_AU_HOST_API int sphere_au_take_editor_user_close(SphereAuInstance* instance) {
+  if (instance == nullptr || !instance->editor_user_closed) {
+    return 0;
+  }
+  instance->editor_user_closed = false;
+  sphere_au_close_editor(instance);
   return 1;
 }
 

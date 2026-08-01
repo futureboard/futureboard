@@ -1848,6 +1848,21 @@ impl BuiltinPluginEditorWindow {
         host::send_view_input(self.view_id, input);
     }
 
+    /// Let CEF consume a click/key/wheel event as soon as this GPUI handler has
+    /// unwound. Pumping inline is unsafe because Chromium may re-enter GPUI.
+    fn schedule_input_pump(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::ZERO).await;
+            host::pump_after_input();
+            let _ = this.update(cx, |this, cx| {
+                if this.surface.sync(this.view_id) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn forward_mouse_move(&mut self, event: &MouseMoveEvent) {
         let (x, y) = self.to_view_point(event.position);
         // A move whose position is outside the browser rect is still forwarded
@@ -1900,16 +1915,17 @@ impl BuiltinPluginEditorWindow {
             y,
             button,
             pressed: true,
-            click_count: event.click_count as i32,
+            click_count: event.click_count.max(1) as i32,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        Self::schedule_input_pump(cx);
     }
 
     fn on_surface_mouse_up(
         &mut self,
         event: &MouseUpEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let Some(button) = editor_mouse_button(event.button) else {
             return;
@@ -1926,13 +1942,14 @@ impl BuiltinPluginEditorWindow {
             click_count: event.click_count.max(1) as i32,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        Self::schedule_input_pump(cx);
     }
 
     fn on_surface_scroll(
         &mut self,
         event: &ScrollWheelEvent,
         window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if event.modifiers.control || event.modifiers.platform {
             window.prevent_default();
@@ -1960,13 +1977,14 @@ impl BuiltinPluginEditorWindow {
             delta_y,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        Self::schedule_input_pump(cx);
     }
 
     fn on_surface_key_down(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let modifiers = self.surface.modifiers(event.keystroke.modifiers);
         if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Down, modifiers) {
@@ -1977,18 +1995,20 @@ impl BuiltinPluginEditorWindow {
         for key in editor_char_keys(&event.keystroke, modifiers) {
             self.send_input(EditorInput::Key(key));
         }
+        Self::schedule_input_pump(cx);
     }
 
     fn on_surface_key_up(
         &mut self,
         event: &KeyUpEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         let modifiers = self.surface.modifiers(event.keystroke.modifiers);
         if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Up, modifiers) {
             self.send_input(EditorInput::Key(key));
         }
+        Self::schedule_input_pump(cx);
     }
 
     /// Native instance list. Reserved width matches `sidebar_width()`, which

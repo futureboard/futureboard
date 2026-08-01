@@ -141,6 +141,26 @@ SPHERE_AU_HOST_API int sphere_au_set_state(
     const unsigned char* data,
     size_t len);
 
+/// Open the Audio Unit's Cocoa editor in a host-owned top-level NSWindow.
+/// `out_width`/`out_height` receive the actual view size. Returns a non-zero
+/// opaque window handle on success. Control/main thread only on macOS.
+SPHERE_AU_HOST_API unsigned long long sphere_au_open_editor(
+    SphereAuInstance* instance,
+    const char* title,
+    unsigned int preferred_width,
+    unsigned int preferred_height,
+    unsigned int* out_width,
+    unsigned int* out_height);
+
+/// Close only the Cocoa editor; the Audio Unit DSP instance remains alive.
+SPHERE_AU_HOST_API void sphere_au_close_editor(SphereAuInstance* instance);
+
+/// Bring an already-open Cocoa editor to the front.
+SPHERE_AU_HOST_API int sphere_au_focus_editor(SphereAuInstance* instance);
+
+/// Returns non-zero once when the user closes the Cocoa editor window.
+SPHERE_AU_HOST_API int sphere_au_take_editor_user_close(SphereAuInstance* instance);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -103,6 +103,9 @@ struct SphereDauxVst3Processor;
 // Forward-declared so the processor can hold a raw pointer to its editor frame.
 class PluginEditorFrame;
 #endif
+#if defined(__APPLE__)
+class MacPluginEditorFrame;
+#endif
 
 struct Vst3BusAudioStats {
   double peak_l{0.0};
@@ -491,7 +494,14 @@ struct SphereDauxVst3Processor {
   std::string editor_title;
   int editor_requested_width{0};
   int editor_requested_height{0};
+  int editor_content_width{0};
+  int editor_content_height{0};
   bool editor_attached{false};
+#if defined(__APPLE__)
+  // Installed before attached(), matching the VST3 editorhost contract. This
+  // lets editors such as Kontakt finalize or later change their native size.
+  MacPluginEditorFrame *editor_frame{nullptr};
+#endif
   // Host-owned top-level editor (Linux/macOS): set when the user closes the
   // editor window via its own titlebar so the external plugin-host process can
   // poll it (sphere_daux_vst3_embed_take_user_close), report EditorClosed, and
@@ -1096,4 +1106,3 @@ struct SphereDauxVst3Processor {
   void close_embed_editor(const char *reason);
 #endif
 };
-

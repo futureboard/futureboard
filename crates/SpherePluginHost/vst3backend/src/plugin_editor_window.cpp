@@ -853,8 +853,8 @@ EmbedHostKind embed_resolve_host_kind() {
     if (_stricmp(mode, "child") == 0 || _stricmp(mode, "ws_child") == 0) {
       return EmbedHostKind::WsChild;
     }
-    if (_stricmp(mode, "tool") == 0 || _stricmp(mode, "owned") == 0 ||
-        _stricmp(mode, "popup") == 0) {
+    if (_stricmp(mode, "detached") == 0 || _stricmp(mode, "tool") == 0 ||
+        _stricmp(mode, "owned") == 0 || _stricmp(mode, "popup") == 0) {
       return EmbedHostKind::OwnedToolWindow;
     }
   }
