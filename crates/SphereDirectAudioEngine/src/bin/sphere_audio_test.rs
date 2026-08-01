@@ -3,6 +3,7 @@
 //! Usage:
 //!   sphere-audio-test list-devices
 //!   sphere-audio-test test-tone [--seconds <N>] [--freq <Hz>] [--device <name>]
+//!   sphere-audio-test input-test [--seconds <N>] [--device <name>]
 //!   sphere-audio-test status
 //!
 //! Build:
@@ -23,6 +24,7 @@ fn main() {
     match args.get(1).map(|s| s.as_str()) {
         Some("list-devices") => cmd_list_devices(),
         Some("test-tone") => cmd_test_tone(&args[2..]),
+        Some("input-test") => cmd_input_test(&args[2..]),
         Some("status") => cmd_status(),
         Some("ks-probe") => cmd_ks_probe(),
         Some(unknown) => {
@@ -35,6 +37,47 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn cmd_input_test(args: &[String]) {
+    let mut seconds = 3u64;
+    let mut device = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seconds" | "-s" => {
+                i += 1;
+                seconds = args
+                    .get(i)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(3);
+            }
+            "--device" | "-d" => {
+                i += 1;
+                device = args.get(i).cloned();
+            }
+            flag => eprintln!("Warning: unknown flag '{flag}' — ignoring"),
+        }
+        i += 1;
+    }
+
+    let engine = EngineInner::new();
+    if let Err(error) = engine.start_input_test(device.clone()) {
+        eprintln!("Failed to open input: {error}");
+        std::process::exit(1);
+    }
+    println!(
+        "Testing input '{}' for {seconds}s…",
+        device.as_deref().unwrap_or("system default")
+    );
+    for _ in 0..seconds * 10 {
+        thread::sleep(Duration::from_millis(100));
+        let peak = engine.get_input_test_level();
+        let bar = "#".repeat((peak * 40.0) as usize);
+        eprint!("\r  IN {bar:<40} {peak:.5}");
+    }
+    eprintln!();
+    engine.stop_input_test();
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -234,6 +277,13 @@ COMMANDS:
           --device,  -d <name>    Output device name   (default: system default)
           --rate,    -r <rate>    Sample rate           (default: device default)
           --buffer,  -b <frames>  Buffer size in frames (default: device default)
+
+    input-test [OPTIONS]
+        Open a CoreAudio input stream and display its live peak meter.
+
+        Options:
+          --seconds, -s <N>       Duration in seconds  (default: 3)
+          --device,  -d <name>    Input device name    (default: system default)
 
     status
         Print engine version, backend info, and default device list.

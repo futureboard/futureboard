@@ -31,6 +31,7 @@ CEF_HELPER_VARIANTS=(
 
 ICON_SRC="$ROOT/packages/shared/app/icons/icon.icns"
 PLIST_SRC="$ROOT/packaging/native/Info.plist"
+ENTITLEMENTS_SRC="$ROOT/packaging/native/Futureboard.entitlements"
 
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -52,6 +53,10 @@ if [[ ! -f "$PLIST_SRC" ]]; then
   echo "error: Info.plist not found: $PLIST_SRC" >&2
   exit 1
 fi
+if [[ ! -f "$ENTITLEMENTS_SRC" ]]; then
+  echo "error: entitlements not found: $ENTITLEMENTS_SRC" >&2
+  exit 1
+fi
 if [[ ! -f "$PACKAGE_DIR/$CEF_HELPER_BINARY_NAME" ]]; then
   echo "error: staged macOS CEF helper not found: $PACKAGE_DIR/$CEF_HELPER_BINARY_NAME" >&2
   exit 1
@@ -66,12 +71,16 @@ cp "$PLIST_SRC" "$CONTENTS/Info.plist"
 # Preserve the validated xtask runtime layout, then place CEF in the standard
 # macOS framework location expected by cef-rs' library loader.
 cp -a "$PACKAGE_DIR/." "$MACOS/"
+# Package metadata is a resource, not executable code. Keeping JSON inside
+# Contents/MacOS makes codesign treat it as an unsigned nested code object.
+mv "$MACOS/build-info.json" "$RESOURCES/build-info.json"
 CEF_FRAMEWORK="$MACOS/Chromium Embedded Framework.framework"
 if [[ ! -d "$CEF_FRAMEWORK" ]]; then
   echo "error: staged CEF framework not found: $CEF_FRAMEWORK" >&2
   exit 1
 fi
 mv "$CEF_FRAMEWORK" "$FRAMEWORKS/"
+CEF_FRAMEWORK="$FRAMEWORKS/Chromium Embedded Framework.framework"
 chmod +x "$MACOS/$APP_EXECUTABLE_NAME"
 chmod +x "$MACOS/FutureboardPluginHostX64" "$MACOS/FutureboardPluginScanner"
 
@@ -114,6 +123,19 @@ if [[ -f "$ICON_SRC" ]]; then
 else
   echo "warning: missing $ICON_SRC — app will use default icon" >&2
 fi
+
+# Bind Info.plist (including the microphone purpose string) and the audio-input
+# entitlement to a stable app-bundle identity. Developer ID distribution can
+# replace this ad-hoc signature later; local/debug bundles still need a proper
+# bundle signature so TCC grants microphone access to Futureboard Studio rather
+# than to an unstable linker-generated executable identity.
+for VARIANT in "${CEF_HELPER_VARIANTS[@]}"; do
+  HELPER_NAME="$APP_NAME $VARIANT"
+  codesign --force --sign - "$FRAMEWORKS/$HELPER_NAME.app"
+done
+codesign --force --sign - "$CEF_FRAMEWORK"
+codesign --force --sign - --entitlements "$ENTITLEMENTS_SRC" "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 
 echo "Bundled macOS app: $APP_DIR"
 echo
