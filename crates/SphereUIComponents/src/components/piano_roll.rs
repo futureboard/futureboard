@@ -1485,16 +1485,20 @@ impl PianoRoll {
     ) {
         self.end_preview_note("replace", cx);
         let Some((track_id, channel)) = self.preview_target(cx) else {
-            eprintln!(
-                "[MidiEditor] sending PreviewNoteOn skipped pitch={} reason={} no_midi_track",
-                pitch, reason
-            );
+            if midi_debug_enabled() {
+                eprintln!(
+                    "[MidiEditor] sending PreviewNoteOn skipped pitch={} reason={} no_midi_track",
+                    pitch, reason
+                );
+            }
             return;
         };
-        eprintln!(
-            "[MidiEditor] sending PreviewNoteOn track_id={} pitch={} channel={} reason={}",
-            track_id, pitch, channel, reason
-        );
+        if midi_debug_enabled() {
+            eprintln!(
+                "[MidiEditor] sending PreviewNoteOn track_id={} pitch={} channel={} reason={}",
+                track_id, pitch, channel, reason
+            );
+        }
         if let Some(handler) = self.on_midi_preview.clone() {
             handler(
                 UiMidiPreviewCommand::NoteOn {
@@ -1513,10 +1517,12 @@ impl PianoRoll {
         let Some((track_id, channel, pitch)) = self.active_preview_note.take() else {
             return;
         };
-        eprintln!(
-            "[MidiEditor] sending PreviewNoteOff track_id={} pitch={} channel={} reason={}",
-            track_id, pitch, channel, reason
-        );
+        if midi_debug_enabled() {
+            eprintln!(
+                "[MidiEditor] sending PreviewNoteOff track_id={} pitch={} channel={} reason={}",
+                track_id, pitch, channel, reason
+            );
+        }
         if let Some(handler) = self.on_midi_preview.clone() {
             handler(
                 UiMidiPreviewCommand::NoteOff {
@@ -1544,10 +1550,12 @@ impl PianoRoll {
         let Some(track_id) = target else {
             return;
         };
-        eprintln!(
-            "[MidiEditor] sending PreviewAllNotesOff track_id={} reason={}",
-            track_id, reason
-        );
+        if midi_debug_enabled() {
+            eprintln!(
+                "[MidiEditor] sending PreviewAllNotesOff track_id={} reason={}",
+                track_id, reason
+            );
+        }
         if let Some(handler) = self.on_midi_preview.clone() {
             handler(UiMidiPreviewCommand::AllNotesOff { track_id }, cx);
         }
@@ -1565,10 +1573,12 @@ impl PianoRoll {
         let Some(track_id) = target else {
             return;
         };
-        eprintln!(
-            "[MidiEditor] sending MidiPanic track_id={} reason={}",
-            track_id, reason
-        );
+        if midi_debug_enabled() {
+            eprintln!(
+                "[MidiEditor] sending MidiPanic track_id={} reason={}",
+                track_id, reason
+            );
+        }
         if let Some(handler) = self.on_midi_preview.clone() {
             handler(UiMidiPreviewCommand::MidiPanic { track_id }, cx);
         }

@@ -922,6 +922,12 @@ impl AudioEngine {
         }
     }
 
+    /// Lightweight transport clock for latency-sensitive control input. Unlike
+    /// [`AudioEngine::stats`], this avoids cloning device/status strings.
+    pub fn transport_snapshot(&self) -> crate::transport::RuntimeTransportSnapshot {
+        self.inner.transport_snapshot()
+    }
+
     /// Attempt to recover the audio device after a device-loss event, reusing
     /// the last-known-good config. Returns `Ok(true)` if recovery ran,
     /// `Ok(false)` if the device was not lost.

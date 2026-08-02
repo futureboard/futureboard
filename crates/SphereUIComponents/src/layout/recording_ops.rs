@@ -1,7 +1,7 @@
 use gpui::{App, Context};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::components::panel::{InspectorAudioInputChannel, InspectorAudioInputDevice};
 use crate::components::timeline::timeline_state::{
@@ -29,6 +29,12 @@ pub(crate) struct RecordingSessionState {
     /// hardware/virtual-keyboard events already arrive on the control router, so
     /// no realtime audio callback work is required.
     pub midi: Option<MidiRecordingTake>,
+    /// MIDI preview snapshots are expensive because they mirror the growing
+    /// take into timeline state. Event edges render immediately; held-note
+    /// growth is capped to 30 Hz so screen capture cannot multiply full-take
+    /// clones and broad timeline redraws.
+    pub midi_preview_dirty: bool,
+    pub midi_preview_updated_at: Instant,
     /// Invalidates an outstanding count-in timer when the user cancels/restarts.
     pub count_in_token: u64,
     /// Metronome state to restore after the temporary audible count-in.
@@ -42,6 +48,8 @@ impl Default for RecordingSessionState {
             ui_state: RecordingUiState::Idle,
             preview: None,
             midi: None,
+            midi_preview_dirty: false,
+            midi_preview_updated_at: Instant::now() - Duration::from_secs(1),
             count_in_token: 0,
             count_in_restore_metronome: None,
         }
@@ -393,6 +401,8 @@ impl StudioLayout {
                     .map(|track| (track.track_id.clone(), track))
                     .collect(),
             });
+            self.recording.midi_preview_dirty = true;
+            self.recording.midi_preview_updated_at = Instant::now() - Duration::from_secs(1);
         } else {
             self.recording.midi = None;
         }
@@ -547,7 +557,18 @@ impl StudioLayout {
         event: &MidiInputEvent,
         cx: &App,
     ) {
-        let current_beat = self.timeline.read(cx).state.transport.playhead_beats;
+        self.capture_midi_record_event_at(track_id, event, None, cx);
+    }
+
+    pub(super) fn capture_midi_record_event_at(
+        &mut self,
+        track_id: &str,
+        event: &MidiInputEvent,
+        event_beat: Option<f32>,
+        cx: &App,
+    ) {
+        let current_beat =
+            event_beat.unwrap_or_else(|| self.timeline.read(cx).state.transport.playhead_beats);
         let Some(take) = self.recording.midi.as_mut() else {
             return;
         };
@@ -589,6 +610,7 @@ impl StudioLayout {
             }
             MidiInputEvent::ControlChange { .. } => {}
         }
+        self.recording.midi_preview_dirty = true;
     }
 
     fn finish_midi_recording_take(&mut self, cx: &mut Context<Self>) -> Vec<MidiRecordingResult> {
@@ -907,6 +929,15 @@ impl StudioLayout {
     /// notes with a growing duration so the user sees a note immediately on
     /// NoteOn rather than only after NoteOff/stop.
     fn update_midi_recording_previews(&mut self, cx: &mut Context<Self>) {
+        const MIDI_PREVIEW_INTERVAL: Duration = Duration::from_millis(33);
+        if self.recording.midi.is_none()
+            || (!self.recording.midi_preview_dirty
+                && self.recording.midi_preview_updated_at.elapsed() < MIDI_PREVIEW_INTERVAL)
+        {
+            return;
+        }
+        self.recording.midi_preview_dirty = false;
+        self.recording.midi_preview_updated_at = Instant::now();
         let now = self.timeline.read(cx).state.transport.playhead_beats;
         let previews = self.recording.midi.as_ref().map(|take| {
             let relative_beat = (now - take.start_beat).max(0.0);

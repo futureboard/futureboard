@@ -98,6 +98,9 @@ pub(crate) struct EngineSyncState {
     /// loop ticks at the display refresh (up to 240 Hz); this caps that
     /// bookkeeping to ~60 Hz so a high-refresh monitor doesn't multiply it.
     pub bridge_reconciled_at: Instant,
+    /// Device/port discovery is much heavier than draining MIDI messages and
+    /// does not need to run at display refresh.
+    pub midi_devices_synced_at: Instant,
 }
 
 impl Default for EngineSyncState {
@@ -112,6 +115,7 @@ impl Default for EngineSyncState {
             last_status_poll_at: Instant::now() - Duration::from_secs(1),
             bpm_committed_at: None,
             bridge_reconciled_at: Instant::now() - Duration::from_secs(1),
+            midi_devices_synced_at: Instant::now() - Duration::from_secs(1),
         }
     }
 }
@@ -540,7 +544,7 @@ impl StudioLayout {
                 .as_ref()
                 .and_then(|runtime| {
                     runtime
-                        .lock()
+                        .try_lock()
                         .ok()
                         .and_then(|bridge| bridge.loaded_for_track(track_id))
                         .map(|loaded| loaded.descriptor.insert_id)
@@ -614,6 +618,37 @@ impl StudioLayout {
                         });
                     }
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// Hardware MIDI gets its own lightweight control poll instead of waiting
+    /// behind meters, bridge reconciliation, waveform work, and frame pacing.
+    /// It idles at 8 ms and accelerates to 2 ms after activity, avoiding a
+    /// permanent high-frequency UI wakeup while keeping live input responsive.
+    pub(super) fn spawn_hardware_midi_input_poll(cx: &mut Context<Self>) {
+        const MIDI_INPUT_ACTIVE_POLL: Duration = Duration::from_millis(2);
+        const MIDI_INPUT_IDLE_POLL: Duration = Duration::from_millis(8);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let mut interval = MIDI_INPUT_IDLE_POLL;
+            loop {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    break;
+                }
+                executor.timer(interval).await;
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    break;
+                }
+                let active = this
+                    .update(cx, |this, cx| this.drain_hardware_midi_input(cx))
+                    .unwrap_or(false);
+                interval = if active {
+                    MIDI_INPUT_ACTIVE_POLL
+                } else {
+                    MIDI_INPUT_IDLE_POLL
+                };
             }
         })
         .detach();
@@ -695,7 +730,10 @@ impl StudioLayout {
         // Drain hardware MIDI input on the UI/control poll (never the audio
         // thread). Opens/refreshes enabled ports, then routes into the same
         // preview + recording path as the virtual keyboard.
-        self.poll_hardware_midi_input(cx);
+        if self.engine_sync.midi_devices_synced_at.elapsed() >= Duration::from_millis(500) {
+            self.engine_sync.midi_devices_synced_at = Instant::now();
+            self.sync_hardware_midi_input_devices(cx);
+        }
 
         // Realtime recording waveform preview (Part 1) — grow the preview clip
         // and append streamed peaks. Self-contained; notifies the timeline.

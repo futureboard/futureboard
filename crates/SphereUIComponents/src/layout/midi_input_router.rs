@@ -102,6 +102,7 @@ impl StudioLayout {
             target,
             MidiInputEvent::from(event),
             capture_track_id.as_deref(),
+            None,
             cx,
         )
     }
@@ -163,7 +164,14 @@ impl StudioLayout {
         cx: &App,
     ) -> MidiInputRouteStatus {
         let capture_track_id = target.track_id.clone();
-        self.route_midi_input_event_with_capture(source, target, event, Some(&capture_track_id), cx)
+        self.route_midi_input_event_with_capture(
+            source,
+            target,
+            event,
+            Some(&capture_track_id),
+            None,
+            cx,
+        )
     }
 
     fn route_midi_input_event_with_capture(
@@ -172,11 +180,12 @@ impl StudioLayout {
         target: MidiInputTarget,
         event: MidiInputEvent,
         capture_track_id: Option<&str>,
+        capture_beat: Option<f32>,
         cx: &App,
     ) -> MidiInputRouteStatus {
         let _source = source;
         if let Some(track_id) = capture_track_id {
-            self.capture_midi_record_event(track_id, &event, cx);
+            self.capture_midi_record_event_at(track_id, &event, capture_beat, cx);
         }
         let bridge_instance = target.plugin_instance_id.clone();
         let sink_ready = match self
@@ -308,7 +317,7 @@ impl StudioLayout {
 
     /// Sync enabled hardware MIDI input ports and route pending messages into
     /// armed/selected instrument tracks (and the active MIDI recording take).
-    pub(super) fn poll_hardware_midi_input(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_hardware_midi_input_devices(&mut self, cx: &mut Context<Self>) {
         let devices = {
             let settings = self.settings.read(cx);
             settings.current.hardware.midi.devices.clone()
@@ -318,14 +327,17 @@ impl StudioLayout {
         let detected = crate::device_registry::cached_midi_devices();
         let resolved = sphere_midi_service::resolve_midi_devices(&devices, &detected);
         self.hardware_midi_input.sync_enabled_devices(&resolved);
+    }
 
+    pub(super) fn drain_hardware_midi_input(&mut self, cx: &mut Context<Self>) -> bool {
         let messages = self.hardware_midi_input.drain(64);
         if messages.is_empty() {
-            return;
+            return false;
         }
         for message in messages {
             self.route_hardware_midi_message(message, cx);
         }
+        true
     }
 
     fn route_hardware_midi_message(
@@ -333,6 +345,17 @@ impl StudioLayout {
         message: HardwareMidiInputMessage,
         cx: &mut Context<Self>,
     ) {
+        // Compensate for control-thread scheduling delay. Screen capture can
+        // delay GPUI work even though the native MIDI callback arrived on time;
+        // recording placement follows that arrival rather than the later drain.
+        let capture_beat = self.audio_bridge.engine.as_ref().map(|engine| {
+            let snapshot = engine.transport_snapshot();
+            compensated_midi_capture_beat(
+                snapshot.position_beats,
+                snapshot.bpm,
+                message.received_at.elapsed().as_secs_f64(),
+            )
+        });
         let channel = match &message.event {
             MidiInputEvent::NoteOn { channel, .. }
             | MidiInputEvent::NoteOff { channel, .. }
@@ -354,6 +377,7 @@ impl StudioLayout {
                 resolved.target,
                 message.event.clone(),
                 Some(&resolved.capture_track_id),
+                capture_beat,
                 cx,
             );
         }
@@ -600,6 +624,11 @@ fn first_instrument_insert_id(
     }
 }
 
+fn compensated_midi_capture_beat(current_beat: f64, bpm: f64, queue_delay_seconds: f64) -> f32 {
+    let elapsed_beats = queue_delay_seconds.max(0.0) * bpm.max(1.0) / 60.0;
+    (current_beat - elapsed_beats).max(0.0) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +651,13 @@ mod tests {
             armed: true,
             input_monitor: InputMonitorMode::WhenRecordArmed,
         })
+    }
+
+    #[test]
+    fn midi_record_timing_compensates_control_queue_delay() {
+        let beat = compensated_midi_capture_beat(8.0, 120.0, 0.025);
+        assert!((beat - 7.95).abs() < 0.0001);
+        assert_eq!(compensated_midi_capture_beat(0.01, 120.0, 1.0), 0.0);
     }
 
     #[test]

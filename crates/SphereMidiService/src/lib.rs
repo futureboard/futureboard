@@ -473,6 +473,9 @@ pub struct HardwareMidiInputMessage {
     pub device_id: String,
     pub device_name: String,
     pub event: MidiInputEvent,
+    /// Monotonic arrival time captured in the native MIDI callback. Consumers
+    /// use this to compensate recording placement when the UI thread is busy.
+    pub received_at: Instant,
 }
 
 /// Control-thread hardware MIDI input listener. Opens midir connections for
@@ -651,6 +654,7 @@ fn open_hardware_midi_inputs(
                         device_id: id.clone(),
                         device_name: name.clone(),
                         event,
+                        received_at: Instant::now(),
                     });
                 }
             },

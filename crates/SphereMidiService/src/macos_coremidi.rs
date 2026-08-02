@@ -228,6 +228,7 @@ unsafe extern "C" fn midi_read_proc(
                     device_id: state.device_id.clone(),
                     device_name: state.device_name.clone(),
                     event,
+                    received_at: std::time::Instant::now(),
                 });
             }
             // Advance to next packet (variable-length: header + data[length], 4-byte aligned).

@@ -1363,9 +1363,6 @@ impl EngineInner {
         pitch: u8,
         velocity: u8,
     ) -> Result<(), SphereAudioError> {
-        eprintln!(
-            "[midi-preview-engine] queued note_on track={track_id} instance={plugin_instance_id} pitch={pitch}"
-        );
         self.send_command(EngineCommand::PluginPreviewNoteOn {
             track_id,
             plugin_instance_id,
@@ -1382,9 +1379,6 @@ impl EngineInner {
         channel: u8,
         pitch: u8,
     ) -> Result<(), SphereAudioError> {
-        eprintln!(
-            "[midi-preview-engine] queued note_off track={track_id} instance={plugin_instance_id} pitch={pitch}"
-        );
         self.send_command(EngineCommand::PluginPreviewNoteOff {
             track_id,
             plugin_instance_id,
