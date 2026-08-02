@@ -152,6 +152,7 @@ impl StudioLayout {
                 }
                 ContextTarget::Tempo
                 | ContextTarget::TapTempo
+                | ContextTarget::CountIn
                 | ContextTarget::TimeSignature
                 | ContextTarget::TimelineRuler { .. } => true,
                 ContextTarget::TimeSignaturePoint { .. }

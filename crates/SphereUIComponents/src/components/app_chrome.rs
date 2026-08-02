@@ -89,7 +89,7 @@ pub struct PanelChromeState {
 pub struct TransportChromeState {
     pub playing: bool,
     pub recording: bool,
-    pub count_in_bars: u32,
+    pub count_in_enabled: bool,
     pub loop_enabled: bool,
     pub metronome_enabled: bool,
     pub follow_playhead: bool,
@@ -120,7 +120,9 @@ pub struct TransportChromeState {
     pub on_play_toggle: ChromeActionCb,
     pub on_stop: ChromeActionCb,
     pub on_record: ChromeActionCb,
-    pub on_count_in_cycle: ChromeActionCb,
+    pub on_count_in_toggle: ChromeActionCb,
+    /// Opens the count-in duration dropdown at the pointer position.
+    pub on_count_in_menu: BpmMenuCb,
     pub on_loop_toggle: ChromeActionCb,
     pub on_metronome_toggle: ChromeActionCb,
     pub on_follow_toggle: ChromeActionCb,
@@ -417,7 +419,8 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
     let on_record = state.on_record.clone();
-    let on_count_in_cycle = state.on_count_in_cycle.clone();
+    let on_count_in_toggle = state.on_count_in_toggle.clone();
+    let on_count_in_menu = state.on_count_in_menu.clone();
     let on_loop = state.on_loop_toggle.clone();
     let on_metronome = state.on_metronome_toggle.clone();
     let on_follow = state.on_follow_toggle.clone();
@@ -501,32 +504,57 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
             })
             .occlude(),
         )
-        // Record count-in. This edits the persisted recording setting and the
-        // recording path consumes the same value before capture starts.
+        // Record count-in split control: the main button is a true on/off
+        // toggle; the visible chevron opens the duration dropdown.
         .child(
             div()
                 .h(px(20.0))
-                .min_w(px(34.0))
-                .px(px(5.0))
                 .flex()
+                .flex_row()
                 .items_center()
-                .justify_center()
                 .rounded_sm()
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .text_size(px(8.0))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(if state.count_in_bars > 0 {
-                    Colors::accent_primary()
-                } else {
-                    Colors::text_muted()
-                })
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    on_count_in_cycle(&(), window, cx);
-                })
-                .child(format!("COUNT {}", state.count_in_bars))
+                .child(
+                    div()
+                        .h_full()
+                        .min_w(px(34.0))
+                        .px(px(5.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(if state.count_in_enabled {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_muted()
+                        })
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                            on_count_in_toggle(&(), window, cx);
+                        })
+                        .child("COUNT"),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .w(px(13.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_l(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .text_color(Colors::text_muted())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                            let x: f32 = event.position.x.into();
+                            let y: f32 = event.position.y.into();
+                            on_count_in_menu(&(x, y), window, cx);
+                        })
+                        .child("▾"),
+                )
                 .occlude(),
         )
         // Loop

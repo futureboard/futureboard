@@ -928,11 +928,7 @@ fn active_summary(
         .bg(Colors::surface_panel_alt())
         .child(
             div()
-                .text_size(px(if kind == SongTextPanelKind::ChordDisplay {
-                    18.0
-                } else {
-                    13.0
-                }))
+                .text_size(px(18.0))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(if active.is_some() {
                     Colors::text_primary()

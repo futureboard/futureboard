@@ -207,9 +207,9 @@ impl Render for Timeline {
         });
 
         let on_delete_track = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.delete_track(track_id);
-            this.mark_project_changed(cx);
-            cx.notify();
+            if let Some(snapshot) = TrackSnapshot::capture(&this.state, track_id) {
+                this.run_edit_command(EditCommand::DeleteTrack { snapshot }, cx);
+            }
         });
 
         let on_volume_change =
@@ -1746,7 +1746,7 @@ impl Render for Timeline {
                 ScrollDelta::Lines(p) => (p.x * 36.0, p.y * 36.0),
             };
 
-            if !event.modifiers.control {
+            if !(event.modifiers.control || event.modifiers.platform) {
                 let (max_x, max_y) = this.max_scroll_offsets(window);
                 let (scroll_x, scroll_y) = if event.modifiers.shift {
                     let horizontal = if delta.1.abs() > 0.01 {

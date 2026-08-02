@@ -134,7 +134,7 @@
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillStyle = faint
-    ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+    ctx.font = '650 9px system-ui, sans-serif'
     ctx.fillText('quiet  →  loud', 0, 0)
     ctx.restore()
 
@@ -190,7 +190,7 @@
     ctx.roundRect(dryX - 5, padT + 4, 10, 10, 2)
     ctx.fill()
     ctx.fillStyle = faint
-    ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+    ctx.font = '650 9px system-ui, sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'bottom'
     ctx.fillText('Sound', dryX, padT - 4)
@@ -240,7 +240,7 @@
 
       if (tap.pass <= NUMBERED_PASSES && tap.amplitude > 0.08) {
         ctx.fillStyle = alpha(text, 0.75)
-        ctx.font = '650 9px Inter, "Segoe UI", system-ui, sans-serif'
+        ctx.font = '650 9px system-ui, sans-serif'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'bottom'
         ctx.fillText(String(tap.pass), gx, top - 4)

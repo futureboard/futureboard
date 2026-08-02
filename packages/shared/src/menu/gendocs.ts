@@ -155,11 +155,11 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
   <rect width="${PAGE_W}" height="${PAGE_H}" fill="#101114"/>
   <rect x="${MARGIN_X - 50}" y="${MARGIN_TOP - 80}" width="${CONTENT_W + 100}" height="${PAGE_H - MARGIN_TOP - MARGIN_BOTTOM + 20}" rx="34" fill="#15171c" stroke="#2a2d35" stroke-width="2"/>
 
-  <text x="${MARGIN_X}" y="${y}" fill="#f4f6fb" font-family="Inter, Arial, sans-serif" font-size="${FONT.title}" font-weight="800">
+  <text x="${MARGIN_X}" y="${y}" fill="#f4f6fb" font-family="system-ui, sans-serif" font-size="${FONT.title}" font-weight="800">
     Futureboard Studio Menu Map
   </text>
 
-  <text x="${MARGIN_X}" y="${y + 48}" fill="#8d94a6" font-family="Inter, Arial, sans-serif" font-size="${FONT.small}">
+  <text x="${MARGIN_X}" y="${y + 48}" fill="#8d94a6" font-family="system-ui, sans-serif" font-size="${FONT.small}">
     Generated documentation · A4 300PPI · Page ${pageIndex + 1} / ${pageCount}
   </text>
 `);
@@ -169,7 +169,7 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
   for (const row of rows) {
     if (row.kind === "section") {
       parts.push(`
-  <text x="${MARGIN_X}" y="${y}" fill="#dce7ff" font-family="Inter, Arial, sans-serif" font-size="${FONT.section}" font-weight="800">
+  <text x="${MARGIN_X}" y="${y}" fill="#dce7ff" font-family="system-ui, sans-serif" font-size="${FONT.section}" font-weight="800">
     ${esc(row.label)}
   </text>
   <line x1="${MARGIN_X}" y1="${y + 24}" x2="${PAGE_W - MARGIN_X}" y2="${y + 24}" stroke="#313744" stroke-width="2"/>
@@ -203,7 +203,7 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
     parts.push(`
   <rect x="${x}" y="${y - 44}" width="${PAGE_W - MARGIN_X - x}" height="${h - 16}" rx="18" fill="${bg}" stroke="${stroke}" stroke-width="2"/>
 
-  <text x="${x + 28}" y="${y}" fill="${labelColor}" font-family="Inter, Arial, sans-serif" font-size="${FONT.item}" font-weight="700">
+  <text x="${x + 28}" y="${y}" fill="${labelColor}" font-family="system-ui, sans-serif" font-size="${FONT.item}" font-weight="700">
     ${row.checked ? "✓ " : ""}${esc(row.label)}
   </text>
 `);
@@ -211,7 +211,7 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
     if (row.accelerator) {
       parts.push(`
   <rect x="${PAGE_W - MARGIN_X - 260}" y="${y - 42}" width="230" height="44" rx="12" fill="#111318" stroke="#343a46" stroke-width="2"/>
-  <text x="${PAGE_W - MARGIN_X - 145}" y="${y - 12}" text-anchor="middle" fill="#c6ccda" font-family="Inter, Arial, sans-serif" font-size="${FONT.meta}" font-weight="700">
+  <text x="${PAGE_W - MARGIN_X - 145}" y="${y - 12}" text-anchor="middle" fill="#c6ccda" font-family="system-ui, sans-serif" font-size="${FONT.meta}" font-weight="700">
     ${esc(row.accelerator)}
   </text>
 `);
@@ -220,14 +220,14 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
     let metaY = y + 37;
 
     parts.push(`
-  <text x="${x + 30}" y="${metaY}" fill="${metaColor}" font-family="Inter, Arial, sans-serif" font-size="${FONT.meta}">
+  <text x="${x + 30}" y="${metaY}" fill="${metaColor}" font-family="system-ui, sans-serif" font-size="${FONT.meta}">
     id: ${esc(row.id)}
   </text>
 `);
 
     if (row.action) {
       parts.push(`
-  <text x="${x + 480}" y="${metaY}" fill="${metaColor}" font-family="Inter, Arial, sans-serif" font-size="${FONT.meta}">
+  <text x="${x + 480}" y="${metaY}" fill="${metaColor}" font-family="system-ui, sans-serif" font-size="${FONT.meta}">
     action: ${esc(row.action)}
   </text>
 `);
@@ -236,7 +236,7 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
     if (row.description) {
       metaY += 34;
       parts.push(`
-  <text x="${x + 30}" y="${metaY}" fill="#737d91" font-family="Inter, Arial, sans-serif" font-size="${FONT.meta}">
+  <text x="${x + 30}" y="${metaY}" fill="#737d91" font-family="system-ui, sans-serif" font-size="${FONT.meta}">
     ${esc(row.description)}
   </text>
 `);
@@ -246,11 +246,11 @@ function renderPage(rows: Row[], pageIndex: number, pageCount: number): string {
   }
 
   parts.push(`
-  <text x="${MARGIN_X}" y="${FOOTER_Y}" fill="#687084" font-family="Inter, Arial, sans-serif" font-size="${FONT.small}">
+  <text x="${MARGIN_X}" y="${FOOTER_Y}" fill="#687084" font-family="system-ui, sans-serif" font-size="${FONT.small}">
     Futureboard Studio · Menu Documentation
   </text>
 
-  <text x="${PAGE_W - MARGIN_X}" y="${FOOTER_Y}" text-anchor="end" fill="#687084" font-family="Inter, Arial, sans-serif" font-size="${FONT.small}">
+  <text x="${PAGE_W - MARGIN_X}" y="${FOOTER_Y}" text-anchor="end" fill="#687084" font-family="system-ui, sans-serif" font-size="${FONT.small}">
     ${pageIndex + 1} / ${pageCount}
   </text>
 </svg>

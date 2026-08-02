@@ -182,14 +182,14 @@ function SaturationCurve({ saturation, gain, active }: { saturation: number; gai
     ctx.shadowBlur   = 0;
 
     // Drive label
-    ctx.font         = `500 8px Inter,system-ui,sans-serif`;
+    ctx.font         = `500 8px system-ui,sans-serif`;
     ctx.fillStyle    = active ? `rgba(${ACCENT_RGB},0.5)` : "rgba(80,100,60,0.35)";
     ctx.textAlign    = "left";
     ctx.textBaseline = "top";
     ctx.fillText(`×${drive.toFixed(1)}`, pad + 4, pad + 4);
 
     // Corner label
-    ctx.font         = "400 7px Inter,system-ui,sans-serif";
+    ctx.font         = "400 7px system-ui,sans-serif";
     ctx.fillStyle    = "rgba(80,110,55,0.3)";
     ctx.textAlign    = "center";
     ctx.textBaseline = "bottom";

@@ -24,7 +24,7 @@ use DirectAudio::{
     ArrangementExportSummary, ExportCancelToken, ExportProgress, ExportStage, TrackExportTarget,
 };
 
-use crate::components::form::select::{select, SelectOption};
+use crate::components::form::select::{select, select_dismiss_backdrop, SelectOption};
 use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
 use crate::components::text_input::{bind_mouse_selection, text_field_with_callbacks_and_ime};
 use crate::components::title_bar::external_window_titlebar_compact;
@@ -482,6 +482,16 @@ impl Render for ExportArrangementWindow {
         }
         let target = cx.entity().clone();
         let title = "Export Arrangement".to_string();
+        let dismiss_backdrop = self.open_select.is_some().then(|| {
+            let target = target.clone();
+            select_dismiss_backdrop(Arc::new(move |_, _window, cx| {
+                let _ = target.update(cx, |this, cx| {
+                    if this.open_select.take().is_some() {
+                        cx.notify();
+                    }
+                });
+            }))
+        });
 
         let body = match &self.state {
             ExportJobState::Editing | ExportJobState::Failed(_) => {
@@ -501,6 +511,7 @@ impl Render for ExportArrangementWindow {
         };
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -544,6 +555,7 @@ impl Render for ExportArrangementWindow {
                     .child(self.subtitle()),
             )
             .child(body)
+            .children(dismiss_backdrop)
     }
 }
 

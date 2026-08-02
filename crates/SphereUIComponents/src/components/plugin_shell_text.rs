@@ -18,7 +18,7 @@ pub use sphere_graphic_engine::TextAlign;
 pub fn shell_font_theme() -> PluginShellFontTheme {
     PluginShellFontTheme {
         family_primary: crate::theme::FONT_FAMILY,
-        family_fallback: crate::theme::THAI_FONT_FAMILY,
+        family_fallback: crate::theme::SYSTEM_THAI_UI_FONT_FAMILY,
         title_size: crate::theme::typography::PLUGIN_TITLE,
         body_size: crate::theme::typography::UI_SM,
         weight_title: 500,
@@ -44,8 +44,8 @@ mod imp {
 
     static INIT_LOG: Once = Once::new();
 
-    /// Lazily build the engine renderer from the shared embedded fonts + shell
-    /// font policy, logging diagnostics once under the shell's tag.
+    /// Lazily build the engine renderer from the system-font policy, logging
+    /// diagnostics once under the shell's tag.
     fn with_renderer<R>(f: impl FnOnce(Option<&DWriteTextRenderer>) -> R) -> R {
         RENDERER.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -56,7 +56,7 @@ mod imp {
                     fallback_family: theme.family_fallback.to_string(),
                     default_weight: theme.weight_title,
                 };
-                let renderer = DWriteTextRenderer::new_with_shared_ui_fonts(config);
+                let renderer = DWriteTextRenderer::new(&[], config);
                 if let Some(renderer) = renderer.as_ref() {
                     log_diagnostics(renderer);
                 }
@@ -72,7 +72,7 @@ mod imp {
             eprintln!("[Fonts] default_ui_font={}", theme.family_primary);
             eprintln!("[Fonts] fallback_ui_font={}", theme.family_fallback);
             let d = renderer.diagnostics();
-            eprintln!("[plugin-shell-font] source=shared_embedded");
+            eprintln!("[plugin-shell-font] source=system");
             eprintln!("[plugin-shell-font] primary={}", d.primary_family);
             eprintln!("[plugin-shell-font] fallback={}", d.fallback_family);
             eprintln!("[plugin-shell-font] dwrite_factory_version=5");

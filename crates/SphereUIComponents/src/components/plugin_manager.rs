@@ -19,6 +19,9 @@ use SpherePluginHost::registry::{
 use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
+use crate::components::progress_dialog::{
+    open_progress_dialog_window, ProgressBarValue, ProgressDialogOptions,
+};
 use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks_and_ime, TextInputAction, TextInputCallbacks,
@@ -1823,4 +1826,206 @@ pub fn open_plugin_manager_window(
 
     cx.open_window(options, |_window, cx| cx.new(PluginManagerWindow::new))
         .map_err(|error| error.to_string())
+}
+
+/// Scan the default plug-in locations in a compact, standalone progress dialog.
+/// Closing the dialog only hides progress; the registry scan continues safely
+/// on its worker thread and persists its result for the next plug-in picker.
+pub fn open_plugin_scan_progress_dialog(
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let options = ProgressDialogOptions::default()
+        .title("Plug-in Scan")
+        .heading("Scanning installed plug-ins")
+        .detail(plugin_scan_discovery_text())
+        .progress(ProgressBarValue::Indeterminate)
+        .footer("You can hide this window; scanning will continue.")
+        .cancel_label("Hide")
+        .hide_percent();
+    let dialog = open_progress_dialog_window(owner_bounds, options, None, cx)?;
+
+    cx.spawn(async move |cx| {
+        let (tx, rx) = std::sync::mpsc::channel::<ScanProgress>();
+        let handle = std::thread::spawn(move || {
+            PluginRegistry::scan_with_progress(ScanOptions::default(), |progress| {
+                let _ = tx.send(progress);
+            })
+        });
+
+        loop {
+            while let Ok(progress) = rx.try_recv() {
+                update_scan_progress_dialog(&dialog, progress, cx);
+            }
+            if handle.is_finished() {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(32))
+                .await;
+        }
+
+        while let Ok(progress) = rx.try_recv() {
+            update_scan_progress_dialog(&dialog, progress, cx);
+        }
+
+        let completed = match handle.join() {
+            Ok(result) => {
+                let plugin_count = result.plugins.len();
+                let failed_count = result.failed.len();
+                let detail = if let Some(au_error) = result.au_scan_error.as_deref() {
+                    format!(
+                        "{plugin_count} plug-in(s) are ready. AudioUnit scan issue: {au_error}"
+                    )
+                } else if failed_count == 0 {
+                    format!("{plugin_count} plug-in(s) are ready to use.")
+                } else {
+                    format!(
+                        "{plugin_count} plug-in(s) are ready; {failed_count} item(s) could not be scanned."
+                    )
+                };
+                let footer = if result.generated_presets > 0 {
+                    format!("Registered {} preset(s).", result.generated_presets)
+                } else {
+                    "The plug-in index is up to date.".to_string()
+                };
+                ProgressDialogOptions::default()
+                    .title("Plug-in Scan")
+                    .heading("Scan complete")
+                    .detail(detail)
+                    .progress(ProgressBarValue::value(1.0))
+                    .footer(footer)
+                    .cancel_label("Close")
+            }
+            Err(_) => ProgressDialogOptions::default()
+                .title("Plug-in Scan")
+                .heading("Scan failed")
+                .detail("The plug-in scanner stopped unexpectedly. You can try again from Plug-in Manager.")
+                .progress(ProgressBarValue::Indeterminate)
+                .footer("No running scan remains.")
+                .cancel_label("Close")
+                .hide_percent(),
+        };
+        let _ = dialog.update(cx, |view, _window, cx| {
+            view.set_options(completed, cx);
+        });
+    })
+    .detach();
+
+    Ok(())
+}
+
+fn update_scan_progress_dialog(
+    dialog: &WindowHandle<crate::components::progress_dialog::ProgressDialogWindow>,
+    progress: ScanProgress,
+    cx: &mut gpui::AsyncApp,
+) {
+    let options = match progress {
+        ScanProgress::Started { bundle_total } => ProgressDialogOptions::default()
+            .title("Plug-in Scan")
+            .heading("Scanning installed plug-ins")
+            .detail(format!(
+                "Found {bundle_total} plug-in bundle(s) to inspect."
+            ))
+            .progress(if bundle_total == 0 {
+                ProgressBarValue::Indeterminate
+            } else {
+                ProgressBarValue::value(0.0)
+            })
+            .footer("You can hide this window; scanning will continue.")
+            .cancel_label("Hide"),
+        ScanProgress::ScanningBundle {
+            current,
+            total,
+            path,
+        } => ProgressDialogOptions::default()
+            .title("Plug-in Scan")
+            .heading("Reading plug-in metadata")
+            .detail(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Plug-in bundle"),
+            )
+            .progress(scan_fraction(current, total))
+            .footer(format!("{} of {} bundle(s)", current.min(total), total))
+            .cancel_label("Hide"),
+        ScanProgress::Registering {
+            current,
+            total,
+            name,
+            generated_presets,
+            ..
+        } => ProgressDialogOptions::default()
+            .title("Plug-in Scan")
+            .heading("Registering plug-ins")
+            .detail(name)
+            .progress(scan_fraction(current, total))
+            .footer(format!(
+                "{} of {} plug-in(s) · {} preset(s)",
+                current.min(total),
+                total,
+                generated_presets
+            ))
+            .cancel_label("Hide"),
+        ScanProgress::Failed { path, error } => ProgressDialogOptions::default()
+            .title("Plug-in Scan")
+            .heading("Scanning installed plug-ins")
+            .detail(format!(
+                "Skipped {}: {error}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("plug-in")
+            ))
+            .progress(ProgressBarValue::Indeterminate)
+            .footer("The scan is continuing with the remaining plug-ins.")
+            .cancel_label("Hide")
+            .hide_percent(),
+        ScanProgress::FormatFinished {
+            format,
+            success_count,
+            failed_count,
+            crashed_count,
+            error,
+        } => {
+            let format_name = if format == PluginFormat::Au {
+                "AudioUnit"
+            } else {
+                format.label()
+            };
+            let detail = error.unwrap_or_else(|| format!("{format_name} scan finished."));
+            ProgressDialogOptions::default()
+                .title("Plug-in Scan")
+                .heading(format!("{format_name} scan complete"))
+                .detail(detail)
+                .progress(ProgressBarValue::Indeterminate)
+                .footer(format!(
+                    "{success_count} ready · {failed_count} failed · {crashed_count} crashed"
+                ))
+                .cancel_label("Hide")
+                .hide_percent()
+        }
+    };
+
+    let _ = dialog.update(cx, |view, _window, cx| {
+        view.set_options(options, cx);
+    });
+}
+
+fn scan_fraction(current: usize, total: usize) -> ProgressBarValue {
+    if total == 0 {
+        ProgressBarValue::Indeterminate
+    } else {
+        ProgressBarValue::value(current as f32 / total as f32)
+    }
+}
+
+fn plugin_scan_discovery_text() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Discovering VST3, CLAP, and AudioUnit plug-ins…"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Discovering VST3 and CLAP plug-ins…"
+    }
 }

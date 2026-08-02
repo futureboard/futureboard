@@ -69,7 +69,7 @@ body {
   background: var(--chassis);
   color: var(--engrave);
   font-family:
-    'Inter Variable', Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-synthesis: none;

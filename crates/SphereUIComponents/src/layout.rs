@@ -1125,13 +1125,15 @@ impl StudioLayout {
             timeline.set_native_audio_callbacks(
                 Some(Arc::new(move |beats, bpm, reason| {
                     match reason {
-                        SeekReason::UserDragging => {
+                        SeekReason::UserDragStart | SeekReason::UserDragging => {
                             let _ = seek_engine.set_metronome_suspended(true);
                         }
-                        SeekReason::TimelineClick | SeekReason::Programmatic => {
+                        SeekReason::UserDragEnd
+                        | SeekReason::TimelineClick
+                        | SeekReason::RewindForward
+                        | SeekReason::Programmatic => {
                             let _ = seek_engine.set_metronome_suspended(false);
                         }
-                        _ => {}
                     }
                     let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
                     if let Err(error) = seek_engine.seek(seconds) {
@@ -1434,6 +1436,20 @@ impl StudioLayout {
                     settings.update_setting(move |schema| schema.appearance.theme = theme_id, cx);
                 });
                 self.command_palette.close();
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(value) = command_id.strip_prefix("recording:set-count-in-bars:") {
+            if let Ok(bars) = value.parse::<u32>() {
+                let bars = bars.clamp(1, 4);
+                self.settings.update(cx, |settings, cx| {
+                    settings.update_setting(
+                        move |schema| schema.recording.metronome.count_in_bars = bars,
+                        cx,
+                    );
+                });
+                self.overlay.open_popover = None;
                 cx.notify();
             }
             return;

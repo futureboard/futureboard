@@ -12,8 +12,17 @@ use super::StudioLayout;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VirtualKeyboardTargetStatus {
     pub target: Option<MidiInputTarget>,
+    /// Track that owns the incoming performance for recording. This can differ
+    /// from `target.track_id` when a MIDI track feeds an Instrument track.
+    capture_track_id: Option<String>,
     pub label: Option<String>,
     pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedMidiInputTarget {
+    target: MidiInputTarget,
+    capture_track_id: String,
 }
 
 impl StudioLayout {
@@ -75,6 +84,7 @@ impl StudioLayout {
         cx: &App,
     ) -> MidiInputRouteStatus {
         let status = self.resolve_virtual_keyboard_target(cx);
+        let capture_track_id = status.capture_track_id.clone();
         let Some(target) = status.target else {
             if virtual_keyboard_debug() {
                 eprintln!("[vkbd] route event={event:?} target=none -> NoTarget");
@@ -87,10 +97,11 @@ impl StudioLayout {
                 target.track_id, target.plugin_instance_id
             );
         }
-        self.route_midi_input_event(
+        self.route_midi_input_event_with_capture(
             MidiInputSource::VirtualKeyboard,
             target,
             MidiInputEvent::from(event),
+            capture_track_id.as_deref(),
             cx,
         )
     }
@@ -151,8 +162,22 @@ impl StudioLayout {
         event: MidiInputEvent,
         cx: &App,
     ) -> MidiInputRouteStatus {
+        let capture_track_id = target.track_id.clone();
+        self.route_midi_input_event_with_capture(source, target, event, Some(&capture_track_id), cx)
+    }
+
+    fn route_midi_input_event_with_capture(
+        &mut self,
+        source: MidiInputSource,
+        target: MidiInputTarget,
+        event: MidiInputEvent,
+        capture_track_id: Option<&str>,
+        cx: &App,
+    ) -> MidiInputRouteStatus {
         let _source = source;
-        self.capture_midi_record_event(&target.track_id, &event, cx);
+        if let Some(track_id) = capture_track_id {
+            self.capture_midi_record_event(track_id, &event, cx);
+        }
         let bridge_instance = target.plugin_instance_id.clone();
         let sink_ready = match self
             .plugin_editors
@@ -323,11 +348,12 @@ impl StudioLayout {
         if targets.is_empty() {
             return;
         }
-        for target in targets {
-            let _ = self.route_midi_input_event(
+        for resolved in targets {
+            let _ = self.route_midi_input_event_with_capture(
                 MidiInputSource::Hardware,
-                target,
+                resolved.target,
                 message.event.clone(),
+                Some(&resolved.capture_track_id),
                 cx,
             );
         }
@@ -339,7 +365,7 @@ impl StudioLayout {
         device_name: &str,
         channel: Option<u8>,
         cx: &App,
-    ) -> Vec<MidiInputTarget> {
+    ) -> Vec<ResolvedMidiInputTarget> {
         let timeline = self.timeline.read(cx);
         let state = &timeline.state;
         let mut targets = Vec::new();
@@ -363,7 +389,7 @@ impl StudioLayout {
             if !track.armed && !selected {
                 continue;
             }
-            if let Some(target) = hardware_midi_target_for_track(track) {
+            if let Some(target) = hardware_midi_target_for_track(state, track) {
                 targets.push(target);
             }
         }
@@ -373,15 +399,21 @@ impl StudioLayout {
         // virtual-keyboard resolver so an instrument track with default
         // AllInputs still receives notes when selected.
         if targets.is_empty() {
-            if let Some(target) = self.resolve_virtual_keyboard_target(cx).target {
+            let fallback = self.resolve_virtual_keyboard_target(cx);
+            if let (Some(target), Some(capture_track_id)) =
+                (fallback.target, fallback.capture_track_id)
+            {
                 // Re-check the fallback track still accepts this device.
-                if let Some(track) = state.find_track(&target.track_id) {
+                if let Some(track) = state.find_track(&capture_track_id) {
                     if track_accepts_hardware_midi(
                         &track.routing.midi_input,
                         device_id,
                         device_name,
                     ) {
-                        targets.push(target);
+                        targets.push(ResolvedMidiInputTarget {
+                            target,
+                            capture_track_id,
+                        });
                     }
                 }
             }
@@ -410,36 +442,40 @@ impl StudioLayout {
         let Some(track) = track else {
             return VirtualKeyboardTargetStatus {
                 target: None,
+                capture_track_id: None,
                 label: None,
                 hint: Some("Select or arm an instrument track to play.".to_string()),
             };
         };
 
-        let plugin_instance_id = track
-            .instrument_plugin_instance_id
-            .clone()
-            .or_else(|| first_instrument_insert_id(track));
+        let destination = state
+            .effective_instrument_track_id(&track.id)
+            .and_then(|track_id| state.find_track(&track_id));
+        let plugin_instance_id = destination.and_then(instrument_instance_id);
 
         let Some(plugin_instance_id) = plugin_instance_id else {
             // The built-in Soundfont Player is a track instrument rather than a
             // hosted plugin, so it has no instance id — the engine's track MIDI
             // preview reaches it directly.
-            if track.builtin_soundfont_player {
-                let loaded = track
+            if destination.is_some_and(|destination| destination.builtin_soundfont_player) {
+                let destination = destination.expect("checked above");
+                let loaded = destination
                     .soundfont_path
                     .as_deref()
                     .is_some_and(|path| !path.is_empty());
                 return VirtualKeyboardTargetStatus {
                     target: loaded.then(|| MidiInputTarget {
-                        track_id: track.id.clone(),
+                        track_id: destination.id.clone(),
                         plugin_instance_id: None,
                     }),
+                    capture_track_id: loaded.then(|| track.id.clone()),
                     label: Some(track.name.clone()),
                     hint: (!loaded).then(|| "Load a SoundFont on the selected track.".to_string()),
                 };
             }
             return VirtualKeyboardTargetStatus {
                 target: None,
+                capture_track_id: None,
                 label: Some(track.name.clone()),
                 hint: Some("Load an instrument on the selected track.".to_string()),
             };
@@ -447,9 +483,12 @@ impl StudioLayout {
 
         VirtualKeyboardTargetStatus {
             target: Some(MidiInputTarget {
-                track_id: track.id.clone(),
+                track_id: destination
+                    .map(|destination| destination.id.clone())
+                    .unwrap_or_else(|| track.id.clone()),
                 plugin_instance_id: Some(plugin_instance_id),
             }),
+            capture_track_id: Some(track.id.clone()),
             label: Some(track.name.clone()),
             hint: None,
         }
@@ -490,38 +529,58 @@ fn track_accepts_hardware_midi(
 }
 
 fn hardware_midi_target_for_track(
+    state: &components::timeline::timeline_state::TimelineState,
     track: &components::timeline::timeline_state::TrackState,
-) -> Option<MidiInputTarget> {
-    let plugin_instance_id = track
-        .instrument_plugin_instance_id
-        .clone()
-        .or_else(|| first_instrument_insert_id(track));
+) -> Option<ResolvedMidiInputTarget> {
+    let destination = state
+        .effective_instrument_track_id(&track.id)
+        .and_then(|track_id| state.find_track(&track_id));
+    let plugin_instance_id = destination.and_then(instrument_instance_id);
     if plugin_instance_id.is_some() {
-        return Some(MidiInputTarget {
-            track_id: track.id.clone(),
-            plugin_instance_id,
+        return Some(ResolvedMidiInputTarget {
+            target: MidiInputTarget {
+                track_id: destination?.id.clone(),
+                plugin_instance_id,
+            },
+            capture_track_id: track.id.clone(),
         });
     }
-    if track.builtin_soundfont_player
-        && track
-            .soundfont_path
-            .as_deref()
-            .is_some_and(|path| !path.is_empty())
-    {
-        return Some(MidiInputTarget {
-            track_id: track.id.clone(),
-            plugin_instance_id: None,
+    if let Some(destination) = destination.filter(|destination| {
+        destination.builtin_soundfont_player
+            && destination
+                .soundfont_path
+                .as_deref()
+                .is_some_and(|path| !path.is_empty())
+    }) {
+        return Some(ResolvedMidiInputTarget {
+            target: MidiInputTarget {
+                track_id: destination.id.clone(),
+                plugin_instance_id: None,
+            },
+            capture_track_id: track.id.clone(),
         });
     }
     // MIDI tracks without an instrument still accept input while recording
     // (notes land in the take buffer via capture_midi_record_event).
     if track.track_type == TrackType::Midi {
-        return Some(MidiInputTarget {
-            track_id: track.id.clone(),
-            plugin_instance_id: None,
+        return Some(ResolvedMidiInputTarget {
+            target: MidiInputTarget {
+                track_id: track.id.clone(),
+                plugin_instance_id: None,
+            },
+            capture_track_id: track.id.clone(),
         });
     }
     None
+}
+
+fn instrument_instance_id(
+    track: &components::timeline::timeline_state::TrackState,
+) -> Option<String> {
+    track
+        .instrument_plugin_instance_id
+        .clone()
+        .or_else(|| first_instrument_insert_id(track))
 }
 
 fn first_instrument_insert_id(
@@ -538,5 +597,57 @@ fn first_instrument_insert_id(
             .filter(|insert| insert.plugin_id.is_some())
             .map(|insert| insert.id.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState, TrackOutputRouting,
+    };
+
+    fn add_track(state: &mut TimelineState, track_type: TrackType, name: &str) -> String {
+        state.create_track(CreateTrackOptions {
+            track_type,
+            name: name.to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 0.8,
+            pan: 0.0,
+            armed: true,
+            input_monitor: InputMonitorMode::WhenRecordArmed,
+        })
+    }
+
+    #[test]
+    fn routed_midi_input_targets_destination_vsti_and_keeps_source_for_capture() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let midi_id = add_track(&mut state, TrackType::Midi, "MIDI");
+        let instrument_id = add_track(&mut state, TrackType::Instrument, "Synth");
+        let instance_id = "insert-synth-1".to_string();
+        state
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == instrument_id)
+            .unwrap()
+            .instrument_plugin_instance_id = Some(instance_id.clone());
+        assert!(state.set_track_output_routing(
+            &midi_id,
+            TrackOutputRouting::Instrument {
+                track_id: instrument_id.clone(),
+            },
+        ));
+
+        let source = state.find_track(&midi_id).unwrap();
+        let resolved = hardware_midi_target_for_track(&state, source).unwrap();
+        assert_eq!(resolved.capture_track_id, midi_id);
+        assert_eq!(resolved.target.track_id, instrument_id);
+        assert_eq!(resolved.target.plugin_instance_id, Some(instance_id));
     }
 }

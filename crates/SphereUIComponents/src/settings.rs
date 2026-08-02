@@ -72,6 +72,10 @@ pub struct GeneralSettings {
     pub check_updates: bool,
     #[serde(default = "default_true")]
     pub discord_rpc_enabled: bool,
+    /// True after the user has answered the first-launch plug-in scan prompt.
+    /// This records that the choice was made, not whether they chose to scan.
+    #[serde(default)]
+    pub plugin_scan_prompt_answered: bool,
     /// User-configured default directory for new projects. When `None` or empty
     /// the platform default ([`crate::project::io::default_projects_dir`]) is
     /// used. Resolve through [`GeneralSettings::resolved_default_project_dir`].
@@ -92,6 +96,7 @@ impl Default for GeneralSettings {
             show_start_screen: default_true(),
             check_updates: default_true(),
             discord_rpc_enabled: default_true(),
+            plugin_scan_prompt_answered: false,
             default_project_directory: None,
             project_defaults: ProjectDefaults::default(),
             autosave: AutosaveSettings::default(),
@@ -446,11 +451,14 @@ impl DefaultMonitorMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MetronomeSettings {
     pub enabled: bool,
     pub volume: f32,
     pub sound_type: String,
+    /// Whether record count-in is active. The bar count is kept separately so
+    /// toggling count-in off does not discard the user's chosen duration.
+    pub count_in_enabled: bool,
     pub count_in_bars: u32,
 }
 
@@ -460,9 +468,54 @@ impl Default for MetronomeSettings {
             enabled: false,
             volume: 0.8,
             sound_type: "Woodblock".to_string(),
+            count_in_enabled: true,
             count_in_bars: 1,
         }
     }
+}
+
+impl<'de> Deserialize<'de> for MetronomeSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StoredMetronomeSettings {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default = "default_metronome_volume")]
+            volume: f32,
+            #[serde(default = "default_metronome_sound")]
+            sound_type: String,
+            count_in_enabled: Option<bool>,
+            #[serde(default = "default_count_in_bars")]
+            count_in_bars: u32,
+        }
+
+        let stored = StoredMetronomeSettings::deserialize(deserializer)?;
+        // Before `count_in_enabled` existed, zero bars was the persisted off
+        // state. Preserve that state while migrating the duration to one bar.
+        let count_in_enabled = stored.count_in_enabled.unwrap_or(stored.count_in_bars > 0);
+        Ok(Self {
+            enabled: stored.enabled,
+            volume: stored.volume,
+            sound_type: stored.sound_type,
+            count_in_enabled,
+            count_in_bars: stored.count_in_bars.max(1),
+        })
+    }
+}
+
+fn default_metronome_volume() -> f32 {
+    0.8
+}
+
+fn default_metronome_sound() -> String {
+    "Woodblock".to_string()
+}
+
+fn default_count_in_bars() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -485,10 +538,7 @@ impl Default for Vst3PluginSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            paths: vec![
-                "C:\\Program Files\\Common Files\\VST3".to_string(),
-                "C:\\Program Files (x86)\\Common Files\\VST3".to_string(),
-            ],
+            paths: default_vst3_paths(),
         }
     }
 }
@@ -503,8 +553,91 @@ impl Default for ClapPluginSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            paths: vec!["C:\\Program Files\\Common Files\\CLAP".to_string()],
+            paths: default_clap_paths(),
         }
+    }
+}
+
+fn default_vst3_paths() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            r"C:\Program Files\Common Files\VST3".to_string(),
+            r"C:\Program Files (x86)\Common Files\VST3".to_string(),
+        ]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut paths = vec!["/Library/Audio/Plug-Ins/VST3".to_string()];
+        if let Some(home) = dirs::home_dir() {
+            paths.push(
+                home.join("Library/Audio/Plug-Ins/VST3")
+                    .display()
+                    .to_string(),
+            );
+        }
+        paths
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut paths = vec![
+            "/usr/lib/vst3".to_string(),
+            "/usr/local/lib/vst3".to_string(),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".vst3").display().to_string());
+        }
+        paths
+    }
+}
+
+fn default_clap_paths() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![r"C:\Program Files\Common Files\CLAP".to_string()]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut paths = vec!["/Library/Audio/Plug-Ins/CLAP".to_string()];
+        if let Some(home) = dirs::home_dir() {
+            paths.push(
+                home.join("Library/Audio/Plug-Ins/CLAP")
+                    .display()
+                    .to_string(),
+            );
+        }
+        paths
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut paths = vec![
+            "/usr/lib/clap".to_string(),
+            "/usr/local/lib/clap".to_string(),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".clap").display().to_string());
+        }
+        paths
+    }
+}
+
+fn migrate_foreign_plugin_defaults(paths: &mut Vec<String>, local_defaults: Vec<String>) {
+    const KNOWN_DEFAULTS: &[&str] = &[
+        r"C:\Program Files\Common Files\VST3",
+        r"C:\Program Files (x86)\Common Files\VST3",
+        r"C:\Program Files\Common Files\CLAP",
+        "/Library/Audio/Plug-Ins/VST3",
+        "/Library/Audio/Plug-Ins/CLAP",
+        "/usr/lib/vst3",
+        "/usr/local/lib/vst3",
+        "/usr/lib/clap",
+        "/usr/local/lib/clap",
+    ];
+    paths.retain(|path| {
+        !KNOWN_DEFAULTS.contains(&path.as_str()) || local_defaults.iter().any(|local| local == path)
+    });
+    if paths.is_empty() {
+        *paths = local_defaults;
     }
 }
 
@@ -751,6 +884,26 @@ impl SettingsSchema {
         }
     }
 
+    /// Persist the first-launch plug-in scan prompt response from a pre-Studio
+    /// surface, where the global [`SettingsModel`] may not exist yet.
+    pub fn persist_plugin_scan_prompt_answered() {
+        let path = FutureboardPaths::resolve().settings_file;
+        let mut schema = SettingsModel::load_from_path(&path);
+        schema.general.plugin_scan_prompt_answered = true;
+        schema.validate_and_clamp();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&schema) {
+            Ok(json) => {
+                if let Err(error) = std::fs::write(&path, json) {
+                    eprintln!("[settings] failed to persist plug-in scan prompt: {error}");
+                }
+            }
+            Err(error) => eprintln!("[settings] failed to serialize settings: {error}"),
+        }
+    }
+
     pub fn validate_and_clamp(&mut self) {
         // Clamp tempo
         if self.general.project_defaults.tempo < 20.0 {
@@ -779,7 +932,13 @@ impl SettingsSchema {
             self.appearance.ui_scale = 2.5;
         }
 
-        self.recording.metronome.count_in_bars = self.recording.metronome.count_in_bars.min(4);
+        self.recording.metronome.count_in_bars = self.recording.metronome.count_in_bars.clamp(1, 4);
+
+        // Older builds serialized Windows-only plugin defaults on every OS.
+        // Remove only exact built-in defaults from foreign platforms; custom
+        // folders remain untouched.
+        migrate_foreign_plugin_defaults(&mut self.plugins.vst3.paths, default_vst3_paths());
+        migrate_foreign_plugin_defaults(&mut self.plugins.clap.paths, default_clap_paths());
 
         // Exclusive → Community (or entitlement lost): remap unavailable audio
         // backends before the engine/UI read the schema. Clearing device picks
@@ -981,6 +1140,7 @@ mod tests {
         let schema = SettingsSchema::default();
         assert_eq!(schema.general.language, "en");
         assert!(schema.general.discord_rpc_enabled);
+        assert!(!schema.general.plugin_scan_prompt_answered);
         assert_eq!(schema.general.project_defaults.tempo, 120.0);
         assert_eq!(schema.general.project_defaults.sample_rate, 48000);
         assert_eq!(schema.general.project_defaults.buffer_size, 256);
@@ -1018,6 +1178,42 @@ mod tests {
         schema.appearance.ui_scale = 5.0;
         schema.validate_and_clamp();
         assert_eq!(schema.appearance.ui_scale, 2.5);
+
+        schema.recording.metronome.count_in_bars = 0;
+        schema.validate_and_clamp();
+        assert_eq!(schema.recording.metronome.count_in_bars, 1);
+    }
+
+    #[test]
+    fn legacy_count_in_state_migrates_without_losing_off_state() {
+        let off: MetronomeSettings = serde_json::from_str(
+            r#"{"enabled":false,"volume":0.8,"sound_type":"Woodblock","count_in_bars":0}"#,
+        )
+        .unwrap();
+        assert!(!off.count_in_enabled);
+        assert_eq!(off.count_in_bars, 1);
+
+        let on: MetronomeSettings = serde_json::from_str(
+            r#"{"enabled":false,"volume":0.8,"sound_type":"Woodblock","count_in_bars":3}"#,
+        )
+        .unwrap();
+        assert!(on.count_in_enabled);
+        assert_eq!(on.count_in_bars, 3);
+    }
+
+    #[test]
+    fn plugin_defaults_match_the_current_platform() {
+        let settings = PluginsSettings::default();
+        #[cfg(target_os = "windows")]
+        {
+            assert!(settings.vst3.paths.iter().all(|path| path.contains(':')));
+            assert!(settings.clap.paths.iter().all(|path| path.contains(':')));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(settings.vst3.paths.iter().all(|path| !path.contains(r":\")));
+            assert!(settings.clap.paths.iter().all(|path| !path.contains(r":\")));
+        }
     }
 
     #[test]

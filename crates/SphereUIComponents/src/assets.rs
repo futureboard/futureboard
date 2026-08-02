@@ -1,15 +1,3 @@
-// Embedded fonts — loaded from packages/shared/fonts via include_bytes!
-//
-// Native embeds Inter as the primary UI font and Google Sans as fallback for
-// Thai glyph coverage. The fallback relationship is configured in `theme`.
-pub const INTER_VARIABLE: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/InterVariable.ttf");
-pub const GOOGLE_SANS_VARIABLE: &[u8] =
-    include_bytes!("../../../packages/shared/fonts/GoogleSans-VariableFont.ttf");
-
-pub const FONT_INTER_VARIABLE_PATH: &str = "fonts/InterVariable.ttf";
-pub const FONT_GOOGLE_SANS_VARIABLE_PATH: &str = "fonts/GoogleSans-VariableFont.ttf";
-
 pub struct SvgIcon {
     pub name: &'static str,
     pub svg: &'static str,
@@ -175,52 +163,16 @@ fn log_startup_dpi() {
 #[cfg(not(target_os = "windows"))]
 fn log_startup_dpi() {}
 
-/// Registers embedded UI fonts with the platform's text system.
-pub fn register_fonts(cx: &mut gpui::App) {
-    use std::borrow::Cow;
-
+/// Configures the native system-font policy and process-wide text scale.
+///
+/// The function name is retained for call-site compatibility. No font blobs
+/// are registered: each platform resolves its own UI and Thai system families.
+pub fn register_fonts(_cx: &mut gpui::App) {
     log_startup_dpi();
-
-    eprintln!(
-        "[Fonts] loading font path=packages/shared/fonts/InterVariable.ttf bytes={}",
-        INTER_VARIABLE.len()
-    );
-    eprintln!(
-        "[Fonts] loading font path=packages/shared/fonts/GoogleSans-VariableFont.ttf bytes={}",
-        GOOGLE_SANS_VARIABLE.len()
-    );
-
-    let blobs = vec![
-        (crate::theme::FONT_FAMILY, Cow::Borrowed(INTER_VARIABLE)),
-        ("Google Sans", Cow::Borrowed(GOOGLE_SANS_VARIABLE)),
-    ];
-
-    let mut loaded = 0usize;
-    for (family, data) in &blobs {
-        if data.is_empty() {
-            eprintln!("[Fonts] failed path={family} error=empty embedded font blob");
-            continue;
-        }
-        match cx.text_system().add_fonts(vec![data.clone()]) {
-            Ok(()) => {
-                loaded += 1;
-                eprintln!("[Fonts] loaded family={family}");
-            }
-            Err(err) => {
-                eprintln!("[Fonts] failed path={family} error={err}");
-            }
-        }
-    }
-
-    if loaded == 0 {
-        eprintln!(
-            "[Fonts] default_ui_font={} (warning: embedded fonts unavailable; using GPUI system fallback)",
-            crate::theme::SYSTEM_UI_FONT_FAMILY
-        );
-    } else {
-        eprintln!("[Fonts] default_ui_font={}", crate::theme::FONT_FAMILY);
-    }
+    gpui::set_global_text_scale(crate::theme::UI_TEXT_SCALE);
+    eprintln!("[Fonts] source=system");
     eprintln!("[UI] default_font={}", crate::theme::FONT_FAMILY);
+    eprintln!("[UI] text_scale={:.2}", crate::theme::UI_TEXT_SCALE);
     eprintln!(
         "[UI] default_font_size={}",
         crate::theme::typography::UI_SM as u32

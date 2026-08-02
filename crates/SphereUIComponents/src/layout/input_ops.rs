@@ -1419,6 +1419,24 @@ impl StudioLayout {
                 ));
                 entries
             }
+            ContextTarget::CountIn => {
+                let bars = self
+                    .settings
+                    .read(cx)
+                    .current
+                    .recording
+                    .metronome
+                    .count_in_bars;
+                let mut entries = vec![ContextMenuEntry::Header("Record Count-in".to_string())];
+                for value in 1..=4 {
+                    entries.push(ContextMenuEntry::checked_item(
+                        format!("{value} bar{}", if value == 1 { "" } else { "s" }),
+                        format!("recording:set-count-in-bars:{value}"),
+                        bars == value,
+                    ));
+                }
+                entries
+            }
             ContextTarget::TempoTrack {
                 beat,
                 bpm,

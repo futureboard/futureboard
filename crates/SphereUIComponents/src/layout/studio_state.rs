@@ -164,6 +164,8 @@ pub enum ContextTarget {
     Tempo,
     /// Tap Tempo control menu (apply / add marker / reset).
     TapTempo,
+    /// Record count-in duration dropdown from the transport control.
+    CountIn,
     /// The compact time signature menu from the transport display.
     TimeSignature,
     /// Right-click on a time signature marker on the ruler or lane.

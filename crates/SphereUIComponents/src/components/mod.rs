@@ -147,8 +147,8 @@ pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
 pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
-    open_plugin_manager_window, FilterCounts, PluginManagerDialogState, PluginManagerWindow,
-    SidebarFilter, SortDir, SortKey,
+    open_plugin_manager_window, open_plugin_scan_progress_dialog, FilterCounts,
+    PluginManagerDialogState, PluginManagerWindow, SidebarFilter, SortDir, SortKey,
 };
 pub use progress_dialog::{
     open_copying_file_dialog_window, open_loading_session_dialog_window,

@@ -247,6 +247,19 @@ impl LocalAudioState {
         }
     }
 
+    /// Re-arm the metronome whenever transport starts. A ruler drag can end
+    /// outside its GPUI hit region, so its mouse-up callback is not a reliable
+    /// audio-state boundary. StartTransport is: playback must never inherit a
+    /// stale scrub suspension.
+    pub fn prepare_metronome_for_transport_start(
+        &mut self,
+        position_sample: u64,
+        sample_rate: u32,
+    ) {
+        self.set_metronome_suspended(false);
+        self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
     pub fn reset_metronome_schedule(&mut self, position_sample: u64, sample_rate: u32) {
         self.clear_metronome_clicks("seek");
         let sr = sample_rate.max(1) as f64;
@@ -514,7 +527,7 @@ pub fn drain_commands(
                 // first audible block — parity with offline export's fresh-runtime
                 // + warmup start. Realtime-safe zero-fill; runs only on Start.
                 runtime.reset_pdc_delay_lines();
-                local.reset_metronome_schedule(pos, output_sample_rate);
+                local.prepare_metronome_for_transport_start(pos, output_sample_rate);
                 if pdc_debug_enabled() {
                     runtime.dump_latency_compensation_graph("StartTransport");
                     eprintln!(
@@ -1592,6 +1605,26 @@ mod tests {
         assert!(
             local.metronome_click_remaining > 0,
             "uncompensated metronome should arm at the raw beat sample"
+        );
+    }
+
+    #[test]
+    fn transport_start_recovers_metronome_after_unfinished_scrub() {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_enabled(true, 0, 48_000);
+        local.set_metronome_suspended(true);
+
+        // Simulate releasing a ruler drag outside its hit region: no explicit
+        // resume arrives before Play.
+        local.prepare_metronome_for_transport_start(48_000, 48_000);
+        assert!(!local.metronome_suspended);
+
+        // 120 BPM at sample 48k is beat 2, so the click arms immediately.
+        let first = local.metronome_sample(48_000, 0, 48_000, true, 0, 0);
+        assert_eq!(first, 0.0, "oscillator starts at phase zero");
+        assert!(
+            local.metronome_click_remaining > 0,
+            "Play must re-arm clicks even when scrub-end was missed"
         );
     }
 }

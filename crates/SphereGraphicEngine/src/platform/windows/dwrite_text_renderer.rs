@@ -30,7 +30,6 @@ use super::dwrite_font_manager::{
     resolve_family_in_collection, DWriteFontManager, FontDiagnostics,
 };
 use super::FontConfig;
-use crate::assets::SharedAssetRegistry;
 use crate::TextAlign;
 
 /// A DirectWrite text renderer over an owned [`DWriteFontManager`].
@@ -45,17 +44,6 @@ impl DWriteTextRenderer {
         Some(Self {
             manager: DWriteFontManager::new(font_blobs, &config)?,
         })
-    }
-
-    /// Build a renderer from Futureboard's shared embedded UI font blobs.
-    pub fn new_with_shared_ui_fonts(config: FontConfig) -> Option<Self> {
-        let blobs = SharedAssetRegistry::ui_font_blobs();
-        Self::new(&blobs, config)
-    }
-
-    /// Build a renderer using the default embedded UI font policy.
-    pub fn new_embedded_ui(default_weight: u32) -> Option<Self> {
-        Self::new_with_shared_ui_fonts(FontConfig::embedded_ui(default_weight))
     }
 
     /// Build a renderer over an already-constructed font manager.

@@ -205,6 +205,10 @@ impl WelcomeWindow {
             }
             return;
         }
+        if let Some((index, action)) = welcome_shortcut_action(event) {
+            self.show_start_action(index, &action, cx);
+            return;
+        }
         match event.keystroke.key.as_str() {
             "enter" | "numpad_enter" => {
                 if let Some(action) = self.selected_action() {
@@ -222,6 +226,19 @@ impl WelcomeWindow {
             "escape" => window.remove_window(),
             _ => {}
         }
+    }
+
+    fn show_start_action(&mut self, index: usize, action: &WelcomeAction, cx: &mut Context<Self>) {
+        self.selected = Some(WelcomeSelection::Start(index));
+        if action == &WelcomeAction::OpenProject {
+            self.active_nav = StartupNav::OpenProject;
+        } else if let Some(template) = template_for_action(action) {
+            self.selected_template = template;
+            self.project_bpm = template.default_bpm();
+            self.project_time_signature = template.time_signature();
+            self.active_nav = StartupNav::NewProject;
+        }
+        cx.notify();
     }
 
     fn create_project_from_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,6 +411,22 @@ impl WelcomeWindow {
             self.active_nav = StartupNav::OpenProject;
             cx.notify();
         }
+    }
+}
+
+fn welcome_shortcut_action(event: &KeyDownEvent) -> Option<(usize, WelcomeAction)> {
+    let modifiers = event.keystroke.modifiers;
+    if !(modifiers.control || modifiers.platform) || modifiers.alt {
+        return None;
+    }
+    let key = event.keystroke.key.as_str();
+    match (key, modifiers.shift) {
+        ("n", false) => Some((0, WelcomeAction::EmptyProject)),
+        ("m", true) => Some((1, WelcomeAction::MidiComposer)),
+        ("a", true) => Some((2, WelcomeAction::AudioSession)),
+        ("t", true) => Some((3, WelcomeAction::MixTemplate)),
+        ("o", false) => Some((4, WelcomeAction::OpenProject)),
+        _ => None,
     }
 }
 
@@ -1463,6 +1496,9 @@ fn feed_status_card(title: impl Into<String>, detail: impl Into<String>) -> gpui
 
 fn feed_post_row(post: FeedPost) -> impl IntoElement {
     let published_at = post.published_at.clone();
+    let public_url = post
+        .slug
+        .map(|slug| format!("{FEED_PUBLIC_BASE_URL}/p/{slug}"));
     div()
         .flex()
         .flex_col()
@@ -1478,6 +1514,15 @@ fn feed_post_row(post: FeedPost) -> impl IntoElement {
             style
                 .bg(Colors::surface_card_hover())
                 .border_color(Colors::border_default())
+        })
+        .when_some(public_url.clone(), |row, url| {
+            row.cursor(gpui::CursorStyle::PointingHand).on_mouse_down(
+                gpui::MouseButton::Left,
+                move |_event, _window, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                },
+            )
         })
         .child(
             div()
@@ -1518,13 +1563,13 @@ fn feed_post_row(post: FeedPost) -> impl IntoElement {
                 .text_color(Colors::text_secondary())
                 .child(post.excerpt),
         )
-        .when_some(post.slug, |row, slug| {
+        .when_some(public_url, |row, url| {
             row.child(
                 div()
                     .text_size(px(9.5))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(Colors::accent_primary())
-                    .child(format!("{FEED_PUBLIC_BASE_URL}/p/{slug}")),
+                    .child(url),
             )
         })
 }

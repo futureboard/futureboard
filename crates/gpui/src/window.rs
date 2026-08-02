@@ -52,7 +52,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst},
     },
     time::Duration,
 };
@@ -72,6 +72,25 @@ pub use prompts::*;
 
 /// Default window size used when no explicit size is provided.
 pub const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
+
+/// Process-wide multiplier applied to resolved text sizes. Applications can
+/// use this for a small accessibility/readability adjustment without scaling
+/// layout geometry, images, or native window dimensions.
+static GLOBAL_TEXT_SCALE_BITS: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+
+/// Set the process-wide text scale used by every GPUI window.
+///
+/// Invalid values fall back to `1.0`; valid values are clamped to a practical
+/// accessibility range to prevent unusable text metrics.
+pub fn set_global_text_scale(scale: f32) {
+    let scale = if scale.is_finite() { scale } else { 1.0 }.clamp(0.5, 2.5);
+    GLOBAL_TEXT_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Return the process-wide text scale currently used by GPUI windows.
+pub fn global_text_scale() -> f32 {
+    f32::from_bits(GLOBAL_TEXT_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// A 6:5 aspect ratio minimum window size to be used for functional,
 /// additional-to-main-Zed windows, like the settings and rules library windows.
@@ -1932,6 +1951,11 @@ impl Window {
         for refinement in &self.text_style_stack {
             style.refine(refinement);
         }
+        let scale = global_text_scale();
+        style.font_size = match style.font_size {
+            crate::AbsoluteLength::Pixels(size) => px(size.0 * scale).into(),
+            crate::AbsoluteLength::Rems(size) => crate::Rems(size.0 * scale).into(),
+        };
         style
     }
 

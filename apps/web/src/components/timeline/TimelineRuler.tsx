@@ -135,12 +135,12 @@ export function TimelineRuler({ width, onAddTrack, snapToGrid, onToggleSnapToGri
         const label = formatBarBeat(beat * spb, bpm, timeSig);
 
         if (level === "bar") {
-          ctx.font      = "bold 10px Inter Variable, ui-sans-serif, system-ui, sans-serif";
+          ctx.font      = "bold 10px system-ui, sans-serif";
           ctx.fillStyle = "rgba(200,212,224,0.88)";
           ctx.fillText(label, x + 4, RULER_HEIGHT / 2);
         } else {
           // beat / sub labels — dimmer, no bold
-          ctx.font      = "10px Inter Variable, ui-sans-serif, system-ui, sans-serif";
+          ctx.font      = "10px system-ui, sans-serif";
           ctx.fillStyle = "rgba(107,120,136,0.7)";
           ctx.fillText(label, x + 3, RULER_HEIGHT / 2);
         }

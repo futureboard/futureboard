@@ -463,7 +463,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, plot: PlotRect) {
 
   // dB labels
   ctx.save();
-  ctx.font = "400 9px Inter,system-ui,sans-serif";
+  ctx.font = "400 9px system-ui,sans-serif";
   ctx.fillStyle = "rgba(150,170,205,0.38)";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
@@ -477,7 +477,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, plot: PlotRect) {
     [20,"20"], [50,"50"], [100,"100"], [200,"200"], [500,"500"],
     [1000,"1k"], [2000,"2k"], [5000,"5k"], [10000,"10k"], [20000,"20k"],
   ];
-  ctx.font = "400 9px Inter,system-ui,sans-serif";
+  ctx.font = "400 9px system-ui,sans-serif";
   ctx.fillStyle = "rgba(130,155,195,0.32)";
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -661,7 +661,7 @@ function drawNodes(
 
     // Band number
     ctx.fillStyle = isSel ? "#000" : band.active ? color : "rgba(80,95,120,0.7)";
-    ctx.font      = `700 ${isSel ? 9 : 8}px Inter,system-ui,sans-serif`;
+    ctx.font      = `700 ${isSel ? 9 : 8}px system-ui,sans-serif`;
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(String(band.id), x, y + 0.5);

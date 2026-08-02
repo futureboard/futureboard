@@ -2427,6 +2427,19 @@ fn run_audio_producer(
             .lock()
             .map(|map| Arc::clone(&map))
             .unwrap_or_default();
+        if snapshot.is_empty() {
+            // With no mapped plug-in audio regions there is no work to poll.
+            // Wait longer and avoid locking/cloning the runtime registries at
+            // audio cadence. The first engine request signals `kick`; the
+            // fallback path wakes within 10 ms when no event is available.
+            match &kick {
+                Some(kick) => {
+                    let _ = kick.wait(20);
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+            continue;
+        }
         let builtin_snapshot = builtins
             .lock()
             .map(|map| Arc::clone(&map))
@@ -2464,7 +2477,7 @@ fn run_audio_producer(
             Some(kick) => {
                 let _ = kick.wait(1);
             }
-            None => std::thread::sleep(Duration::from_micros(250)),
+            None => std::thread::sleep(Duration::from_millis(1)),
         }
     }
     diagnostics.report();
@@ -2897,7 +2910,8 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         //          user can always close a wedged editor).
         let gap_ms = last_pump_done.elapsed().as_millis() as u64;
         if !registry.is_empty() {
-            if gap_ms > 50 {
+            static PUMP_GAP_RATE: platform::LogRate = platform::LogRate::new(1);
+            if gap_ms > 50 && PUMP_GAP_RATE.allow() {
                 eprintln!(
                     "[PluginUIThread] pump gap ms={gap_ms} suspected_block={slowest_section} \
                      section_ms={slowest_section_ms} dispatched={dispatched}"
@@ -2933,12 +2947,12 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
             && !registry.is_empty()
             && tick.is_multiple_of(120)
         {
-            // Track plugin-created child/popup/dialog windows. Throttled to
-            // ~1/sec (spec item 2); fully disabled in safe mode.
+            // Track plugin-created child/popup/dialog windows. Throttled and
+            // fully disabled outside explicit plug-in diagnostics.
             let roots: Vec<u64> = registry.values().map(|state| state.host_hwnd).collect();
             platform::log_window_tree_changes(&roots, &mut window_tree);
         }
-        if tick.is_multiple_of(60) {
+        if platform::plugin_debug() && tick.is_multiple_of(600) {
             eprintln!(
                 "[PluginUIThread] loop alive editor_count={}",
                 registry.len()
@@ -2984,10 +2998,10 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         } else {
             (8, "editor_msgwait_8ms")
         };
-        if wait_mode != last_wait_mode {
+        if platform::plugin_debug() && wait_mode != last_wait_mode {
             eprintln!("[PluginUIThread] idle wait mode={wait_mode}");
-            last_wait_mode = wait_mode;
         }
+        last_wait_mode = wait_mode;
         let woke_on_input = platform::wait_for_input(wait_ms);
         // Spin watchdog (spec item 3): repeated "input available" wakes that
         // then dispatch nothing means the queue is being signalled without
@@ -5480,7 +5494,7 @@ mod platform {
             }
             if pumped > 0 {
                 let n = PUMP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n.is_multiple_of(120) {
+                if plugin_debug() && n.is_multiple_of(600) {
                     eprintln!("[PluginEditor] modal/dialog message pump active drained={pumped}");
                 }
             }
@@ -5685,9 +5699,9 @@ mod platform {
                 if debug {
                     log_input_dispatch(&msg);
                 }
-                // Focus/capture + hit-test summary on click (kept in safe mode;
-                // throttled so a click storm cannot flood stderr).
-                let click_diag = msg.message == WM_LBUTTONDOWN && CLICK_PATH_RATE.allow();
+                // Focus/capture + hit-test summary on click. Explicit debug
+                // only, and throttled so a click storm cannot flood stderr.
+                let click_diag = debug && msg.message == WM_LBUTTONDOWN && CLICK_PATH_RATE.allow();
                 if click_diag {
                     log_click_path(&msg);
                 }
@@ -5702,7 +5716,7 @@ mod platform {
                 if let Some(dialog) = dialog_ancestor(msg.hwnd) {
                     dialog_candidate = dialog.0 as u64;
                     static DIALOG_RATE: LogRate = LogRate::new(1);
-                    if DIALOG_RATE.allow() {
+                    if debug && DIALOG_RATE.allow() {
                         eprintln!("[PluginUIThread] dialog candidate hwnd=0x{dialog_candidate:x}");
                     }
                     dialog_handled = IsDialogMessageW(dialog, &msg).as_bool();
@@ -5736,6 +5750,9 @@ mod platform {
     /// visible/rect/thread/process. Triggered once per editor open and from
     /// the pump-gap watchdog — throttled, never per-frame.
     pub fn plugin_editor_snapshot(reason: &str) {
+        if !plugin_debug() {
+            return;
+        }
         static SNAPSHOT_RATE: LogRate = LogRate::new(1);
         if !SNAPSHOT_RATE.allow() {
             return;

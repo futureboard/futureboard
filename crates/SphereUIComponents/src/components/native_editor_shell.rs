@@ -346,7 +346,7 @@ mod imp {
                 static PUMP_TICK: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 let n = PUMP_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n % 120 == 0 {
+                if crate::forensic_trace::shell_layout_trace_enabled() && n % 600 == 0 {
                     eprintln!("[PluginEditor] modal/dialog message pump active drained={pumped}");
                 }
             }

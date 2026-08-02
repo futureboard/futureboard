@@ -65,8 +65,7 @@ body {
   background: var(--base);
   color: var(--text);
   font-family:
-    'Inter Variable', Inter, 'Segoe UI Variable', 'Segoe UI', system-ui,
-    sans-serif;
+    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   font-synthesis: none;

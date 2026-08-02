@@ -7,34 +7,17 @@ use gpui::{font, Font, FontFallbacks, Rgba};
 use serde::Deserialize;
 use serde_json::Value;
 
-/// Primary Latin/UI font family used across the native app.
-///
-/// This must match the family stored in `InterVariable.ttf`. CoreText does not
-/// resolve the Windows-compatible "Inter Variable Text" alias.
-pub const FONT_FAMILY: &str = "Inter Variable";
-
-/// Thai-capable fallback registered from `packages/shared/fonts`. `InterVariable`
-/// carries no Thai coverage, so this embedded family is what actually shapes Thai
-/// on every platform.
-pub const THAI_FONT_FAMILY: &str = "Google Sans";
-
-/// Preferred Windows UI Thai font. Using a Thai-capable font as the primary
-/// family avoids per-glyph fallback splitting Thai base glyphs and marks.
-pub const WINDOWS_THAI_UI_FONT_FAMILY: &str = "Leelawadee UI";
-pub const WINDOWS_THAI_FALLBACK_FONT_FAMILY: &str = "Noto Sans Thai";
-
-/// System sans used as the last resort before the generic Latin fallback.
-///
-/// A family that the running OS does not ship is not a harmless list entry: the
-/// platform text system resolves the unknown name to its own default (CoreText
-/// answers "Segoe UI" with Helvetica), so a Windows-only stack leaves macOS and
-/// Linux with no system tier at all.
+/// Native UI font selected independently on each supported desktop platform.
 #[cfg(target_os = "macos")]
 pub const SYSTEM_UI_FONT_FAMILY: &str = ".AppleSystemUIFont";
 #[cfg(target_os = "windows")]
 pub const SYSTEM_UI_FONT_FAMILY: &str = "Segoe UI";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const SYSTEM_UI_FONT_FAMILY: &str = "Noto Sans";
+
+/// Compatibility alias used by existing UI call sites. It intentionally points
+/// to the platform font rather than a bundled typeface.
+pub const FONT_FAMILY: &str = SYSTEM_UI_FONT_FAMILY;
 
 /// Real, selectable system family behind [`SYSTEM_UI_FONT_FAMILY`]. macOS keeps
 /// the SF UI font under a hidden dot-name that only resolves as a fallback
@@ -44,29 +27,40 @@ const SYSTEM_UI_FONT_FAMILY_ALIAS: Option<&str> = Some("Helvetica Neue");
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_UI_FONT_FAMILY_ALIAS: Option<&str> = None;
 
-/// Platform Thai UI families, most preferred first. Thai needs an explicit tier
-/// because base glyphs and marks must come from one family to stay composed.
+/// Primary Thai system family. Keeping Thai base glyphs and marks in one family
+/// avoids broken composition while still respecting native platform typography.
 #[cfg(target_os = "macos")]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &["Thonburi", "Sukhumvit Set"];
+pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Thonburi";
 #[cfg(target_os = "windows")]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[
-    WINDOWS_THAI_UI_FONT_FAMILY,
-    WINDOWS_THAI_FALLBACK_FONT_FAMILY,
-];
+pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Leelawadee UI";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &["Noto Sans Thai", "Noto Serif Thai"];
+pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Noto Sans Thai";
 
-/// Alias kept for callsites that want an explicit "display" name. Points at
-/// the same variable family.
+#[cfg(target_os = "macos")]
+const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Sukhumvit Set"];
+#[cfg(target_os = "windows")]
+const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Tahoma"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Noto Serif Thai"];
+
+#[cfg(target_os = "macos")]
+const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Helvetica Neue", "Arial"];
+#[cfg(target_os = "windows")]
+const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Segoe UI Variable", "Arial"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Ubuntu", "DejaVu Sans", "Liberation Sans"];
+
+/// Alias kept for callsites that want an explicit display font name.
 pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
+
+/// Readability adjustment for the native application. This scales text only;
+/// controls and window geometry retain their compact DAW layout.
+pub const UI_TEXT_SCALE: f32 = 1.08;
 
 /// Bundled cross-surface theme template. Installed to AppData on first run and
 /// used as the fallback when no user theme exists or a user theme omits tokens.
 pub const DEFAULT_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Default.json");
 pub const TEMPLATE_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Template.json");
-
-/// Generic Latin family available on every supported desktop.
-const GENERIC_LATIN_FONT_FAMILY: &str = "Arial";
 
 /// Build a fallback list, dropping the primary family and any repeat. A duplicate
 /// costs a redundant descriptor in the platform cascade list and never adds
@@ -82,17 +76,15 @@ fn fallback_list(primary: &str, candidates: impl IntoIterator<Item = &'static st
     list
 }
 
-/// Central UI font fallback stack (Latin → platform Thai → embedded Thai → system).
+/// Central UI font fallback stack made exclusively from platform fonts.
 ///
 /// A Thai-capable family is named ahead of the generic tiers so Thai base glyphs
 /// and marks are shaped by one font instead of being split per glyph.
 pub fn ui_font_fallback_stack() -> Vec<String> {
     let mut candidates = vec![FONT_FAMILY];
     candidates.extend(PLATFORM_THAI_UI_FONT_FAMILIES);
-    candidates.push(THAI_FONT_FAMILY);
-    candidates.push(SYSTEM_UI_FONT_FAMILY);
     candidates.extend(SYSTEM_UI_FONT_FAMILY_ALIAS);
-    candidates.push(GENERIC_LATIN_FONT_FAMILY);
+    candidates.extend(PLATFORM_UI_FALLBACK_FAMILIES);
     fallback_list("", candidates)
 }
 
@@ -105,15 +97,11 @@ pub fn ui_font() -> Font {
 pub fn ui_font_for_language(language_code: &str) -> Font {
     let normalized = language_code.trim().replace('_', "-").to_ascii_lowercase();
     if normalized == "th" || normalized.starts_with("th-") {
-        let family = if cfg!(target_os = "windows") {
-            WINDOWS_THAI_UI_FONT_FAMILY
-        } else {
-            THAI_FONT_FAMILY
-        };
+        let family = SYSTEM_THAI_UI_FONT_FAMILY;
         let mut candidates = PLATFORM_THAI_UI_FONT_FAMILIES.to_vec();
-        candidates.push(THAI_FONT_FAMILY);
         candidates.push(FONT_FAMILY);
-        candidates.push(SYSTEM_UI_FONT_FAMILY);
+        candidates.extend(SYSTEM_UI_FONT_FAMILY_ALIAS);
+        candidates.extend(PLATFORM_UI_FALLBACK_FAMILIES);
 
         let mut font = font(family);
         font.fallbacks = Some(FontFallbacks::from_fonts(fallback_list(family, candidates)));
@@ -848,13 +836,12 @@ mod font_stack_tests {
     }
 
     #[test]
-    fn ui_stack_leads_with_the_embedded_family_and_ends_at_a_generic_one() {
+    fn ui_stack_leads_with_the_platform_system_family() {
         let stack = ui_font_fallback_stack();
         assert_eq!(stack.first().map(String::as_str), Some(FONT_FAMILY));
-        assert_eq!(
-            stack.last().map(String::as_str),
-            Some(GENERIC_LATIN_FONT_FAMILY)
-        );
+        assert_eq!(FONT_FAMILY, SYSTEM_UI_FONT_FAMILY);
+        assert!(!stack.iter().any(|family| family == "Google Sans"));
+        assert!(!stack.iter().any(|family| family.contains("Inter")));
     }
 
     #[test]
@@ -885,10 +872,7 @@ mod font_stack_tests {
         seen.dedup();
         assert_eq!(seen.len(), stack.len(), "duplicate family in {stack:?}");
 
-        let thai = PLATFORM_THAI_UI_FONT_FAMILIES
-            .iter()
-            .chain(std::iter::once(&THAI_FONT_FAMILY));
-        for family in thai {
+        for family in PLATFORM_THAI_UI_FONT_FAMILIES {
             assert!(
                 stack.iter().any(|entry| entry == family),
                 "Thai family {family} missing from {stack:?}"
@@ -901,8 +885,7 @@ mod font_stack_tests {
         let font = ui_font_for_language("th-TH");
         let primary = font.family.to_string();
         assert!(
-            primary == THAI_FONT_FAMILY
-                || PLATFORM_THAI_UI_FONT_FAMILIES.contains(&primary.as_str()),
+            PLATFORM_THAI_UI_FONT_FAMILIES.contains(&primary.as_str()),
             "{primary} cannot shape Thai"
         );
 

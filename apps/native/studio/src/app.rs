@@ -7,6 +7,12 @@ use sphere_ui_components::app_state::{AppMode, AppSessionGate};
 use sphere_ui_components::assets;
 use sphere_ui_components::boot;
 use sphere_ui_components::components::progress_dialog::ProgressBarValue;
+use sphere_ui_components::components::{
+    message_box_dialog::{
+        open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResponseCb,
+    },
+    plugin_manager::open_plugin_scan_progress_dialog,
+};
 use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
@@ -19,6 +25,7 @@ use sphere_ui_components::loading_session::{
     SessionShutdownReason,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
+use sphere_ui_components::settings::{GlobalSettingsModel, SettingsSchema};
 use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
     log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
@@ -240,8 +247,67 @@ pub fn setup(cx: &mut App) {
         {
             let _ = cx.update(|app| crate::exclusive_edition::show_eula_if_needed(app));
         }
+
+        // Ask once, after the first real surface is visible. The short defer
+        // lets Welcome/Studio paint before the compact question dialog opens.
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(350))
+            .await;
+        let _ = cx.update(show_first_launch_plugin_scan_prompt);
     })
     .detach();
+}
+
+fn persist_plugin_scan_prompt_answered(cx: &mut App) {
+    let settings = cx
+        .try_global::<GlobalSettingsModel>()
+        .map(|global| global.0.clone());
+    if let Some(settings) = settings {
+        settings.update(cx, |settings, cx| {
+            settings.update_setting(
+                |schema| schema.general.plugin_scan_prompt_answered = true,
+                cx,
+            );
+        });
+    } else {
+        SettingsSchema::persist_plugin_scan_prompt_answered();
+    }
+}
+
+fn show_first_launch_plugin_scan_prompt(cx: &mut App) {
+    if SettingsSchema::load_from_disk()
+        .general
+        .plugin_scan_prompt_answered
+    {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let scan_locations = "the standard VST3, CLAP, and AudioUnit locations";
+    #[cfg(not(target_os = "macos"))]
+    let scan_locations = "the standard VST3 and CLAP locations";
+
+    let options = MessageBoxOptions::new("Scan installed plug-ins now?")
+        .title("Plug-in Scan")
+        .detail(format!(
+            "Futureboard will scan {scan_locations}. You can run this later from Plug-in Manager."
+        ))
+        .kind(MessageBoxKind::Question)
+        .buttons(["Yes", "No"])
+        .default_id(0)
+        .cancel_id(1);
+    let on_response: MessageBoxResponseCb =
+        Arc::new(|result, _window: &mut gpui::Window, cx: &mut App| {
+            persist_plugin_scan_prompt_answered(cx);
+            if result.response == 0 {
+                if let Err(error) = open_plugin_scan_progress_dialog(None, cx) {
+                    eprintln!("[plugin-scan] failed to open first-launch scanner: {error}");
+                }
+            }
+        });
+    if let Err(error) = open_message_box_window(None, options, on_response, cx) {
+        eprintln!("[plugin-scan] failed to open first-launch prompt: {error}");
+    }
 }
 
 fn set_app_mode(cx: &mut App, mode: AppMode) {

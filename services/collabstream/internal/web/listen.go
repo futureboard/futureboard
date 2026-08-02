@@ -18,7 +18,7 @@ const listenPageTemplate = `<!DOCTYPE html>
 <title>DAWStream – Futureboard Studio</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0e1117;color:#c9cdd4;font-family:'Inter',system-ui,sans-serif;font-size:13px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:0}
+body{background:#0e1117;color:#c9cdd4;font-family:system-ui,sans-serif;font-size:13px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:0}
 .shell{width:340px;background:#151b24;border:1px solid rgba(255,255,255,.07);border-radius:8px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.5)}
 .titlebar{background:#1a2130;border-bottom:1px solid rgba(255,255,255,.06);padding:9px 14px;display:flex;align-items:center;gap:8px;height:32px}
 .dot{width:10px;height:10px;border-radius:50%}

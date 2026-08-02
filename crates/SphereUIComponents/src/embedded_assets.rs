@@ -64,12 +64,6 @@ impl AssetSource for EmbeddedAssets {
         if path == LOGO_TEXT_PATH {
             return Ok(Some(Cow::Borrowed(LOGO_TEXT_PNG)));
         }
-        if path == assets::FONT_INTER_VARIABLE_PATH {
-            return Ok(Some(Cow::Borrowed(assets::INTER_VARIABLE)));
-        }
-        if path == assets::FONT_GOOGLE_SANS_VARIABLE_PATH {
-            return Ok(Some(Cow::Borrowed(assets::GOOGLE_SANS_VARIABLE)));
-        }
         let bytes = match path {
             assets::ICON_PLAY_PATH => Some(assets::icons::PLAY.as_bytes()),
             assets::ICON_PAUSE_PATH => Some(assets::icons::PAUSE.as_bytes()),
@@ -145,8 +139,6 @@ impl AssetSource for EmbeddedAssets {
             SPLASH_IMAGE_PATH,
             SPLASH_CE_IMAGE_PATH,
             SPLASH_EXCLUSIVE_IMAGE_PATH,
-            assets::FONT_INTER_VARIABLE_PATH,
-            assets::FONT_GOOGLE_SANS_VARIABLE_PATH,
             assets::ICON_PLAY_PATH,
             assets::ICON_PAUSE_PATH,
             assets::ICON_SQUARE_PATH,

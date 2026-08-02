@@ -23,7 +23,7 @@
 }
 
 body {
-  font-family: "Inter Variable", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 12px;
   -webkit-font-smoothing: antialiased;
   text-rendering: geometricPrecision;

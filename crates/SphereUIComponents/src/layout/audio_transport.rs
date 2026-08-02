@@ -557,9 +557,11 @@ impl StudioLayout {
         // the chosen cadence and `interpolated_playhead_beat` smooths between
         // engine snapshots. Until the entity exists we fall back to ~60 Hz.
         const FALLBACK_INTERVAL_NANOS: u64 = 16_666_667; // ~60 Hz
+        const IDLE_MIN_INTERVAL_NANOS: u64 = 16_666_667; // cap idle control work at 60 Hz
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let mut interval_handle: Option<Arc<AtomicU64>> = None;
+            let mut transport_active = false;
             loop {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;
@@ -569,24 +571,39 @@ impl StudioLayout {
                         .update(cx, |this, _| this.frame_scheduler.continuous_nanos_handle())
                         .ok();
                 }
-                let interval_nanos = interval_handle
+                let requested_interval_nanos = interval_handle
                     .as_ref()
                     .map(|h| h.load(Ordering::Relaxed))
                     .filter(|n| *n > 0)
                     .unwrap_or(FALLBACK_INTERVAL_NANOS);
+                // High-refresh polling is useful only while the transport is
+                // moving. At idle, 60 Hz keeps hardware MIDI latency low while
+                // avoiding 120/144/240 registry, meter, and status polls/sec.
+                let interval_nanos = if transport_active {
+                    requested_interval_nanos
+                } else {
+                    requested_interval_nanos.max(IDLE_MIN_INTERVAL_NANOS)
+                };
                 executor.timer(Duration::from_nanos(interval_nanos)).await;
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;
                 }
-                let Ok((changed, mixer_handle)) = this.update(cx, |this, cx| {
+                let Ok((changed, mixer_handle, active)) = this.update(cx, |this, cx| {
                     if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                        return (false, None);
+                        return (false, None, false);
                     }
                     let changed = this.poll_native_audio(cx);
-                    (changed, this.external_windows.mixer.clone())
+                    let active = this
+                        .audio_bridge
+                        .stats
+                        .as_ref()
+                        .map(|stats| stats.transport_playing)
+                        .unwrap_or(false);
+                    (changed, this.external_windows.mixer.clone(), active)
                 }) else {
                     continue;
                 };
+                transport_active = active;
                 if changed && !crate::shutdown::ShutdownState::global().is_shutting_down() {
                     crate::perf::record_notify("transport");
                     let studio_id = this.entity_id();
@@ -829,7 +846,19 @@ impl StudioLayout {
         // the frame scheduler so 120/144 Hz displays do not step at a fixed low
         // FPS. Ballistics below use the actual elapsed time, so throttling or
         // brief stalls do not change the apparent attack/release speed.
-        let min_interval = self.frame_scheduler.meter_min_interval();
+        let transport_active = self
+            .audio_bridge
+            .stats
+            .as_ref()
+            .map(|stats| stats.transport_playing)
+            .unwrap_or(false);
+        let min_interval = if transport_active {
+            self.frame_scheduler.meter_min_interval()
+        } else {
+            // Idle meters only need to finish their release animation; 30 Hz
+            // halves snapshot/track traversal work while remaining smooth.
+            self.frame_scheduler.background_interval()
+        };
         let now = Instant::now();
         let elapsed = now.duration_since(self.engine_sync.meter_applied_at);
         if elapsed < min_interval {

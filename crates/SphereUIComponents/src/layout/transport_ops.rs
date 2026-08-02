@@ -304,7 +304,7 @@ impl StudioLayout {
             metronome_enabled,
             follow_playhead,
             auto_scroll_continuous,
-            count_in_bars,
+            count_in_enabled,
         ) = {
             let timeline = self.timeline.read(cx);
             // The transport always shows the *effective* BPM at the playhead so
@@ -345,7 +345,7 @@ impl StudioLayout {
                     .current
                     .recording
                     .metronome
-                    .count_in_bars,
+                    .count_in_enabled,
             )
         };
         let playing = self
@@ -372,7 +372,7 @@ impl StudioLayout {
         let on_follow_toggle = make_command_handler("transport:toggle-follow-playhead");
         let on_follow_mode_toggle = make_command_handler("transport:toggle-autoscroll-mode");
         let on_record = make_command_handler("transport:record");
-        let on_count_in_cycle: components::ChromeActionCb = {
+        let on_count_in_toggle: components::ChromeActionCb = {
             let this = cx.entity().clone();
             Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
                 let _ = this.update(cx, |this, cx| {
@@ -382,17 +382,35 @@ impl StudioLayout {
                         .current
                         .recording
                         .metronome
-                        .count_in_bars;
-                    let next = (current + 1) % 5;
+                        .count_in_enabled;
                     this.settings.update(cx, |settings, cx| {
                         settings.update_setting(
-                            move |schema| schema.recording.metronome.count_in_bars = next,
+                            move |schema| schema.recording.metronome.count_in_enabled = !current,
                             cx,
                         );
                     });
                     cx.notify();
                 });
             })
+        };
+        let on_count_in_menu: components::BpmMenuCb = {
+            let this = cx.entity().clone();
+            Arc::new(
+                move |pos: &(f32, f32), window: &mut Window, cx: &mut gpui::App| {
+                    let (x, y) = *pos;
+                    let _ = this.update(cx, |this, cx| {
+                        this.try_open_context_menu(
+                            ContextMenuRequest::from_window(
+                                window,
+                                x,
+                                y,
+                                ContextMenuTarget::Extended(ContextTarget::CountIn),
+                            ),
+                            cx,
+                        );
+                    });
+                },
+            )
         };
 
         let on_set_bpm: components::BpmChangeCb = {
@@ -493,7 +511,7 @@ impl StudioLayout {
         components::TransportChromeState {
             playing,
             recording,
-            count_in_bars,
+            count_in_enabled,
             loop_enabled,
             metronome_enabled,
             follow_playhead,
@@ -523,7 +541,8 @@ impl StudioLayout {
             on_play_toggle,
             on_stop,
             on_record,
-            on_count_in_cycle,
+            on_count_in_toggle,
+            on_count_in_menu,
             on_loop_toggle,
             on_metronome_toggle,
             on_follow_toggle,

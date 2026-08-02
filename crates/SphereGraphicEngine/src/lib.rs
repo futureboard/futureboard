@@ -3,11 +3,10 @@
 //! This crate owns the **platform graphics infrastructure** shared by
 //! Futureboard's native shells:
 //!
-//! - DirectWrite text rendering (embedded fonts, custom collection, font
+//! - DirectWrite text rendering (system fonts, optional custom collection, and
 //!   fallback) rasterized through **GDI interop** — **Direct2D is never used**.
 //! - DWM window chrome effects (immersive dark mode, rounded corners, themed
 //!   border / caption color).
-//! - A registry of **shared embedded assets** (the UI fonts).
 //! - A generic [`ChromeTheme`] / [`ChromeFontTheme`] for window chrome.
 //! - [`SoftwarePainter`] GDI paint primitives (fills, frames, strokes).
 //!
@@ -17,7 +16,6 @@
 //! plugin editor shell, a settings window, or any future native surface reuse
 //! the same text/window backend.
 
-pub mod assets;
 pub mod theme;
 
 #[cfg(target_os = "windows")]
@@ -37,7 +35,6 @@ pub enum TextAlign {
     Center,
 }
 
-pub use assets::SharedAssetRegistry;
 pub use theme::{ChromeFontTheme, ChromeTheme, Color};
 
 #[cfg(target_os = "windows")]

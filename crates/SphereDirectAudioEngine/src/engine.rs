@@ -4127,6 +4127,13 @@ where
                             // because it builds a fresh zeroed runtime). Realtime-safe
                             // zero-fill; runs only on Start.
                             runtime.reset_pdc_delay_lines();
+                            // Starting playback is the authoritative end of any
+                            // ruler scrub. Never inherit a stale suspended flag
+                            // when mouse-up occurred outside the ruler.
+                            metronome.prepare_metronome_for_transport_start(
+                                pos,
+                                output_sample_rate,
+                            );
                         }
                         EngineCommand::StopTransport => {
                             if command_debug_enabled() {

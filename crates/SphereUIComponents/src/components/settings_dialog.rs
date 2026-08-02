@@ -1781,62 +1781,6 @@ fn build_settings_content(
                             )
                         }),
                 ))
-                .child(settings_daw_row(
-                    "Count-in Bars",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child({
-                            let val = schema.recording.metronome.count_in_bars;
-                            let up_cnt = up.clone();
-                            fb_stepper_button("met-count-dec", "-", move |_, w, cx| {
-                                up_cnt(
-                                    Arc::new(move |s| {
-                                        s.recording.metronome.count_in_bars =
-                                            val.saturating_sub(1).max(0)
-                                    }),
-                                    w,
-                                    cx,
-                                );
-                            })
-                        })
-                        .child(
-                            div()
-                                .w(px(40.0))
-                                .h(px(28.0))
-                                .rounded_md()
-                                .border(px(1.0))
-                                .border_color(Colors::border_subtle())
-                                .bg(Colors::surface_input())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(11.0))
-                                .text_color(Colors::text_primary())
-                                .child(schema.recording.metronome.count_in_bars.to_string()),
-                        )
-                        .child({
-                            let val = schema.recording.metronome.count_in_bars;
-                            let up_cnt = up.clone();
-                            fb_stepper_button("met-count-inc", "+", move |_, w, cx| {
-                                up_cnt(
-                                    Arc::new(move |s| {
-                                        s.recording.metronome.count_in_bars = (val + 1).min(4)
-                                    }),
-                                    w,
-                                    cx,
-                                );
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child("bars"),
-                        ),
-                ))
                 .into_any_element(),
         );
     }

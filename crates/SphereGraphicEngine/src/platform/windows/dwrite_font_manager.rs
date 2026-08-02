@@ -1,5 +1,5 @@
-//! DirectWrite font manager: embedded-font loading, custom collection, and
-//! font fallback.
+//! DirectWrite font manager: optional in-memory font loading, custom
+//! collection, and system font fallback.
 //!
 //! Mirrors GPUI's Windows font path: embedded font bytes via
 //! `IDWriteInMemoryFontFileLoader`, a custom font collection, and
@@ -18,30 +18,16 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::System::SystemServices::LOCALE_NAME_MAX_LENGTH;
 
-use crate::assets::SharedAssetRegistry;
-
 /// Family / weight policy for the font manager. Generic — no app or plugin
 /// knowledge.
 #[derive(Debug, Clone)]
 pub struct FontConfig {
-    /// Preferred UI family name (e.g. "Inter Variable Text").
+    /// Preferred UI family name (e.g. "Segoe UI").
     pub primary_family: String,
-    /// Fallback family for scripts the primary lacks (e.g. "Google Sans").
+    /// Fallback family for scripts the primary lacks (e.g. "Leelawadee UI").
     pub fallback_family: String,
     /// Default weight used when resolving the primary family.
     pub default_weight: u32,
-}
-
-impl FontConfig {
-    /// Futureboard's embedded UI font policy: Inter primary + Google Sans
-    /// fallback, matching the shared GPUI-facing font assets.
-    pub fn embedded_ui(default_weight: u32) -> Self {
-        Self {
-            primary_family: SharedAssetRegistry::inter_family().to_string(),
-            fallback_family: SharedAssetRegistry::google_sans_family().to_string(),
-            default_weight,
-        }
-    }
 }
 
 /// Read-only facts about what the manager loaded, for caller-side diagnostics.

@@ -21,7 +21,7 @@
   --radius-panel: 0.9rem;
   --knob-size: clamp(4.5rem, 8.5vw, 5.75rem);
   --control-column: calc(var(--knob-size) + 0.65rem);
-  --font: 'Inter Variable', Inter, 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  --font: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   color: var(--text-secondary);
   background: var(--surface-base);
   font-family: var(--font);

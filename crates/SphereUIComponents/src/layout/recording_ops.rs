@@ -97,23 +97,19 @@ impl StudioLayout {
     }
 
     pub(super) fn start_native_recording(&mut self, cx: &mut Context<Self>) {
-        let (count_in_bars, playing, bpm, beats_per_bar, target_beat) = {
+        let (count_in_enabled, count_in_bars, playing, bpm, beats_per_bar, target_beat) = {
             let timeline = self.timeline.read(cx);
+            let metronome = &self.settings.read(cx).current.recording.metronome;
             (
-                self.settings
-                    .read(cx)
-                    .current
-                    .recording
-                    .metronome
-                    .count_in_bars
-                    .min(4),
+                metronome.count_in_enabled,
+                metronome.count_in_bars.clamp(1, 4),
                 timeline.state.transport.playing,
                 timeline.state.effective_bpm_at_playhead().max(1.0) as f32,
                 timeline.state.time_signature_at_playhead().numerator.max(1) as f32,
                 timeline.state.transport.playhead_beats.max(0.0),
             )
         };
-        if count_in_bars > 0 && !playing {
+        if count_in_enabled && !playing {
             self.begin_record_count_in(count_in_bars, bpm, beats_per_bar, target_beat, cx);
             return;
         }
