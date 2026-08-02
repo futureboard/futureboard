@@ -1071,18 +1071,18 @@ impl RuntimeProject {
     /// on the worker thread; track order is fixed for the life of a runtime
     /// snapshot, so the audio callback only ever reads the precomputed indices.
     pub fn resolve_indices(&mut self) {
+        let track_indices: HashMap<String, usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id.clone(), index))
+            .collect();
         for i in 0..self.clips.len() {
-            let ix = {
-                let id = &self.clips[i].track_id;
-                self.tracks.iter().position(|t| &t.id == id)
-            };
+            let ix = track_indices.get(&self.clips[i].track_id).copied();
             self.clips[i].track_index = ix;
         }
         for i in 0..self.midi_tracks.len() {
-            let ix = {
-                let id = &self.midi_tracks[i].track_id;
-                self.tracks.iter().position(|t| &t.id == id)
-            };
+            let ix = track_indices.get(&self.midi_tracks[i].track_id).copied();
             self.midi_tracks[i].track_index = ix;
         }
         for i in 0..self.tracks.len() {
@@ -1090,23 +1090,21 @@ impl RuntimeProject {
                 .output_track_id
                 .as_deref()
                 .filter(|id| !crate::engine::is_master_output(id))
-                .and_then(|id| self.tracks.iter().position(|t| t.id == id));
+                .and_then(|id| track_indices.get(id).copied());
             self.tracks[i].output_track_index = out_ix;
             for s in 0..self.tracks[i].sends.len() {
-                let target_ix = {
-                    let id = &self.tracks[i].sends[s].return_track_id;
-                    self.tracks.iter().position(|t| &t.id == id)
-                };
+                let target_ix = track_indices
+                    .get(&self.tracks[i].sends[s].return_track_id)
+                    .copied();
                 self.tracks[i].sends[s].return_track_index = target_ix;
             }
             // Multi-out (Slice 1): resolve each bridged instrument insert's child
             // "Out Ch" route destination track. Almost always empty.
             for n in 0..self.tracks[i].inserts.len() {
                 for c in 0..self.tracks[i].inserts[n].vsti_output_children.len() {
-                    let dest_ix = {
-                        let id = &self.tracks[i].inserts[n].vsti_output_children[c].dest_track_id;
-                        self.tracks.iter().position(|t| &t.id == id)
-                    };
+                    let dest_ix = track_indices
+                        .get(&self.tracks[i].inserts[n].vsti_output_children[c].dest_track_id)
+                        .copied();
                     self.tracks[i].inserts[n].vsti_output_children[c].dest_track_index = dest_ix;
                 }
             }
@@ -1116,6 +1114,23 @@ impl RuntimeProject {
             let bindings = build_plugin_param_bindings(&self.tracks[i]);
             self.tracks[i].plugin_param_automation = bindings;
         }
+        let mut active_source_mask = vec![false; self.tracks.len()];
+        for track_index in self.clips.iter().filter_map(|clip| clip.track_index) {
+            active_source_mask[track_index] = true;
+        }
+        for track_index in self
+            .midi_tracks
+            .iter()
+            .filter_map(|track| track.track_index)
+        {
+            active_source_mask[track_index] = true;
+        }
+        for &track_index in &self.audio_graph.pass1_source_indices {
+            let track = &self.tracks[track_index];
+            active_source_mask[track_index] |=
+                !track.inserts.is_empty() || track.soundfont_player.is_some();
+        }
+        self.audio_graph.active_source_mask = active_source_mask;
         self.resolve_bridge_sinks();
     }
 
@@ -1352,15 +1367,32 @@ impl RuntimeProject {
     /// rebuild + delay-line resize only happens when an observed latency differs
     /// from the active plan.
     pub fn refresh_runtime_latency_graph(&mut self, bridge_block_frames: u32) -> bool {
-        let changed = self.tracks.iter().enumerate().any(|(idx, track)| {
+        const TRACKS_PER_CALLBACK: usize = 64;
+        let track_count = self.tracks.len();
+        if track_count == 0 {
+            return false;
+        }
+        let scan_count = track_count.min(TRACKS_PER_CALLBACK);
+        let scan_start = self.audio_graph.latency_scan_cursor.min(track_count - 1);
+        let mut changed = false;
+        let mut scanned = 0usize;
+        for offset in 0..scan_count {
+            let idx = (scan_start + offset) % track_count;
+            let track = &self.tracks[idx];
             let observed = self.track_insert_latency_samples(track, bridge_block_frames);
-            self.latency_graph
+            changed = self
+                .latency_graph
                 .track_plugin_latency
                 .get(idx)
                 .copied()
                 .unwrap_or(0)
-                != observed
-        });
+                != observed;
+            scanned += 1;
+            if changed {
+                break;
+            }
+        }
+        self.audio_graph.latency_scan_cursor = (scan_start + scanned) % track_count;
         if !changed {
             return false;
         }
@@ -1419,43 +1451,50 @@ impl RuntimeProject {
         let mut skipped_decode_err = 0u32;
         let mut loaded_from_cache = 0u32;
         let mut loaded_fresh = 0u32;
+        let graph_debug = std::env::var_os("FUTUREBOARD_AUDIO_GRAPH_DEBUG").is_some();
 
         for clip in &snapshot.clips {
             let Some(path) = clip.media_path.as_deref().filter(|p| !p.trim().is_empty()) else {
-                eprintln!(
-                    "[SphereAudio] clip '{}' (track={}) — no mediaPath, skipping",
-                    clip.id, clip.track_id
-                );
+                if graph_debug {
+                    eprintln!(
+                        "[SphereAudio] clip '{}' (track={}) — no mediaPath, skipping",
+                        clip.id, clip.track_id
+                    );
+                }
                 skipped_no_path += 1;
                 continue;
             };
 
             let source = match decoded_by_path.get(path) {
                 Some(existing) => {
-                    eprintln!(
-                        "[SphereAudio] clip '{}' — cache hit: '{path}' ({} frames)",
-                        clip.id,
-                        existing.frames()
-                    );
+                    if graph_debug {
+                        eprintln!(
+                            "[SphereAudio] clip '{}' — cache hit: '{path}' ({} frames)",
+                            clip.id,
+                            existing.frames()
+                        );
+                    }
                     loaded_from_cache += 1;
                     Arc::clone(existing)
                 }
                 None => match open_clip_audio_source(path) {
                     Ok(source) => {
-                        eprintln!(
-                            "[SphereAudio] clip '{}' — opened: '{path}' {} frames @ {}Hz {} ch ({})",
-                            clip.id,
-                            source.frames(),
-                            source.sample_rate(),
-                            source.channels(),
-                            if source.is_streaming() {
-                                "stream"
-                            } else if source.is_mapped() {
-                                "mmap"
-                            } else {
-                                "memory"
-                            }
-                        );
+                        if graph_debug {
+                            eprintln!(
+                                "[SphereAudio] clip '{}' — opened: '{path}' {} frames @ {}Hz {} ch ({})",
+                                clip.id,
+                                source.frames(),
+                                source.sample_rate(),
+                                source.channels(),
+                                if source.is_streaming() {
+                                    "stream"
+                                } else if source.is_mapped() {
+                                    "mmap"
+                                } else {
+                                    "memory"
+                                }
+                            );
+                        }
                         loaded_fresh += 1;
                         let source = Arc::new(source);
                         decoded_by_path.insert(path.to_string(), Arc::clone(&source));
@@ -1463,10 +1502,12 @@ impl RuntimeProject {
                     }
                     Err(e) => {
                         skipped_decode_err += 1;
-                        eprintln!(
-                            "[SphereAudio] clip '{}' — decode FAILED '{path}': {e}",
-                            clip.id
-                        );
+                        if graph_debug {
+                            eprintln!(
+                                "[SphereAudio] clip '{}' — decode FAILED '{path}': {e}",
+                                clip.id
+                            );
+                        }
                         continue;
                     }
                 },
@@ -1557,18 +1598,20 @@ impl RuntimeProject {
                     let processor = reused.or_else(|| {
                         Vst3RuntimeProcessor::from_params(&insert.params, output_sample_rate)
                     });
-                    let processor_handle =
-                        processor.as_ref().map(|p| p.handle_value()).unwrap_or(0);
-                    eprintln!(
-                        "[SphereAudio] native VST3 insert track='{}' insert='{}' pluginInstanceId='{}' reused={} ready={} processorHandle=0x{:x} path='{}'",
-                        t.id,
-                        insert.id,
-                        insert.params.get("pluginInstanceId").and_then(Value::as_str).unwrap_or(&insert.id),
-                        reused_flag,
-                        processor.as_ref().map(|p| p.is_ready()).unwrap_or(false),
-                        processor_handle,
-                        insert.params.get("path").and_then(Value::as_str).unwrap_or(""),
-                    );
+                    if graph_debug {
+                        let processor_handle =
+                            processor.as_ref().map(|p| p.handle_value()).unwrap_or(0);
+                        eprintln!(
+                            "[SphereAudio] native VST3 insert track='{}' insert='{}' pluginInstanceId='{}' reused={} ready={} processorHandle=0x{:x} path='{}'",
+                            t.id,
+                            insert.id,
+                            insert.params.get("pluginInstanceId").and_then(Value::as_str).unwrap_or(&insert.id),
+                            reused_flag,
+                            processor.as_ref().map(|p| p.is_ready()).unwrap_or(false),
+                            processor_handle,
+                            insert.params.get("path").and_then(Value::as_str).unwrap_or(""),
+                        );
+                    }
                     processor
                 } else {
                     None
@@ -1692,24 +1735,31 @@ impl RuntimeProject {
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
-        let master_insert_count = tracks
-            .iter()
-            .find(|track| track.track_type == "master")
-            .map(|track| track.inserts.len())
-            .unwrap_or(0);
-        eprintln!("[SphereAudio] RuntimeMaster inserts={master_insert_count}");
-        for track in &tracks {
-            let track_clips = clips
+        if std::env::var_os("FUTUREBOARD_AUDIO_GRAPH_DEBUG").is_some() {
+            let master_insert_count = tracks
                 .iter()
-                .filter(|clip| clip.track_id == track.id)
-                .count();
-            eprintln!(
-                "[SphereAudio] RuntimeTrack track={} clips={} inserts={}",
-                track.id,
-                track_clips,
-                track.inserts.len()
-            );
-            if !track.inserts.is_empty() {
+                .find(|track| track.track_type == "master")
+                .map(|track| track.inserts.len())
+                .unwrap_or(0);
+            eprintln!("[SphereAudio] RuntimeMaster inserts={master_insert_count}");
+            let track_indices: HashMap<&str, usize> = tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| (track.id.as_str(), index))
+                .collect();
+            let mut clip_counts = vec![0usize; tracks.len()];
+            for clip in &clips {
+                if let Some(index) = track_indices.get(clip.track_id.as_str()) {
+                    clip_counts[*index] += 1;
+                }
+            }
+            for (track_index, track) in tracks.iter().enumerate() {
+                eprintln!(
+                    "[SphereAudio] RuntimeTrack track={} clips={} inserts={}",
+                    track.id,
+                    clip_counts[track_index],
+                    track.inserts.len()
+                );
                 for insert in &track.inserts {
                     let format = insert
                         .params
@@ -1791,10 +1841,12 @@ impl RuntimeProject {
         } else {
             0.0
         };
-        eprintln!(
-            "[transport] sample_rate={} bpm={} samples_per_beat={:.0}",
-            output_sample_rate, snapshot.bpm, samples_per_beat
-        );
+        if graph_debug {
+            eprintln!(
+                "[transport] sample_rate={} bpm={} samples_per_beat={:.0}",
+                output_sample_rate, snapshot.bpm, samples_per_beat
+            );
+        }
 
         if crate::forensic_trace::engine_midi_trace_enabled() {
             for track in &snapshot.tracks {

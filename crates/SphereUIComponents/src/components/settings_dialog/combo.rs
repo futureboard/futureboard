@@ -202,6 +202,33 @@ pub(crate) fn hardware_combo_overlay(
             )
             .into_any_element()
         }
+        HardwareCombo::UpdateChannel => {
+            let selected = schema.general.update_channel.label().to_string();
+            let options = crate::settings::UpdateChannel::ALL
+                .iter()
+                .map(|channel| channel.label().to_string())
+                .collect::<Vec<_>>();
+            let up = on_update;
+            combo_box_string_menu(
+                "settings-general-update-channel-menu",
+                position,
+                &selected,
+                &options,
+                Arc::new(move |value, window, cx| {
+                    let channel = crate::settings::UpdateChannel::ALL
+                        .iter()
+                        .copied()
+                        .find(|channel| channel.label() == value)
+                        .unwrap_or_default();
+                    up(
+                        Arc::new(move |s| s.general.update_channel = channel),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
         HardwareCombo::AutosaveInterval => {
             let selected = format!("{} min", schema.general.autosave.interval_minutes);
             let options: Vec<String> = AUTOSAVE_INTERVAL_OPTIONS

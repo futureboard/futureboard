@@ -22,9 +22,10 @@ jobs:
       - name: Read app version
         id: read
         run: |
-          BASE=$(node -p "require('./version.json').version")
-          COMMIT="${GITHUB_SHA::7}"
-          VERSION="${BASE}-alpha+${COMMIT}"
+          # Nightly versions are calendar based and intentionally contain no
+          # commit hash. This keeps Cargo, bundle metadata and updater parsing
+          # valid while still producing a newer version every daily run.
+          VERSION="$(TZ=Asia/Bangkok date +'%Y.%-m.%-d')-nightly"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "App version: ${VERSION}"
 
@@ -144,7 +145,7 @@ jobs:
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out
+          bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out "${{ needs.version.outputs.app-version }}"
           bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
 
       - name: Install Inno Setup
@@ -154,7 +155,9 @@ jobs:
       - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}" -SourceDir $env:FUTUREBOARD_PACKAGE_DIR
+        run: |
+          ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}" -SourceDir $env:FUTUREBOARD_PACKAGE_DIR
+          Move-Item target/installer/FutureboardStudioSetup.exe "target/installer/Futureboard.Studio-${{ needs.version.outputs.app-version }}-windows-x86_64-Setup.exe"
 
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-24.04'
@@ -217,10 +220,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly
-          name: "Nightly v${{ needs.version.outputs.app-version }} #${{ github.run_number }}"
+          name: "Nightly v${{ needs.version.outputs.app-version }}"
           body: |
-            **Automated daily build** from `${{ github.ref_name }}`
-            Commit: `${{ github.sha }}`
+            **Automated daily build** for Windows, Linux, and macOS.
             App version: `${{ needs.version.outputs.app-version }}`
 
             > Pre-release snapshot — may be unstable, not for production use.

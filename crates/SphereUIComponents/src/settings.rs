@@ -53,6 +53,27 @@ pub struct NotificationSettings {
     pub enable_system_notifications: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Nightly,
+    Beta,
+    #[default]
+    Stable,
+}
+
+impl UpdateChannel {
+    pub const ALL: [Self; 3] = [Self::Stable, Self::Beta, Self::Nightly];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Nightly => "Nightly",
+            Self::Beta => "Beta",
+            Self::Stable => "Stable",
+        }
+    }
+}
+
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
@@ -70,6 +91,8 @@ pub struct GeneralSettings {
     pub show_start_screen: bool,
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
     #[serde(default = "default_true")]
     pub discord_rpc_enabled: bool,
     /// True after the user has answered the first-launch plug-in scan prompt.
@@ -95,6 +118,7 @@ impl Default for GeneralSettings {
             language: default_language(),
             show_start_screen: default_true(),
             check_updates: default_true(),
+            update_channel: UpdateChannel::default(),
             discord_rpc_enabled: default_true(),
             plugin_scan_prompt_answered: false,
             default_project_directory: None,

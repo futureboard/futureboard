@@ -12,9 +12,9 @@ use crate::components::mixer_master_strip_view::{
     mixer_master_meter_signature, MixerMasterStripView,
 };
 use crate::components::mixer_panel::{
-    build_mixer_render_snapshot, mixer_center_lightweight, mixer_render_item_count,
-    mixer_strip_scroller, mixer_sub_header, MixerSplit, MixerSplitAction, MixerSplitDrag,
-    VstiOutputMeterState,
+    build_mixer_render_snapshot, collect_mixer_render_items, mixer_center_lightweight,
+    mixer_render_item_count, mixer_strip_scroller, mixer_sub_header, mixer_visible_item_range,
+    MixerRenderItem, MixerSplit, MixerSplitAction, MixerSplitDrag, VstiOutputMeterState,
 };
 use crate::components::mixer_surface::render_mixer_primitives;
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
@@ -99,7 +99,26 @@ impl MixerPanelView {
                 &timeline.state.tracks,
             );
         let hidden = timeline.state.mixer_tree.hidden_channel_ids.clone();
-        let strip_count = mixer_render_item_count(&timeline.state.tracks, &collapsed, &hidden);
+        let render_items = collect_mixer_render_items(&timeline.state.tracks, &collapsed, &hidden);
+        let strip_count = render_items.len();
+        let visible_range =
+            mixer_visible_item_range(strip_count, chrome.scroll_x, chrome.viewport_width);
+        let mut detailed_track_indices = HashSet::new();
+        for item in &render_items[visible_range] {
+            match *item {
+                MixerRenderItem::Track { track_index } => {
+                    detailed_track_indices.insert(track_index);
+                }
+                MixerRenderItem::VstiOutput {
+                    parent_index,
+                    child_index,
+                    ..
+                } => {
+                    detailed_track_indices.insert(parent_index);
+                    detailed_track_indices.insert(child_index);
+                }
+            }
+        }
 
         // Mixer strips never inspect arrangement clips. A full TrackState clone
         // also clones every MIDI note/controller vector, which made a simple
@@ -108,7 +127,14 @@ impl MixerPanelView {
             .state
             .tracks
             .iter()
-            .map(crate::layout::clone_track_for_mixer)
+            .enumerate()
+            .map(|(track_index, track)| {
+                if detailed_track_indices.contains(&track_index) {
+                    crate::layout::clone_track_for_mixer(track)
+                } else {
+                    crate::layout::clone_track_for_mixer_summary(track)
+                }
+            })
             .collect();
         let mut master = timeline.state.master.clone();
         timeline

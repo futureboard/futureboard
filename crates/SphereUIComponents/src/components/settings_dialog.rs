@@ -362,6 +362,7 @@ pub enum HardwareCombo {
     OutputDevice,
     ClockSource,
     Language,
+    UpdateChannel,
     AutosaveInterval,
     AutosaveMaxBackups,
     SampleRate,
@@ -467,6 +468,15 @@ fn build_settings_content(
                         move |_, w, cx| {
                             up(Arc::new(move |s| s.general.check_updates = !val), w, cx);
                         },
+                    )
+                }))
+                .child(settings_daw_row("Update channel", {
+                    hardware_select(
+                        HardwareCombo::UpdateChannel,
+                        "settings-general-update-channel",
+                        schema.general.update_channel.label(),
+                        callbacks.open_hardware_combo,
+                        callbacks.on_toggle_hardware_combo.clone(),
                     )
                 }))
                 .into_any_element(),
@@ -2256,6 +2266,7 @@ pub struct SettingsWindow {
     open_hardware_combo: Option<HardwareCombo>,
     hardware_combo_anchor: Option<OverlayAnchor>,
     midi_refresh_nonce: u64,
+    midi_refresh_in_flight: bool,
     on_update: OnSettingUpdate,
     on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
     focus_handle: FocusHandle,

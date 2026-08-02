@@ -2,6 +2,7 @@
 
 mod app;
 mod audio_state;
+mod updater;
 mod window;
 
 #[cfg(feature = "exclusive")]

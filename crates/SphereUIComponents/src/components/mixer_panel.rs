@@ -1950,6 +1950,20 @@ pub(crate) fn master_strip(
 /// prevent pop-in during horizontal mixer scrolling.
 const MIXER_OVERSCAN: usize = 1;
 
+pub(crate) fn mixer_visible_item_range(
+    strip_count: usize,
+    scroll_x: f32,
+    viewport_width: f32,
+) -> std::ops::Range<usize> {
+    let max_scroll_x = (strip_count as f32 * STRIP_WIDTH - viewport_width.max(0.0)).max(0.0);
+    let scroll_x = scroll_x.clamp(0.0, max_scroll_x);
+    let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
+    let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
+    let last_visible = ((scroll_x + viewport_width.max(0.0)) / STRIP_WIDTH).ceil() as usize;
+    let visible_end = (last_visible + MIXER_OVERSCAN).min(strip_count);
+    visible_start.min(visible_end)..visible_end
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct VstiOutputMeterState {
     pub level: f32,
@@ -2021,6 +2035,30 @@ pub(crate) fn collect_mixer_render_items(
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_channels: &HashSet<String>,
 ) -> Vec<MixerRenderItem> {
+    // Index VSTi output children once. The old parent-by-parent full track scan
+    // was O(n²), which became visible as multi-second mixer stalls at 1k tracks.
+    let mut children_by_insert: std::collections::HashMap<&str, Vec<(u8, usize)>> =
+        std::collections::HashMap::new();
+    for (child_index, child) in tracks.iter().enumerate() {
+        let Some(insert_id) = vsti_output_child_insert_id(&child.id) else {
+            continue;
+        };
+        let Some(bus_index) = child
+            .id
+            .rsplit_once(":bus:")
+            .and_then(|(_, bus)| bus.parse::<u8>().ok())
+        else {
+            continue;
+        };
+        children_by_insert
+            .entry(insert_id)
+            .or_default()
+            .push((bus_index, child_index));
+    }
+    for children in children_by_insert.values_mut() {
+        children.sort_unstable_by_key(|(bus_index, _)| *bus_index);
+    }
+
     let mut items = Vec::with_capacity(tracks.len());
     for (track_index, track) in tracks.iter().enumerate() {
         // VSTi multi-out child tracks are model/engine route nodes. The visible
@@ -2045,22 +2083,11 @@ pub(crate) fn collect_mixer_render_items(
         // model child tracks — rather than re-deriving channel pairs here — keeps
         // the visible strips, the engine routes, and per-bus mute/solo/meters in
         // perfect 1:1 lockstep with `ensure_vsti_output_child_tracks`.
-        let mut children: Vec<(u8, usize)> = tracks
-            .iter()
-            .enumerate()
-            .filter_map(|(child_index, child)| {
-                if vsti_output_child_insert_id(&child.id) != Some(slot.id.as_str()) {
-                    return None;
-                }
-                let bus_index = child
-                    .id
-                    .rsplit_once(":bus:")
-                    .and_then(|(_, bus)| bus.parse::<u8>().ok())?;
-                Some((bus_index, child_index))
-            })
-            .collect();
-        children.sort_by_key(|(bus_index, _)| *bus_index);
-        for (bus_index, child_index) in children {
+        for &(bus_index, child_index) in children_by_insert
+            .get(slot.id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
             let child_id = &tracks[child_index].id;
             if hidden_channels.contains(child_id) {
                 continue;
@@ -2456,10 +2483,9 @@ pub(crate) fn mixer_strip_scroller(
     let scroll_x = scroll_x.clamp(0.0, max_scroll_x.max(0.0));
     let spare_channel_w = (viewport_width - total_content_w).max(0.0);
 
-    let first_visible = (scroll_x / STRIP_WIDTH).floor() as usize;
-    let visible_start = first_visible.saturating_sub(MIXER_OVERSCAN);
-    let last_visible = ((scroll_x + viewport_width) / STRIP_WIDTH).ceil() as usize;
-    let visible_end = (last_visible + MIXER_OVERSCAN).min(strip_count);
+    let visible_range = mixer_visible_item_range(strip_count, scroll_x, viewport_width);
+    let visible_start = visible_range.start;
+    let visible_end = visible_range.end;
 
     let left_spacer_w = visible_start as f32 * STRIP_WIDTH;
     let right_spacer_w = strip_count.saturating_sub(visible_end) as f32 * STRIP_WIDTH;
@@ -2766,5 +2792,21 @@ mod collapse_filter_tests {
             collect_mixer_render_items(&state.tracks, &collapsed, &HashSet::new());
         assert_eq!(collapsed_items.len(), 1);
         assert_eq!(state.tracks.len(), 5);
+    }
+}
+
+#[cfg(test)]
+mod mixer_virtualization_tests {
+    use super::mixer_visible_item_range;
+
+    #[test]
+    fn thousand_strip_detail_window_stays_bounded() {
+        let first = mixer_visible_item_range(1_000, 0.0, 880.0);
+        let middle = mixer_visible_item_range(1_000, 44_000.0, 880.0);
+        let end = mixer_visible_item_range(1_000, f32::MAX, 880.0);
+        assert!(first.len() <= 12);
+        assert!(middle.len() <= 12);
+        assert!(end.len() <= 12);
+        assert_eq!(end.end, 1_000);
     }
 }

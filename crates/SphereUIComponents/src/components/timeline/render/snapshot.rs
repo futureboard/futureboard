@@ -161,14 +161,18 @@ impl TimelineRenderSnapshot {
             seconds_per_beat,
         );
 
-        let visible_tracks = visible_track_range(state, options.track_overscan);
+        // Row layout is O(track_count) and owns cloned track ids. Build it once
+        // per snapshot; 1k-track sessions previously rebuilt it four times for
+        // visibility, lanes, clips, and the drag insertion marker.
+        let row_layout = state.track_row_layout();
+        let visible_tracks = visible_track_range(state, &row_layout, options.track_overscan);
         let visible_beats = VisibleBeatRange {
             start_beat: viewport.visible_beat_range().0,
             end_beat: viewport.visible_beat_range().1,
         };
 
-        let lanes = build_lanes(state, &visible_tracks);
-        let clips = build_clips(state, &visible_tracks, &viewport);
+        let lanes = build_lanes(state, &row_layout, &visible_tracks);
+        let clips = build_clips(state, &row_layout, &visible_tracks, &viewport);
         let grid_lines = state
             .get_arrangement_grid_lines(grid_width)
             .into_iter()
@@ -191,7 +195,7 @@ impl TimelineRenderSnapshot {
         };
 
         let track_insert_y = state.drag_target_index.and_then(|index| {
-            state.track_row_layout().row_for_index(index).map(|row| {
+            row_layout.row_for_index(index).map(|row| {
                 (row.y - state.viewport.scroll_y).clamp(0.0, grid_height.max(DEFAULT_TRACK_HEIGHT))
             })
         });
@@ -214,8 +218,11 @@ impl TimelineRenderSnapshot {
     }
 }
 
-fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRange {
-    let row_layout = state.track_row_layout();
+fn visible_track_range(
+    state: &TimelineState,
+    row_layout: &crate::components::timeline::timeline_state::TrackRowLayout,
+    overscan: usize,
+) -> VisibleTrackRange {
     let track_count = row_layout.rows.len();
     if track_count == 0 {
         return VisibleTrackRange {
@@ -227,7 +234,7 @@ fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRa
     let viewport_height = state.viewport.viewport_height;
     let (visible_start, visible_end, _, _) =
         crate::components::timeline::track_resize::visible_track_row_range(
-            &row_layout,
+            row_layout,
             scroll_y,
             viewport_height,
             overscan,
@@ -238,8 +245,11 @@ fn visible_track_range(state: &TimelineState, overscan: usize) -> VisibleTrackRa
     }
 }
 
-fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLaneSnapshot> {
-    let row_layout = state.track_row_layout();
+fn build_lanes(
+    state: &TimelineState,
+    row_layout: &crate::components::timeline::timeline_state::TrackRowLayout,
+    range: &VisibleTrackRange,
+) -> Vec<RenderLaneSnapshot> {
     state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
@@ -274,13 +284,12 @@ fn build_lanes(state: &TimelineState, range: &VisibleTrackRange) -> Vec<RenderLa
 
 fn build_clips(
     state: &TimelineState,
+    row_layout: &crate::components::timeline::timeline_state::TrackRowLayout,
     range: &VisibleTrackRange,
     viewport: &TimelineViewport,
 ) -> Vec<RenderClipSnapshot> {
     let mut clips = Vec::new();
     let pad = 7.0_f32;
-    let row_layout = state.track_row_layout();
-
     for (rel, track) in state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
@@ -475,5 +484,43 @@ impl WaveformStatusExt for WaveformDisplayStatus {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TrackType,
+    };
+
+    #[test]
+    fn snapshot_virtualizes_one_thousand_tracks() {
+        let mut state = TimelineState::default();
+        state.viewport.viewport_width = 1_200.0;
+        state.viewport.viewport_height = 500.0;
+        for index in 0..1_000 {
+            state.create_track(CreateTrackOptions {
+                track_type: if index % 2 == 0 {
+                    TrackType::Audio
+                } else {
+                    TrackType::Midi
+                },
+                name: format!("Track {index}"),
+                color: crate::theme::Colors::track_color_for_index(index),
+                volume: 1.0,
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+        }
+
+        let snapshot = TimelineRenderSnapshot::from_state(&state, SnapshotBuildOptions::default());
+        assert_eq!(state.tracks.len(), 1_000);
+        assert!(snapshot.lanes.len() <= 12, "only viewport rows are drawn");
+        assert!(
+            snapshot.visible_tracks.end_index - snapshot.visible_tracks.start_index <= 12,
+            "vertical overscan must stay bounded independently of track count"
+        );
     }
 }

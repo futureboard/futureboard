@@ -165,9 +165,21 @@ pub async fn run_lightweight_boot(cx: &mut AsyncApp) -> StartupPlan {
     crate::boot::log("[Startup] phase=ScanMidi");
     executor
         .spawn(async {
-            crate::device_registry::scan_midi();
+            crate::device_registry::scan_midi_resilient();
         })
         .await;
+    if crate::device_registry::cached_midi_devices().is_empty() {
+        // USB class drivers and platform MIDI services can appear after the
+        // splash scan has completed. Retry once after startup without delaying
+        // Welcome/Studio; the regular hardware sync will consume the new cache.
+        let retry_timer = executor.clone();
+        executor
+            .spawn(async move {
+                retry_timer.timer(Duration::from_secs(2)).await;
+                crate::device_registry::scan_midi_resilient();
+            })
+            .detach();
+    }
 
     executor.timer(Duration::from_millis(80)).await;
     cx.update(|_app| {

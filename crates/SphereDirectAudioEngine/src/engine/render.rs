@@ -847,7 +847,20 @@ fn render_project_block_interleaved_core(
         }
     }
 
-    for track in &mut runtime.tracks {
+    for (track_index, track) in runtime.tracks.iter_mut().enumerate() {
+        let is_routing_or_master = crate::audio_graph::is_routing_track_type(&track.track_type)
+            || crate::audio_graph::is_master_track_type(&track.track_type);
+        let source_active = runtime
+            .audio_graph
+            .active_source_mask
+            .get(track_index)
+            .copied()
+            .unwrap_or(true)
+            || track.monitor_enabled
+            || !track.midi_block_events.is_empty();
+        if !is_routing_or_master && !source_active {
+            continue;
+        }
         if track.block_l.len() < frames {
             track.block_l.resize(frames, 0.0);
             track.block_r.resize(frames, 0.0);
@@ -881,6 +894,18 @@ fn render_project_block_interleaved_core(
     for clip_index in 0..runtime.clips.len() {
         if !transport_active {
             break; // stopped-transport preview block — no timeline material
+        }
+        // The overwhelmingly common non-looping path rejects inactive clips
+        // before cloning their Arc source or reading the rest of their DSP
+        // metadata. Large arrangements otherwise touched every clip every
+        // callback even when only a handful overlap the current block.
+        if loop_bounds.is_none() {
+            let clip = &runtime.clips[clip_index];
+            let block_end = base_sample.saturating_add(frames as u64);
+            let clip_end = clip.start_sample.saturating_add(clip.duration_samples);
+            if clip_end <= base_sample || clip.start_sample >= block_end {
+                continue;
+            }
         }
         let (
             clip_muted,
@@ -1030,6 +1055,17 @@ fn render_project_block_interleaved_core(
     // it is restored below. `audio_graph` is otherwise untouched here.
     let pass1_indices = std::mem::take(&mut runtime.audio_graph.pass1_source_indices);
     for &track_index in &pass1_indices {
+        let source_active = runtime
+            .audio_graph
+            .active_source_mask
+            .get(track_index)
+            .copied()
+            .unwrap_or(true)
+            || runtime.tracks[track_index].monitor_enabled
+            || !runtime.tracks[track_index].midi_block_events.is_empty();
+        if !source_active {
+            continue;
+        }
         if effective_track_muted(&runtime.tracks[track_index], block_beat)
             || (runtime.has_solo
                 && !runtime.tracks[track_index].solo
@@ -2364,11 +2400,13 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod live_input_monitor_tests {
-    use super::render_project_block_interleaved_with_live_input;
+    use super::{
+        render_project_block_interleaved, render_project_block_interleaved_with_live_input,
+    };
     use crate::runtime::RuntimeProject;
     use crate::types::{
-        EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackInputSourceSnapshot,
-        EngineTrackSnapshot,
+        EngineInsertSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot,
+        EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
     };
     use std::collections::HashMap;
 
@@ -2482,6 +2520,59 @@ mod live_input_monitor_tests {
         let (left, right) = render_monitored_block(&mut runtime, 0);
         assert!(left.abs() < 1.0e-6);
         assert!(right.abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn stress_1000_tracks_and_128_bypassed_inserts_render_only_active_source() {
+        let mut tracks: Vec<_> = (0..1_000)
+            .map(|index| track(&format!("midi-{index}"), "midi"))
+            .collect();
+        tracks[500].inserts = (0..128)
+            .map(|index| EngineInsertSnapshot {
+                id: format!("bypassed-{index}"),
+                kind: "gain".to_string(),
+                enabled: false,
+                params: HashMap::new(),
+                state: None,
+            })
+            .collect();
+        tracks.push(track("master", "master"));
+        let snapshot = EngineProjectSnapshot {
+            project_id: "stress-1k-tracks".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks,
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            },
+        };
+        let mut runtime = RuntimeProject::build(&snapshot, 48_000, &mut HashMap::new(), None, true)
+            .expect("large runtime");
+        assert_eq!(runtime.tracks.len(), 1_001);
+        assert_eq!(
+            runtime
+                .audio_graph
+                .active_source_mask
+                .iter()
+                .filter(|active| **active)
+                .count(),
+            1,
+            "only the source with an insert chain should touch audio buffers"
+        );
+
+        let mut output = [0.0f32; FRAMES * 2];
+        render_project_block_interleaved(&mut runtime, 0, 1.0, &mut output, 2, true, 4, 4, None);
+        assert!(output.iter().all(|sample| *sample == 0.0));
     }
 }
 

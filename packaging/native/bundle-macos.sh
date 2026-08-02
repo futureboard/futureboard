@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 PACKAGE_DIR="${1:-}"
 OUT="${2:-$ROOT/packaging/native/out}"
+APP_VERSION="${3:-}"
 
 if [[ -z "$PACKAGE_DIR" ]]; then
   PACKAGE_DIR="$(find "$ROOT/out/release/community" -mindepth 1 -maxdepth 1 -type d -name 'macos-*' -print -quit 2>/dev/null || true)"
@@ -49,6 +50,21 @@ if [[ ! -f "$PACKAGE_DIR/build-info.json" ]]; then
   exit 1
 fi
 
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$PACKAGE_DIR/build-info.json" | sed -E 's/.*"([^"]+)"/\1/' || true)"
+fi
+if [[ -z "$APP_VERSION" ]]; then
+  echo "error: could not determine app version" >&2
+  exit 1
+fi
+# Apple's bundle version fields accept numeric dot-separated components. The
+# full channel-qualified SemVer remains embedded in the Rust binary/build-info.
+BUNDLE_VERSION="${APP_VERSION%%[-+]*}"
+if [[ ! "$BUNDLE_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+  echo "error: invalid macOS bundle version: $BUNDLE_VERSION" >&2
+  exit 1
+fi
+
 if [[ ! -f "$PLIST_SRC" ]]; then
   echo "error: Info.plist not found: $PLIST_SRC" >&2
   exit 1
@@ -67,6 +83,8 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 
 # Existing Info.plist
 cp "$PLIST_SRC" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BUNDLE_VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUNDLE_VERSION" "$CONTENTS/Info.plist"
 
 # Preserve the validated xtask runtime layout, then place CEF in the standard
 # macOS framework location expected by cef-rs' library loader.
@@ -105,8 +123,8 @@ for VARIANT in "${CEF_HELPER_VARIANTS[@]}"; do
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>$HELPER_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
+  <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

@@ -2975,6 +2975,7 @@ dependencies = [
  "gpui_macos",
  "gpui_windows",
  "rand 0.9.4",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

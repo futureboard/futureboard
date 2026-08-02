@@ -12,9 +12,9 @@
 //! backend failure yields an empty list + warning instead of a panic.
 
 use std::sync::{OnceLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use sphere_midi_service::{scan_midi_ports, DetectedMidiDevice, MidiDeviceDirection};
+use sphere_midi_service::{scan_midi_ports, DetectedMidiDevice};
 
 /// One enumerated audio endpoint. Mirrors the engine's `JsAudioDeviceInfo`
 /// fields we actually surface in Preferences.
@@ -43,6 +43,7 @@ struct RegistryState {
     midi: Vec<DetectedMidiDevice>,
     midi_revision: u64,
     midi_scanned: bool,
+    midi_consecutive_empty_scans: u8,
     audio: AudioDeviceSnapshot,
     audio_scanned: bool,
 }
@@ -56,29 +57,83 @@ fn state() -> &'static RwLock<RegistryState> {
 
 /// Run a real MIDI port scan, replace the cache, bump the revision, and return
 /// the new revision. Called at startup and on manual Refresh — never per paint.
+fn commit_midi_scan(
+    devices: Vec<DetectedMidiDevice>,
+    confirmed_empty: bool,
+    start: Instant,
+) -> u64 {
+    let reported_devices = devices.len();
+    let (revision, cached_devices, preserved_previous) = {
+        let mut s = state().write().unwrap();
+        let empty = devices.is_empty();
+        if empty {
+            s.midi_consecutive_empty_scans = s.midi_consecutive_empty_scans.saturating_add(1);
+        } else {
+            s.midi_consecutive_empty_scans = 0;
+        }
+        let preserve_previous = should_preserve_midi_cache(
+            !s.midi.is_empty(),
+            empty,
+            confirmed_empty,
+            s.midi_consecutive_empty_scans,
+        );
+        if !preserve_previous {
+            s.midi = devices;
+        }
+        s.midi_revision = s.midi_revision.wrapping_add(1);
+        s.midi_scanned = true;
+        (s.midi_revision, s.midi.len(), preserve_previous)
+    };
+    if sphere_midi_service::midi_settings_debug_enabled() || reported_devices == 0 {
+        eprintln!(
+            "[MidiDeviceScan] reported={reported_devices} cached={cached_devices} preserved_previous={preserved_previous} duration={:.1}ms revision={revision}",
+            start.elapsed().as_secs_f32() * 1000.0
+        );
+    }
+    revision
+}
+
+fn should_preserve_midi_cache(
+    had_devices: bool,
+    scan_empty: bool,
+    confirmed_empty: bool,
+    consecutive_empty_scans: u8,
+) -> bool {
+    had_devices && scan_empty && !confirmed_empty && consecutive_empty_scans < 2
+}
+
+fn resilient_midi_scan_with(
+    mut scan: impl FnMut() -> Vec<DetectedMidiDevice>,
+    mut wait: impl FnMut(Duration),
+) -> Vec<DetectedMidiDevice> {
+    const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(40), Duration::from_millis(120)];
+    let mut devices = scan();
+    for delay in RETRY_DELAYS {
+        if !devices.is_empty() {
+            break;
+        }
+        wait(delay);
+        devices = scan();
+    }
+    devices
+}
+
+/// Single non-blocking enumeration attempt. A lone transient empty result does
+/// not erase a previously healthy cache; two consecutive manual scans confirm
+/// that all devices were actually disconnected.
 pub fn scan_midi() -> u64 {
     let start = Instant::now();
     let devices = scan_midi_ports();
-    let inputs = devices
-        .iter()
-        .filter(|d| d.direction == MidiDeviceDirection::Input)
-        .count();
-    let outputs = devices
-        .iter()
-        .filter(|d| d.direction == MidiDeviceDirection::Output)
-        .count();
-    let revision = {
-        let mut s = state().write().unwrap();
-        s.midi = devices;
-        s.midi_revision = s.midi_revision.wrapping_add(1);
-        s.midi_scanned = true;
-        s.midi_revision
-    };
-    eprintln!(
-        "[MidiDeviceScan] found inputs={inputs} outputs={outputs} duration={:.1}ms revision={revision}",
-        start.elapsed().as_secs_f32() * 1000.0
-    );
-    revision
+    commit_midi_scan(devices, false, start)
+}
+
+/// Startup/manual scan for backends that initialize asynchronously (WinMM,
+/// ALSA sequencer, CoreMIDI). Must be called off the UI/audio thread.
+pub fn scan_midi_resilient() -> u64 {
+    let start = Instant::now();
+    let devices = resilient_midi_scan_with(scan_midi_ports, std::thread::sleep);
+    let confirmed_empty = devices.is_empty();
+    commit_midi_scan(devices, confirmed_empty, start)
 }
 
 /// Cached MIDI devices for rendering. Lazily runs one scan the first time it is
@@ -178,5 +233,41 @@ mod tests {
     fn cached_midi_never_panics() {
         // Lazy scan path must be panic-free even with no MIDI backend.
         let _ = cached_midi_devices();
+    }
+
+    #[test]
+    fn transient_empty_scan_preserves_previous_devices_once() {
+        assert!(should_preserve_midi_cache(true, true, false, 1));
+        assert!(!should_preserve_midi_cache(true, true, false, 2));
+        assert!(!should_preserve_midi_cache(true, true, true, 1));
+        assert!(!should_preserve_midi_cache(false, true, false, 1));
+    }
+
+    #[test]
+    fn resilient_scan_retries_until_backend_reports_devices() {
+        let expected = DetectedMidiDevice {
+            id: "midi-in-ready".to_string(),
+            name: "Ready Controller".to_string(),
+            direction: sphere_midi_service::MidiDeviceDirection::Input,
+        };
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let devices = resilient_midi_scan_with(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Vec::new()
+                } else {
+                    vec![expected.clone()]
+                }
+            },
+            |delay| waits.push(delay),
+        );
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            waits,
+            vec![Duration::from_millis(40), Duration::from_millis(120)]
+        );
+        assert_eq!(devices, vec![expected]);
     }
 }

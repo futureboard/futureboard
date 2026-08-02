@@ -89,6 +89,11 @@ pub struct RuntimeAudioGraph {
     pub nodes: Vec<AudioGraphNode>,
     /// Pass-1 source track indices (audio / midi / instrument), array order.
     pub pass1_source_indices: Vec<usize>,
+    /// Source tracks that can produce audio without live input in the current
+    /// runtime snapshot. Filled after clip and MIDI routes are resolved.
+    pub active_source_mask: Vec<bool>,
+    /// Round-robin cursor for bounded bridge-latency observation.
+    pub latency_scan_cursor: usize,
     /// Pass-2 routing tracks in topological order (bus / return).
     pub pass2_routing_indices: Vec<usize>,
     pub master_index: Option<usize>,
@@ -302,6 +307,8 @@ pub fn plan_runtime_audio_graph(
     Ok(RuntimeAudioGraph {
         nodes,
         pass1_source_indices,
+        active_source_mask: vec![false; tracks.len()],
+        latency_scan_cursor: 0,
         pass2_routing_indices,
         master_index,
         rejected_routes,

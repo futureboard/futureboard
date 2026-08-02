@@ -5,8 +5,8 @@
 //! directly.
 
 use crate::{
-    coalesce_detected_midi_devices, decode_midi_bytes, stable_id, DetectedMidiDevice,
-    HardwareMidiInputMessage, MidiDeviceDirection,
+    coalesce_detected_midi_devices, decode_midi_bytes, stable_id, stable_id_ordinal,
+    DetectedMidiDevice, HardwareMidiInputMessage, MidiDeviceDirection,
 };
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int, c_ulong};
@@ -262,13 +262,18 @@ impl Drop for MacMidiInputConnection {
     }
 }
 
-fn find_source_by_name(device_name: &str) -> Option<MIDIEndpointRef> {
+fn find_source_by_name_or_id(device_id: &str, device_name: &str) -> Option<MIDIEndpointRef> {
+    let ordinal = stable_id_ordinal(device_id, device_name);
+    let mut occurrence = 0usize;
     unsafe {
         let n = MIDIGetNumberOfSources();
         for i in 0..n {
             let src = MIDIGetSource(i);
             if endpoint_name(src).as_deref() == Some(device_name) {
-                return Some(src);
+                occurrence += 1;
+                if occurrence == ordinal {
+                    return Some(src);
+                }
             }
         }
     }
@@ -276,6 +281,7 @@ fn find_source_by_name(device_name: &str) -> Option<MIDIEndpointRef> {
 }
 
 fn find_destination_by_name_or_id(device_id_or_name: &str) -> Option<(MIDIEndpointRef, String)> {
+    let mut occurrences = std::collections::HashMap::<String, usize>::new();
     unsafe {
         let n = MIDIGetNumberOfDestinations();
         for i in 0..n {
@@ -283,9 +289,14 @@ fn find_destination_by_name_or_id(device_id_or_name: &str) -> Option<(MIDIEndpoi
             if let Some(name) = endpoint_name(dst) {
                 let stable = stable_id(MidiDeviceDirection::Output, &name);
                 let stable_io = stable_id(MidiDeviceDirection::InputOutput, &name);
+                let occurrence = occurrences.entry(name.clone()).or_insert(0);
+                *occurrence += 1;
+                let ordinal = stable_id_ordinal(device_id_or_name, &name);
                 if name == device_id_or_name
-                    || stable == device_id_or_name
-                    || stable_io == device_id_or_name
+                    || ((stable == device_id_or_name
+                        || stable_io == device_id_or_name
+                        || ordinal > 1)
+                        && *occurrence == ordinal)
                 {
                     return Some((dst, name));
                 }
@@ -301,7 +312,7 @@ pub fn open_inputs(
 ) -> Vec<(String, MacMidiInputConnection)> {
     let mut connections = Vec::new();
     for (device_id, device_name) in enabled {
-        let Some(source) = find_source_by_name(&device_name) else {
+        let Some(source) = find_source_by_name_or_id(&device_id, &device_name) else {
             eprintln!("[MIDI input] CoreMIDI source not found for '{device_name}'");
             continue;
         };

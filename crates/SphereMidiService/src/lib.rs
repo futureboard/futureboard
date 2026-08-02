@@ -168,6 +168,28 @@ pub(crate) fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
     format!("{prefix}-{slug}")
 }
 
+/// One-based occurrence encoded by duplicate-port ids (`...-2`, `...-3`).
+/// Accept every direction prefix because bidirectional devices are coalesced
+/// to `midi-io-*` but are opened through the input/output-specific backend.
+pub(crate) fn stable_id_ordinal(device_id: &str, name: &str) -> usize {
+    for direction in [
+        MidiDeviceDirection::InputOutput,
+        MidiDeviceDirection::Input,
+        MidiDeviceDirection::Output,
+    ] {
+        let base = stable_id(direction, name);
+        if device_id == base {
+            return 1;
+        }
+        if let Some(suffix) = device_id.strip_prefix(&format!("{base}-")) {
+            if let Ok(ordinal) = suffix.parse::<usize>() {
+                return ordinal.max(1);
+            }
+        }
+    }
+    1
+}
+
 /// Real MIDI port scan. Windows/Linux use `midir`; macOS uses a thin CoreMIDI
 /// FFI path (avoids midir/coremidi vs gpui `core-foundation` pin conflict).
 /// Enumeration only reads port names — it never opens the hardware.
@@ -241,28 +263,46 @@ fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
 pub(crate) fn coalesce_detected_midi_devices(
     devices: Vec<DetectedMidiDevice>,
 ) -> Vec<DetectedMidiDevice> {
-    let mut by_name: HashMap<String, DetectedMidiDevice> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+    let mut resolved: Vec<DetectedMidiDevice> = Vec::with_capacity(devices.len());
     for device in devices {
-        match by_name.get_mut(&device.name) {
-            Some(existing) => {
-                if existing.direction != device.direction
-                    && existing.direction != MidiDeviceDirection::InputOutput
-                {
-                    existing.direction = MidiDeviceDirection::InputOutput;
-                    existing.id = stable_id(MidiDeviceDirection::InputOutput, &existing.name);
-                }
+        let opposite = match device.direction {
+            MidiDeviceDirection::Input => MidiDeviceDirection::Output,
+            MidiDeviceDirection::Output => MidiDeviceDirection::Input,
+            MidiDeviceDirection::InputOutput => {
+                resolved.push(device);
+                continue;
             }
-            None => {
-                order.push(device.name.clone());
-                by_name.insert(device.name.clone(), device);
-            }
+        };
+        if let Some(existing) = resolved
+            .iter_mut()
+            .find(|existing| existing.name == device.name && existing.direction == opposite)
+        {
+            existing.direction = MidiDeviceDirection::InputOutput;
+            existing.id = stable_id(MidiDeviceDirection::InputOutput, &existing.name);
+        } else {
+            resolved.push(device);
         }
     }
-    order
-        .into_iter()
-        .filter_map(|name| by_name.remove(&name))
-        .collect()
+
+    // Multiple physical ports frequently expose the same display name. Keep
+    // every endpoint and disambiguate only colliding ids; name-keyed merging
+    // used to silently drop all but one port on every platform.
+    let mut id_counts: HashMap<String, usize> = HashMap::new();
+    for device in &mut resolved {
+        let base = if device.id.trim().is_empty() {
+            stable_id(device.direction, &device.name)
+        } else {
+            device.id.clone()
+        };
+        let count = id_counts.entry(base.clone()).or_insert(0);
+        *count += 1;
+        device.id = if *count == 1 {
+            base
+        } else {
+            format!("{base}-{}", *count)
+        };
+    }
+    resolved
 }
 
 /// Merge saved preferences with freshly detected devices. Saved-only entries stay visible as missing.
@@ -629,12 +669,17 @@ fn open_hardware_midi_inputs(
     };
     let ports = scanner.ports();
     for (device_id, device_name) in enabled {
-        let Some(port) = ports.iter().find(|port| {
-            scanner
-                .port_name(port)
-                .ok()
-                .is_some_and(|name| name == device_name)
-        }) else {
+        let ordinal = stable_id_ordinal(&device_id, &device_name);
+        let Some(port) = ports
+            .iter()
+            .filter(|port| {
+                scanner
+                    .port_name(port)
+                    .ok()
+                    .is_some_and(|name| name == device_name)
+            })
+            .nth(ordinal - 1)
+        else {
             eprintln!("[MIDI input] port not found for enabled device '{device_name}'");
             continue;
         };
@@ -786,13 +831,27 @@ fn open_midi_output(device_id_or_name: &str) -> Option<MidiOutputConnection> {
     #[cfg(not(target_os = "macos"))]
     {
         let midi_out = midir::MidiOutput::new("Futureboard MIDI playback").ok()?;
-        for port in midi_out.ports() {
+        let ports = midi_out.ports();
+        for port in &ports {
             let Ok(name) = midi_out.port_name(&port) else {
                 continue;
             };
             let stable = stable_id(MidiDeviceDirection::Output, &name);
-            if name == device_id_or_name || stable == device_id_or_name {
+            let stable_io = stable_id(MidiDeviceDirection::InputOutput, &name);
+            if name == device_id_or_name
+                || stable == device_id_or_name
+                || stable_io == device_id_or_name
+            {
                 return midi_out.connect(&port, "Futureboard MIDI Out").ok();
+            }
+            let ordinal = stable_id_ordinal(device_id_or_name, &name);
+            if ordinal > 1 {
+                let matching = ports.iter().filter(|candidate| {
+                    midi_out.port_name(candidate).ok().as_deref() == Some(&name)
+                });
+                if let Some(target) = matching.into_iter().nth(ordinal - 1) {
+                    return midi_out.connect(target, "Futureboard MIDI Out").ok();
+                }
             }
         }
         None
@@ -1339,6 +1398,43 @@ mod tests {
         assert!(pad.id.starts_with("midi-io-"));
         let keys = coalesced.iter().find(|d| d.name == "Keys").expect("keys");
         assert_eq!(keys.direction, MidiDeviceDirection::Input);
+    }
+
+    #[test]
+    fn coalesce_preserves_duplicate_named_physical_ports() {
+        let detected = vec![
+            DetectedMidiDevice {
+                id: String::new(),
+                name: "USB MIDI".to_string(),
+                direction: MidiDeviceDirection::Input,
+            },
+            DetectedMidiDevice {
+                id: String::new(),
+                name: "USB MIDI".to_string(),
+                direction: MidiDeviceDirection::Input,
+            },
+            DetectedMidiDevice {
+                id: String::new(),
+                name: "USB MIDI".to_string(),
+                direction: MidiDeviceDirection::Output,
+            },
+            DetectedMidiDevice {
+                id: String::new(),
+                name: "USB MIDI".to_string(),
+                direction: MidiDeviceDirection::Output,
+            },
+        ];
+        let coalesced = coalesce_detected_midi_devices(detected);
+        assert_eq!(coalesced.len(), 2);
+        assert!(
+            coalesced
+                .iter()
+                .all(|device| device.direction == MidiDeviceDirection::InputOutput)
+        );
+        assert_eq!(coalesced[0].id, "midi-io-usb-midi");
+        assert_eq!(coalesced[1].id, "midi-io-usb-midi-2");
+        assert_eq!(stable_id_ordinal(&coalesced[0].id, "USB MIDI"), 1);
+        assert_eq!(stable_id_ordinal(&coalesced[1].id, "USB MIDI"), 2);
     }
 
     #[test]

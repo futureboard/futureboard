@@ -65,6 +65,7 @@ impl SettingsWindow {
             open_hardware_combo: None,
             hardware_combo_anchor: None,
             midi_refresh_nonce: 0,
+            midi_refresh_in_flight: false,
             on_update,
             on_open_keyboard_shortcuts,
             focus_handle: cx.focus_handle(),
@@ -123,6 +124,34 @@ impl SettingsWindow {
                     );
                 }
                 window.renders_since_backend_change = 0;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Retry MIDI enumeration off the foreground thread. WinMM, ALSA and
+    /// CoreMIDI can all report zero ports briefly while their service/session
+    /// is still initializing; coalesce repeated clicks into one scan job.
+    pub(super) fn refresh_midi_devices(&mut self, cx: &mut Context<Self>) {
+        if self.midi_refresh_in_flight {
+            return;
+        }
+        self.midi_refresh_in_flight = true;
+        cx.spawn(async move |this, cx| {
+            let revision = cx
+                .background_executor()
+                .spawn(async { crate::device_registry::scan_midi_resilient() })
+                .await;
+            let _ = this.update(cx, |window, cx| {
+                window.midi_refresh_in_flight = false;
+                window.midi_refresh_nonce = window.midi_refresh_nonce.wrapping_add(1);
+                if midi_settings_debug_enabled() {
+                    eprintln!(
+                        "[MIDI settings] refresh completed (nonce={} registry_revision={revision})",
+                        window.midi_refresh_nonce
+                    );
+                }
                 cx.notify();
             });
         })
@@ -343,18 +372,8 @@ impl Render for SettingsWindow {
             on_refresh_midi: Some(Arc::new({
                 let target = target.clone();
                 move |_w: &mut Window, cx: &mut App| {
-                    // Manual refresh runs a real off-render MIDI scan, then a
-                    // single notify so the cached list re-renders once (no loop).
-                    let revision = crate::device_registry::scan_midi();
                     let _ = target.update(cx, |this, cx| {
-                        this.midi_refresh_nonce = this.midi_refresh_nonce.wrapping_add(1);
-                        if midi_settings_debug_enabled() {
-                            eprintln!(
-                                "[MIDI settings] refresh requested (nonce={} registry_revision={revision})",
-                                this.midi_refresh_nonce
-                            );
-                        }
-                        cx.notify();
+                        this.refresh_midi_devices(cx);
                     });
                 }
             })),

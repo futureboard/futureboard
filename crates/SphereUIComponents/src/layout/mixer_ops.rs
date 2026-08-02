@@ -2026,6 +2026,17 @@ fn external_mixer_perf_record(pushed: bool, build_nanos: u64) {
 /// the mixer needs it, instead of silently shipping a stale/defaulted value to
 /// the detached window.
 pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
+    clone_track_for_mixer_detail(track, true)
+}
+
+/// Lightweight offscreen mixer snapshot. It keeps only the structural
+/// instrument slot needed to preserve VSTi child-strip ordering; effect chains,
+/// sends, and automation are cloned only for strips inside the viewport.
+pub(crate) fn clone_track_for_mixer_summary(track: &TrackState) -> TrackState {
+    clone_track_for_mixer_detail(track, false)
+}
+
+fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> TrackState {
     let TrackState {
         id,
         name,
@@ -2084,10 +2095,18 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         meter_peak_hold_r: *meter_peak_hold_r,
         meter_clip: *meter_clip,
         clips: Vec::new(),
-        automation_lanes: automation_lanes.clone(),
+        automation_lanes: if include_detail {
+            automation_lanes.clone()
+        } else {
+            Vec::new()
+        },
         lane_mode: *lane_mode,
         selected_automation_target: selected_automation_target.clone(),
-        inserts: inserts.clone(),
+        inserts: if include_detail {
+            inserts.clone()
+        } else {
+            track.instrument_insert().cloned().into_iter().collect()
+        },
         instrument_plugin_instance_id: instrument_plugin_instance_id.clone(),
         builtin_soundfont_player: *builtin_soundfont_player,
         soundfont_path: soundfont_path.clone(),
@@ -2097,14 +2116,18 @@ pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
         soundfont_polyphony: *soundfont_polyphony,
         soundfont_envelope: *soundfont_envelope,
         soundfont_quality: *soundfont_quality,
-        sends: sends.clone(),
+        sends: if include_detail {
+            sends.clone()
+        } else {
+            Vec::new()
+        },
         routing: routing.clone(),
     }
 }
 
 #[cfg(test)]
 mod mixer_snapshot_clone_tests {
-    use super::clone_track_for_mixer;
+    use super::{clone_track_for_mixer, clone_track_for_mixer_summary};
     use crate::components::timeline::timeline_state::{
         CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
     };
@@ -2155,6 +2178,30 @@ mod mixer_snapshot_clone_tests {
         assert_eq!(lite.sends.len(), track.sends.len());
         // automation_lanes are kept (display_volume depends on them).
         assert_eq!(lite.automation_lanes.len(), track.automation_lanes.len());
+    }
+
+    #[test]
+    fn offscreen_mixer_summary_drops_effect_slot_payloads() {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Offscreen FX".to_string(),
+            color: crate::theme::Colors::track_color_for_index(0),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        state
+            .ensure_insert_slot_at(&track_id, 0)
+            .expect("effect slot");
+        let track = state.find_track(&track_id).expect("track");
+        assert_eq!(track.inserts.len(), 1);
+
+        let summary = clone_track_for_mixer_summary(track);
+        assert!(summary.inserts.is_empty());
+        assert!(summary.automation_lanes.is_empty());
+        assert!(summary.sends.is_empty());
     }
 }
 
