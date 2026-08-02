@@ -18,8 +18,10 @@
 // Compiled as Objective-C++ with -fobjc-arc (see build.rs).
 
 #import <AppKit/AppKit.h>
+#import <dispatch/dispatch.h>
 
 #include <cstdio>
+#include <cstdint>
 
 namespace {
 
@@ -136,5 +138,30 @@ extern "C" void sphere_plugin_host_mac_ui_wake(void) {
                                           data1:0
                                           data2:0];
     [NSApp postEvent:wake atStart:YES];
+  }
+}
+
+/// Bring an existing host-owned editor NSWindow to the front. `handle` is an
+/// NSWindow* bit-cast to u64 (AU path). Returns 1 on success, 0 if the handle
+/// is not a live window owned by this process.
+extern "C" int sphere_plugin_host_mac_ui_focus_window(unsigned long long handle) {
+  if (handle == 0 || !ui_ready()) {
+    return 0;
+  }
+  if (![NSThread isMainThread]) {
+    __block int result = 0;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      result = sphere_plugin_host_mac_ui_focus_window(handle);
+    });
+    return result;
+  }
+  @autoreleasepool {
+    NSWindow *window = (__bridge NSWindow *)(void *)(uintptr_t)handle;
+    if (window == nil || ![NSApp.windows containsObject:window]) {
+      return 0;
+    }
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    return 1;
   }
 }

@@ -630,36 +630,20 @@ fn filtered_instrument_plugin_options(
     }
 }
 
-fn plugin_search_header(query: &str) -> gpui::AnyElement {
+fn plugin_search_header(
+    search_input: &TextInputState,
+    search_focused: bool,
+    search_callbacks: TextInputCallbacks,
+    ime_target: Entity<AddTrackWindow>,
+) -> gpui::AnyElement {
     div()
-        .h(px(30.0))
         .mb(px(4.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_focus())
-        .bg(Colors::surface_input())
-        .child(icon(assets::ICON_SEARCH_PATH, 11.0, Colors::text_faint()))
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_size(px(10.5))
-                .text_color(if query.is_empty() {
-                    Colors::text_faint()
-                } else {
-                    Colors::text_primary()
-                })
-                .child(if query.is_empty() {
-                    "Search instruments...".to_string()
-                } else {
-                    query.to_string()
-                }),
-        )
+        .child(text_field_with_callbacks_and_ime(
+            search_input,
+            search_focused,
+            search_callbacks,
+            ime_target,
+        ))
         .into_any_element()
 }
 
@@ -1219,6 +1203,10 @@ fn type_fields(
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     instrument_plugin_query: &str,
+    instrument_search_input: Option<&TextInputState>,
+    instrument_search_focused: bool,
+    instrument_search_callbacks: Option<TextInputCallbacks>,
+    instrument_search_ime: Option<Entity<AddTrackWindow>>,
     midi_input_devices: &[String],
     i18n: I18n,
 ) -> gpui::AnyElement {
@@ -1349,6 +1337,19 @@ fn type_fields(
                 .child(fb_form_row(
                     "Instrument",
                     if state.instrument_mode == InstrumentMode::Vsti {
+                        let search_header = match (
+                            instrument_search_input,
+                            instrument_search_callbacks,
+                            instrument_search_ime,
+                        ) {
+                            (Some(input), Some(cbs), Some(ime)) => Some(plugin_search_header(
+                                input,
+                                instrument_search_focused,
+                                cbs,
+                                ime,
+                            )),
+                            _ => None,
+                        };
                         select_with_placement_and_header(
                             "add-track-instrument-plugin-select",
                             state.instrument_plugin_id.as_deref().or(Some("")),
@@ -1360,7 +1361,7 @@ fn type_fields(
                             add_track_select_open(open_select, AddTrackSelectId::InstrumentPlugin),
                             false,
                             SelectMenuPlacement::Below,
-                            Some(plugin_search_header(instrument_plugin_query)),
+                            search_header,
                             Arc::new(move |_, w, cx| {
                                 toggle_instrument(&AddTrackSelectId::InstrumentPlugin, w, cx)
                             }),
@@ -1560,6 +1561,10 @@ pub fn add_track_dialog_body(
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     instrument_plugin_query: &str,
+    instrument_search_input: Option<&TextInputState>,
+    instrument_search_focused: bool,
+    instrument_search_callbacks: Option<TextInputCallbacks>,
+    instrument_search_ime: Option<Entity<AddTrackWindow>>,
     midi_input_devices: &[String],
     color_ui: AddTrackColorUi,
     callbacks: AddTrackDialogCallbacks,
@@ -1632,6 +1637,10 @@ pub fn add_track_dialog_body(
                     open_select,
                     instrument_plugins,
                     instrument_plugin_query,
+                    instrument_search_input,
+                    instrument_search_focused,
+                    instrument_search_callbacks,
+                    instrument_search_ime,
                     midi_input_devices,
                     i18n,
                 ))),
@@ -1699,6 +1708,7 @@ pub struct AddTrackWindow {
     color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
     instrument_plugin_query: String,
+    instrument_search_input: TextInputState,
     instrument_plugins: Vec<RegistryPlugin>,
     /// Real detected MIDI input device names (Preferences → MIDI enabled
     /// inputs), refreshed whenever the dialog opens or devices change.
@@ -1729,6 +1739,11 @@ impl AddTrackWindow {
             initial_state.selected_color(),
             crate::color::load_recent_colors(),
         );
+        let mut instrument_search_input =
+            TextInputState::new("add-track-instrument-search", cx.focus_handle())
+                .with_placeholder("Search instruments...")
+                .blur_on_outside_click(true);
+        instrument_search_input.set_value("");
         Self {
             state: initial_state,
             language: language.into(),
@@ -1739,6 +1754,7 @@ impl AddTrackWindow {
             color_picker,
             open_select: None,
             instrument_plugin_query: String::new(),
+            instrument_search_input,
             instrument_plugins,
             midi_input_devices,
             focus_handle: cx.focus_handle(),
@@ -1775,6 +1791,7 @@ impl AddTrackWindow {
         self.count_editing = false;
         self.open_select = None;
         self.instrument_plugin_query.clear();
+        self.instrument_search_input.set_value("");
         self.color_picker
             .reset(color_picker_value_for(&dialog), dialog.selected_color());
         self.state = dialog;
@@ -1878,37 +1895,43 @@ impl AddTrackWindow {
         window.remove_window();
     }
 
+    fn clear_instrument_search(&mut self) {
+        self.instrument_plugin_query.clear();
+        self.instrument_search_input.set_value("");
+    }
+
+    fn sync_instrument_search_query(&mut self) {
+        self.instrument_plugin_query = self.instrument_search_input.value.clone();
+    }
+
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_select == Some(AddTrackSelectId::InstrumentPlugin) {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    self.open_select = None;
-                    self.instrument_plugin_query.clear();
-                    cx.notify();
-                    return;
-                }
-                "backspace" => {
-                    self.instrument_plugin_query.pop();
-                    cx.notify();
-                    return;
-                }
-                "enter" | "numpad_enter" => return,
-                _ => {}
-            }
-            let modifiers = event.keystroke.modifiers;
-            let text = event
-                .keystroke
-                .key_char
-                .as_deref()
-                .filter(|text| !text.chars().next().is_some_and(char::is_control))
-                .or_else(|| match event.keystroke.key.as_str() {
-                    "space" => Some(" "),
-                    key if key.chars().count() == 1 => Some(key),
-                    _ => None,
-                });
-            if let Some(text) = text.filter(|_| !modifiers.platform && !modifiers.control) {
-                self.instrument_plugin_query.push_str(text);
+            if event.keystroke.key.as_str() == "escape" {
+                self.open_select = None;
+                self.clear_instrument_search();
                 cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            if self.instrument_search_input.is_focused(window)
+                || !self.track_name_input.is_focused(window)
+            {
+                let action = self
+                    .instrument_search_input
+                    .handle_key_with_clipboard(event, Some(cx));
+                match action {
+                    TextInputAction::Cancel => {
+                        self.open_select = None;
+                        self.clear_instrument_search();
+                        cx.notify();
+                    }
+                    TextInputAction::Submit => {}
+                    TextInputAction::Consumed | TextInputAction::Pass => {
+                        self.sync_instrument_search_query();
+                        cx.notify();
+                    }
+                }
+                cx.stop_propagation();
                 return;
             }
         }
@@ -1989,33 +2012,52 @@ impl EntityInputHandler for AddTrackWindow {
         &mut self,
         range: Range<usize>,
         actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        self.track_name_input
-            .text_for_utf16_range(range, actual_range)
+        if self.instrument_search_input.is_focused(window) {
+            self.instrument_search_input
+                .text_for_utf16_range(range, actual_range)
+        } else {
+            self.track_name_input
+                .text_for_utf16_range(range, actual_range)
+        }
     }
 
     fn selected_text_range(
         &mut self,
         ignore_disabled_input: bool,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
-        self.track_name_input
-            .selected_text_range_utf16(ignore_disabled_input)
+        if self.instrument_search_input.is_focused(window) {
+            self.instrument_search_input
+                .selected_text_range_utf16(ignore_disabled_input)
+        } else {
+            self.track_name_input
+                .selected_text_range_utf16(ignore_disabled_input)
+        }
     }
 
     fn marked_text_range(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        self.track_name_input.marked_text_range_utf16()
+        if self.instrument_search_input.is_focused(window) {
+            self.instrument_search_input.marked_text_range_utf16()
+        } else {
+            self.track_name_input.marked_text_range_utf16()
+        }
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.track_name_input.unmark_text();
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.instrument_search_input.is_focused(window) {
+            self.instrument_search_input.unmark_text();
+            self.sync_instrument_search_query();
+        } else {
+            self.track_name_input.unmark_text();
+        }
         cx.notify();
     }
 
@@ -2023,12 +2065,21 @@ impl EntityInputHandler for AddTrackWindow {
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.track_name_input
-            .replace_text_in_utf16_range(range, text);
-        self.state.track_name = self.track_name_input.value.clone();
+        if self.instrument_search_input.is_focused(window)
+            || self.open_select == Some(AddTrackSelectId::InstrumentPlugin)
+                && !self.track_name_input.is_focused(window)
+        {
+            self.instrument_search_input
+                .replace_text_in_utf16_range(range, text);
+            self.sync_instrument_search_query();
+        } else {
+            self.track_name_input
+                .replace_text_in_utf16_range(range, text);
+            self.state.track_name = self.track_name_input.value.clone();
+        }
         cx.notify();
     }
 
@@ -2037,15 +2088,24 @@ impl EntityInputHandler for AddTrackWindow {
         range: Option<Range<usize>>,
         new_text: &str,
         new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.track_name_input.replace_and_mark_text_in_utf16_range(
-            range,
-            new_text,
-            new_selected_range,
-        );
-        self.state.track_name = self.track_name_input.value.clone();
+        if self.instrument_search_input.is_focused(window)
+            || self.open_select == Some(AddTrackSelectId::InstrumentPlugin)
+                && !self.track_name_input.is_focused(window)
+        {
+            self.instrument_search_input
+                .replace_and_mark_text_in_utf16_range(range, new_text, new_selected_range);
+            self.sync_instrument_search_query();
+        } else {
+            self.track_name_input.replace_and_mark_text_in_utf16_range(
+                range,
+                new_text,
+                new_selected_range,
+            );
+            self.state.track_name = self.track_name_input.value.clone();
+        }
         cx.notify();
     }
 
@@ -2053,11 +2113,16 @@ impl EntityInputHandler for AddTrackWindow {
         &mut self,
         range_utf16: Range<usize>,
         bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        self.track_name_input
-            .bounds_for_utf16_range(range_utf16, bounds)
+        if self.instrument_search_input.is_focused(window) {
+            self.instrument_search_input
+                .bounds_for_utf16_range(range_utf16, bounds)
+        } else {
+            self.track_name_input
+                .bounds_for_utf16_range(range_utf16, bounds)
+        }
     }
 
     fn character_index_for_point(
@@ -2075,6 +2140,7 @@ impl Render for AddTrackWindow {
         let i18n = I18n::new(&self.language);
         let target = cx.entity().clone();
         let search_focused = self.track_name_input.is_focused(window) && !self.count_editing;
+        let instrument_search_focused = self.instrument_search_input.is_focused(window);
         let count_focused = self.count_editing;
         // Snapshot the open select for this frame. The dismiss backdrop (below)
         // sits above the form and resets `open_select` first on a click, so the
@@ -2253,17 +2319,19 @@ impl Render for AddTrackWindow {
             }),
             on_toggle_select: Arc::new({
                 let target = target.clone();
-                move |select_id: &AddTrackSelectId, _w, cx| {
+                move |select_id: &AddTrackSelectId, window, cx| {
                     let select_id = *select_id;
                     let _ = target.update(cx, |this, cx| {
+                        let opening = open_select_at_render != Some(select_id);
+                        this.open_select = if opening { Some(select_id) } else { None };
                         if select_id == AddTrackSelectId::InstrumentPlugin {
-                            this.instrument_plugin_query.clear();
+                            this.clear_instrument_search();
+                            if opening {
+                                this.instrument_search_input
+                                    .focus_handle
+                                    .focus(window, cx);
+                            }
                         }
-                        this.open_select = if open_select_at_render == Some(select_id) {
-                            None
-                        } else {
-                            Some(select_id)
-                        };
                         if crate::ui_debug_enabled() {
                             match this.open_select {
                                 Some(open) => {
@@ -2318,7 +2386,7 @@ impl Render for AddTrackWindow {
                             this.track_name_input.select_all();
                         }
                         this.open_select = None;
-                        this.instrument_plugin_query.clear();
+                        this.clear_instrument_search();
                         cx.notify();
                     });
                 }
@@ -2367,7 +2435,7 @@ impl Render for AddTrackWindow {
             let on_dismiss: VoidCb = Arc::new(move |_: &(), _w: &mut Window, cx: &mut App| {
                 let _ = target.update(cx, |this, cx| {
                     if this.open_select.take().is_some() {
-                        this.instrument_plugin_query.clear();
+                        this.clear_instrument_search();
                         if crate::ui_debug_enabled() {
                             eprintln!("[ui-select] close reason=click_outside");
                         }
@@ -2521,6 +2589,34 @@ impl Render for AddTrackWindow {
             })),
         };
 
+        let instrument_search_callbacks = TextInputCallbacks {
+            on_context_menu: None,
+            on_mouse: Some(Arc::new({
+                let target = target.clone();
+                move |event: &TextInputMouseEvent, _w, cx| {
+                    let phase = event.phase;
+                    let index = event.index;
+                    let extend = event.extend;
+                    let _ = target.update(cx, |this, cx| {
+                        match phase {
+                            TextInputMousePhase::Down => {
+                                this.instrument_search_input
+                                    .handle_mouse_down(index, extend)
+                            }
+                            TextInputMousePhase::Drag => {
+                                this.instrument_search_input.handle_mouse_drag(index)
+                            }
+                            TextInputMousePhase::Up => {
+                                this.instrument_search_input.handle_mouse_up()
+                            }
+                        }
+                        this.sync_instrument_search_query();
+                        cx.notify();
+                    });
+                }
+            })),
+        };
+
         div()
             .flex()
             .flex_col()
@@ -2553,6 +2649,10 @@ impl Render for AddTrackWindow {
                 self.open_select,
                 &self.instrument_plugins,
                 &self.instrument_plugin_query,
+                Some(&self.instrument_search_input),
+                instrument_search_focused,
+                Some(instrument_search_callbacks),
+                Some(cx.entity().clone()),
                 &self.midi_input_devices,
                 color_ui,
                 callbacks,

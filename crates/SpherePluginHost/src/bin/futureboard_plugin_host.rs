@@ -4339,7 +4339,7 @@ fn plugin_lifecycle_on_main_thread() -> bool {
 }
 
 fn editor_mode_name() -> String {
-    std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "legacy".to_string())
+    std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "detached".to_string())
 }
 
 fn editor_mode_prefers_async_attach(mode: &str) -> bool {
@@ -4463,7 +4463,13 @@ fn schedule_unified_editor_attach(
                 "[NativeEditorShell] title=\"{}\" owner_hwnd=0x{:x}",
                 existing.display_title, existing.owner_hwnd
             );
-            let focused = platform::focus_editor_window(existing.host_hwnd);
+            let mut focused = platform::focus_editor_window(existing.host_hwnd);
+            if !focused {
+                if let Some(mut processor) = preview.lock().clone_processor_for(plugin_instance_id)
+                {
+                    focused = processor.focus_editor();
+                }
+            }
             eprintln!("[NativeEditorShell] focus_existing result={focused}");
             eprintln!(
                 "[editor-open] existing valid plugin={} insert={} hwnd=0x{:x} result={}",
@@ -5992,6 +5998,7 @@ mod platform {
                 timeout_ms: std::os::raw::c_uint,
             ) -> std::os::raw::c_int;
             pub fn sphere_plugin_host_mac_ui_wake();
+            pub fn sphere_plugin_host_mac_ui_focus_window(handle: u64) -> std::os::raw::c_int;
         }
     }
 
@@ -6021,8 +6028,24 @@ mod platform {
         None
     }
     pub fn log_window_identity_chain(_label: &str, _handle: u64) {}
-    pub fn focus_editor_window(_handle: u64) -> bool {
-        false
+    pub fn focus_editor_window(handle: u64) -> bool {
+        if handle == 0 {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // AU editors store an NSWindow* as the handle. VST3 stores an opaque
+            // counter — that path returns false here and the caller falls back to
+            // `processor.focus_editor()`.
+            let ok = unsafe { appkit::sphere_plugin_host_mac_ui_focus_window(handle) != 0 };
+            eprintln!("[NativeEditorShell] mac focus handle=0x{handle:x} result={ok}");
+            return ok;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = handle;
+            false
+        }
     }
     pub fn pump_messages() -> u32 {
         #[cfg(target_os = "macos")]
@@ -6102,7 +6125,14 @@ mod platform {
     ) {
     }
     pub fn focus_plugin_editor_child(_host_hwnd: u64) {}
-    pub fn pump_editor_messages(_host_hwnd: u64) {}
+    pub fn pump_editor_messages(_host_hwnd: u64) {
+        // Drain AppKit during attach/load so plugins that need nested run-loop
+        // work (timers, view layout) can progress while the IPC thread is busy.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let _ = appkit::sphere_plugin_host_mac_ui_pump();
+        }
+    }
     pub fn create_selftest_windows() -> Option<(u64, u64)> {
         None
     }

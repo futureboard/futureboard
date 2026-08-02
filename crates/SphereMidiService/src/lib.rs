@@ -142,7 +142,10 @@ pub fn midi_settings_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_SETTINGS_DEBUG").is_some())
 }
 
-fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
+#[cfg(target_os = "macos")]
+mod macos_coremidi;
+
+pub(crate) fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
     let slug = name
         .chars()
         .map(|c| {
@@ -165,8 +168,9 @@ fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
     format!("{prefix}-{slug}")
 }
 
-/// Real MIDI port scan via `midir` (WinMM on Windows, CoreMIDI on macOS, ALSA on
-/// Linux). Enumeration only reads port names — it never opens the hardware.
+/// Real MIDI port scan. Windows/Linux use `midir`; macOS uses a thin CoreMIDI
+/// FFI path (avoids midir/coremidi vs gpui `core-foundation` pin conflict).
+/// Enumeration only reads port names — it never opens the hardware.
 /// Wrapped in `catch_unwind` so a misbehaving backend yields an empty list and a
 /// warning rather than taking down the UI thread.
 pub fn scan_midi_ports() -> Vec<DetectedMidiDevice> {
@@ -190,12 +194,10 @@ pub fn scan_midi_ports() -> Vec<DetectedMidiDevice> {
     }
 }
 
-/// macOS placeholder: midir's CoreMIDI backend currently conflicts with gpui's
-/// pinned `core-foundation` version, so the macOS port scan is unavailable. We
-/// return an empty list (no mock data) until that dependency pin is reconciled.
+/// macOS: thin CoreMIDI enumeration (avoids midir/coremidi vs gpui CF pin).
 #[cfg(target_os = "macos")]
 fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
-    Vec::new()
+    macos_coremidi::scan_ports()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -236,7 +238,9 @@ fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
 
 /// Merge same-name input and output ports into a single InputOutput entry so a
 /// bidirectional controller does not appear twice in Preferences / routing lists.
-fn coalesce_detected_midi_devices(devices: Vec<DetectedMidiDevice>) -> Vec<DetectedMidiDevice> {
+pub(crate) fn coalesce_detected_midi_devices(
+    devices: Vec<DetectedMidiDevice>,
+) -> Vec<DetectedMidiDevice> {
     let mut by_name: HashMap<String, DetectedMidiDevice> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for device in devices {
@@ -489,7 +493,7 @@ struct HardwareMidiInputConnection {
     #[cfg(not(target_os = "macos"))]
     _connection: midir::MidiInputConnection<()>,
     #[cfg(target_os = "macos")]
-    _connection: (),
+    _connection: macos_coremidi::MacMidiInputConnection,
 }
 
 impl Default for HardwareMidiInput {
@@ -566,10 +570,7 @@ impl Drop for HardwareMidiInput {
     }
 }
 
-/// Only the midir input path feeds this; macOS opens no hardware input yet
-/// (see `open_hardware_midi_inputs`), so nothing decodes bytes there.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-fn decode_midi_bytes(bytes: &[u8]) -> Option<MidiInputEvent> {
+pub(crate) fn decode_midi_bytes(bytes: &[u8]) -> Option<MidiInputEvent> {
     if bytes.is_empty() {
         return None;
     }
@@ -674,15 +675,18 @@ fn open_hardware_midi_inputs(
 
 #[cfg(target_os = "macos")]
 fn open_hardware_midi_inputs(
-    _enabled: Vec<(String, String)>,
-    _tx: std::sync::mpsc::Sender<HardwareMidiInputMessage>,
+    enabled: Vec<(String, String)>,
+    tx: std::sync::mpsc::Sender<HardwareMidiInputMessage>,
 ) -> Vec<HardwareMidiInputConnection> {
-    // midir's CoreMIDI backend currently conflicts with gpui's pinned
-    // core-foundation version (same limitation as port scan / output).
-    Vec::new()
+    macos_coremidi::open_inputs(enabled, tx)
+        .into_iter()
+        .map(|(device_id, connection)| HardwareMidiInputConnection {
+            device_id,
+            _connection: connection,
+        })
+        .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
 fn spawn_hardware_midi_thread(
     events: Vec<HardwareMidiEvent>,
     config: HardwareMidiPlaybackConfig,
@@ -695,25 +699,12 @@ fn spawn_hardware_midi_thread(
         .expect("spawn Futureboard MIDI output thread")
 }
 
-#[cfg(target_os = "macos")]
-fn spawn_hardware_midi_thread(
-    _events: Vec<HardwareMidiEvent>,
-    _config: HardwareMidiPlaybackConfig,
-    _cancel_rx: std::sync::mpsc::Receiver<()>,
-    _profiler: std::sync::Arc<HardwareMidiProfiler>,
-) -> JoinHandle<()> {
-    std::thread::spawn(|| {})
-}
-
-#[cfg(not(target_os = "macos"))]
 fn run_hardware_midi_thread(
     events: Vec<HardwareMidiEvent>,
     config: HardwareMidiPlaybackConfig,
     cancel_rx: std::sync::mpsc::Receiver<()>,
     profiler: std::sync::Arc<HardwareMidiProfiler>,
 ) {
-    use midir::MidiOutputConnection;
-
     let _thread_scope = MidiThreadScope::enter();
     let debug = midi_output_debug_enabled();
     let lateness_warnings = midi_lateness_warnings_enabled();
@@ -725,7 +716,7 @@ fn run_hardware_midi_thread(
     let mut cursor = events.partition_point(|ev| ev.absolute_sample < start_sample);
 
     // Open enabled target devices once on the MIDI thread. Avoiding open/close
-    // during playback prevents WinMM/midir from introducing UI-sized stalls.
+    // during playback prevents WinMM/midir/CoreMIDI from introducing UI-sized stalls.
     for device_id in unique_event_devices(&events[cursor..]) {
         if let Some(conn) = open_midi_output(&device_id) {
             connections.insert(device_id, conn);
@@ -783,22 +774,32 @@ fn run_hardware_midi_thread(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_midi_output(device_id_or_name: &str) -> Option<midir::MidiOutputConnection> {
-    let midi_out = midir::MidiOutput::new("Futureboard MIDI playback").ok()?;
-    for port in midi_out.ports() {
-        let Ok(name) = midi_out.port_name(&port) else {
-            continue;
-        };
-        let stable = stable_id(MidiDeviceDirection::Output, &name);
-        if name == device_id_or_name || stable == device_id_or_name {
-            return midi_out.connect(&port, "Futureboard MIDI Out").ok();
+type MidiOutputConnection = midir::MidiOutputConnection;
+#[cfg(target_os = "macos")]
+type MidiOutputConnection = macos_coremidi::MacMidiOutputConnection;
+
+fn open_midi_output(device_id_or_name: &str) -> Option<MidiOutputConnection> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let midi_out = midir::MidiOutput::new("Futureboard MIDI playback").ok()?;
+        for port in midi_out.ports() {
+            let Ok(name) = midi_out.port_name(&port) else {
+                continue;
+            };
+            let stable = stable_id(MidiDeviceDirection::Output, &name);
+            if name == device_id_or_name || stable == device_id_or_name {
+                return midi_out.connect(&port, "Futureboard MIDI Out").ok();
+            }
         }
+        None
     }
-    None
+    #[cfg(target_os = "macos")]
+    {
+        macos_coremidi::open_output(device_id_or_name)
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn send_all_notes_off(connections: &mut HashMap<String, midir::MidiOutputConnection>) {
+fn send_all_notes_off(connections: &mut HashMap<String, MidiOutputConnection>) {
     for conn in connections.values_mut() {
         for channel in 0..16u8 {
             for note in 0..128u8 {
@@ -815,18 +816,15 @@ fn seconds_to_samples(seconds: f64, sample_rate: u32) -> u64 {
     (seconds.max(0.0) * sample_rate.max(1) as f64).round() as u64
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn samples_to_duration(samples: u64, sample_rate: f64) -> Duration {
     Duration::from_secs_f64(samples as f64 / sample_rate.max(1.0))
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn midi_output_debug_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_DEBUG").is_some())
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn midi_lateness_warnings_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_LATENESS_WARN").is_some())

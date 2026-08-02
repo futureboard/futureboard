@@ -28,7 +28,7 @@ use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, pulsating_between, px, svg, Animation, AnimationExt, AppContext, Context, Empty,
-    ExternalPaths, InteractiveElement, IntoElement, ParentElement, Render, ScrollDelta,
+    ExternalPaths, InteractiveElement, IntoElement, ParentElement, PinchEvent, Render, ScrollDelta,
     StatefulInteractiveElement, Styled, Subscription, Window,
 };
 use std::time::Duration;

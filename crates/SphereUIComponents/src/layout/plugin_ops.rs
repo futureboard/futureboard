@@ -105,7 +105,20 @@ macro_rules! ped_log {
 /// Editor sometimes cannot open again" regression. The wrapper window lives in
 /// the main process, so the user can always close a timed-out shell too.
 const EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
+/// Host-owned (detached) editors create the native view in the plugin-host
+/// process. Heavy VSTi `createView`/`attached` on macOS routinely exceeds the
+/// legacy 12s main-owned budget, so host-owned opens align with the host's
+/// 30s create/attach hang watchdogs.
+const HOST_OWNED_EDITOR_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 const EDITOR_FIRST_PAINT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn editor_open_timeout() -> Duration {
+    if bridge_editor_host_owned() {
+        HOST_OWNED_EDITOR_OPEN_TIMEOUT
+    } else {
+        EDITOR_OPEN_TIMEOUT
+    }
+}
 
 fn loading_plugin_status(display_name: &str) -> String {
     format!("Loading Plugin\n{display_name}")
@@ -1320,8 +1333,9 @@ impl StudioLayout {
                     | BridgeEditorState::ViewCreated
                     | BridgeEditorState::Sized
                     | BridgeEditorState::AwaitingAttach
-            ) && session.requested_at.elapsed() >= EDITOR_OPEN_TIMEOUT
+            ) && session.requested_at.elapsed() >= editor_open_timeout()
             {
+                let open_timeout = editor_open_timeout();
                 ped_log!(
                     "Open Failed instance={} reason=timeout state={:?} elapsed_s={}",
                     session.instance_id,
@@ -1333,7 +1347,7 @@ impl StudioLayout {
                     session.instance_id,
                     bridge_editor_state_name(&session.state),
                     session.requested_at.elapsed().as_millis(),
-                    EDITOR_OPEN_TIMEOUT.as_millis()
+                    open_timeout.as_millis()
                 );
                 session
                     .shell

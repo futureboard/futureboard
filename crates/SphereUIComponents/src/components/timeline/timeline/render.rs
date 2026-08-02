@@ -1805,6 +1805,24 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        // Trackpad pinch-to-zoom (macOS Magnify, Windows Direct Manipulation,
+        // Linux X11/Wayland gesture). GPUI already emits PinchEvent on all
+        // three; the timeline previously only handled Ctrl/Cmd + wheel.
+        let on_pinch_zoom = cx.listener(|this, event: &PinchEvent, window, cx| {
+            let factor = pinch_zoom_factor(event.delta);
+            if (factor - 1.0).abs() < 0.0001 {
+                return;
+            }
+            window.prevent_default();
+            cx.stop_propagation();
+            let x: f32 = event.position.x.into();
+            let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+            this.state.zoom_by(factor, anchor);
+            let (max_x, max_y) = this.max_scroll_offsets(window);
+            this.state.clamp_scroll(max_x, max_y);
+            cx.notify();
+        });
+
         let on_arrangement_context_menu = on_timeline_context.clone().map(|cb| {
             cx.listener(
                 move |this, event: &gpui::MouseDownEvent, window: &mut gpui::Window, cx| {
@@ -1891,6 +1909,7 @@ impl Render for Timeline {
                 }),
             )
             .on_scroll_wheel(on_ctrl_wheel_zoom)
+            .on_pinch(on_pinch_zoom)
             // 1. Timeline Ruler
             .child(timeline_ruler(
                 state,
@@ -2357,6 +2376,14 @@ const WHEEL_ZOOM_BASE: f32 = 1.0024;
 /// zooming maps it onto a scale, where up simply means more.
 pub(crate) fn wheel_zoom_factor(delta_y: f32) -> f32 {
     WHEEL_ZOOM_BASE.powf(delta_y)
+}
+
+/// Map a GPUI [`PinchEvent::delta`] onto a multiplicative zoom factor.
+///
+/// Platform backends already normalize the gesture: positive delta means zoom
+/// in, and `0.1` means "+10%". Began/Ended phases emit `0.0` and are no-ops.
+pub(crate) fn pinch_zoom_factor(delta: f32) -> f32 {
+    (1.0 + delta).max(0.0001)
 }
 
 /// Resolve a pen-draw gesture's `(start_beat, end_beat)` into the final
@@ -2894,6 +2921,22 @@ mod midi_clip_draw_tests {
             wheel_zoom_factor(-30.0)
         );
         assert_eq!(wheel_zoom_factor(0.0), 1.0, "no delta must not zoom");
+    }
+
+    /// Trackpad pinch delta is already a fractional scale change (`0.1` = +10%).
+    #[test]
+    fn pinch_in_zooms_in_and_out_zooms_out() {
+        assert!(
+            pinch_zoom_factor(0.1) > 1.0,
+            "pinch out (positive) must zoom in, got {}",
+            pinch_zoom_factor(0.1)
+        );
+        assert!(
+            pinch_zoom_factor(-0.1) < 1.0,
+            "pinch in (negative) must zoom out, got {}",
+            pinch_zoom_factor(-0.1)
+        );
+        assert_eq!(pinch_zoom_factor(0.0), 1.0, "zero pinch must not zoom");
     }
 
     /// The factor has to actually move `pixels_per_second` the right way, not
