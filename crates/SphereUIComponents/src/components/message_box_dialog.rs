@@ -455,8 +455,35 @@ pub fn open_message_box_window(
     on_response: MessageBoxResponseCb,
     cx: &mut App,
 ) -> Result<WindowHandle<MessageBoxWindow>, String> {
+    open_message_box_window_with_kind(
+        owner_bounds,
+        options,
+        on_response,
+        gpui::WindowKind::Dialog,
+        cx,
+    )
+}
+
+/// Open a message box as an independent application surface. Startup uses
+/// this variant because a modal dialog without a normal owner can become owned
+/// by the Splash popup on Windows and disappear when Splash is retired.
+pub fn open_standalone_message_box_window(
+    options: MessageBoxOptions,
+    on_response: MessageBoxResponseCb,
+    cx: &mut App,
+) -> Result<WindowHandle<MessageBoxWindow>, String> {
+    open_message_box_window_with_kind(None, options, on_response, gpui::WindowKind::Normal, cx)
+}
+
+fn open_message_box_window_with_kind(
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
+    options: MessageBoxOptions,
+    on_response: MessageBoxResponseCb,
+    kind: gpui::WindowKind,
+    cx: &mut App,
+) -> Result<WindowHandle<MessageBoxWindow>, String> {
     use crate::window_position::{apply_owner_display, centered_window_bounds};
-    use gpui::{size, AppContext, WindowBackgroundAppearance, WindowBounds, WindowKind};
+    use gpui::{size, AppContext, WindowBackgroundAppearance, WindowBounds};
 
     let height = message_box_height(&options);
     let window_bounds =
@@ -464,7 +491,7 @@ pub fn open_message_box_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Dialog;
+    window_options.kind = kind;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;

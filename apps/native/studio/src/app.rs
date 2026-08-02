@@ -9,9 +9,9 @@ use sphere_ui_components::boot;
 use sphere_ui_components::components::progress_dialog::ProgressBarValue;
 use sphere_ui_components::components::{
     message_box_dialog::{
-        open_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResponseCb,
+        open_standalone_message_box_window, MessageBoxKind, MessageBoxOptions, MessageBoxResponseCb,
     },
-    plugin_manager::open_plugin_scan_progress_dialog,
+    plugin_manager::open_startup_plugin_scan_progress_dialog,
 };
 use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
@@ -194,6 +194,27 @@ pub fn setup(cx: &mut App) {
             plan.route, plan.show_welcome_screen
         ));
 
+        // On first launch the scan question is the next surface after Splash.
+        // Welcome/Studio must not open behind it because that reverses the
+        // intended startup flow and allows both windows to paint at once.
+        let needs_scan_prompt = !SettingsSchema::load_from_disk()
+            .general
+            .plugin_scan_prompt_answered;
+        if needs_scan_prompt {
+            if let Some(splash) = splash.as_ref() {
+                cx.update(|app| splash.set_status(app, "Checking installed plug-ins…"));
+            }
+            let prompt_opened = cx.update(open_first_launch_plugin_scan_prompt);
+            if let Err(error) = prompt_opened {
+                eprintln!("[plugin-scan] failed to open first-launch prompt: {error}");
+                cx.update(open_welcome_after_startup_scan);
+            }
+            if let Some(splash) = splash {
+                cx.update(|app| splash.close(app));
+            }
+            return;
+        }
+
         // Open the next surface before closing splash so Windows does not quit
         // on LastWindowClosed while transitioning.
         if let Some(splash) = splash.as_ref() {
@@ -247,13 +268,6 @@ pub fn setup(cx: &mut App) {
         {
             let _ = cx.update(|app| crate::exclusive_edition::show_eula_if_needed(app));
         }
-
-        // Ask once, after the first real surface is visible. The short defer
-        // lets Welcome/Studio paint before the compact question dialog opens.
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(350))
-            .await;
-        let _ = cx.update(show_first_launch_plugin_scan_prompt);
     })
     .detach();
 }
@@ -274,14 +288,7 @@ fn persist_plugin_scan_prompt_answered(cx: &mut App) {
     }
 }
 
-fn show_first_launch_plugin_scan_prompt(cx: &mut App) {
-    if SettingsSchema::load_from_disk()
-        .general
-        .plugin_scan_prompt_answered
-    {
-        return;
-    }
-
+fn open_first_launch_plugin_scan_prompt(cx: &mut App) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let scan_locations = "the standard VST3, CLAP, and AudioUnit locations";
     #[cfg(not(target_os = "macos"))]
@@ -300,14 +307,26 @@ fn show_first_launch_plugin_scan_prompt(cx: &mut App) {
         Arc::new(|result, _window: &mut gpui::Window, cx: &mut App| {
             persist_plugin_scan_prompt_answered(cx);
             if result.response == 0 {
-                if let Err(error) = open_plugin_scan_progress_dialog(None, cx) {
+                let on_complete = Arc::new(open_welcome_after_startup_scan);
+                if let Err(error) = open_startup_plugin_scan_progress_dialog(on_complete, cx) {
                     eprintln!("[plugin-scan] failed to open first-launch scanner: {error}");
+                    open_welcome_after_startup_scan(cx);
                 }
+            } else {
+                open_welcome_after_startup_scan(cx);
             }
         });
-    if let Err(error) = open_message_box_window(None, options, on_response, cx) {
-        eprintln!("[plugin-scan] failed to open first-launch prompt: {error}");
-    }
+    open_standalone_message_box_window(options, on_response, cx).map(|_| ())
+}
+
+fn open_welcome_after_startup_scan(cx: &mut App) {
+    log_startup_phase(StartupPhase::OpeningWelcome);
+    open_welcome_window(cx);
+
+    // First-run EULA gate (Exclusive Edition) belongs on the first real app
+    // surface, after the plug-in scan handoff has completed.
+    #[cfg(feature = "exclusive")]
+    let _ = crate::exclusive_edition::show_eula_if_needed(cx);
 }
 
 fn set_app_mode(cx: &mut App, mode: AppMode) {

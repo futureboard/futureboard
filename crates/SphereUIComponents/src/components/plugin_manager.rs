@@ -1,6 +1,7 @@
 //! Audio Plug-in Manager — GPUI-rendered native dialog (VST3/CLAP scan, Electron layout parity).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
@@ -20,7 +21,8 @@ use crate::assets;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::progress_dialog::{
-    open_progress_dialog_window, ProgressBarValue, ProgressDialogOptions,
+    open_progress_dialog_window, open_standalone_progress_dialog_window, ProgressBarValue,
+    ProgressDialogCancelCb, ProgressDialogOptions,
 };
 use crate::components::scroll_thumb::vertical_scrollbar_thumb;
 use crate::components::text_input::{
@@ -1835,15 +1837,61 @@ pub fn open_plugin_scan_progress_dialog(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     cx: &mut App,
 ) -> Result<(), String> {
+    open_plugin_scan_progress_dialog_impl(owner_bounds, None, cx)
+}
+
+/// First-launch scan surface. It stays in the startup window handoff and opens
+/// the caller's next surface exactly once when the scan finishes or the user
+/// closes the progress window. The scan itself remains safe to finish in the
+/// background after a manual close.
+pub fn open_startup_plugin_scan_progress_dialog(
+    on_complete: Arc<dyn Fn(&mut App) + Send + Sync>,
+    cx: &mut App,
+) -> Result<(), String> {
+    open_plugin_scan_progress_dialog_impl(None, Some(on_complete), cx)
+}
+
+fn open_plugin_scan_progress_dialog_impl(
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
+    on_startup_complete: Option<Arc<dyn Fn(&mut App) + Send + Sync>>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let startup_flow = on_startup_complete.is_some();
     let options = ProgressDialogOptions::default()
         .title("Plug-in Scan")
         .heading("Scanning installed plug-ins")
         .detail(plugin_scan_discovery_text())
         .progress(ProgressBarValue::Indeterminate)
-        .footer("You can hide this window; scanning will continue.")
-        .cancel_label("Hide")
+        .footer(if startup_flow {
+            "Welcome will open when scanning finishes."
+        } else {
+            "You can hide this window; scanning will continue."
+        })
         .hide_percent();
-    let dialog = open_progress_dialog_window(owner_bounds, options, None, cx)?;
+    let options = if startup_flow {
+        options
+    } else {
+        options.cancel_label("Hide")
+    };
+
+    let startup_finished = Arc::new(AtomicBool::new(false));
+    let guarded_complete = on_startup_complete.map(|on_complete| {
+        let finished = startup_finished.clone();
+        Arc::new(move |cx: &mut App| {
+            if !finished.swap(true, Ordering::AcqRel) {
+                on_complete(cx);
+            }
+        }) as Arc<dyn Fn(&mut App) + Send + Sync>
+    });
+    let on_cancel: Option<ProgressDialogCancelCb> = guarded_complete.as_ref().map(|complete| {
+        let complete = complete.clone();
+        Arc::new(move |_window: &mut Window, cx: &mut App| complete(cx)) as ProgressDialogCancelCb
+    });
+    let dialog = if startup_flow {
+        open_standalone_progress_dialog_window(options, on_cancel, cx)?
+    } else {
+        open_progress_dialog_window(owner_bounds, options, on_cancel, cx)?
+    };
 
     cx.spawn(async move |cx| {
         let (tx, rx) = std::sync::mpsc::channel::<ScanProgress>();
@@ -1855,7 +1903,7 @@ pub fn open_plugin_scan_progress_dialog(
 
         loop {
             while let Ok(progress) = rx.try_recv() {
-                update_scan_progress_dialog(&dialog, progress, cx);
+                update_scan_progress_dialog(&dialog, progress, startup_flow, cx);
             }
             if handle.is_finished() {
                 break;
@@ -1866,7 +1914,7 @@ pub fn open_plugin_scan_progress_dialog(
         }
 
         while let Ok(progress) = rx.try_recv() {
-            update_scan_progress_dialog(&dialog, progress, cx);
+            update_scan_progress_dialog(&dialog, progress, startup_flow, cx);
         }
 
         let completed = match handle.join() {
@@ -1906,9 +1954,16 @@ pub fn open_plugin_scan_progress_dialog(
                 .cancel_label("Close")
                 .hide_percent(),
         };
-        let _ = dialog.update(cx, |view, _window, cx| {
-            view.set_options(completed, cx);
-        });
+        if let Some(complete) = guarded_complete {
+            // Open Welcome before retiring the progress surface so GPUI never
+            // observes a zero-window gap under LastWindowClosed behavior.
+            let _ = cx.update(|app| complete(app));
+            let _ = dialog.update(cx, |_view, window, _cx| window.remove_window());
+        } else {
+            let _ = dialog.update(cx, |view, _window, cx| {
+                view.set_options(completed, cx);
+            });
+        }
     })
     .detach();
 
@@ -1918,9 +1973,10 @@ pub fn open_plugin_scan_progress_dialog(
 fn update_scan_progress_dialog(
     dialog: &WindowHandle<crate::components::progress_dialog::ProgressDialogWindow>,
     progress: ScanProgress,
+    startup_flow: bool,
     cx: &mut gpui::AsyncApp,
 ) {
-    let options = match progress {
+    let mut options = match progress {
         ScanProgress::Started { bundle_total } => ProgressDialogOptions::default()
             .title("Plug-in Scan")
             .heading("Scanning installed plug-ins")
@@ -2005,6 +2061,11 @@ fn update_scan_progress_dialog(
                 .hide_percent()
         }
     };
+
+    if startup_flow {
+        options.footer = Some("Welcome will open when scanning finishes.".to_string());
+        options.cancel_label = None;
+    }
 
     let _ = dialog.update(cx, |view, _window, cx| {
         view.set_options(options, cx);

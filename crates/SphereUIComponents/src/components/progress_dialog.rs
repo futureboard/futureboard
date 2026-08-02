@@ -496,8 +496,34 @@ pub fn open_progress_dialog_window(
     on_cancel: Option<ProgressDialogCancelCb>,
     cx: &mut App,
 ) -> Result<WindowHandle<ProgressDialogWindow>, String> {
+    open_progress_dialog_window_with_kind(
+        owner_bounds,
+        options,
+        on_cancel,
+        gpui::WindowKind::Dialog,
+        cx,
+    )
+}
+
+/// Open progress as an independent startup surface rather than an owner-bound
+/// dialog. This keeps it alive after the Splash popup is removed on Windows.
+pub fn open_standalone_progress_dialog_window(
+    options: ProgressDialogOptions,
+    on_cancel: Option<ProgressDialogCancelCb>,
+    cx: &mut App,
+) -> Result<WindowHandle<ProgressDialogWindow>, String> {
+    open_progress_dialog_window_with_kind(None, options, on_cancel, gpui::WindowKind::Normal, cx)
+}
+
+fn open_progress_dialog_window_with_kind(
+    owner_bounds: Option<Bounds<gpui::Pixels>>,
+    options: ProgressDialogOptions,
+    on_cancel: Option<ProgressDialogCancelCb>,
+    kind: gpui::WindowKind,
+    cx: &mut App,
+) -> Result<WindowHandle<ProgressDialogWindow>, String> {
     use crate::window_position::{apply_owner_display, centered_window_bounds};
-    use gpui::{size, WindowBackgroundAppearance, WindowBounds, WindowKind};
+    use gpui::{size, WindowBackgroundAppearance, WindowBounds};
 
     let height = progress_window_height(&options);
     let window_bounds = centered_window_bounds(
@@ -508,7 +534,7 @@ pub fn open_progress_dialog_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Dialog;
+    window_options.kind = kind;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;
