@@ -6040,6 +6040,39 @@ mod platform {
     pub fn editor_safe_mode() -> bool {
         false
     }
+
+    /// Coarse log rate limiter: allows at most `max` events per second.
+    pub struct LogRate {
+        window_start_ms: std::sync::atomic::AtomicU64,
+        count: std::sync::atomic::AtomicU32,
+        max_per_sec: u32,
+    }
+
+    impl LogRate {
+        pub const fn new(max_per_sec: u32) -> Self {
+            Self {
+                window_start_ms: std::sync::atomic::AtomicU64::new(0),
+                count: std::sync::atomic::AtomicU32::new(0),
+                max_per_sec,
+            }
+        }
+
+        pub fn allow(&self) -> bool {
+            use std::sync::atomic::Ordering;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let start = self.window_start_ms.load(Ordering::Relaxed);
+            if now.saturating_sub(start) >= 1000 {
+                self.window_start_ms.store(now, Ordering::Relaxed);
+                self.count.store(1, Ordering::Relaxed);
+                return true;
+            }
+            self.count.fetch_add(1, Ordering::Relaxed) < self.max_per_sec
+        }
+    }
+
     pub fn set_editor_roots(_roots: Vec<u64>) {}
     pub fn plugin_editor_snapshot(_reason: &str) {}
     pub fn log_capture_on_open(_host_hwnd: u64) {}
