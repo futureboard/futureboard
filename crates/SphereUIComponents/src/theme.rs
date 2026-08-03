@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
-use gpui::{font, Font, FontFallbacks, Rgba};
+use gpui::{Font, FontWeight, Rgba};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -19,39 +19,18 @@ pub const SYSTEM_UI_FONT_FAMILY: &str = "Noto Sans";
 /// to the platform font rather than a bundled typeface.
 pub const FONT_FAMILY: &str = SYSTEM_UI_FONT_FAMILY;
 
-/// Real, selectable system family behind [`SYSTEM_UI_FONT_FAMILY`]. macOS keeps
-/// the SF UI font under a hidden dot-name that only resolves as a fallback
-/// descriptor, so the stack also names a family that can be selected directly.
-#[cfg(target_os = "macos")]
-const SYSTEM_UI_FONT_FAMILY_ALIAS: Option<&str> = Some("Helvetica Neue");
-#[cfg(not(target_os = "macos"))]
-const SYSTEM_UI_FONT_FAMILY_ALIAS: Option<&str> = None;
-
-/// Primary Thai system family. Keeping Thai base glyphs and marks in one family
-/// avoids broken composition while still respecting native platform typography.
+/// Primary Thai system family, retained only for the plugin-editor shell chrome
+/// renderer ([`crate::components::plugin_shell_text`]), whose `sphere_graphic_engine`
+/// `FontConfig` supports a single fallback family rather than a composite chain.
+///
+/// General UI text does **not** use this: it goes through the composite
+/// [`crate::fonts`] system, which never selects a font by language.
 #[cfg(target_os = "macos")]
 pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Thonburi";
 #[cfg(target_os = "windows")]
 pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Leelawadee UI";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const SYSTEM_THAI_UI_FONT_FAMILY: &str = "Noto Sans Thai";
-
-#[cfg(target_os = "macos")]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Sukhumvit Set"];
-#[cfg(target_os = "windows")]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Tahoma"];
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const PLATFORM_THAI_UI_FONT_FAMILIES: &[&str] = &[SYSTEM_THAI_UI_FONT_FAMILY, "Noto Serif Thai"];
-
-#[cfg(target_os = "macos")]
-const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Helvetica Neue", "Arial"];
-#[cfg(target_os = "windows")]
-const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Segoe UI Variable", "Arial"];
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const PLATFORM_UI_FALLBACK_FAMILIES: &[&str] = &["Ubuntu", "DejaVu Sans", "Liberation Sans"];
-
-/// Alias kept for callsites that want an explicit display font name.
-pub const DISPLAY_FONT_FAMILY: &str = FONT_FAMILY;
 
 /// Readability adjustment for the native application. This scales text only;
 /// controls and window geometry retain their compact DAW layout.
@@ -63,52 +42,24 @@ pub const DEFAULT_THEME_JSON: &str = include_str!("../../../packages/shared/them
 pub const LIGHT_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Light.json");
 pub const TEMPLATE_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Template.json");
 
-/// Build a fallback list, dropping the primary family and any repeat. A duplicate
-/// costs a redundant descriptor in the platform cascade list and never adds
-/// coverage.
-fn fallback_list(primary: &str, candidates: impl IntoIterator<Item = &'static str>) -> Vec<String> {
-    let mut list: Vec<String> = Vec::new();
-    for candidate in candidates {
-        if candidate == primary || list.iter().any(|kept| kept == candidate) {
-            continue;
-        }
-        list.push(candidate.to_string());
-    }
-    list
-}
-
-/// Central UI font fallback stack made exclusively from platform fonts.
+/// Composite system-UI font at the default (regular) weight.
 ///
-/// A Thai-capable family is named ahead of the generic tiers so Thai base glyphs
-/// and marks are shaped by one font instead of being split per glyph.
-pub fn ui_font_fallback_stack() -> Vec<String> {
-    let mut candidates = vec![FONT_FAMILY];
-    candidates.extend(PLATFORM_THAI_UI_FONT_FAMILIES);
-    candidates.extend(SYSTEM_UI_FONT_FAMILY_ALIAS);
-    candidates.extend(PLATFORM_UI_FALLBACK_FAMILIES);
-    fallback_list("", candidates)
-}
-
+/// One descriptor for all normal UI text. The platform's native text system
+/// (DirectWrite / CoreText / Fontconfig) shapes and per-cluster fallback-resolves
+/// it against the coverage-ordered chain attached by [`crate::fonts`]. No
+/// language detection, no per-character font switching.
 pub fn ui_font() -> Font {
-    let mut font = font(FONT_FAMILY);
-    font.fallbacks = Some(FontFallbacks::from_fonts(ui_font_fallback_stack()));
-    font
+    crate::fonts::ui_font(FontWeight::NORMAL)
 }
 
-pub fn ui_font_for_language(language_code: &str) -> Font {
-    let normalized = language_code.trim().replace('_', "-").to_ascii_lowercase();
-    if normalized == "th" || normalized.starts_with("th-") {
-        let family = SYSTEM_THAI_UI_FONT_FAMILY;
-        let mut candidates = PLATFORM_THAI_UI_FONT_FAMILIES.to_vec();
-        candidates.push(FONT_FAMILY);
-        candidates.extend(SYSTEM_UI_FONT_FAMILY_ALIAS);
-        candidates.extend(PLATFORM_UI_FALLBACK_FAMILIES);
+/// Composite system-UI font at an explicit weight (regular, medium, semibold, …).
+pub fn ui_font_weight(weight: FontWeight) -> Font {
+    crate::fonts::ui_font(weight)
+}
 
-        let mut font = font(family);
-        font.fallbacks = Some(FontFallbacks::from_fonts(fallback_list(family, candidates)));
-        return font;
-    }
-    ui_font()
+/// Composite display font (large text) at the given weight.
+pub fn display_font(weight: FontWeight) -> Font {
+    crate::fonts::display_font(weight)
 }
 
 /// Compact DAW typography tokens (logical px — GPUI/DWrite scale for DPI).
@@ -881,93 +832,29 @@ impl Colors {
 mod font_stack_tests {
     use super::*;
 
-    /// Families the running OS does not ship are resolved to that platform's own
-    /// default, so a stack that names another platform's system font silently has
-    /// no system tier.
-    const FOREIGN_FAMILIES: &[&str] = &[
-        "Segoe UI",
-        "Leelawadee UI",
-        ".AppleSystemUIFont",
-        "Helvetica Neue",
-        "Thonburi",
-        "Sukhumvit Set",
-    ];
-
-    fn platform_families() -> Vec<&'static str> {
-        let mut families = vec![SYSTEM_UI_FONT_FAMILY];
-        families.extend(SYSTEM_UI_FONT_FAMILY_ALIAS);
-        families.extend(PLATFORM_THAI_UI_FONT_FAMILIES);
-        families
-    }
-
+    /// All normal UI text resolves to one composite descriptor carrying a
+    /// coverage-ordered fallback chain — no language input, no per-language font.
     #[test]
-    fn ui_stack_leads_with_the_platform_system_family() {
-        let stack = ui_font_fallback_stack();
-        assert_eq!(stack.first().map(String::as_str), Some(FONT_FAMILY));
-        assert_eq!(FONT_FAMILY, SYSTEM_UI_FONT_FAMILY);
-        assert!(!stack.iter().any(|family| family == "Google Sans"));
-        assert!(!stack.iter().any(|family| family.contains("Inter")));
-    }
-
-    #[test]
-    fn ui_stack_names_this_platform_and_no_other() {
-        let stack = ui_font_fallback_stack();
-        for family in platform_families() {
-            assert!(
-                stack.iter().any(|entry| entry == family),
-                "{family} missing from {stack:?}"
-            );
-        }
-        for family in FOREIGN_FAMILIES {
-            if platform_families().contains(family) {
-                continue;
-            }
-            assert!(
-                !stack.iter().any(|entry| entry == family),
-                "{family} belongs to another platform but appears in {stack:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ui_stack_covers_thai_without_repeating_a_family() {
-        let stack = ui_font_fallback_stack();
-        let mut seen = stack.clone();
-        seen.sort();
-        seen.dedup();
-        assert_eq!(seen.len(), stack.len(), "duplicate family in {stack:?}");
-
-        for family in PLATFORM_THAI_UI_FONT_FAMILIES {
-            assert!(
-                stack.iter().any(|entry| entry == family),
-                "Thai family {family} missing from {stack:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn thai_ui_font_is_thai_capable_and_never_falls_back_to_itself() {
-        let font = ui_font_for_language("th-TH");
-        let primary = font.family.to_string();
+    fn ui_font_is_a_single_composite_with_a_fallback_chain() {
+        let font = ui_font();
+        let fallbacks = font
+            .fallbacks
+            .expect("composite UI font must attach a fallback chain");
         assert!(
-            PLATFORM_THAI_UI_FONT_FAMILIES.contains(&primary.as_str()),
-            "{primary} cannot shape Thai"
+            !fallbacks.fallback_list().is_empty(),
+            "composite UI font needs a non-empty fallback chain"
         );
-
-        let fallbacks = font.fallbacks.expect("Thai font needs a fallback list");
-        let list = fallbacks.fallback_list();
-        assert!(!list.contains(&primary));
-        assert!(list.iter().any(|entry| *entry == SYSTEM_UI_FONT_FAMILY));
     }
 
+    /// Weight selection is a descriptor axis, not a family swap: the family is
+    /// identical across weights.
     #[test]
-    fn language_tag_matching_ignores_case_and_separator() {
-        let thai = ui_font_for_language("TH_th").family.to_string();
-        assert_eq!(thai, ui_font_for_language("th").family.to_string());
+    fn weight_variants_share_the_same_anchor_family() {
         assert_eq!(
-            ui_font_for_language("en-US").family.to_string(),
-            ui_font().family.to_string()
+            ui_font_weight(FontWeight::NORMAL).family,
+            ui_font_weight(FontWeight::BOLD).family
         );
+        assert_eq!(ui_font_weight(FontWeight::BOLD).weight, FontWeight::BOLD);
     }
 }
 

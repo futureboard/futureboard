@@ -1323,7 +1323,7 @@ impl Render for StudioLayout {
             .size_full()
             .relative()
             .bg(Colors::surface_base())
-            .font(theme::ui_font_for_language(&ui_language))
+            .font(theme::ui_font())
             // Reclaim the studio shortcut anchor before the clicked child handles
             // the pointer. Focusable controls (text fields, piano roll, etc.) take
             // focus again in their own target handler, while non-focusable
