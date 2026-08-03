@@ -1,18 +1,24 @@
 # Locale translation status
 
-Source of truth for UI strings: `en-US/app.ftl`.
+Source of truth for shipped UI strings: committed `*/app.ftl` under this directory.
 
-Locales: `en-US`, `ja-JP`, `th-TH`, `zh-CN`.
+Locales: `en-US`, `ja-JP`, `th-TH`, `zh-CN` (selected by `settings.general.language`).
 
-## Pipeline
+## Runtime
 
-1. Edit English keys in `packages/shared/locales/en-US/app.ftl` (or regenerate via `node scripts/generate-app-ftl.mjs`).
-2. Refresh English→locale maps: the committed `scripts/translations/{zh-CN,ja-JP,th-TH}.json` maps English source strings to translations.
-3. Apply maps into locale FTL files: `node scripts/apply-locale-translations.mjs`.
-4. Native app loads FTL at compile time via `crates/SphereUIComponents/src/i18n.rs`.
+Native UI loads FTL at compile time via `crates/SphereUIComponents/src/i18n.rs`.
 
-## Runtime wiring
-
-`settings.general.language` selects the locale. Surfaces should call `I18n::new(&language)` and `i18n.tr("key")` / `i18n.tr_vars(...)`.
+Surfaces call `I18n::new(&language)` or `I18n::from_app(cx)`, then `tr` / `tr_vars` / `tr_menu`.
 
 Menu labels use stable IDs from `native-menu.json` mapped as `menu.{id_with_dots_as_dashes}`.
+
+## Maintainer pipeline
+
+Optional helpers (maps under `scripts/translations/*.json` are gitignored):
+
+1. Edit or regenerate English keys (`node scripts/generate-app-ftl.mjs` writes `en-US/app.ftl`).
+2. Refresh English→locale JSON maps (from current FTL or `generate-locale-json.mjs`).
+3. Apply maps: `node scripts/apply-locale-translations.mjs`.
+4. Keep locale key sets aligned with `en-US` (same keys; no missing entries).
+
+When adding UI copy, prefer a stable Fluent key in `en-US/app.ftl`, translate the other locales, then wire `i18n.tr("key")` at the render site.
