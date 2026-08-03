@@ -18,6 +18,7 @@ use SpherePluginHost::registry::{
 };
 
 use crate::assets;
+use crate::i18n::I18n;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::progress_dialog::{
@@ -111,11 +112,12 @@ pub struct PluginManagerDialogState {
 }
 
 impl PluginManagerDialogState {
-    pub fn new_empty() -> Self {
+    pub fn new_empty(i18n: I18n) -> Self {
         let host = PluginRegistry::host_status();
         let au_cache = load_au_cache_state();
         let status_text = if host.available {
-            "Loading cached plug-in index…".to_string()
+            // No dedicated FTL key; closest empty-registry copy until cache load finishes.
+            i18n.tr("plugin-manager.list.empty")
         } else {
             host.message.clone()
         };
@@ -144,7 +146,12 @@ impl PluginManagerDialogState {
 
     /// Apply a cached `.pst` load to the dialog. Does not touch any plug-in
     /// binary or trigger an SDK scan.
-    pub fn apply_cache_load(&mut self, plugins: Vec<RegistryPlugin>, last_scan_at_ms: i64) {
+    pub fn apply_cache_load(
+        &mut self,
+        plugins: Vec<RegistryPlugin>,
+        last_scan_at_ms: i64,
+        i18n: I18n,
+    ) {
         self.failed_count = PluginRegistry::cached_failed_count(&plugins);
         self.last_scan_at_ms = last_scan_at_ms;
         let count = plugins.len();
@@ -152,13 +159,16 @@ impl PluginManagerDialogState {
         self.cache_loaded = true;
         self.scanning = false;
         self.status_text = if count == 0 {
-            "No plugin index found. Click Scan Now to scan plugins.".to_string()
+            i18n.tr("plugin-manager.list.empty")
         } else {
-            format!("{count} plug-in(s) cached.")
+            i18n.tr_vars(
+                "plugin-manager.scan.found",
+                &[("count", count.to_string())],
+            )
         };
     }
 
-    pub fn apply_scan_result(&mut self, result: RegistryScanResult) {
+    pub fn apply_scan_result(&mut self, result: RegistryScanResult, i18n: I18n) {
         self.host = PluginRegistry::host_status();
         self.plugins = result.plugins;
         self.scan_paths = result.scanned_paths;
@@ -185,28 +195,43 @@ impl PluginManagerDialogState {
                 format!("AudioUnit scan failed. VST3/CLAP results are still available. {au_error}")
             } else if self.failed_count > 0 {
                 format!(
-                    "Scan finished with {} path error(s). {au_error}",
-                    self.failed_count
+                    "{} {au_error}",
+                    i18n.tr_vars(
+                        "plugin-manager.scan.path-errors",
+                        &[("n", self.failed_count.to_string())],
+                    )
                 )
             } else {
                 format!("AudioUnit scan failed. {au_error}")
             }
         } else if count == 0 && self.failed_count > 0 {
-            format!("Scan finished with {} path error(s).", self.failed_count)
+            i18n.tr_vars(
+                "plugin-manager.scan.path-errors",
+                &[("n", self.failed_count.to_string())],
+            )
         } else if count == 0 {
-            "No plug-ins found in scan locations.".to_string()
+            i18n.tr("plugin-manager.scan.none-found")
         } else if self.failed_count > 0 {
-            format!(
-                "Found {} plug-in(s); {} path error(s).",
-                count, self.failed_count
+            i18n.tr_vars(
+                "plugin-manager.scan.found-with-errors",
+                &[
+                    ("count", count.to_string()),
+                    ("errors", self.failed_count.to_string()),
+                ],
             )
         } else if self.generated_presets > 0 {
-            format!(
-                "Registered {} preset(s). {} plug-in(s) cached.",
-                self.generated_presets, count
+            i18n.tr_vars(
+                "plugin-manager.scan.registered",
+                &[
+                    ("presets", self.generated_presets.to_string()),
+                    ("count", count.to_string()),
+                ],
             )
         } else {
-            format!("Found {} plug-in(s).", count)
+            i18n.tr_vars(
+                "plugin-manager.scan.found",
+                &[("count", count.to_string())],
+            )
         };
 
         if let Some(id) = &self.selected_id {
@@ -216,7 +241,7 @@ impl PluginManagerDialogState {
         }
     }
 
-    pub fn begin_scan(&mut self, mode: PluginScanMode) {
+    pub fn begin_scan(&mut self, mode: PluginScanMode, i18n: I18n) {
         self.scanning = true;
         self.scan_progress_current = 0;
         self.scan_progress_total = 0;
@@ -228,22 +253,18 @@ impl PluginManagerDialogState {
         }
         self.au_scan_error = None;
         self.status_text = match mode {
-            PluginScanMode::Rescan => {
-                "Scanning and registering VST3, CLAP, and AudioUnit plug-ins…".to_string()
-            }
-            PluginScanMode::RescanAll => {
-                "Deleting presets and rescanning all plug-ins…".to_string()
-            }
-            PluginScanMode::RescanAu => "Scanning AudioUnit plug-ins…".to_string(),
+            PluginScanMode::Rescan => i18n.tr("plugin-manager.scan.in-progress"),
+            PluginScanMode::RescanAll => i18n.tr("plugin-manager.scan.rescan-all"),
+            PluginScanMode::RescanAu => i18n.tr("plugin-manager.scan.in-progress"),
         };
     }
 
-    pub fn apply_scan_progress(&mut self, progress: &ScanProgress) {
+    pub fn apply_scan_progress(&mut self, progress: &ScanProgress, i18n: I18n) {
         match progress {
             ScanProgress::Started { bundle_total } => {
                 self.scan_progress_total = *bundle_total;
                 self.scan_progress_current = 0;
-                self.scan_progress_label = "Discovering plug-in bundles…".to_string();
+                self.scan_progress_label = i18n.tr("plugin-manager.scan.discovering");
             }
             ScanProgress::ScanningBundle {
                 current,
@@ -252,12 +273,13 @@ impl PluginManagerDialogState {
             } => {
                 self.scan_progress_current = *current;
                 self.scan_progress_total = *total;
-                self.scan_progress_label = format!(
-                    "Reading metadata: {}",
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("bundle")
-                );
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("bundle")
+                    .to_string();
+                self.scan_progress_label =
+                    i18n.tr_vars("plugin-manager.scan.reading", &[("name", name)]);
             }
             ScanProgress::Registering {
                 current,
@@ -415,15 +437,23 @@ fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
     svg().path(path).text_color(color).size(px(size))
 }
 
-fn scan_progress_bar(state: &PluginManagerDialogState) -> impl IntoElement {
+fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoElement {
     let fraction = state.scan_progress_fraction();
     let pct = (fraction * 100.0).round() as u32;
     let label = if state.scan_progress_total > 0 {
-        format!(
-            "Scanning {} of {} — {}",
-            state.scan_progress_current.min(state.scan_progress_total),
-            state.scan_progress_total,
-            state.scan_progress_label
+        i18n.tr_vars(
+            "plugin-manager.scan.progress",
+            &[
+                (
+                    "current",
+                    state
+                        .scan_progress_current
+                        .min(state.scan_progress_total)
+                        .to_string(),
+                ),
+                ("total", state.scan_progress_total.to_string()),
+                ("name", state.scan_progress_label.clone()),
+            ],
         )
     } else {
         state.scan_progress_label.clone()
@@ -475,7 +505,8 @@ fn scan_progress_bar(state: &PluginManagerDialogState) -> impl IntoElement {
         )
 }
 
-fn status_badge(label: &'static str, ready: bool) -> impl IntoElement {
+fn status_badge(label: impl Into<String>, ready: bool) -> impl IntoElement {
+    let label = label.into();
     let (fg, bg) = if ready {
         (Colors::text_primary(), Colors::surface_input())
     } else {
@@ -530,7 +561,8 @@ fn rgba_warning_soft() -> gpui::Rgba {
     gpui::rgba(0xE5C07B18)
 }
 
-fn sidebar_section(label: &'static str, children: Vec<impl IntoElement>) -> impl IntoElement {
+fn sidebar_section(label: impl Into<String>, children: Vec<impl IntoElement>) -> impl IntoElement {
+    let label = label.into();
     div()
         .mb(px(4.0))
         .child(
@@ -548,12 +580,13 @@ fn sidebar_section(label: &'static str, children: Vec<impl IntoElement>) -> impl
 
 fn sidebar_item(
     id: impl Into<gpui::ElementId>,
-    label: &'static str,
+    label: impl Into<String>,
     count: usize,
     active: bool,
     disabled: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .id(id)
         .flex()
@@ -597,11 +630,12 @@ fn sidebar_item(
 
 fn col_header(
     id: impl Into<gpui::ElementId>,
-    label: &'static str,
+    label: impl Into<String>,
     key: SortKey,
     state: &PluginManagerDialogState,
     on_sort: Arc<dyn Fn(&SortKey, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
+    let label = label.into();
     let active = state.sort_key == key;
     let on_sort = on_sort.clone();
     div()
@@ -630,7 +664,11 @@ fn col_header(
         }))
 }
 
-fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) -> impl IntoElement {
+fn details_panel(
+    plugin: &RegistryPlugin,
+    callbacks: &PluginManagerCallbacks,
+    i18n: I18n,
+) -> impl IntoElement {
     let insert_enabled = plugin.supports_insert();
     let editor_enabled = plugin.supports_editor();
     let insert_cb = callbacks.on_insert.clone();
@@ -642,6 +680,19 @@ fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) ->
     let id_reveal = plugin.id.clone();
     let id_register = plugin.id.clone();
     let can_register = plugin.status == PluginStatus::MissingPreset && plugin.path.exists();
+    let kind_label = match plugin.kind {
+        PluginKind::Instrument => i18n.tr("plugin-manager.kind.instrument"),
+        PluginKind::Effect => i18n.tr("plugin-manager.kind.effect"),
+    };
+    let status_label = match plugin.status {
+        PluginStatus::PresetReady => i18n.tr("plugin-manager.status.available"),
+        PluginStatus::MissingPreset => i18n.tr("plugin-manager.status.missing-preset"),
+    };
+    let reveal_label = if plugin.status == PluginStatus::PresetReady {
+        i18n.tr("plugin-manager.action.reveal-preset")
+    } else {
+        i18n.tr("plugin-manager.action.reveal-plugin")
+    };
 
     div()
         .flex()
@@ -660,7 +711,7 @@ fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) ->
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
-                .child("Plug-in Details"),
+                .child(i18n.tr("plugin-manager.details.title")),
         )
         .child(
             div()
@@ -673,37 +724,43 @@ fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) ->
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(detail_row("Name", &plugin.name))
-                .child(detail_row("Vendor", &plugin.vendor))
-                .child(detail_row("Category", &plugin.display_category()))
-                .when_some(plugin.raw_category.as_ref(), |this, raw| {
-                    this.child(detail_row("SDK Category", raw))
-                })
-                .child(detail_row("Format", plugin.format.label()))
+                .child(detail_row(i18n.tr("plugin-manager.field.name"), &plugin.name))
                 .child(detail_row(
-                    "Kind",
-                    match plugin.kind {
-                        PluginKind::Instrument => "Instrument",
-                        PluginKind::Effect => "Effect",
-                    },
+                    i18n.tr("plugin-manager.field.vendor"),
+                    &plugin.vendor,
                 ))
-                .child(detail_row("Path", &plugin.path.display().to_string()))
+                .child(detail_row(
+                    i18n.tr("plugin-manager.field.category"),
+                    &plugin.display_category(),
+                ))
+                .when_some(plugin.raw_category.as_ref(), |this, raw| {
+                    this.child(detail_row(
+                        i18n.tr("plugin-manager.field.sdk-category"),
+                        raw,
+                    ))
+                })
+                .child(detail_row(
+                    i18n.tr("plugin-manager.field.format"),
+                    plugin.format.label(),
+                ))
+                .child(detail_row(i18n.tr("plugin-manager.field.kind"), &kind_label))
+                .child(detail_row(
+                    i18n.tr("plugin-manager.field.path"),
+                    &plugin.path.display().to_string(),
+                ))
                 .when_some(plugin.class_id.as_ref(), |this, cid| {
-                    this.child(detail_row("Class ID", cid))
+                    this.child(detail_row(i18n.tr("plugin-manager.field.class-id"), cid))
                 })
                 .when_some(plugin.version.as_ref(), |this, ver| {
-                    this.child(detail_row("Version", ver))
+                    this.child(detail_row(i18n.tr("plugin-manager.field.version"), ver))
                 })
                 .child(detail_row(
-                    "Preset",
+                    i18n.tr("plugin-manager.field.preset"),
                     &plugin.preset_path.display().to_string(),
                 ))
                 .child(detail_row(
-                    "Status",
-                    match plugin.status {
-                        PluginStatus::PresetReady => "Available",
-                        PluginStatus::MissingPreset => "Missing preset",
-                    },
+                    i18n.tr("plugin-manager.field.status"),
+                    &status_label,
                 )),
         )
         .child(
@@ -717,32 +774,28 @@ fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) ->
                 .border_color(Colors::divider())
                 .child(fb_button(
                     "plugin-mgr-insert",
-                    "Insert on Selected Track",
+                    i18n.tr("plugin-manager.action.insert"),
                     FbButtonKind::Primary,
                     insert_enabled,
                     move |_, window, cx| insert_cb(&id_insert, window, cx),
                 ))
                 .child(fb_button(
                     "plugin-mgr-editor",
-                    "Open Plug-in Editor",
+                    i18n.tr("plugin-manager.action.editor"),
                     FbButtonKind::Default,
                     editor_enabled,
                     move |_, window, cx| editor_cb(&id_editor, window, cx),
                 ))
                 .child(fb_button(
                     "plugin-mgr-register",
-                    "Validate & Register",
+                    i18n.tr("plugin-manager.action.register"),
                     FbButtonKind::Primary,
                     can_register,
                     move |_, window, cx| register_cb(&id_register, window, cx),
                 ))
                 .child(fb_button(
                     "plugin-mgr-reveal",
-                    if plugin.status == PluginStatus::PresetReady {
-                        "Reveal Preset in Explorer"
-                    } else {
-                        "Reveal Plug-in in Explorer"
-                    },
+                    reveal_label,
                     FbButtonKind::Default,
                     plugin.path.exists() || plugin.preset_path.exists(),
                     move |_, window, cx| reveal_cb(&id_reveal, window, cx),
@@ -752,13 +805,14 @@ fn details_panel(plugin: &RegistryPlugin, callbacks: &PluginManagerCallbacks) ->
                         div()
                             .text_size(px(9.5))
                             .text_color(Colors::text_faint())
-                            .child("Editor: VST3 plug-ins with an available preset only."),
+                            .child(i18n.tr("plugin-manager.editor.hint")),
                     )
                 }),
         )
 }
 
-fn detail_row(label: &'static str, value: &str) -> impl IntoElement {
+fn detail_row(label: impl Into<String>, value: &str) -> impl IntoElement {
+    let label = label.into();
     div()
         .flex()
         .flex_col()
@@ -824,6 +878,7 @@ pub fn plugin_manager_panel(
     callbacks: PluginManagerCallbacks,
     sidebar_scroll: &ScrollHandle,
     list_scroll: &ScrollHandle,
+    i18n: I18n,
 ) -> impl IntoElement {
     let rescan = callbacks.on_rescan.clone();
     let rescan_all = callbacks.on_rescan_all.clone();
@@ -858,13 +913,13 @@ pub fn plugin_manager_panel(
                 .text_size(px(11.0))
                 .text_color(Colors::text_faint())
                 .child(if state.scanning {
-                    "Scanning… plug-ins will appear here one by one."
+                    i18n.tr("plugin-manager.list.scanning")
                 } else if state.plugins.is_empty() && state.cache_loaded {
-                    "No plugin index found. Click Scan Now to scan plugins."
+                    i18n.tr("plugin-manager.list.empty")
                 } else if state.plugins.is_empty() {
-                    "Loading cached plug-in index…"
+                    i18n.tr("plugin-manager.list.empty")
                 } else {
-                    "No plug-ins match the current filter."
+                    i18n.tr("plugin-manager.list.no-match")
                 })
                 .into_any_element(),
         );
@@ -960,7 +1015,11 @@ pub fn plugin_manager_panel(
                                 reveal(&reveal_id, window, cx);
                             })
                             .child(status_badge(
-                                if status_ready { "Available" } else { "Missing" },
+                                if status_ready {
+                                    i18n.tr("plugin-manager.status.available")
+                                } else {
+                                    i18n.tr("plugin-manager.status.missing")
+                                },
                                 status_ready,
                             )),
                     )
@@ -1008,9 +1067,9 @@ pub fn plugin_manager_panel(
                         .child(fb_button(
                             "plugin-manager-scan-now",
                             if state.scanning {
-                                "Scanning…"
+                                i18n.tr("plugin-manager.rescan.scanning")
                             } else {
-                                "Scan Now"
+                                i18n.tr("plugin-manager.rescan")
                             },
                             FbButtonKind::Primary,
                             !state.scanning,
@@ -1018,7 +1077,7 @@ pub fn plugin_manager_panel(
                         ))
                         .child(fb_button(
                             "plugin-manager-full-rescan",
-                            "Full Rescan",
+                            i18n.tr("plugin-manager.rescan-all"),
                             FbButtonKind::Default,
                             !state.scanning,
                             move |_, window, cx| rescan_all(&(), window, cx),
@@ -1051,7 +1110,9 @@ pub fn plugin_manager_panel(
                             move |_, window, cx| open_db_folder(&(), window, cx),
                         )),
                 )
-                .when(state.scanning, |panel| panel.child(scan_progress_bar(state)))
+                .when(state.scanning, |panel| {
+                    panel.child(scan_progress_bar(state, i18n))
+                })
                 .when(state.au_auto_scan_disabled && state.au_scan_available, |panel| {
                     panel.child(
                         div()
@@ -1115,11 +1176,11 @@ pub fn plugin_manager_panel(
                                                     div()
                                                         .py(px(4.0))
                                                         .child(sidebar_section(
-                                                    "Library",
+                                                    i18n.tr("plugin-manager.filter.library"),
                                                     vec![
                                                         sidebar_item(
                                                             "pm-filter-all",
-                                                            "All Plug-ins",
+                                                            i18n.tr("plugin-manager.filter.all"),
                                                             counts.all,
                                                             state.sidebar_filter == SidebarFilter::All,
                                                             false,
@@ -1135,11 +1196,11 @@ pub fn plugin_manager_panel(
                                                     ],
                                                 ))
                                                 .child(sidebar_section(
-                                                    "Kind",
+                                                    i18n.tr("plugin-manager.filter.kind"),
                                                     vec![
                                                         sidebar_item(
                                                             "pm-filter-inst",
-                                                            "Instruments",
+                                                            i18n.tr("plugin-manager.filter.instruments"),
                                                             counts.instruments,
                                                             state.sidebar_filter
                                                                 == SidebarFilter::Instrument,
@@ -1155,7 +1216,7 @@ pub fn plugin_manager_panel(
                                                         .into_any_element(),
                                                         sidebar_item(
                                                             "pm-filter-fx",
-                                                            "Effects",
+                                                            i18n.tr("plugin-manager.filter.effects"),
                                                             counts.effects,
                                                             state.sidebar_filter == SidebarFilter::Effect,
                                                             false,
@@ -1171,7 +1232,7 @@ pub fn plugin_manager_panel(
                                                     ],
                                                 ))
                                                 .child(sidebar_section(
-                                                    "Format",
+                                                    i18n.tr("plugin-manager.filter.format"),
                                                     vec![
                                                         sidebar_item(
                                                             "pm-filter-vst3",
@@ -1233,14 +1294,14 @@ pub fn plugin_manager_panel(
                                                         .border_color(Colors::divider())
                                                         .child(
                                                             sidebar_section(
-                                                                "Scan Locations",
+                                                                i18n.tr("plugin-manager.scan-locations"),
                                                                 if state.scan_paths.is_empty() {
                                                                     vec![div()
                                                                         .px(px(10.0))
                                                                         .py(px(4.0))
                                                                         .text_size(px(10.0))
                                                                         .text_color(Colors::text_faint())
-                                                                        .child("No scan paths detected")
+                                                                        .child(i18n.tr("plugin-manager.scan-locations.empty"))
                                                                         .into_any_element()]
                                                                 } else {
                                                                     state
@@ -1281,7 +1342,7 @@ pub fn plugin_manager_panel(
                                                                 .child(
                                                                     fb_button(
                                                                         "pm-add-location",
-                                                                        "+ Add Location",
+                                                                        i18n.tr("plugin-manager.add-location"),
                                                                         FbButtonKind::Default,
                                                                         false,
                                                                         |_, _, _| {},
@@ -1313,7 +1374,7 @@ pub fn plugin_manager_panel(
                                         .child(
                                             div().flex_1().child(col_header(
                                                 "pm-sort-name",
-                                                "Name",
+                                                i18n.tr("plugin-manager.sort.name"),
                                                 SortKey::Name,
                                                 state,
                                                 sort_cb.clone(),
@@ -1322,7 +1383,7 @@ pub fn plugin_manager_panel(
                                         .child(
                                             div().w(px(110.0)).child(col_header(
                                                 "pm-sort-vendor",
-                                                "Vendor",
+                                                i18n.tr("plugin-manager.sort.vendor"),
                                                 SortKey::Vendor,
                                                 state,
                                                 sort_cb.clone(),
@@ -1331,7 +1392,7 @@ pub fn plugin_manager_panel(
                                         .child(
                                             div().w(px(100.0)).child(col_header(
                                                 "pm-sort-cat",
-                                                "Category",
+                                                i18n.tr("plugin-manager.sort.category"),
                                                 SortKey::Category,
                                                 state,
                                                 sort_cb.clone(),
@@ -1340,7 +1401,7 @@ pub fn plugin_manager_panel(
                                         .child(
                                             div().w(px(72.0)).child(col_header(
                                                 "pm-sort-fmt",
-                                                "Format",
+                                                i18n.tr("plugin-manager.sort.format"),
                                                 SortKey::Format,
                                                 state,
                                                 sort_cb,
@@ -1352,7 +1413,7 @@ pub fn plugin_manager_panel(
                                                 .text_size(px(10.0))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .text_color(Colors::text_faint())
-                                                .child("Status"),
+                                                .child(i18n.tr("plugin-manager.column.status")),
                                         ),
                                 )
                                 .child(
@@ -1372,7 +1433,7 @@ pub fn plugin_manager_panel(
                                 ),
                         )
                         .when_some(selected, |panel, plugin| {
-                            panel.child(details_panel(plugin, &callbacks))
+                            panel.child(details_panel(plugin, &callbacks, i18n))
                         }),
                 )
                 .child(
@@ -1458,10 +1519,11 @@ pub struct PluginManagerWindow {
 
 impl PluginManagerWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let i18n = I18n::from_app(cx);
         Self {
-            state: PluginManagerDialogState::new_empty(),
+            state: PluginManagerDialogState::new_empty(i18n),
             search_input: TextInputState::new("plugin-manager-search", cx.focus_handle())
-                .with_placeholder("Search plug-ins..."),
+                .with_placeholder(i18n.tr("search.plugins-manager.placeholder")),
             focus_handle: cx.focus_handle(),
             initial_cache_loaded: false,
             sidebar_scroll: ScrollHandle::new(),
@@ -1481,7 +1543,8 @@ impl PluginManagerWindow {
                 .await;
             let count = plugins.len();
             let _ = this.update(cx, |win, cx| {
-                win.state.apply_cache_load(plugins, last_ms);
+                let i18n = I18n::from_app(cx);
+                win.state.apply_cache_load(plugins, last_ms, i18n);
                 cx.notify();
             });
             if debug {
@@ -1519,7 +1582,8 @@ impl PluginManagerWindow {
             loop {
                 while let Ok(progress) = rx.try_recv() {
                     let _ = this.update(cx, |win, cx| {
-                        win.state.apply_scan_progress(&progress);
+                        let i18n = I18n::from_app(cx);
+                        win.state.apply_scan_progress(&progress, i18n);
                         cx.notify();
                     });
                 }
@@ -1533,7 +1597,8 @@ impl PluginManagerWindow {
 
             while let Ok(progress) = rx.try_recv() {
                 let _ = this.update(cx, |win, cx| {
-                    win.state.apply_scan_progress(&progress);
+                    let i18n = I18n::from_app(cx);
+                    win.state.apply_scan_progress(&progress, i18n);
                     cx.notify();
                 });
             }
@@ -1541,14 +1606,15 @@ impl PluginManagerWindow {
             match handle.join() {
                 Ok(result) => {
                     let _ = this.update(cx, |win, cx| {
-                        win.state.apply_scan_result(result);
+                        let i18n = I18n::from_app(cx);
+                        win.state.apply_scan_result(result, i18n);
                         cx.notify();
                     });
                 }
                 Err(_) => {
                     let _ = this.update(cx, |win, cx| {
                         win.state.scanning = false;
-                        win.state.status_text = "Scan thread panicked.".to_string();
+                        win.state.status_text = I18n::from_app(cx).tr("plugin-manager.error.panic");
                         cx.notify();
                     });
                 }
@@ -1579,6 +1645,10 @@ crate::impl_single_input_window_ime!(PluginManagerWindow, search_input);
 
 impl Render for PluginManagerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let i18n = I18n::from_app(cx);
+        self.search_input.placeholder =
+            Some(i18n.tr("search.plugins-manager.placeholder"));
+
         if !self.initial_cache_loaded {
             self.initial_cache_loaded = true;
             // Load cached `.pst` index only. Never auto-scan VST3/CLAP binaries
@@ -1600,7 +1670,8 @@ impl Render for PluginManagerWindow {
                         if this.state.scanning {
                             return;
                         }
-                        this.state.begin_scan(PluginScanMode::Rescan);
+                        this.state
+                            .begin_scan(PluginScanMode::Rescan, I18n::from_app(cx));
                         cx.notify();
                         PluginManagerWindow::arm_background_scan(cx, PluginScanMode::Rescan);
                     });
@@ -1613,7 +1684,8 @@ impl Render for PluginManagerWindow {
                         if this.state.scanning {
                             return;
                         }
-                        this.state.begin_scan(PluginScanMode::RescanAll);
+                        this.state
+                            .begin_scan(PluginScanMode::RescanAll, I18n::from_app(cx));
                         cx.notify();
                         PluginManagerWindow::arm_background_scan(cx, PluginScanMode::RescanAll);
                     });
@@ -1626,7 +1698,8 @@ impl Render for PluginManagerWindow {
                         if this.state.scanning || !this.state.au_scan_available {
                             return;
                         }
-                        this.state.begin_scan(PluginScanMode::RescanAu);
+                        this.state
+                            .begin_scan(PluginScanMode::RescanAu, I18n::from_app(cx));
                         cx.notify();
                         PluginManagerWindow::arm_background_scan(cx, PluginScanMode::RescanAu);
                     });
@@ -1674,7 +1747,8 @@ impl Render for PluginManagerWindow {
                 let target = target.clone();
                 move |_id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.state.status_text = "Insert on track: not connected yet.".to_string();
+                        this.state.status_text =
+                            I18n::from_app(cx).tr("plugin-manager.error.insert-not-connected");
                         cx.notify();
                     });
                 }
@@ -1683,7 +1757,8 @@ impl Render for PluginManagerWindow {
                 let target = target.clone();
                 move |_id: &String, _w, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.state.status_text = "Plug-in editor: not connected yet.".to_string();
+                        this.state.status_text =
+                            I18n::from_app(cx).tr("plugin-manager.error.editor-not-connected");
                         cx.notify();
                     });
                 }
@@ -1740,6 +1815,7 @@ impl Render for PluginManagerWindow {
                             return;
                         };
                         let name = plugin.name.clone();
+                        let i18n = I18n::from_app(cx);
                         match register_plugin(plugin) {
                             Ok(()) => {
                                 this.state.generated_presets =
@@ -1748,10 +1824,16 @@ impl Render for PluginManagerWindow {
                                         .iter()
                                         .filter(|p| p.status == PluginStatus::PresetReady)
                                         .count() as u32;
-                                this.state.status_text = format!("Registered preset for {name}.");
+                                this.state.status_text = i18n.tr_vars(
+                                    "plugin-manager.register.success",
+                                    &[("name", name)],
+                                );
                             }
                             Err(error) => {
-                                this.state.status_text = format!("Register failed: {error}");
+                                this.state.status_text = i18n.tr_vars(
+                                    "plugin-manager.register.failed",
+                                    &[("error", error.to_string())],
+                                );
                             }
                         }
                         cx.notify();
@@ -1778,7 +1860,7 @@ impl Render for PluginManagerWindow {
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
-                "Audio Plug-in Manager",
+                i18n.tr("plugin-manager.title"),
                 "plugin-manager-window-close",
                 {
                     let target = sw_target.clone();
@@ -1797,6 +1879,7 @@ impl Render for PluginManagerWindow {
                 callbacks,
                 &self.sidebar_scroll,
                 &self.list_scroll,
+                i18n,
             ))
     }
 }

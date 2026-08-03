@@ -13,6 +13,7 @@ use crate::components::editor_panel::ClipEditorPanel;
 use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::icon_button::icon_button;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
+use crate::i18n::I18n;
 use crate::layout::{StudioLayout, WorkspaceActivePanel};
 use crate::theme::Colors;
 
@@ -154,6 +155,7 @@ impl Render for BottomPanelShell {
                 active_panel,
                 on_tab_click,
                 on_close_panel,
+                I18n::from_app(cx),
             ))
             .child(
                 div()
@@ -235,6 +237,7 @@ fn render_tab_bar(
     active_panel: WorkspaceActivePanel,
     on_tab_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
     on_close_panel: Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
+    i18n: I18n,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("BottomPanelTabBar");
     crate::perf::count("bottom_panel_tabbar_layout_count", 1);
@@ -254,7 +257,8 @@ fn render_tab_bar(
         })
         .bg(Colors::bottom_panel_header_bg())
         .child(tab_button(
-            "Mixer",
+            "bottom-tab-mixer",
+            i18n.tr("bottom-panel.tab.mixer"),
             assets::ICON_SLIDERS_HORIZONTAL_PATH,
             BottomTab::Mixer,
             active_tab,
@@ -262,7 +266,8 @@ fn render_tab_bar(
             on_tab_click.clone(),
         ))
         .child(tab_button(
-            "Editor",
+            "bottom-tab-editor",
+            i18n.tr("bottom-panel.tab.editor"),
             assets::ICON_PENCIL_PATH,
             BottomTab::Editor,
             active_tab,
@@ -292,7 +297,8 @@ fn render_tab_bar(
 }
 
 fn tab_button(
-    label: &'static str,
+    id: &'static str,
+    label: impl Into<String>,
     icon_path: &'static str,
     tab: BottomTab,
     active_tab: BottomTab,
@@ -319,7 +325,7 @@ fn tab_button(
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text_color)
-        .id(label)
+        .id(id)
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
         })
@@ -330,7 +336,7 @@ fn tab_button(
                 .h(px(14.0))
                 .text_color(text_color),
         )
-        .child(label);
+        .child(label.into());
 
     if active {
         btn = btn.bg(Colors::tab_bg_active()).child(
