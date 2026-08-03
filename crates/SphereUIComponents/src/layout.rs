@@ -367,13 +367,18 @@ pub(crate) fn build_and_warm_audio_engine(
     }
 }
 
-/// Fixed clip id for the temporary live-recording preview clip.
-pub(crate) const RECORDING_PREVIEW_CLIP_ID: &str = "__recording_preview__";
+/// Per-track clip id for the temporary live-recording preview clip (one
+/// track can be recording several simultaneously-armed takes at once, each
+/// with its own growing preview clip). Mirrors
+/// `recording_ops::midi_recording_preview_clip_id`.
+pub(crate) fn audio_recording_preview_clip_id(track_id: &str) -> String {
+    format!("__recording_preview__:{track_id}")
+}
 
 /// UI-side bookkeeping for the realtime recording waveform preview (Part 1).
 /// Holds the streamed peak bins and where they live in the arrangement; the
-/// growing preview clip itself lives in timeline state under
-/// [`RECORDING_PREVIEW_CLIP_ID`].
+/// growing preview clip itself lives in timeline state under the clip id
+/// returned by [`audio_recording_preview_clip_id`].
 pub(crate) struct RecordingPreviewUi {
     pub clip_id: String,
     pub recording_id: u64,

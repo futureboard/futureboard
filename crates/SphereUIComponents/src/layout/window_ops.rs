@@ -1148,6 +1148,7 @@ impl StudioLayout {
                 .is_ok()
             {
                 self.panels.mixer_docked = false;
+                self.sync_timeline_chrome_metrics(cx);
                 self.push_mixer_snapshot_to_window(cx);
                 cx.notify();
                 return;
@@ -1217,14 +1218,20 @@ impl StudioLayout {
             Ok(handle) => {
                 self.external_windows.mixer = Some(handle);
                 // Removing the docked mixer changes the arrangement's client
-                // rectangle. Force both DirectComposition surfaces to repaint
-                // once so no pixels from the old bottom-panel bounds survive.
+                // rectangle. Refresh the timeline's own reserved-chrome
+                // metric too — `cx.refresh_windows()` only repaints the
+                // already-computed layout, it doesn't recompute the bottom
+                // panel height the timeline subtracts for its scroll/clip
+                // geometry, which otherwise stays stale at the docked mixer's
+                // height and clips the arrangement view.
+                self.sync_timeline_chrome_metrics(cx);
                 cx.refresh_windows();
                 cx.notify();
             }
             Err(err) => {
                 eprintln!("[mixer] failed to open external mixer window: {err}");
                 self.panels.mixer_docked = true;
+                self.sync_timeline_chrome_metrics(cx);
                 self.set_active_panel(crate::layout::WorkspaceActivePanel::Mixer, cx);
                 cx.notify();
             }

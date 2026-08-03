@@ -775,3 +775,21 @@ pub struct JsRecordingPreviewInfo {
     /// Total bins produced so far (drain target / head index).
     pub peak_count: f64,
 }
+
+/// Per-track metadata + current bin count for one armed track's in-progress
+/// recording preview (multi-track). The UI polls
+/// `recordingPreviewTracks()`, then drains each track with
+/// `drainRecordingPreviewPeaksForTrack(trackId, from)`.
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Debug, Default, Clone)]
+pub struct JsRecordingPreviewTrackInfo {
+    pub track_id: String,
+    /// Monotonic take id — changes between takes so the UI can drop stale data.
+    pub recording_id: f64,
+    /// Transport sample at which the take started (preview clip origin).
+    pub start_sample: f64,
+    pub sample_rate: u32,
+    pub peaks_per_second: u32,
+    /// Total bins produced so far (drain target / head index).
+    pub peak_count: f64,
+}

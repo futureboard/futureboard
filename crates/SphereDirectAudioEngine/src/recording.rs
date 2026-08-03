@@ -425,6 +425,7 @@ fn reset_failed_own_stream_start(shared: &crate::engine::SharedState) {
     shared
         .recording_preview_active
         .store(false, Ordering::Relaxed);
+    shared.recording_preview_track_ids.lock().clear();
     shared.live_input_active.store(false, Ordering::Relaxed);
     shared.input_ring.set_active(false, 0, 0);
     shared.monitor_enabled_any.store(false, Ordering::Relaxed);
@@ -437,11 +438,12 @@ fn reset_failed_own_stream_start(shared: &crate::engine::SharedState) {
 // ── Input stream builder (f32 samples) ───────────────────────────────────────
 
 /// Build the single recording capture stream. Its one realtime callback fans
-/// out to four independent paths, none of which blocks another:
-///   1. monitor    → `shared.input_ring` (read by the output render callback)
-///   2. record     → `tx` channel → disk-writer worker thread
-///   3. preview     → min/max/rms bins → `shared.preview_ring` (drained by UI)
-///   4. meters/diag → raw input peak + lightweight counters
+/// out to five independent paths, none of which blocks another:
+///   1. monitor       → `shared.input_ring` (read by the output render callback)
+///   2. record        → `tx` channel → disk-writer worker thread
+///   3. preview        → min/max/rms bins → `shared.preview_ring` (drained by UI)
+///   3b. per-track preview → one ring per armed track → `shared.preview_rings`
+///   4. meters/diag    → raw input peak + lightweight counters
 ///
 /// Realtime-safe: the record path uses a bounded preallocated block pool and
 /// drops when the pool or writer queue is full; the monitor/preview/meter paths
@@ -458,6 +460,7 @@ fn build_f32_input_stream(
     shared: Arc<crate::engine::SharedState>,
     channels: usize,
     monitor_channels: Vec<usize>,
+    preview_tracks: Vec<(String, usize, usize)>,
     samples_per_bin: usize,
     capture_on_transport: bool,
 ) -> Result<cpal::Stream, SphereAudioError> {
@@ -473,6 +476,30 @@ fn build_f32_input_stream(
     let mut bin_max = f32::MIN;
     let mut bin_sumsq = 0.0f32;
     let mut bin_count = 0usize;
+
+    // Per-track preview accumulators (Part 1, multi-track) — one entry per
+    // armed track, built once here and moved into the closure below. Fixed
+    // length for the whole take; mutated in place per frame, never
+    // grown/shrunk, so indexing `shared.preview_rings` stays allocation-free.
+    struct PreviewAccum {
+        l_ch: usize,
+        r_ch: usize,
+        bin_min: f32,
+        bin_max: f32,
+        bin_sumsq: f32,
+        bin_count: usize,
+    }
+    let mut track_accums: Vec<PreviewAccum> = preview_tracks
+        .iter()
+        .map(|&(_, l, r)| PreviewAccum {
+            l_ch: l,
+            r_ch: r,
+            bin_min: f32::MAX,
+            bin_max: f32::MIN,
+            bin_sumsq: 0.0,
+            bin_count: 0,
+        })
+        .collect();
 
     device
         .build_input_stream::<f32, _, _>(
@@ -549,6 +576,44 @@ fn build_f32_input_stream(
                         bin_max = f32::MIN;
                         bin_sumsq = 0.0;
                         bin_count = 0;
+                    }
+
+                    // 3b. Per-track preview bins (Part 1, multi-track): each
+                    // armed track gets its own mono mix of its own selected
+                    // input channels, mirroring what the disk writer captures
+                    // for that track — not the single global monitor mix
+                    // above. Bounded loop (one entry per armed track, capped
+                    // at MAX_RECORDING_PREVIEW_TRACKS), plain arithmetic, no
+                    // allocation.
+                    if capture_active {
+                        for (slot, acc) in track_accums.iter_mut().enumerate() {
+                            let tl = frame.get(acc.l_ch).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+                            let tr = frame.get(acc.r_ch).copied().unwrap_or(tl).clamp(-1.0, 1.0);
+                            let tm = (tl + tr) * 0.5;
+                            acc.bin_min = acc.bin_min.min(tm);
+                            acc.bin_max = acc.bin_max.max(tm);
+                            acc.bin_sumsq += tm * tm;
+                            acc.bin_count += 1;
+                            if acc.bin_count >= samples_per_bin {
+                                let rms = (acc.bin_sumsq / acc.bin_count as f32).sqrt();
+                                shared.preview_rings[slot].push(WaveformPeak {
+                                    min: acc.bin_min,
+                                    max: acc.bin_max,
+                                    rms,
+                                });
+                                acc.bin_min = f32::MAX;
+                                acc.bin_max = f32::MIN;
+                                acc.bin_sumsq = 0.0;
+                                acc.bin_count = 0;
+                            }
+                        }
+                    } else {
+                        for acc in track_accums.iter_mut() {
+                            acc.bin_min = f32::MAX;
+                            acc.bin_max = f32::MIN;
+                            acc.bin_sumsq = 0.0;
+                            acc.bin_count = 0;
+                        }
                     }
 
                     // 4. Record peak across all channels (diagnostics).
@@ -868,6 +933,36 @@ pub(crate) fn start_recording_with_device(
         .recording_preview_active
         .store(true, Ordering::Relaxed);
 
+    // ── Per-track preview setup (Part 1, multi-track) ──────────────────────
+    // Each armed track previews a mono mix of its *own* selected input
+    // channels — mirroring what `build_track_writers` already resolved for
+    // the disk-write path above — instead of everyone sharing the single
+    // global `monitor_channels` mix. `config.tracks` is still available here
+    // because `build_track_writers` only borrowed it.
+    let preview_tracks: Vec<(String, usize, usize)> = config
+        .tracks
+        .iter()
+        .take(crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS)
+        .filter_map(|t| {
+            let l = *t.input_channels.first()? as usize;
+            if l >= input_ch {
+                return None;
+            }
+            let r = t
+                .input_channels
+                .get(1)
+                .map(|&c| c as usize)
+                .filter(|&c| c < input_ch)
+                .unwrap_or(l);
+            Some((t.track_id.clone(), l, r))
+        })
+        .collect();
+    *shared.recording_preview_track_ids.lock() =
+        preview_tracks.iter().map(|(id, ..)| id.clone()).collect();
+    for slot in 0..preview_tracks.len() {
+        shared.preview_rings[slot].reset();
+    }
+
     // Arm the monitor ring for this stream's format and enable output monitoring
     // when the user requested it. A dedicated capture stream does not share the
     // output device's callback clock, even when both endpoints are WASAPI.
@@ -891,6 +986,7 @@ pub(crate) fn start_recording_with_device(
         Arc::clone(&shared),
         input_ch,
         monitor_channels,
+        preview_tracks,
         samples_per_bin,
         capture_on_transport,
     ) {

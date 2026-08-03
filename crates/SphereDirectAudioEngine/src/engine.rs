@@ -126,6 +126,35 @@ pub fn f32_load(v: u32) -> f32 {
     f32::from_bits(v)
 }
 
+/// Drain preview bins in `[from_index, head)` from one ring. Cheap clone on
+/// the control thread; never blocks the audio path. Shared by the legacy
+/// single-track `drain_recording_preview_peaks` and the per-track
+/// `drain_recording_preview_peaks_for_track`.
+fn drain_preview_ring(
+    ring: &crate::input_ring::PreviewPeakRing,
+    from_index: f64,
+) -> Vec<crate::types::JsWaveformPeak> {
+    let head = ring.head();
+    let mut from = from_index.max(0.0) as u64;
+    // If the consumer lagged past the ring window, clamp to what's retained.
+    let cap = crate::input_ring::PreviewPeakRing::default_capacity();
+    if head.saturating_sub(from) > cap {
+        from = head.saturating_sub(cap);
+    }
+    let mut out = Vec::with_capacity((head.saturating_sub(from)) as usize);
+    let mut i = from;
+    while i < head {
+        let p = ring.read(i);
+        out.push(crate::types::JsWaveformPeak {
+            min: p.min as f64,
+            max: p.max as f64,
+            rms: p.rms as f64,
+        });
+        i += 1;
+    }
+    out
+}
+
 #[inline]
 fn monitor_channel_pair(channels: &[u32]) -> Option<(u32, u32)> {
     channels
@@ -451,6 +480,18 @@ pub struct SharedState {
     pub recording_preview_sample_rate: AtomicU32,
     pub recording_preview_channels: AtomicU32,
     pub recording_preview_peaks_per_sec: AtomicU32,
+    /// One ring per potential simultaneously-recording track. Slot `i` backs
+    /// the track id at index `i` of `recording_preview_track_ids` for the
+    /// current take. Fixed-length, allocated once (see `Default`); the audio
+    /// callback only indexes into existing slots — no realtime allocation.
+    /// Purely additive alongside `preview_ring` above (which stays the
+    /// single-track legacy/monitor-mix path).
+    pub preview_rings: Vec<crate::input_ring::PreviewPeakRing>,
+    /// Track ids backing each `preview_rings` slot for the current take.
+    /// Written once per take-start and read only from the control thread
+    /// (`recording_preview_tracks`/`drain_recording_preview_peaks_for_track`)
+    /// — never the audio callback, so a plain mutex is fine here.
+    pub recording_preview_track_ids: Mutex<Vec<String>>,
 
     // ── Callback watchdog (audio-hang spec §12; audio → control) ──────────
     /// Duration of the most recent output callback, microseconds.
@@ -558,6 +599,10 @@ impl Default for SharedState {
             recording_preview_sample_rate: AtomicU32::new(0),
             recording_preview_channels: AtomicU32::new(0),
             recording_preview_peaks_per_sec: AtomicU32::new(0),
+            preview_rings: (0..crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS)
+                .map(|_| crate::input_ring::PreviewPeakRing::default())
+                .collect(),
+            recording_preview_track_ids: Mutex::new(Vec::new()),
             last_callback_us: AtomicU32::new(0),
             max_callback_us: AtomicU32::new(0),
             slow_callback_count: AtomicU64::new(0),
@@ -1617,25 +1662,60 @@ impl EngineInner {
         &self,
         from_index: f64,
     ) -> Vec<crate::types::JsWaveformPeak> {
-        let head = self.shared.preview_ring.head();
-        let mut from = from_index.max(0.0) as u64;
-        // If the consumer lagged past the ring window, clamp to what's retained.
-        let cap = crate::input_ring::PreviewPeakRing::default_capacity();
-        if head.saturating_sub(from) > cap {
-            from = head.saturating_sub(cap);
+        drain_preview_ring(&self.shared.preview_ring, from_index)
+    }
+
+    /// Per-track metadata for every armed track currently feeding its own
+    /// live preview ring (Part 1, multi-track). Replaces
+    /// [`Self::recording_preview_info`] for takes with more than one armed
+    /// audio track — the UI iterates this instead of guessing one track.
+    pub fn recording_preview_tracks(&self) -> Vec<crate::types::JsRecordingPreviewTrackInfo> {
+        if !self.shared.recording_preview_active.load(Ordering::Relaxed) {
+            return Vec::new();
         }
-        let mut out = Vec::with_capacity((head.saturating_sub(from)) as usize);
-        let mut i = from;
-        while i < head {
-            let p = self.shared.preview_ring.read(i);
-            out.push(crate::types::JsWaveformPeak {
-                min: p.min as f64,
-                max: p.max as f64,
-                rms: p.rms as f64,
-            });
-            i += 1;
-        }
-        out
+        let ids = self.shared.recording_preview_track_ids.lock();
+        ids.iter()
+            .enumerate()
+            .map(
+                |(slot, track_id)| crate::types::JsRecordingPreviewTrackInfo {
+                    track_id: track_id.clone(),
+                    recording_id: self.shared.recording_preview_id.load(Ordering::Relaxed) as f64,
+                    start_sample: self
+                        .shared
+                        .recording_preview_start_sample
+                        .load(Ordering::Relaxed) as f64,
+                    sample_rate: self
+                        .shared
+                        .recording_preview_sample_rate
+                        .load(Ordering::Relaxed),
+                    peaks_per_second: self
+                        .shared
+                        .recording_preview_peaks_per_sec
+                        .load(Ordering::Relaxed),
+                    peak_count: self.shared.preview_rings[slot].head() as f64,
+                },
+            )
+            .collect()
+    }
+
+    /// Drain one track's preview bins in `[from_index, head)`. Returns an
+    /// empty vec when `track_id` has no active preview slot (untracked, or
+    /// the take ended) or there is nothing new.
+    pub fn drain_recording_preview_peaks_for_track(
+        &self,
+        track_id: &str,
+        from_index: f64,
+    ) -> Vec<crate::types::JsWaveformPeak> {
+        let slot = self
+            .shared
+            .recording_preview_track_ids
+            .lock()
+            .iter()
+            .position(|id| id == track_id);
+        let Some(slot) = slot else {
+            return Vec::new();
+        };
+        drain_preview_ring(&self.shared.preview_rings[slot], from_index)
     }
 
     /// Throttled (≈500 ms) raw-input-peak trace, gated by
@@ -6265,5 +6345,108 @@ mod dropout_tests {
         // A genuine overrun past the deadline does flag, even under Off.
         record_output_callback_timing(&shared, 12_000, FRAMES, SR);
         assert_eq!(shared.dropout_count.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod recording_preview_multi_track_tests {
+    use super::*;
+    use crate::input_ring::WaveformPeak;
+
+    fn engine_with_two_tracks_active() -> EngineInner {
+        let engine = EngineInner::new();
+        engine
+            .shared
+            .recording_preview_active
+            .store(true, Ordering::Relaxed);
+        engine
+            .shared
+            .recording_preview_id
+            .store(7, Ordering::Relaxed);
+        engine
+            .shared
+            .recording_preview_start_sample
+            .store(1_000, Ordering::Relaxed);
+        engine
+            .shared
+            .recording_preview_sample_rate
+            .store(48_000, Ordering::Relaxed);
+        engine
+            .shared
+            .recording_preview_peaks_per_sec
+            .store(150, Ordering::Relaxed);
+        *engine.shared.recording_preview_track_ids.lock() =
+            vec!["track-a".to_string(), "track-b".to_string()];
+        engine.shared.preview_rings[0].push(WaveformPeak {
+            min: -0.5,
+            max: 0.5,
+            rms: 0.25,
+        });
+        engine.shared.preview_rings[1].push(WaveformPeak {
+            min: -0.1,
+            max: 0.1,
+            rms: 0.05,
+        });
+        engine.shared.preview_rings[1].push(WaveformPeak {
+            min: -0.2,
+            max: 0.2,
+            rms: 0.1,
+        });
+        engine
+    }
+
+    #[test]
+    fn recording_preview_tracks_reports_every_armed_track_independently() {
+        let engine = engine_with_two_tracks_active();
+        let tracks = engine.recording_preview_tracks();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].track_id, "track-a");
+        assert_eq!(tracks[0].peak_count, 1.0);
+        assert_eq!(tracks[1].track_id, "track-b");
+        assert_eq!(tracks[1].peak_count, 2.0);
+        // Shared take-level metadata is identical across tracks.
+        for t in &tracks {
+            assert_eq!(t.recording_id, 7.0);
+            assert_eq!(t.start_sample, 1_000.0);
+            assert_eq!(t.sample_rate, 48_000);
+        }
+    }
+
+    #[test]
+    fn recording_preview_tracks_is_empty_when_take_inactive() {
+        let engine = engine_with_two_tracks_active();
+        engine
+            .shared
+            .recording_preview_active
+            .store(false, Ordering::Relaxed);
+        assert!(engine.recording_preview_tracks().is_empty());
+    }
+
+    #[test]
+    fn drain_recording_preview_peaks_for_track_is_independent_per_track() {
+        let engine = engine_with_two_tracks_active();
+        let a = engine.drain_recording_preview_peaks_for_track("track-a", 0.0);
+        let b = engine.drain_recording_preview_peaks_for_track("track-b", 0.0);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].rms, 0.25);
+        assert_eq!(b.len(), 2);
+        // Compare against the same f32->f64 widening `drain_preview_ring`
+        // applies, since 0.1f32 doesn't round-trip to the f64 literal 0.1.
+        assert_eq!(b[1].rms, 0.1f32 as f64);
+        // Draining one track's ring must not disturb the other's head index.
+        assert_eq!(
+            engine
+                .drain_recording_preview_peaks_for_track("track-a", 1.0)
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_recording_preview_peaks_for_track_returns_empty_for_unknown_track() {
+        let engine = engine_with_two_tracks_active();
+        assert!(engine
+            .drain_recording_preview_peaks_for_track("no-such-track", 0.0)
+            .is_empty());
     }
 }

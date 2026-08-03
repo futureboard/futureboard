@@ -11,7 +11,7 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::waveform_cache::{self, WaveformPeak};
 use sphere_midi_service::MidiInputEvent;
 
-use super::{RecordingPreviewUi, RecordingUiState, StudioLayout, RECORDING_PREVIEW_CLIP_ID};
+use super::{audio_recording_preview_clip_id, RecordingPreviewUi, RecordingUiState, StudioLayout};
 use DirectAudio::types::{JsRecordingTrackConfig, JsStartRecordingConfig};
 
 /// Active recording-session UI state — the take's start position, the UI phase,
@@ -22,9 +22,11 @@ pub(crate) struct RecordingSessionState {
     pub start_beat: f32,
     /// Recording UI phase (Idle / Arming / Recording / …).
     pub ui_state: RecordingUiState,
-    /// Live recording waveform preview (Part 1). `Some` while a take draws a
-    /// growing preview clip in the arrangement.
-    pub preview: Option<RecordingPreviewUi>,
+    /// Live recording waveform preview (Part 1), keyed by track id. Holds one
+    /// entry per armed audio track currently drawing a growing preview clip
+    /// in the arrangement — every simultaneously-armed track gets its own
+    /// entry, mirroring `midi.tracks` below for MIDI takes.
+    pub preview: HashMap<String, RecordingPreviewUi>,
     /// Native MIDI/instrument track capture. This is UI/control-path state — MIDI
     /// hardware/virtual-keyboard events already arrive on the control router, so
     /// no realtime audio callback work is required.
@@ -46,7 +48,7 @@ impl Default for RecordingSessionState {
         Self {
             start_beat: 0.0,
             ui_state: RecordingUiState::Idle,
-            preview: None,
+            preview: HashMap::new(),
             midi: None,
             midi_preview_dirty: false,
             midi_preview_updated_at: Instant::now() - Duration::from_secs(1),
@@ -790,12 +792,13 @@ impl StudioLayout {
         }
     }
 
-    /// Poll the engine's recording preview ring and keep the temporary preview
-    /// clip + its streamed waveform in sync (Part 1). Called every audio tick.
+    /// Poll the engine's per-track recording preview rings and keep every
+    /// armed audio track's temporary preview clip + streamed waveform in sync
+    /// (Part 1, multi-track). Called every audio tick.
     pub(super) fn update_recording_preview(&mut self, cx: &mut Context<Self>) {
         self.update_midi_recording_previews(cx);
         if !self.timeline.read(cx).state.transport.recording {
-            if self.recording.preview.is_some()
+            if !self.recording.preview.is_empty()
                 && std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some()
             {
                 eprintln!("[RecordingPreviewUI] ignored_late_peaks transport_recording=false");
@@ -806,57 +809,71 @@ impl StudioLayout {
         let Some(engine) = self.audio_bridge.engine.clone() else {
             return;
         };
-        let info = engine.recording_preview_info();
-        if !info.active {
+        // Authoritative per-track list: the engine resolved exactly which
+        // armed tracks (and their channels) are feeding a live preview ring
+        // when the take started — no need to re-derive it from timeline
+        // arm state here.
+        let track_infos = engine.recording_preview_tracks();
+        if track_infos.is_empty() {
             self.finish_recording_preview(cx);
             return;
         }
-        let rec_id = info.recording_id as u64;
 
-        // (Re)initialize the preview clip for a new take.
-        let need_init = self
+        // Drop any tracked preview whose track id fell out of the engine's
+        // active set (take ended) or whose take id changed (stale from a
+        // previous take reusing the same track).
+        let stale_track_ids: Vec<String> = self
             .recording
             .preview
-            .as_ref()
-            .map(|p| p.recording_id != rec_id)
-            .unwrap_or(true);
-        if need_init {
-            self.finish_recording_preview(cx);
-            let track_id = {
-                let timeline = self.timeline.read(cx);
-                timeline
-                    .state
-                    .tracks
+            .iter()
+            .filter(|(id, p)| {
+                track_infos
                     .iter()
-                    .find(|t| t.armed && t.track_type == TrackType::Audio)
-                    .map(|t| t.id.clone())
-            };
-            let Some(track_id) = track_id else {
-                return;
-            };
+                    .find(|t| &t.track_id == *id)
+                    .map(|t| t.recording_id as u64 != p.recording_id)
+                    .unwrap_or(true)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for track_id in stale_track_ids {
+            self.teardown_recording_preview_track(&track_id, cx);
+        }
+
+        // (Re)initialize the preview clip for any track not yet tracked.
+        for info in &track_infos {
+            if self.recording.preview.contains_key(&info.track_id) {
+                continue;
+            }
+            let rec_id = info.recording_id as u64;
             let start_beat = self.recording.start_beat.max(0.0);
-            let clip_id = RECORDING_PREVIEW_CLIP_ID.to_string();
+            let clip_id = audio_recording_preview_clip_id(&info.track_id);
             waveform_cache::clear_recording_preview(&clip_id);
             if std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some() {
-                eprintln!("[RecordingPreviewUI] started id={rec_id} clip_id={clip_id}");
+                eprintln!(
+                    "[RecordingPreviewUI] started id={rec_id} track_id={} clip_id={clip_id}",
+                    info.track_id
+                );
             }
-            let (cid, tid) = (clip_id.clone(), track_id.clone());
+            let (cid, tid) = (clip_id.clone(), info.track_id.clone());
             self.timeline.update(cx, |timeline, cx| {
                 timeline
                     .state
                     .begin_recording_preview_clip(&cid, &tid, start_beat);
                 cx.notify();
             });
-            self.recording.preview = Some(RecordingPreviewUi {
-                clip_id,
-                recording_id: rec_id,
-                track_id,
-                start_beat,
-                sample_rate: info.sample_rate,
-                peaks_per_second: info.peaks_per_second.max(1),
-                drained: 0,
-                peaks: Vec::new(),
-            });
+            self.recording.preview.insert(
+                info.track_id.clone(),
+                RecordingPreviewUi {
+                    clip_id,
+                    recording_id: rec_id,
+                    track_id: info.track_id.clone(),
+                    start_beat,
+                    sample_rate: info.sample_rate,
+                    peaks_per_second: info.peaks_per_second.max(1),
+                    drained: 0,
+                    peaks: Vec::new(),
+                },
+            );
         }
 
         let bpm = {
@@ -864,16 +881,21 @@ impl StudioLayout {
             timeline.state.bpm
         };
 
-        // Drain newly produced peaks and republish the preview waveform.
-        let mut length_update: Option<(String, f32)> = None;
-        if let Some(p) = self.recording.preview.as_mut() {
-            let new = engine.drain_recording_preview_peaks(p.drained as f64);
+        // Drain newly produced peaks per track and republish each waveform.
+        let mut length_updates: Vec<(String, f32)> = Vec::new();
+        for info in &track_infos {
+            let Some(p) = self.recording.preview.get_mut(&info.track_id) else {
+                continue;
+            };
+            let new = engine
+                .drain_recording_preview_peaks_for_track(info.track_id.clone(), p.drained as f64);
             if !new.is_empty() {
                 p.drained += new.len() as u64;
                 if std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some() {
                     eprintln!(
-                        "[RecordingPreviewUI] peaks id={} count={}",
+                        "[RecordingPreviewUI] peaks id={} track_id={} count={}",
                         p.recording_id,
+                        p.track_id,
                         new.len()
                     );
                 }
@@ -890,28 +912,31 @@ impl StudioLayout {
             }
             let length_seconds = p.peaks.len() as f64 / p.peaks_per_second.max(1) as f64;
             let length_beats = (length_seconds * bpm.max(1.0) as f64 / 60.0) as f32;
-            length_update = Some((p.clip_id.clone(), length_beats));
+            length_updates.push((p.clip_id.clone(), length_beats));
         }
-        if let Some((clip_id, length_beats)) = length_update {
+        if !length_updates.is_empty() {
             self.timeline.update(cx, |timeline, cx| {
-                if timeline
-                    .state
-                    .set_recording_preview_clip_length(&clip_id, length_beats)
-                {
+                let mut changed = false;
+                for (clip_id, length_beats) in length_updates {
+                    changed |= timeline
+                        .state
+                        .set_recording_preview_clip_length(&clip_id, length_beats);
+                }
+                if changed {
                     cx.notify();
                 }
             });
         }
     }
 
-    /// Tear down the live recording preview clip + registry entry.
-    pub(super) fn finish_recording_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(preview) = self.recording.preview.take() else {
+    /// Tear down one track's live recording preview clip + registry entry.
+    fn teardown_recording_preview_track(&mut self, track_id: &str, cx: &mut Context<Self>) {
+        let Some(preview) = self.recording.preview.remove(track_id) else {
             return;
         };
         if std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some() {
             eprintln!(
-                "[RecordingPreviewUI] finished id={} active_recording_id=None",
+                "[RecordingPreviewUI] finished id={} track_id={track_id}",
                 preview.recording_id
             );
         }
@@ -922,6 +947,14 @@ impl StudioLayout {
                 cx.notify();
             }
         });
+    }
+
+    /// Tear down every tracked live recording preview clip + registry entry.
+    pub(super) fn finish_recording_preview(&mut self, cx: &mut Context<Self>) {
+        let track_ids: Vec<String> = self.recording.preview.keys().cloned().collect();
+        for track_id in track_ids {
+            self.teardown_recording_preview_track(&track_id, cx);
+        }
     }
 
     /// Mirror captured MIDI notes into temporary arrangement clips. This runs
