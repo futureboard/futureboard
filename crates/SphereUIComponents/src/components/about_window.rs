@@ -37,12 +37,10 @@ impl AboutWindow {
 
 impl Render for AboutWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let info = crate::edition::current_edition_info();
-        let version = info
-            .as_ref()
-            .map(|info| info.app_version.clone())
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-        let edition = info.as_ref().map(|info| info.edition).unwrap_or("Community");
+        let version = crate::edition::app_version();
+        let edition = crate::edition::current_edition_info()
+            .map(|info| info.edition)
+            .unwrap_or("Community");
 
         div()
             .size_full()
