@@ -4,6 +4,7 @@ use gpui::{Context, IntoElement, Render, Window};
 
 use crate::components::mixer_panel::{master_strip, MixerCallbacks, MixerSplit};
 use crate::components::timeline::timeline::Timeline;
+use crate::i18n::I18n;
 use crate::theme::Colors;
 
 pub struct MixerMasterStripView {
@@ -79,6 +80,7 @@ impl Render for MixerMasterStripView {
 
         let accent = Colors::accent_primary();
         let on_master = self.callbacks.on_master_volume_change.clone();
+        let i18n = I18n::from_app(cx);
         master_strip(
             accent,
             &master,
@@ -86,6 +88,7 @@ impl Render for MixerMasterStripView {
             &self.callbacks,
             &self.split,
             self.strip_available_px,
+            i18n,
         )
     }
 }

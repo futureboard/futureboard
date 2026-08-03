@@ -59,7 +59,7 @@ add-track.tab.master = 主
 add-track.tab.midi = MIDI
 add-track.tab.plugin = 插件
 add-track.tab.return = 返送
-add-track.monitor.auto = 自动
+add-track.monitor.auto = 自动化
 add-track.monitor.in = 输入
 add-track.monitor.label = 监听
 add-track.monitor.off = 关
@@ -562,6 +562,16 @@ project-switcher.section.this-window = 此窗口
 project-switcher.status.saved = 已保存
 project-switcher.status.unsaved = 未保存
 
+## Welcome
+welcome.button.continue-without-project = 不打开项目继续
+welcome.nav.audio = 音频
+welcome.nav.feed = 动态
+welcome.nav.new = 新建
+welcome.nav.recent = 最近
+welcome.nav.start = 开始
+welcome.open-project = 打开项目
+
+
 ## Status & Errors
 
 project.default-name = 未命名项目
@@ -654,13 +664,14 @@ settings.field.system-notifications = 系统通知
 settings.field.theme-preset = 主题预设
 settings.field.ui-scale = 界面缩放
 settings.field.update-check = 更新检查
+settings.field.update-channel = 更新通道
 settings.field.vst3-folders = VST3 文件夹
 settings.field.warnings = 警告
 settings.field.zoom-sensitivity = 缩放灵敏度
 settings.format.aiff = AIFF
 settings.format.flac = FLAC
 settings.format.wav = WAV
-settings.gpu.auto = 自动
+settings.gpu.auto = 自动化
 settings.gpu.cpu-active = CPU 渲染已启用（GPUI 绘制回退）。
 settings.gpu.enum-failed = GPU 枚举失败。可使用 CPU 渲染回退。
 settings.gpu.none-detected = 未检测到 GPU 适配器。将使用 CPU 渲染回退。
@@ -672,6 +683,30 @@ settings.language.ja = 日语
 settings.language.th = 泰语
 settings.language.zh = 简体中文
 settings.latency.approx = ~{ $ms } ms
+settings.latency.engine-closed = 引擎未打开
+settings.latency.ms-value = { $ms } ms
+settings.latency.unavailable = —
+settings.latency.pdc-active = 已启用
+settings.latency.pdc-off = 关
+settings.latency.pdc-disabled-setting = 已在播放设置中禁用
+settings.latency.pdc-toggle-hint = 在主总线对齐并行轨道的时序
+settings.latency.pdc-hint = 禁用补偿后，混合具有不同插件延迟的轨道时可能会出现时序偏移。
+settings.latency.report-hint = 来自 DAUx 的实时报告。插件路径延迟包含发送与返回。驱动报告的 I/O 延迟根据缓冲区大小估算。
+settings.latency.track-summary = plug { $plugin } ms · path { $path } ms · PDC { $pdc } ms
+settings.field.device-state = 设备状态
+settings.field.active-sample-rate = 当前采样率
+settings.field.requested-sample-rate = 请求的采样率
+settings.field.preferred-sample-rate = 首选采样率
+settings.latency.sample-rate-value = { $hz } Hz
+settings.latency.sample-rate-mismatch = 设备正以 { $active } Hz 运行（请求 { $requested } Hz）。时序使用当前设备采样率。
+settings.latency.sample-rate-restart-pending = 采样率更改将在重新打开项目或重启音频引擎后生效。
+settings.field.output-buffer-latency = 输出缓冲区
+settings.field.plugin-path-latency = 最大插件路径
+settings.field.master-plugin-latency = 主总线插件
+settings.field.pdc-status = 延迟补偿
+settings.field.latency-compensation = 插件延迟补偿
+settings.section.latency-report = 延迟报告
+settings.section.playback-latency = 播放 > 延迟
 settings.ltc.enable = 在输入上启用线性时间码 (LTC) 读取器
 settings.ltc.description = 从所选输入读取传入的 LTC
 settings.meter-decay.dbs = { $n } dB/秒
@@ -807,7 +842,7 @@ template.scoring.metadata = 8 MIDI | 120 BPM
 ## Panels & Timeline
 
 timeline.snap.1-bar = 1 小节
-timeline.snap.auto = 自动
+timeline.snap.auto = 自动化
 timeline.snap.off = 关
 timeline.tool.automation = 自动化 [A]
 timeline.tool.cut = 剪切 [C]

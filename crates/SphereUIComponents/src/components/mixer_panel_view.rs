@@ -19,6 +19,7 @@ use crate::components::mixer_panel::{
 use crate::components::mixer_surface::render_mixer_primitives;
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::timeline::timeline::Timeline;
+use crate::i18n::I18n;
 use crate::layout::StudioLayout;
 use crate::theme::Colors;
 
@@ -202,6 +203,7 @@ impl Render for MixerPanelView {
         crate::perf::count("mixer_root_layout_count", 1);
         crate::perf::count("mixer_root_paint_count", 1);
 
+        let i18n = I18n::from_app(cx);
         let owner_entity = self.owner.clone();
         let callbacks = self
             .owner
@@ -253,6 +255,7 @@ impl Render for MixerPanelView {
                 &split,
                 on_scroll,
                 state.gpu_decor,
+                i18n,
             );
             div()
                 .flex()
@@ -311,7 +314,7 @@ impl Render for MixerPanelView {
             .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
                 (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
             })
-            .child(mixer_sub_header(state.track_count))
+            .child(mixer_sub_header(state.track_count, i18n))
             .child(body)
     }
 }

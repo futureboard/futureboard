@@ -1,7 +1,6 @@
 # Futureboard Studio — th-TH
-# Rewritten Thai localization: clearer DAW terms + consistent UI wording
-# Base generated from SphereUIComponents + native-menu.json
-# Updated: 2026-05-29
+# Extracted from SphereUIComponents + native-menu.json
+# Generated: 2026-05-29
 
 ## Application Menu
 
@@ -60,7 +59,7 @@ add-track.tab.master = มาสเตอร์
 add-track.tab.midi = MIDI
 add-track.tab.plugin = ปลั๊กอิน
 add-track.tab.return = รีเทิร์น
-add-track.monitor.auto = อัตโนมัติ
+add-track.monitor.auto = ออโต
 add-track.monitor.in = เปิดรับเสียง
 add-track.monitor.label = มอนิเตอร์
 add-track.monitor.off = ปิด
@@ -85,12 +84,12 @@ add-track.title = เพิ่มแทร็กใหม่
 ## Panels & Timeline
 
 bottom-panel.mix-level = มิกซ์: 80%
-bottom-panel.plugin.compressor = Compressor
+bottom-panel.plugin.compressor = คอมเพรสเซอร์
 bottom-panel.plugin.delay = Delay
-bottom-panel.plugin.equalizer = Equalizer
-bottom-panel.tab.editor = Editor
-bottom-panel.tab.effect-editor = Effect Editor
-bottom-panel.tab.mixer = Mixer
+bottom-panel.plugin.equalizer = อีควอไลเซอร์
+bottom-panel.tab.editor = เอดิเตอร์
+bottom-panel.tab.effect-editor = เอดิเตอร์เอฟเฟกต์
+bottom-panel.tab.mixer = มิกเซอร์
 
 ## Browser
 
@@ -98,12 +97,12 @@ browser.category.audio-files = ไฟล์เสียง
 browser.category.instruments = เครื่องดนตรี
 browser.category.plugins = ปลั๊กอิน
 browser.category.projects = โปรเจกต์
-browser.category.samples = Samples
+browser.category.samples = แซมเปิล
 browser.category.user-library = คลังของผู้ใช้
 browser.error.cannot-read = อ่านโฟลเดอร์นี้ไม่ได้
 browser.file.unavailable = ไม่พร้อมใช้งาน
 browser.loading = กำลังโหลด…
-browser.panel.title = Browser
+browser.panel.title = เบราว์เซอร์
 browser.root.current-project = โปรเจกต์ปัจจุบัน
 browser.root.project-prefix = โปรเจกต์: { $name }
 browser.selection.label = เลือกอยู่
@@ -148,9 +147,9 @@ context.timeline.add-midi = เพิ่มแทร็ก MIDI
 context.track.arm = เตรียมบันทึก
 context.track.delete = ลบแทร็ก
 context.track.duplicate = ทำซ้ำแทร็ก
-context.track.mute = Mute
+context.track.mute = มิวต์
 context.track.rename = เปลี่ยนชื่อแทร็ก
-context.track.solo = Solo
+context.track.solo = โซโล
 context.zoom-in = ซูมเข้า
 context.zoom-out = ซูมออก
 
@@ -195,9 +194,9 @@ inspector.clip.type = ชนิด
 inspector.clip.type.audio = เสียง
 inspector.clip.type.midi = MIDI
 inspector.field.clips = คลิป
-inspector.field.pan = Pan
+inspector.field.pan = แพน
 inspector.field.type = ชนิด
-inspector.field.volume = Volume
+inspector.field.volume = ระดับเสียง
 inspector.no-selection.hint = เลือกแทร็กหรือคลิปเพื่อดูรายละเอียด
 inspector.no-selection.title = ยังไม่ได้เลือกอะไร
 inspector.pan.center = กลาง
@@ -217,7 +216,7 @@ inspector.volume.db = { $db } dB
 
 ## Application Menu
 
-menu.audio = Audio
+menu.audio = เสียง
 menu.audio-audio_settings = ตั้งค่า Audio…
 menu.audio-bounce_in_place = Bounce in Place
 menu.audio-buffer_size = ขนาด Buffer
@@ -381,7 +380,7 @@ menu.project-previous_marker = Marker ก่อนหน้า
 menu.project-project_statistics = สถิติโปรเจกต์…
 menu.project-rename = เปลี่ยนชื่อโปรเจกต์…
 menu.project-rename_track = เปลี่ยนชื่อแทร็ก
-menu.project-sample_rate = Sample Rate
+menu.project-sample_rate = อัตราแซมเปิล
 menu.project-sample_rate-192000 = 192 kHz
 menu.project-sample_rate-44100 = 44.1 kHz
 menu.project-sample_rate-48000 = 48 kHz
@@ -427,19 +426,19 @@ menu.window-dock_browser-float = ลอยเป็นหน้าต่าง
 menu.window-dock_browser-left = Dock ด้านซ้าย
 menu.window-dock_browser-right = Dock ด้านขวา
 menu.window-dock_inspector = Dock Inspector
-menu.window-dock_inspector-bottom = เรือนด้านล่าง
-menu.window-dock_inspector-float = ลอย
-menu.window-dock_inspector-left = เรือนซ้าย
-menu.window-dock_inspector-right = เรือนขวา
+menu.window-dock_inspector-bottom = Dock ด้านล่าง
+menu.window-dock_inspector-float = ลอยเป็นหน้าต่าง
+menu.window-dock_inspector-left = Dock ด้านซ้าย
+menu.window-dock_inspector-right = Dock ด้านขวา
 menu.window-dock_mixer = Dock Mixer
-menu.window-dock_mixer-bottom = เรือนด้านล่าง
-menu.window-dock_mixer-float = ลอย
-menu.window-dock_mixer-left = เรือนซ้าย
+menu.window-dock_mixer-bottom = Dock ด้านล่าง
+menu.window-dock_mixer-float = ลอยเป็นหน้าต่าง
+menu.window-dock_mixer-left = Dock ด้านซ้าย
 menu.window-dock_mixer-native = เปิด Mixer เป็นหน้าต่าง Native
-menu.window-dock_mixer-right = เรือนขวา
+menu.window-dock_mixer-right = Dock ด้านขวา
 menu.window-fullscreen = เข้า/ออกโหมดเต็มจอ
 menu.window-layout-default = ค่าเริ่มต้น
-menu.window-layout-editing = Editing
+menu.window-layout-editing = การแก้ไข
 menu.window-layout-laptop = Laptop
 menu.window-layout-minimal = Minimal
 menu.window-layout-mixing = Mixing
@@ -476,7 +475,7 @@ mixer.track-type.master = Master
 mixer.track-type.midi = MIDI
 mixer.track-type.return = RTN
 panel.browser = เบราว์เซอร์
-panel.inspector = Inspector
+panel.inspector = ตรวจสอบ
 panel.mixer = มิกเซอร์
 
 ## Plugins
@@ -536,7 +535,7 @@ plugin-manager.scan.rescan-all = กำลังลบพรีเซ็ตแ�
 plugin-manager.sort.category = หมวดหมู่
 plugin-manager.sort.format = รูปแบบ
 plugin-manager.sort.name = ชื่อ
-plugin-manager.sort.vendor = ผู้จำหน่าย
+plugin-manager.sort.vendor = ผู้พัฒนา
 plugin-manager.status.available = พร้อมใช้งาน
 plugin-manager.status.missing = หาไฟล์ไม่พบ
 plugin-manager.status.missing-preset = ไม่มีพรีเซ็ต
@@ -557,11 +556,21 @@ plugin.stub.display-name = Stub Effect
 ## Components
 
 project-switcher.empty.no-match = ไม่มีโปรเจกต์ตรง "{ $query }"
-project-switcher.empty.no-recent = ไม่มีโปรเจกต์ล่าสุด
+project-switcher.empty.no-recent = ยังไม่มีโปรเจกต์ล่าสุด
 project-switcher.section.recent = โปรเจกต์ล่าสุด
 project-switcher.section.this-window = หน้าต่างนี้
 project-switcher.status.saved = บันทึกแล้ว
-project-switcher.status.unsaved = ยังไม่บันทึก
+project-switcher.status.unsaved = ยังไม่ได้บันทึก
+
+## Welcome
+welcome.button.continue-without-project = ดำเนินการโดยไม่มีโปรเจกต์
+welcome.nav.audio = เสียง
+welcome.nav.feed = ฟีด
+welcome.nav.new = ใหม่
+welcome.nav.recent = ล่าสุด
+welcome.nav.start = เริ่มต้น
+welcome.open-project = เปิดโปรเจกต์
+
 
 ## Status & Errors
 
@@ -571,7 +580,7 @@ project.error.corrupted = ไฟล์โปรเจกต์เสียหา
 project.error.invalid-magic = ไม่ใช่ไฟล์โปรเจกต์ Futureboard
 project.error.io = I/O Error: { $e }
 project.error.unsupported-version = ไม่รองรับเวอร์ชันโปรเจกต์นี้: { $v }
-project.file.missing = ไฟล์หาย
+project.file.missing = หาไฟล์ไม่พบ
 project.subtitle.opened = เปิดแล้ว
 project.subtitle.save-failed = บันทึกไม่สำเร็จ: { $error }
 project.subtitle.saved = บันทึกแล้ว
@@ -615,7 +624,7 @@ settings.field.actions = การดำเนินการ
 settings.field.autosave = บันทึกอัตโนมัติ
 settings.field.backend = Backend
 settings.field.bit-depth = Bit Depth
-settings.field.buffer-size = ขนาดบัฟเฟอร์
+settings.field.buffer-size = ขนาด Buffer
 settings.field.clap-folders = โฟลเดอร์ CLAP
 settings.field.click-sound = เสียงคลิก
 settings.field.click-volume = ระดับเสียงคลิก
@@ -646,7 +655,7 @@ settings.field.peak-hold = Peak Hold
 settings.field.renderer = Renderer *
 settings.field.return-to-start = กลับไปจุดเริ่ม
 settings.field.round-trip-latency = Round-trip Latency
-settings.field.sample-rate = Sample Rate
+settings.field.sample-rate = อัตราแซมเปิล
 settings.field.snap-to-grid = Snap to Grid
 settings.field.spacebar-action = การทำงานของ Spacebar
 settings.field.start-wizard = หน้าต้อนรับ
@@ -655,13 +664,14 @@ settings.field.system-notifications = แจ้งเตือนระบบ
 settings.field.theme-preset = Theme Preset
 settings.field.ui-scale = UI Scale
 settings.field.update-check = ตรวจสอบอัปเดต
+settings.field.update-channel = ช่องทางอัปเดต
 settings.field.vst3-folders = โฟลเดอร์ VST3
 settings.field.warnings = คำเตือน
 settings.field.zoom-sensitivity = ความไวการซูม
 settings.format.aiff = AIFF
 settings.format.flac = FLAC
 settings.format.wav = WAV
-settings.gpu.auto = อัตโนมัติ
+settings.gpu.auto = ออโต
 settings.gpu.cpu-active = กำลังใช้ CPU Renderer (GPUI paint fallback)
 settings.gpu.enum-failed = อ่านรายการ GPU ไม่สำเร็จ จะใช้ CPU Renderer สำรอง
 settings.gpu.none-detected = ไม่พบ GPU Adapter จะใช้ CPU Renderer สำรอง
@@ -673,6 +683,30 @@ settings.language.ja = ญี่ปุ่น
 settings.language.th = ไทย
 settings.language.zh = จีนตัวย่อ
 settings.latency.approx = ~{ $ms } ms
+settings.latency.engine-closed = เอนจินยังไม่เปิด
+settings.latency.ms-value = { $ms } ms
+settings.latency.unavailable = —
+settings.latency.pdc-active = เปิดใช้งาน
+settings.latency.pdc-off = ปิด
+settings.latency.pdc-disabled-setting = ปิดไว้ในการตั้งค่าการเล่น
+settings.latency.pdc-toggle-hint = จัดจังหวะแทร็กขนานให้ตรงกันที่มาสเตอร์บัส
+settings.latency.pdc-hint = การปิดการชดเชยอาจทำให้จังหวะคลาดเมื่อมิกซ์แทร็กที่มีเลเทนซีปลั๊กอินต่างกัน
+settings.latency.report-hint = รายงานสดจาก DAUx เลเทนซีเส้นทางปลั๊กอินรวมเซนด์และรีเทิร์น เลเทนซี I/O จากไดรเวอร์ประมาณจากขนาดบัฟเฟอร์
+settings.latency.track-summary = plug { $plugin } ms · path { $path } ms · PDC { $pdc } ms
+settings.field.device-state = สถานะอุปกรณ์
+settings.field.active-sample-rate = อัตราแซมเปิลที่ใช้งาน
+settings.field.requested-sample-rate = อัตราแซมเปิลที่ร้องขอ
+settings.field.preferred-sample-rate = อัตราแซมเปิลที่ต้องการ
+settings.latency.sample-rate-value = { $hz } Hz
+settings.latency.sample-rate-mismatch = อุปกรณ์ทำงานที่ { $active } Hz (ร้องขอ { $requested } Hz) การจับเวลาใช้อัตราของอุปกรณ์ที่ใช้งานจริง
+settings.latency.sample-rate-restart-pending = การเปลี่ยนอัตราแซมเปิลจะมีผลหลังเปิดโปรเจกต์ใหม่หรือรีสตาร์ทเอนจินเสียง
+settings.field.output-buffer-latency = บัฟเฟอร์เอาต์พุต
+settings.field.plugin-path-latency = เส้นทางปลั๊กอินสูงสุด
+settings.field.master-plugin-latency = ปลั๊กอินมาสเตอร์
+settings.field.pdc-status = การชดเชยดีเลย์
+settings.field.latency-compensation = การชดเชยดีเลย์ปลั๊กอิน
+settings.section.latency-report = รายงานเลเทนซี
+settings.section.playback-latency = การเล่น > เลเทนซี
 settings.ltc.enable = เปิดตัวอ่าน LTC ที่อินพุต
 settings.ltc.description = อ่าน LTC ที่เข้ามาจากอินพุตที่เลือก
 settings.meter-decay.dbs = { $n } dB/วินาที
@@ -687,7 +721,7 @@ settings.midi.keyboard-controller = คอนโทรลเลอร์คี�
 settings.midi.refresh = รีเฟรชอุปกรณ์ MIDI
 settings.midi.status.connected = เชื่อมต่อแล้ว
 settings.midi.status.disabled = ปิดใช้งาน
-settings.midi.status.missing = ไม่พบ
+settings.midi.status.missing = หาไฟล์ไม่พบ
 settings.midi.sync-clock-hint = ไปยังเอาต์พุตที่เปิดใช้งาน
 settings.midi.sync-clock-send = ส่ง MIDI Clock
 settings.midi.synth-out = ซินธ์เอาต์
@@ -752,7 +786,7 @@ settings.tab.advanced = ขั้นสูง
 settings.tab.advanced.description = ตัวเลือกทดลองและเครื่องมือนักพัฒนา
 settings.tab.appearance = รูปลักษณ์
 settings.tab.appearance.description = ธีม ไทม์ไลน์ Mixer และ Meter
-settings.tab.audio = ออดิโอ
+settings.tab.audio = เสียง
 settings.tab.audio.description = Driver, อุปกรณ์, Sample Rate, Buffer และ Latency
 settings.tab.editing = การแก้ไข
 settings.tab.editing.description = เมาส์, Snap Grid และประวัติ Undo
@@ -785,7 +819,7 @@ status.audio-offline = Audio Offline
 status.audio-ready = Audio Ready
 status.fps = { $fps } fps  { $ms } ms
 status.playing = กำลังเล่น
-status.ready = พร้อม
+status.ready = พร้อมใช้งาน
 
 ## Dialogs
 
@@ -793,13 +827,13 @@ template.beat-making.description = เลน MIDI สำหรับกลอง
 template.beat-making.label = Beat Making
 template.beat-making.metadata = 4 MIDI | 140 BPM
 template.empty.description = เซสชันเปล่าพร้อม Master Bus
-template.empty.label = Empty
+template.empty.label = ว่าง
 template.empty.metadata = ไม่มีแทร็ก | 120 BPM
 template.mixing.description = แชนเนลเสียงสำหรับแก้ไขและมิกซ์
 template.mixing.label = Mixing
 template.mixing.metadata = 8 ออดิโอ | 120 BPM
 template.recording.description = แทร็กเสียง Monitor และ Routing พร้อมอัด
-template.recording.label = Recording
+template.recording.label = การบันทึก
 template.recording.metadata = 4 ออดิโอ | 120 BPM
 template.scoring.description = เลย์เอาต์ที่เน้น MIDI สำหรับ Cue และ Sketch
 template.scoring.label = Scoring
@@ -808,7 +842,7 @@ template.scoring.metadata = 8 MIDI | 120 BPM
 ## Panels & Timeline
 
 timeline.snap.1-bar = 1 บาร์
-timeline.snap.auto = อัตโนมัติ
+timeline.snap.auto = ออโต
 timeline.snap.off = ปิด
 timeline.tool.automation = Automation [A]
 timeline.tool.cut = ตัด [C]
@@ -851,27 +885,27 @@ wizard.error.duplicate = มีโปรเจกต์ชื่อนี้อ�
 wizard.error.location-invalid = ตำแหน่งโปรเจกต์ต้องเป็นพาธโฟลเดอร์ที่ถูกต้อง
 wizard.error.location-required = กรุณาเลือกตำแหน่งโปรเจกต์
 wizard.error.name-required = กรุณาตั้งชื่อโปรเจกต์
-wizard.error.tempo-range = Tempo ต้องอยู่ระหว่าง 20 ถึง 300 BPM
-wizard.field.beat-grid = Beat / Grid
+wizard.error.tempo-range = เทมโปต้องอยู่ระหว่าง 20 ถึง 300 BPM
+wizard.field.beat-grid = บีต / กริด
 wizard.field.location = ตำแหน่ง
 wizard.field.name = ชื่อ
-wizard.field.sample-rate = Sample Rate
+wizard.field.sample-rate = อัตราแซมเปิล
 wizard.field.tempo = เทมโป
-wizard.field.time-signature = Time Signature
+wizard.field.time-signature = อัตราจังหวะ
 wizard.footer.hint = สร้างโฟลเดอร์โปรเจกต์ Futureboard แบบ Binary ในเครื่อง
 wizard.placeholder.bpm = 120
 wizard.placeholder.location = ~/Documents/Futureboard Studio/Projects
-wizard.placeholder.name = ชื่อโปรเจกต์
+wizard.placeholder.name = ชื่อ
 wizard.section.project = โปรเจกต์
 wizard.section.session-settings = ตั้งค่าเซสชัน
 wizard.section.summary = สรุป
-wizard.section.template = Template
+wizard.section.template = เทมเพลต
 wizard.session-settings.hint = จังหวะและรูปแบบสำหรับเซสชันใหม่
 wizard.summary.format = รูปแบบ
 wizard.summary.format-value = { $bpm } BPM, { $num }/{ $den }, { $khz } kHz
 wizard.summary.location = ตำแหน่ง
 wizard.summary.project = โปรเจกต์
-wizard.summary.template = Template
+wizard.summary.template = เทมเพลต
 wizard.summary.tracks = แทร็ก
 wizard.summary.tracks-value = เสียง { $audio } / MIDI { $midi }
-wizard.title = สร้างโปรเจกต์ใหม่
+wizard.title = โปรเจกต์ใหม่

@@ -23,6 +23,7 @@ use crate::components::text_input::{
 use crate::components::title_bar::{draggable_spacer, section_separator, window_control_button};
 use crate::components::{TextInputAction, TextInputState};
 use crate::embedded_assets::LOGO_TEXT_PATH;
+use crate::i18n::I18n;
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::project::{ProjectCreateOptions, ProjectTemplate, RecentProject, RecentProjectsStore};
 use crate::settings::SettingsSchema;
@@ -146,6 +147,8 @@ pub struct WelcomeWindow {
     open_error: Option<SharedString>,
     feed_state: FeedLoadState,
     feed_posts: Vec<FeedPost>,
+    /// UI language from settings at construction (`schema.general.language`).
+    language: String,
 }
 
 impl WelcomeWindow {
@@ -164,9 +167,12 @@ impl WelcomeWindow {
             default_dir_configured
         );
 
+        let language = schema.general.language.clone();
+        let i18n = I18n::new(&language);
+        let default_name = i18n.tr("project.default-name");
         let mut project_name_input = TextInputState::new("welcome-project-name", focus_handle)
-            .with_placeholder("Untitled Project");
-        project_name_input.set_value("Untitled Project");
+            .with_placeholder(default_name.clone());
+        project_name_input.set_value(default_name);
 
         Self {
             active_nav: StartupNav::Welcome,
@@ -185,6 +191,7 @@ impl WelcomeWindow {
             open_error: None,
             feed_state: FeedLoadState::Idle,
             feed_posts: Vec::new(),
+            language,
         }
     }
 
@@ -437,6 +444,7 @@ crate::impl_single_input_window_ime!(WelcomeWindow, project_name_input);
 
 impl Render for WelcomeWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let i18n = I18n::new(&self.language);
         let target = cx.entity().clone();
         let project_name_callbacks =
             bind_mouse_selection(target.clone(), |this| &mut this.project_name_input);
@@ -448,7 +456,7 @@ impl Render for WelcomeWindow {
             .flex()
             .flex_col()
             .size_full()
-            .font(theme::ui_font())
+            .font(theme::ui_font_for_language(&self.language))
             .bg(Colors::surface_window())
             .cursor(gpui::CursorStyle::Arrow)
             // Swallow the platform's default click-drag gesture on the Welcome
@@ -463,7 +471,7 @@ impl Render for WelcomeWindow {
                 window.prevent_default();
             })
             .child(startup_titlebar(window))
-            .child(self.render_welcome(window, cx, project_name_callbacks))
+            .child(self.render_welcome(window, cx, project_name_callbacks, i18n))
     }
 }
 
@@ -473,6 +481,7 @@ impl WelcomeWindow {
         window: &Window,
         cx: &mut Context<Self>,
         project_name_callbacks: TextInputCallbacks,
+        i18n: I18n,
     ) -> gpui::AnyElement {
         // Center pane content depends on the selected sidebar tab.
         let center = match self.active_nav {
@@ -487,12 +496,14 @@ impl WelcomeWindow {
                 self.project_time_signature,
                 self.default_project_dir.clone(),
                 &self.callbacks,
+                i18n,
             ),
             StartupNav::OpenProject => open_project_pane(
                 cx,
                 &self.recent_projects,
                 self.open_error.clone(),
                 &self.callbacks,
+                i18n,
             ),
             StartupNav::Feed => {
                 self.fetch_feed_if_needed(cx);
@@ -501,7 +512,13 @@ impl WelcomeWindow {
             StartupNav::AudioSetup => {
                 audio_setup_pane(self.audio_backend.clone(), self.audio_device_out.clone())
             }
-            _ => center_actions(cx, &self.selected, self.selected_template, &self.callbacks),
+            _ => center_actions(
+                cx,
+                &self.selected,
+                self.selected_template,
+                &self.callbacks,
+                i18n,
+            ),
         };
 
         div()
@@ -517,7 +534,7 @@ impl WelcomeWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(left_rail(cx, &self.active_nav, &self.callbacks))
+                    .child(left_rail(cx, &self.active_nav, &self.callbacks, i18n))
                     .child(center)
                     .child(right_panel(
                         cx,
@@ -526,6 +543,7 @@ impl WelcomeWindow {
                         &self.callbacks,
                         self.default_project_dir.clone(),
                         self.default_dir_configured,
+                        i18n,
                     )),
             )
             .into_any_element()
@@ -663,6 +681,7 @@ fn left_rail(
     cx: &mut Context<WelcomeWindow>,
     active: &StartupNav,
     callbacks: &WelcomeCallbacks,
+    i18n: I18n,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -678,7 +697,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::Welcome,
-            "Start",
+            "welcome-rail-start",
+            i18n.tr("welcome.nav.start"),
             assets::ICON_STAR_PATH,
             active,
             None,
@@ -686,7 +706,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::NewProject,
-            "New",
+            "welcome-rail-new",
+            i18n.tr("welcome.nav.new"),
             assets::ICON_PLUS_PATH,
             active,
             None,
@@ -694,7 +715,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::OpenProject,
-            "Open Project",
+            "welcome-rail-open",
+            i18n.tr("welcome.open-project"),
             assets::ICON_FOLDER_OPEN_PATH,
             active,
             None,
@@ -702,7 +724,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::RecentProjects,
-            "Recent",
+            "welcome-rail-recent",
+            i18n.tr("welcome.nav.recent"),
             assets::ICON_CLOCK_PATH,
             active,
             None,
@@ -710,7 +733,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::Feed,
-            "Feed",
+            "welcome-rail-feed",
+            i18n.tr("welcome.nav.feed"),
             assets::ICON_NEWSPAPER_PATH,
             active,
             None,
@@ -718,7 +742,8 @@ fn left_rail(
         .child(rail_item(
             cx,
             StartupNav::AudioSetup,
-            "Audio",
+            "welcome-rail-audio",
+            i18n.tr("welcome.nav.audio"),
             assets::ICON_VOLUME_2_PATH,
             active,
             None,
@@ -728,7 +753,8 @@ fn left_rail(
             rail.child(rail_item(
                 cx,
                 StartupNav::Welcome,
-                action.label,
+                "welcome-rail-footer",
+                action.label.to_string(),
                 action.icon,
                 active,
                 Some(action.on_click),
@@ -739,18 +765,20 @@ fn left_rail(
 fn rail_item(
     cx: &mut Context<WelcomeWindow>,
     nav: StartupNav,
-    label: &'static str,
+    id: &'static str,
+    label: impl Into<SharedString>,
     icon: &'static str,
     active: &StartupNav,
     action: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
+    let label = label.into();
     // Action rows (Open Project) never show the active highlight — only real
     // tabs do.
     let is_active = action.is_none() && active == &nav;
     let changes_nav = action.is_none();
     let target = cx.entity().clone();
     div()
-        .id(label)
+        .id(id)
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -811,6 +839,7 @@ fn center_actions(
     selected: &Option<WelcomeSelection>,
     _selected_template: ProjectTemplate,
     callbacks: &WelcomeCallbacks,
+    i18n: I18n,
 ) -> gpui::AnyElement {
     let mut rows = div()
         .flex()
@@ -865,21 +894,25 @@ fn center_actions(
         .p(px(20.0))
         .gap(px(10.0))
         .bg(Colors::surface_panel())
-        .child(section_label("Start"))
+        .child(section_label(i18n.tr("welcome.nav.start")))
         .child(rows)
         .child(
             div()
                 .mt(px(2.0))
                 .max_w(px(620.0))
                 .w_full()
-                .child(continue_row(continue_selected, move |window, cx| {
-                    let _ = target.update(cx, |this, cx| {
-                        this.selected = Some(WelcomeSelection::Continue);
-                        this.active_nav = StartupNav::Welcome;
-                        cx.notify();
-                    });
-                    on_continue(WelcomeAction::OpenEmptyWorkspace, window, cx);
-                })),
+                .child(continue_row(
+                    continue_selected,
+                    i18n,
+                    move |window, cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            this.selected = Some(WelcomeSelection::Continue);
+                            this.active_nav = StartupNav::Welcome;
+                            cx.notify();
+                        });
+                        on_continue(WelcomeAction::OpenEmptyWorkspace, window, cx);
+                    },
+                )),
         )
         .into_any_element()
 }
@@ -906,6 +939,7 @@ fn new_project_pane(
     time_signature: (u32, u32),
     default_dir: PathBuf,
     callbacks: &WelcomeCallbacks,
+    i18n: I18n,
 ) -> gpui::AnyElement {
     let safe_name = crate::project::io::sanitize_project_name(&project_name_input.value);
     let preview = default_dir.join(&safe_name).to_string_lossy().to_string();
@@ -993,7 +1027,7 @@ fn new_project_pane(
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
-                        .child("New Project"),
+                        .child(i18n.tr("wizard.title")),
                 )
                 .child(
                     div()
@@ -1002,14 +1036,14 @@ fn new_project_pane(
                         .child("Name it, choose a template, and start."),
                 ),
         )
-        .child(form_label("Project Name"))
+        .child(form_label(i18n.tr("wizard.field.name")))
         .child(text_field_with_callbacks_and_ime(
             project_name_input,
             name_focused,
             name_callbacks,
             target.clone(),
         ))
-        .child(form_label("Location"))
+        .child(form_label(i18n.tr("wizard.field.location")))
         .child(
             div()
                 .rounded_md()
@@ -1022,9 +1056,9 @@ fn new_project_pane(
                 .text_color(Colors::text_secondary())
                 .child(preview),
         )
-        .child(form_label("Template"))
+        .child(form_label(i18n.tr("wizard.summary.template")))
         .child(template_row)
-        .child(form_label("Audio"))
+        .child(form_label(i18n.tr("welcome.nav.audio")))
         .child(
             div()
                 .flex()
@@ -1067,7 +1101,7 @@ fn new_project_pane(
                                 .text_size(px(11.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_primary())
-                                .child("Create Project"),
+                                .child(i18n.tr("wizard.button.create")),
                         ),
                 )
                 .child(
@@ -1095,7 +1129,7 @@ fn new_project_pane(
                                 .text_size(px(11.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(Colors::text_primary())
-                                .child("Continue Without Project"),
+                                .child(i18n.tr("welcome.button.continue-without-project")),
                         ),
                 ),
         )
@@ -1109,6 +1143,7 @@ fn open_project_pane(
     recent: &[RecentProject],
     open_error: Option<SharedString>,
     callbacks: &WelcomeCallbacks,
+    i18n: I18n,
 ) -> gpui::AnyElement {
     let browse_target = cx.entity().clone();
 
@@ -1120,7 +1155,7 @@ fn open_project_pane(
             .min_h(px(80.0))
             .text_size(px(11.0))
             .text_color(Colors::text_muted())
-            .child("No recent projects yet")
+            .child(i18n.tr("menu.file-open_recent-empty"))
             .into_any_element()
     } else {
         let mut list = div()
@@ -1132,14 +1167,20 @@ fn open_project_pane(
         for (index, item) in recent.iter().cloned().enumerate() {
             let target = cx.entity().clone();
             let on_action = callbacks.on_action.clone();
-            list = list.child(recent_row(index, item, false, move |path, window, cx| {
-                welcome_debug!("recent project clicked (open tab) -> {}", path.display());
-                let _ = target.update(cx, |this, cx| {
-                    this.active_nav = StartupNav::OpenProject;
-                    cx.notify();
-                });
-                on_action(WelcomeAction::OpenRecent(path), window, cx);
-            }));
+            list = list.child(recent_row(
+                index,
+                item,
+                false,
+                i18n,
+                move |path, window, cx| {
+                    welcome_debug!("recent project clicked (open tab) -> {}", path.display());
+                    let _ = target.update(cx, |this, cx| {
+                        this.active_nav = StartupNav::OpenProject;
+                        cx.notify();
+                    });
+                    on_action(WelcomeAction::OpenRecent(path), window, cx);
+                },
+            ));
         }
         list.into_any_element()
     };
@@ -1163,7 +1204,7 @@ fn open_project_pane(
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
-                        .child("Open Project"),
+                        .child(i18n.tr("welcome.open-project")),
                 )
                 .child(
                     div()
@@ -1203,12 +1244,12 @@ fn open_project_pane(
                             .text_size(px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(Colors::text_primary())
-                            .child("Browse"),
+                            .child(i18n.tr("wizard.button.browse")),
                     ),
             ),
         )
         .when_some(open_error, |el, msg| el.child(open_error_banner(msg)))
-        .child(section_label("Recent"))
+        .child(section_label(i18n.tr("welcome.nav.recent")))
         .child(
             div()
                 .id("welcome-open-recent-scroll")
@@ -1242,12 +1283,12 @@ fn open_error_banner(msg: SharedString) -> impl IntoElement {
         )
 }
 
-fn form_label(label: &'static str) -> impl IntoElement {
+fn form_label(label: impl Into<SharedString>) -> impl IntoElement {
     div()
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(Colors::text_muted())
-        .child(label)
+        .child(label.into())
 }
 
 fn readout_chip(label: impl Into<String>) -> impl IntoElement {
@@ -1336,6 +1377,7 @@ fn start_row(
 
 fn continue_row(
     selected: bool,
+    i18n: I18n,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -1386,7 +1428,7 @@ fn continue_row(
                         .text_size(px(11.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
-                        .child("Continue Without Project"),
+                        .child(i18n.tr("welcome.button.continue-without-project")),
                 )
                 .child(
                     div()
@@ -1656,6 +1698,7 @@ fn right_panel(
     callbacks: &WelcomeCallbacks,
     default_dir: PathBuf,
     configured: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     let recent_content = if recent.is_empty() {
         div()
@@ -1665,7 +1708,7 @@ fn right_panel(
             .min_h(px(120.0))
             .text_size(px(11.0))
             .text_color(Colors::text_muted())
-            .child("No recent projects yet")
+            .child(i18n.tr("menu.file-open_recent-empty"))
             .into_any_element()
     } else {
         let mut list = div().flex().flex_col().gap(px(3.0));
@@ -1677,6 +1720,7 @@ fn right_panel(
                 index,
                 item,
                 is_selected,
+                i18n,
                 move |path, window, cx| {
                     welcome_debug!("recent project clicked -> {}", path.display());
                     let _ = target.update(cx, |this, cx| {
@@ -1703,7 +1747,7 @@ fn right_panel(
         .px(px(12.0))
         .py(px(10.0))
         .gap(px(8.0))
-        .child(section_label("Recent"))
+        .child(section_label(i18n.tr("welcome.nav.recent")))
         .child(
             div()
                 .id("welcome-recent-scroll")
@@ -1714,13 +1758,14 @@ fn right_panel(
                 .overflow_y_scroll()
                 .child(recent_content),
         )
-        .child(default_location_section(cx, default_dir, configured))
+        .child(default_location_section(cx, default_dir, configured, i18n))
 }
 
 fn default_location_section(
     cx: &mut Context<WelcomeWindow>,
     default_dir: PathBuf,
     configured: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     let exists = default_dir.exists();
     let path_label = default_dir.to_string_lossy().to_string();
@@ -1738,7 +1783,7 @@ fn default_location_section(
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(section_label("Project Location"))
+                .child(section_label(i18n.tr("wizard.field.location")))
                 .child(
                     div()
                         .id("welcome-change-default-dir")
@@ -1764,7 +1809,7 @@ fn default_location_section(
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(Colors::text_primary())
-                                .child("Browse"),
+                                .child(i18n.tr("wizard.button.browse")),
                         ),
                 ),
         )
@@ -1797,11 +1842,13 @@ fn recent_row(
     index: usize,
     recent: RecentProject,
     selected: bool,
+    i18n: I18n,
     on_click: impl Fn(PathBuf, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let path = recent.path.clone();
     let path_label = recent.path.to_string_lossy().to_string();
     let missing = recent.missing;
+    let missing_label = i18n.tr("project.file.missing");
     let last_opened = format_last_opened(recent.last_opened_at);
     div()
         .id(("welcome-recent-row", index))
@@ -1880,7 +1927,7 @@ fn recent_row(
                             .text_size(px(8.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(Colors::semantic_warning())
-                            .child("Missing"),
+                            .child(missing_label.clone()),
                     )
                 })
                 .when(!missing && !last_opened.is_empty(), |row| {
@@ -2028,7 +2075,7 @@ fn format_last_opened(last_opened_at: u64) -> String {
     }
 }
 
-fn section_label(label: &'static str) -> impl IntoElement {
+fn section_label(label: impl Into<String>) -> impl IntoElement {
     div()
         .h(px(22.0))
         .flex()
@@ -2036,7 +2083,7 @@ fn section_label(label: &'static str) -> impl IntoElement {
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_muted())
-        .child(label.to_uppercase())
+        .child(label.into().to_uppercase())
 }
 
 fn row_icon(path: &'static str) -> impl IntoElement {

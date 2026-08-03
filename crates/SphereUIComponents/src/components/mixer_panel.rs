@@ -31,6 +31,7 @@ use gpui::{
 use std::collections::HashSet;
 
 use crate::assets;
+use crate::i18n::I18n;
 use crate::components::fader::{db_scale_column, db_value_pill, fader_with_drag_callbacks};
 use crate::components::knob::knob_bipolar;
 use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
@@ -79,7 +80,7 @@ struct HeaderPlus {
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
 
-pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
+pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -101,7 +102,7 @@ pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
-                .child("Mixer"),
+                .child(i18n.tr("mixer.title")),
         )
         .child(
             div()
@@ -122,10 +123,11 @@ pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
 // ─── Section header ──────────────────────────────────────────────────────────
 
 fn section_header(
-    label: &'static str,
+    label: impl Into<String>,
     _accent: gpui::Rgba,
     plus: Option<HeaderPlus>,
 ) -> impl IntoElement {
+    let label = label.into();
     let section_accent = Colors::accent_primary();
     let soft_accent = Colors::with_alpha(section_accent, 0.55); // Approved: dynamic accent decoration alpha
 
@@ -199,7 +201,7 @@ fn section_header(
         .child(plus_el)
 }
 
-fn empty_slot() -> impl IntoElement {
+fn empty_slot(i18n: I18n) -> impl IntoElement {
     div()
         .flex()
         .flex_none()
@@ -210,7 +212,19 @@ fn empty_slot() -> impl IntoElement {
         .rounded_sm()
         .text_size(px(8.0))
         .text_color(Colors::text_muted())
-        .child("empty")
+        .child(i18n.tr("mixer.insert.empty"))
+}
+
+fn mixer_track_type_label(track_type: TrackType, i18n: I18n) -> String {
+    match track_type {
+        TrackType::Audio => i18n.tr("mixer.track-type.audio"),
+        TrackType::Midi => i18n.tr("mixer.track-type.midi"),
+        TrackType::Instrument => i18n.tr("mixer.track-type.instrument"),
+        TrackType::Bus => i18n.tr("mixer.track-type.bus"),
+        TrackType::Return => i18n.tr("mixer.track-type.return"),
+        TrackType::Group => "GRP".to_string(),
+        TrackType::Master => i18n.tr("mixer.track-type.master"),
+    }
 }
 
 // ─── M/S/R/I buttons ────────────────────────────────────────────────────────
@@ -327,16 +341,13 @@ fn strip_header(
     track: &TrackState,
     index: usize,
     vsti_output_group: Option<(&str, bool, usize, &MixerCallbacks)>,
+    i18n: I18n,
 ) -> impl IntoElement {
-    let type_label = match track.track_type {
-        TrackType::Audio => "AUDIO",
-        TrackType::Midi => "MIDI",
-        TrackType::Instrument => "INST",
-        TrackType::Bus => "BUS",
-        TrackType::Return => "RTN",
-        TrackType::Group => "GRP",
-        TrackType::Master => "MST",
-    };
+    let type_label = mixer_track_type_label(track.track_type, i18n);
+    let channel_label = i18n.tr_vars(
+        "mixer.channel",
+        &[("nn", format!("{:02}", index + 1))],
+    );
 
     div()
         .flex()
@@ -382,7 +393,7 @@ fn strip_header(
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(Colors::text_secondary())
-                                .child(format!("CH{:02}", index + 1)),
+                                .child(channel_label),
                         ),
                 ),
         )
@@ -807,6 +818,7 @@ fn inserts_section(
     _index: usize,
     callbacks: &MixerCallbacks,
     height_px: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     let effect_start = if track.track_type == TrackType::Instrument {
         1
@@ -858,7 +870,7 @@ fn inserts_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header("INSERTS", track.color, header_plus))
+        .child(section_header(i18n.tr("mixer.section.inserts"), track.color, header_plus))
         .child(
             div()
                 .id(gpui::SharedString::from(format!(
@@ -877,6 +889,7 @@ fn master_inserts_section(
     master: &MasterBusState,
     callbacks: &MixerCallbacks,
     height_px: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     let used = master.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
@@ -917,7 +930,7 @@ fn master_inserts_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header("INSERTS", accent, header_plus))
+        .child(section_header(i18n.tr("mixer.section.inserts"), accent, header_plus))
         .child(
             div()
                 .id("insert-slot-scroll-master")
@@ -1139,6 +1152,7 @@ fn sends_section(
     all_tracks: &[TrackState],
     callbacks: &MixerCallbacks,
     height_px: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     // Bus/return strips carry an aux-send rack so chained send/return paths
     // (bus → return, return → bus) are available from the mixer.
@@ -1172,7 +1186,7 @@ fn sends_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header("SENDS", track.color, None))
+        .child(section_header(i18n.tr("mixer.section.sends"), track.color, None))
         .child(
             div()
                 .id(gpui::SharedString::from(format!(
@@ -1463,6 +1477,7 @@ fn channel_strip(
     // bar, and right separator — the strip container omits them so the batched
     // canvas behind shows through. Inner sections keep their native styling.
     gpu_decor: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     log_vsti_child_meter_subscribe_once(track);
     log_vsti_child_strip_state(track);
@@ -1552,14 +1567,15 @@ fn channel_strip(
             vsti_group.as_ref().map(|(group_key, expanded, count)| {
                 (group_key.as_str(), *expanded, *count, callbacks)
             }),
+            i18n,
         ))
-        .child(inserts_section(track, index, callbacks, insert_h))
+        .child(inserts_section(track, index, callbacks, insert_h, i18n))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,
             split,
         ))
-        .child(sends_section(track, all_tracks, callbacks, send_h))
+        .child(sends_section(track, all_tracks, callbacks, send_h, i18n))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::SendFader,
@@ -1599,6 +1615,7 @@ fn vsti_output_sub_strip(
     split: &MixerSplit,
     strip_available_px: f32,
     gpu_decor: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     let id_num = {
         use std::hash::{Hash, Hasher};
@@ -1707,7 +1724,7 @@ fn vsti_output_sub_strip(
         // Real callbacks: mute / solo / volume / pan all target the child track
         // id (via button_row / pan_section / fader_area below), so S/M and the
         // fader operate per output bus.
-        .child(strip_header(&sub_track, track_index, None))
+        .child(strip_header(&sub_track, track_index, None, i18n))
         // Real per-bus insert rack: the backing child track is a genuine Bus
         // model track, so its FX chain is added/bypassed/reordered by child
         // track id and processed by the engine's pass-2 routing chain for
@@ -1717,13 +1734,20 @@ fn vsti_output_sub_strip(
             track_index,
             callbacks,
             insert_h,
+            i18n,
         ))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,
             split,
         ))
-        .child(sends_section(child_track, all_tracks, callbacks, send_h))
+        .child(sends_section(
+            child_track,
+            all_tracks,
+            callbacks,
+            send_h,
+            i18n,
+        ))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::SendFader,
@@ -1753,6 +1777,7 @@ pub(crate) fn master_strip(
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
     strip_available_px: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     let db_str = volume::format_db(master.volume);
     let on_start_cb = callbacks.on_master_volume_drag_start.clone();
@@ -1810,18 +1835,24 @@ pub(crate) fn master_strip(
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_primary())
-                                .child("Master"),
+                                .child(i18n.tr("mixer.master.label")),
                         )
                         .child(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(Colors::text_secondary())
-                                .child("MST·BUS"),
+                                .child(i18n.tr("mixer.master.bus-label")),
                         ),
                 ),
         )
-        .child(master_inserts_section(accent, master, callbacks, insert_h))
+        .child(master_inserts_section(
+            accent,
+            master,
+            callbacks,
+            insert_h,
+            i18n,
+        ))
         // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
         .child(
             div()
@@ -1858,13 +1889,13 @@ pub(crate) fn master_strip(
                                 .text_size(px(9.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_secondary())
-                                .child("STEREO"),
+                                .child(i18n.tr("mixer.stereo")),
                         )
                         .child(
                             div()
                                 .text_size(px(7.5))
                                 .text_color(Colors::text_secondary())
-                                .child("OUT 1-2"),
+                                .child(i18n.tr("mixer.output.1-2")),
                         ),
                 )
                 .child(
@@ -1937,11 +1968,11 @@ pub(crate) fn master_strip(
                                 .text_size(px(8.5))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_muted())
-                                .child("OUT 1·2"),
+                                .child(i18n.tr("mixer.output.1-2")),
                         ),
                 ),
         )
-        .child(strip_footer("Master"))
+        .child(strip_footer(&i18n.tr("mixer.master.label")))
 }
 
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
@@ -2304,6 +2335,7 @@ pub fn mixer_panel(
     split: MixerSplit,
     tree_sidebar: Option<Entity<MixerTreeSidebar>>,
     tree_sidebar_enabled: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     let _shell = crate::perf::PerfScope::enter("MixerShell");
     crate::perf::count("mixer_shell_layout_count", 1);
@@ -2339,6 +2371,7 @@ pub fn mixer_panel(
                 &callbacks,
                 &split,
                 strip_available_px,
+                i18n,
             ));
 
         let content_row = if tree_sidebar_enabled {
@@ -2365,7 +2398,7 @@ pub fn mixer_panel(
             .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
                 (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
             })
-            .child(mixer_sub_header(track_count))
+            .child(mixer_sub_header(track_count, i18n))
             .child(content_row);
     }
 
@@ -2383,6 +2416,7 @@ pub fn mixer_panel(
         &split,
         on_scroll,
         gpu_active,
+        i18n,
     );
 
     let master_block = mixer_master_strip_pinned(
@@ -2392,6 +2426,7 @@ pub fn mixer_panel(
         &callbacks,
         &split,
         strip_available_px,
+        i18n,
     );
 
     let mut channel_row = div()
@@ -2449,7 +2484,7 @@ pub fn mixer_panel(
         .on_mouse_up(gpui::MouseButton::Left, move |_e, w, cx| {
             (split_for_end.on_action)(MixerSplitAction::ResizeEnd, w, cx);
         })
-        .child(mixer_sub_header(track_count))
+        .child(mixer_sub_header(track_count, i18n))
         .child(content_row)
 }
 
@@ -2468,6 +2503,7 @@ pub(crate) fn mixer_strip_scroller(
     split: &MixerSplit,
     on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     gpu_decor: bool,
+    i18n: I18n,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("MixerStripScroller");
     crate::perf::count("mixer_strip_layout_count", 1);
@@ -2519,6 +2555,7 @@ pub(crate) fn mixer_strip_scroller(
                     strip_available_px,
                     vsti_group_expanded,
                     gpu_decor,
+                    i18n,
                 )
                 .into_any_element()
             }
@@ -2552,6 +2589,7 @@ pub(crate) fn mixer_strip_scroller(
                     split,
                     strip_available_px,
                     gpu_decor,
+                    i18n,
                 )
                 .into_any_element()
             }
@@ -2648,6 +2686,7 @@ fn mixer_master_strip_pinned(
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
     strip_available_px: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("MixerMasterStrip");
     master_strip(
@@ -2657,6 +2696,7 @@ fn mixer_master_strip_pinned(
         callbacks,
         split,
         strip_available_px,
+        i18n,
     )
 }
 

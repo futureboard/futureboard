@@ -10,6 +10,7 @@ use crate::assets;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
+use crate::i18n::I18n;
 use crate::overlay::{
     compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize, OVERLAY_WINDOW_MARGIN,
 };
@@ -87,6 +88,7 @@ pub fn project_switcher_popover(
     on_row_action: ProjectSwitcherRowCb,
     on_command: ProjectSwitcherCommandCb,
     on_close: ProjectSwitcherCloseCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let window_bounds = gpui::bounds(
         gpui::point(px(0.0), px(0.0)),
@@ -130,6 +132,7 @@ pub fn project_switcher_popover(
             top,
             on_row_action,
             on_command,
+            i18n,
         ))
 }
 
@@ -152,6 +155,7 @@ fn panel(
     top: f32,
     on_row_action: ProjectSwitcherRowCb,
     on_command: ProjectSwitcherCommandCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let filtered = filtered_recent(state);
     let query = state.query.clone();
@@ -179,18 +183,19 @@ fn panel(
                 .id("project-switcher-scroll")
                 .overflow_y_scroll()
                 .p(px(4.0))
-                .child(section_label("This Window"))
+                .child(section_label(i18n.tr("project-switcher.section.this-window")))
                 .child(project_row(
                     0,
                     &state.current_project,
                     true,
                     selected_index == 0,
                     on_row_action.clone(),
+                    i18n,
                 ))
                 .child(divider())
-                .child(section_label("Recent Projects"))
+                .child(section_label(i18n.tr("project-switcher.section.recent")))
                 .children(if filtered.is_empty() {
-                    vec![empty_recent_row(&query).into_any_element()]
+                    vec![empty_recent_row(&query, i18n).into_any_element()]
                 } else {
                     filtered
                         .iter()
@@ -202,6 +207,7 @@ fn panel(
                                 false,
                                 selected_index == index + 1,
                                 on_row_action.clone(),
+                                i18n,
                             )
                             .into_any_element()
                         })
@@ -218,13 +224,13 @@ fn panel(
                 .gap(px(2.0))
                 .child(action_row(
                     assets::ICON_FOLDER_OPEN_PATH,
-                    "Open Project...",
+                    i18n.tr("menu.file-open_project"),
                     "project:open",
                     on_command.clone(),
                 ))
                 .child(action_row(
                     assets::ICON_PLUS_PATH,
-                    "New Project",
+                    i18n.tr("menu.file-new_project"),
                     "project:new",
                     on_command,
                 )),
@@ -269,7 +275,7 @@ fn search_row(
         ))
 }
 
-fn section_label(label: &'static str) -> impl IntoElement {
+fn section_label(label: impl Into<String>) -> impl IntoElement {
     div()
         .px(px(8.0))
         .pt(px(6.0))
@@ -277,11 +283,31 @@ fn section_label(label: &'static str) -> impl IntoElement {
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_faint())
-        .child(label.to_uppercase())
+        .child(label.into().to_uppercase())
 }
 
 fn divider() -> impl IntoElement {
     div().my(px(3.0)).h(px(1.0)).bg(Colors::border_subtle())
+}
+
+fn localize_subtitle(i18n: I18n, subtitle: &str) -> String {
+    match subtitle {
+        "Missing" => i18n.tr("project.file.missing"),
+        "Saved" => i18n.tr("project-switcher.status.saved"),
+        "Unsaved" => i18n.tr("project-switcher.status.unsaved"),
+        "Saved locally" => i18n.tr("project.subtitle.saved-locally"),
+        "Unsaved changes" => i18n.tr("project.subtitle.unsaved-changes"),
+        "Opened" => i18n.tr("project.subtitle.opened"),
+        other => other.to_string(),
+    }
+}
+
+fn localize_project_name(i18n: I18n, name: &str) -> String {
+    if name == "Untitled Project" {
+        i18n.tr("project.default-name")
+    } else {
+        name.to_string()
+    }
 }
 
 fn project_row(
@@ -290,10 +316,14 @@ fn project_row(
     active: bool,
     selected: bool,
     on_row_action: ProjectSwitcherRowCb,
+    i18n: I18n,
 ) -> impl IntoElement {
+    // Status marker stays English in state; translate only for display.
     let is_missing = project.subtitle == "Missing";
     let path = project.path.clone().unwrap_or_default();
     let name = project.name.clone();
+    let display_name = localize_project_name(i18n, &project.name);
+    let display_subtitle = localize_subtitle(i18n, &project.subtitle);
     let row_action = if active {
         ProjectSwitcherRowEvent::CurrentProject
     } else {
@@ -359,14 +389,14 @@ fn project_row(
                         } else {
                             Colors::text_primary()
                         })
-                        .child(project.name.clone()),
+                        .child(display_name),
                 )
                 .child(
                     div()
                         .max_w_full()
                         .truncate()
                         .text_size(px(9.0))
-                        .text_color(if project.subtitle == "Missing" {
+                        .text_color(if is_missing {
                             Colors::status_warning()
                         } else {
                             Colors::text_faint()
@@ -379,7 +409,7 @@ fn project_row(
                                 .map(|path| path.to_string_lossy().to_string())
                                 .unwrap_or_default()
                         } else {
-                            project.subtitle.clone()
+                            display_subtitle
                         }),
                 ),
         );
@@ -394,13 +424,15 @@ fn project_row(
 
 fn action_row(
     icon_path: &'static str,
-    label: &'static str,
+    label: impl Into<String>,
     command: &'static str,
     on_command: ProjectSwitcherCommandCb,
 ) -> impl IntoElement {
+    let label = label.into();
     let command = command.to_string();
+    let id = gpui::SharedString::from(label.clone());
     div()
-        .id(label)
+        .id(id)
         .h(px(28.0))
         .rounded_md()
         .px(px(8.0))
@@ -429,11 +461,14 @@ fn action_row(
         )
 }
 
-fn empty_recent_row(query: &str) -> impl IntoElement {
+fn empty_recent_row(query: &str, i18n: I18n) -> impl IntoElement {
     let label = if query.is_empty() {
-        "No Recent Projects".to_string()
+        i18n.tr("project-switcher.empty.no-recent")
     } else {
-        format!("No projects match \"{}\"", query)
+        i18n.tr_vars(
+            "project-switcher.empty.no-match",
+            &[("query", query.to_string())],
+        )
     };
     div()
         .px(px(8.0))

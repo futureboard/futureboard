@@ -19,6 +19,7 @@ use crate::components::mixer_tree_sidebar::MIXER_TREE_COLLAPSED_RAIL_WIDTH;
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
+use crate::i18n::I18n;
 use crate::theme::Colors;
 
 pub const MIXER_WINDOW_WIDTH: f32 = 1180.0;
@@ -27,9 +28,15 @@ pub const MIXER_WINDOW_MIN_WIDTH: f32 = 760.0;
 pub const MIXER_WINDOW_MIN_HEIGHT: f32 = 320.0;
 const MIXER_MENU_BAR_HEIGHT: f32 = 24.0;
 const MIXER_MENU_FONT_SIZE: f32 = 11.0;
-const MIXER_MENU_LABELS: [&str; 5] = ["File", "Edit", "Scene", "Tools", "Help"];
+const MIXER_MENU_IDS: [(&str, &str); 5] = [
+    ("file", "File"),
+    ("edit", "Edit"),
+    ("scene", "Scene"),
+    ("tools", "Tools"),
+    ("help", "Help"),
+];
 
-fn mixer_menu_bar() -> impl IntoElement {
+fn mixer_menu_bar(i18n: I18n) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -42,10 +49,10 @@ fn mixer_menu_bar() -> impl IntoElement {
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .children(
-            MIXER_MENU_LABELS
+            MIXER_MENU_IDS
                 .into_iter()
                 .enumerate()
-                .map(|(index, label)| {
+                .map(|(index, (menu_id, fallback))| {
                     div()
                         .id(("mixer-menu-label", index))
                         .h_full()
@@ -62,7 +69,7 @@ fn mixer_menu_bar() -> impl IntoElement {
                                 .text_color(Colors::text_primary())
                         })
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .child(label)
+                        .child(i18n.tr_menu(menu_id, fallback))
                 }),
         )
 }
@@ -192,6 +199,7 @@ impl Render for MixerWindow {
             active_target: mixer_split_active_target,
             on_action: on_mixer_split,
         };
+        let i18n = I18n::from_app(cx);
 
         div()
             .flex()
@@ -218,14 +226,14 @@ impl Render for MixerWindow {
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(external_window_titlebar(
-                "Mixer",
+                i18n.tr("mixer.title"),
                 "mixer-window-close",
                 move |window, cx| {
                     on_close(window, cx);
                     window.remove_window();
                 },
             ))
-            .child(mixer_menu_bar())
+            .child(mixer_menu_bar(i18n))
             .child(
                 div()
                     .flex()
@@ -249,6 +257,7 @@ impl Render for MixerWindow {
                         mixer_split,
                         Some(self.tree_sidebar.clone()),
                         tree_sidebar_enabled,
+                        i18n,
                     )),
             )
     }
