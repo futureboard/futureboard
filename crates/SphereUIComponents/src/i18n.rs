@@ -57,6 +57,15 @@ impl I18n {
         }
     }
 
+    /// Resolve the active UI locale from the global settings model when present.
+    pub fn from_app(cx: &gpui::App) -> Self {
+        let language = cx
+            .try_global::<crate::settings::GlobalSettingsModel>()
+            .map(|global| global.0.read(cx).current.general.language.clone())
+            .unwrap_or_else(|| "en".to_string());
+        Self::new(&language)
+    }
+
     pub fn locale(self) -> Locale {
         self.locale
     }
@@ -65,12 +74,26 @@ impl I18n {
         self.lookup(key).unwrap_or(key).to_string()
     }
 
+    pub fn tr_or(self, key: &str, fallback: &str) -> String {
+        self.lookup(key).unwrap_or(fallback).to_string()
+    }
+
     pub fn tr_vars(self, key: &str, vars: &[(&str, String)]) -> String {
         let mut text = self.tr(key);
         for (name, value) in vars {
             text = text.replace(&format!("{{ ${name} }}"), value);
         }
         text
+    }
+
+    /// Map a native-menu id (`file.new_project`) to its Fluent key (`menu.file-new_project`).
+    pub fn menu_key(menu_id: &str) -> String {
+        format!("menu.{}", menu_id.replace('.', "-"))
+    }
+
+    pub fn tr_menu(self, menu_id: &str, fallback: &str) -> String {
+        let key = Self::menu_key(menu_id);
+        self.tr_or(&key, fallback)
     }
 
     fn lookup(self, key: &str) -> Option<&'static str> {

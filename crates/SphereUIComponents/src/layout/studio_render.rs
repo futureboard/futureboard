@@ -726,6 +726,7 @@ impl Render for StudioLayout {
         let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
         let viewport_height: f32 = window.bounds().size.height.into();
+        let i18n = crate::i18n::I18n::new(&self.settings.read(cx).current.general.language);
 
         let chrome_policy = crate::platform_chrome::PlatformChromePolicy::current();
         let dropdown_overlay = if chrome_policy.show_in_window_menubar {
@@ -738,6 +739,7 @@ impl Render for StudioLayout {
                             viewport_height,
                             on_open_menu.clone(),
                             on_close_menu.clone(),
+                            i18n,
                         )
                         .into_any_element(),
                     )
@@ -768,6 +770,7 @@ impl Render for StudioLayout {
                             on_toggle_submenu.clone(),
                             on_menu_command.clone(),
                             on_close_menu.clone(),
+                            i18n,
                         )
                         .into_any_element()
                     })
@@ -1607,6 +1610,7 @@ impl Render for StudioLayout {
                     transport_chrome,
                     panel_chrome,
                     Some(on_window_close),
+                    i18n,
                 )
             })
             .child({

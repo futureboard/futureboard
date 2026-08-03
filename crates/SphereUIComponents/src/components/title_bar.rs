@@ -1,5 +1,5 @@
 use gpui::{
-    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
+    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea,
 };
 
@@ -78,7 +78,7 @@ mod windows_icon_font_tests {
 pub fn window_control_icon(
     area: WindowControlArea,
     icon_path: &'static str,
-    fallback_text: &'static str,
+    fallback_text: impl Into<SharedString>,
 ) -> Div {
     #[cfg(target_os = "windows")]
     {
@@ -116,7 +116,7 @@ pub fn section_separator() -> impl gpui::IntoElement {
 
 pub fn chrome_button(
     icon_path: Option<&'static str>,
-    fallback_text: &'static str,
+    fallback_text: impl Into<SharedString>,
     _active: bool,
     color: Rgba,
 ) -> Div {
@@ -134,7 +134,7 @@ pub fn chrome_button(
     if let Some(path) = icon_path {
         button = button.child(svg().path(path).w(px(13.0)).h(px(13.0)).text_color(color));
     } else {
-        button = button.child(fallback_text);
+        button = button.child(fallback_text.into());
     }
 
     button
@@ -143,7 +143,7 @@ pub fn chrome_button(
 pub fn window_control_button(
     area: WindowControlArea,
     icon_path: &'static str,
-    fallback_text: &'static str,
+    fallback_text: impl Into<SharedString>,
 ) -> Div {
     let button = window_control_icon(area, icon_path, fallback_text)
         .w(px(WINDOW_CONTROL_WIDTH))

@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::i18n::I18n;
 use crate::menu::MenuManifest;
 use crate::overlay::{compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize};
 use crate::platform_chrome::PlatformChromePolicy;
@@ -28,7 +29,7 @@ const MENU_LABEL_GAP: f32 = 1.0;
 const MENU_LABEL_CHAR_W: f32 = 6.2;
 const COMPACT_MENU_BUTTON_SIZE: f32 = 16.0;
 
-pub fn menu_bar_chrome_width(viewport_width: f32) -> f32 {
+pub fn menu_bar_chrome_width(viewport_width: f32, i18n: I18n) -> f32 {
     if PlatformChromePolicy::menubar_compact(viewport_width) {
         MENU_BAR_PAD_X * 2.0 + COMPACT_MENU_BUTTON_SIZE
     } else {
@@ -36,7 +37,7 @@ pub fn menu_bar_chrome_width(viewport_width: f32) -> f32 {
         let labels_width = manifest
             .menus
             .iter()
-            .map(|menu| menu_label_width(&menu.label))
+            .map(|menu| menu_label_width(&i18n.tr_menu(&menu.id, &menu.label)))
             .sum::<f32>();
         let gaps = manifest.menus.len().saturating_sub(1) as f32 * MENU_LABEL_GAP;
         MENU_BAR_PAD_X * 2.0 + labels_width + gaps
@@ -47,15 +48,16 @@ pub fn menu_bar(
     open_menu_id: Option<&str>,
     on_open_menu: MenuOpenCb,
     viewport_width: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
     if PlatformChromePolicy::menubar_compact(viewport_width) {
         menu_bar_compact(open_menu_id, on_open_menu).into_any_element()
     } else {
-        menu_bar_full(open_menu_id, on_open_menu).into_any_element()
+        menu_bar_full(open_menu_id, on_open_menu, i18n).into_any_element()
     }
 }
 
-fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl IntoElement {
+fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb, i18n: I18n) -> impl IntoElement {
     let manifest = MenuManifest::load();
     let open_id_owned = open_menu_id.map(|s| s.to_string());
     let chrome_left: f32 = PlatformChromePolicy::current()
@@ -74,15 +76,16 @@ fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> impl I
             let is_open = open_id_owned.as_deref() == Some(menu.id.as_str());
             let menu_id = menu.id.clone();
             let hover_menu_id = menu.id.clone();
+            let label = i18n.tr_menu(&menu.id, &menu.label);
             let anchor_x = next_label_left;
-            next_label_left += menu_label_width(&menu.label) + MENU_LABEL_GAP;
+            next_label_left += menu_label_width(&label) + MENU_LABEL_GAP;
             let cb = on_open_menu.clone();
             let hover_cb = on_open_menu.clone();
             let can_hover_switch = open_id_owned.is_some() && !is_open;
 
             menu_label_button(
                 ("top-menu", i),
-                menu.label.clone(),
+                label,
                 is_open,
                 can_hover_switch,
                 move |hovered, window, cx| {
@@ -152,6 +155,7 @@ pub fn menu_picker_dropdown(
     viewport_height: f32,
     on_open_menu: MenuOpenCb,
     on_close: MenuCloseCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let manifest = MenuManifest::load();
     let row_count = manifest.menus.len();
@@ -205,7 +209,7 @@ pub fn menu_picker_dropdown(
                 .shadow_lg()
                 .children(manifest.menus.iter().enumerate().map(|(i, menu)| {
                     let menu_id = menu.id.clone();
-                    let label = menu.label.clone();
+                    let label = i18n.tr_menu(&menu.id, &menu.label);
                     let cb = on_open_menu.clone();
                     div()
                         .id(("menu-picker-row", i))
