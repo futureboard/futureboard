@@ -568,7 +568,7 @@ welcome.nav.audio = オーディオ
 welcome.nav.feed = フィード
 welcome.nav.new = 新規
 welcome.nav.recent = 最近
-welcome.nav.start = スタート
+welcome.nav.start = 開始
 welcome.open-project = プロジェクトを開く
 
 
@@ -664,6 +664,7 @@ settings.field.system-notifications = システム通知
 settings.field.theme-preset = テーマプリセット
 settings.field.ui-scale = UI スケール
 settings.field.update-check = アップデート確認
+settings.field.update-channel = アップデートチャネル
 settings.field.vst3-folders = VST3 フォルダ
 settings.field.warnings = 警告
 settings.field.zoom-sensitivity = ズーム感度

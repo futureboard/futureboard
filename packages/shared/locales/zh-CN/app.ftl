@@ -664,6 +664,7 @@ settings.field.system-notifications = 系统通知
 settings.field.theme-preset = 主题预设
 settings.field.ui-scale = 界面缩放
 settings.field.update-check = 更新检查
+settings.field.update-channel = 更新通道
 settings.field.vst3-folders = VST3 文件夹
 settings.field.warnings = 警告
 settings.field.zoom-sensitivity = 缩放灵敏度

@@ -731,7 +731,8 @@ impl Render for StudioLayout {
         let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
         let viewport_height: f32 = window.bounds().size.height.into();
-        let i18n = crate::i18n::I18n::new(&self.settings.read(cx).current.general.language);
+        let ui_language = self.settings.read(cx).current.general.language.clone();
+        let i18n = crate::i18n::I18n::new(&ui_language);
 
         let chrome_policy = crate::platform_chrome::PlatformChromePolicy::current();
         let dropdown_overlay = if chrome_policy.show_in_window_menubar {
@@ -1322,7 +1323,7 @@ impl Render for StudioLayout {
             .size_full()
             .relative()
             .bg(Colors::surface_base())
-            .font(theme::ui_font())
+            .font(theme::ui_font_for_language(&ui_language))
             // Reclaim the studio shortcut anchor before the clicked child handles
             // the pointer. Focusable controls (text fields, piano roll, etc.) take
             // focus again in their own target handler, while non-focusable

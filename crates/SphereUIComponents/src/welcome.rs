@@ -456,7 +456,7 @@ impl Render for WelcomeWindow {
             .flex()
             .flex_col()
             .size_full()
-            .font(theme::ui_font())
+            .font(theme::ui_font_for_language(&self.language))
             .bg(Colors::surface_window())
             .cursor(gpui::CursorStyle::Arrow)
             // Swallow the platform's default click-drag gesture on the Welcome

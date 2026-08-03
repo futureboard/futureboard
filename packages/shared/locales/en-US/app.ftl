@@ -664,6 +664,7 @@ settings.field.system-notifications = System Notifications
 settings.field.theme-preset = Theme Preset
 settings.field.ui-scale = UI Scale
 settings.field.update-check = Update Check
+settings.field.update-channel = Update channel
 settings.field.vst3-folders = VST3 Folders
 settings.field.warnings = Warnings
 settings.field.zoom-sensitivity = Zoom Sensitivity

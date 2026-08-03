@@ -664,6 +664,7 @@ settings.field.system-notifications = แจ้งเตือนระบบ
 settings.field.theme-preset = Theme Preset
 settings.field.ui-scale = UI Scale
 settings.field.update-check = ตรวจสอบอัปเดต
+settings.field.update-channel = ช่องทางอัปเดต
 settings.field.vst3-folders = โฟลเดอร์ VST3
 settings.field.warnings = คำเตือน
 settings.field.zoom-sensitivity = ความไวการซูม
