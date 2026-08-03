@@ -422,7 +422,7 @@ windows = { version = "0.61", features = [
 windows-sys = "0.61"
 x11-dl = "2"
 windows-core = "0.61"
-# Safe registry reader — used to derive the Exclusive Edition machine
+# Safe registry reader — used to derive the Professional Edition machine
 # fingerprint from HKLM MachineGuid without a hand-rolled unsafe RegGetValueW.
 windows-registry = "0.5"
 
@@ -475,7 +475,7 @@ derive_more = { version = "2.1.1", features = [
     "mul_assign",
     "not",
 ] }
-# Offline license-token verification for the Exclusive Edition. Verification
+# Offline license-token verification for the Professional Edition. Verification
 # only — the signing key never ships in a build.
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 heck = "0.5"

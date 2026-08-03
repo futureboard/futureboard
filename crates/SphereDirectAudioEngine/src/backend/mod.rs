@@ -6,7 +6,7 @@
 //! | Backend                  | Platform     | Notes                              |
 //! |--------------------------|--------------|-------------------------------------|
 //! | `DauxCpalBackend`        | All          | cpal: WASAPI Shared / CoreAudio / ALSA |
-//! | `DauxWasapiExclBackend`  | Windows only | Raw WASAPI exclusive + MMCSS        |
+//! | `DauxWasapiExclBackend`  | Windows only | Raw WASAPI professional + MMCSS        |
 //! | `DauxWdmKsBackend`       | Windows only | WDM-KS low-level driver path        |
 //! | `DauxAsioBackend`        | Windows only | Host supplied by an edition provider |
 //! | `DauxMmeBackend`         | Windows only | Legacy MME stub (fallback only)     |
@@ -43,7 +43,7 @@ pub enum BackendKind {
     WasapiExclusive,
     /// Windows: WDM-KS low-level driver path (experimental).
     WdmKs,
-    /// Windows: Steinberg ASIO driver path supplied by Exclusive Edition.
+    /// Windows: Steinberg ASIO driver path supplied by Professional Edition.
     Asio,
     /// macOS: CoreAudio (same as Auto on macOS, explicit selection).
     CoreAudio,
@@ -83,7 +83,7 @@ impl BackendKind {
     pub fn from_id(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "wasapi-shared" | "wasapishared" => BackendKind::WasapiShared,
-            "wasapi-exclusive" | "wasapiexclusive" => BackendKind::WasapiExclusive,
+            "wasapi-exclusive" | "wasapiprofessional" => BackendKind::WasapiExclusive,
             "wdm-ks" | "wdmks" | "wdm_ks" => BackendKind::WdmKs,
             "asio" | "daux-asio" => BackendKind::Asio,
             "coreaudio" | "core-audio" => BackendKind::CoreAudio,
@@ -388,7 +388,7 @@ fn asio_support_enabled_for(provider: Option<&AsioHostProvider>) -> bool {
 pub(crate) fn asio_host() -> Result<&'static cpal::Host, SphereAudioError> {
     let provider = ASIO_HOST_PROVIDER.get().ok_or_else(|| {
         SphereAudioError::BackendUnavailable(
-            "DAUx ASIO requires a Futureboard Exclusive Edition provider".into(),
+            "DAUx ASIO requires a Futureboard Professional Edition provider".into(),
         )
     })?;
     let require_entitlement = || {
@@ -396,7 +396,7 @@ pub(crate) fn asio_host() -> Result<&'static cpal::Host, SphereAudioError> {
             Ok(())
         } else {
             Err(SphereAudioError::BackendUnavailable(
-                "DAUx ASIO requires a current Exclusive Edition ASIO entitlement".into(),
+                "DAUx ASIO requires a current Professional Edition ASIO entitlement".into(),
             ))
         }
     };

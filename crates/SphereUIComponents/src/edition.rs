@@ -3,7 +3,7 @@
 //!
 //! This module holds **no** license logic and **no** signing keys. It is a
 //! dependency-free hand-off point: the shared crate must never depend on the
-//! private Exclusive Edition crate, so the Exclusive build's app layer installs
+//! private Professional Edition crate, so the Professional build's app layer installs
 //! a provider here and the shared About panel reads from it. A Community build
 //! installs nothing and the About panel falls back to its plain edition info.
 //!
@@ -15,8 +15,10 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
+use gpui::{App, Window};
+
 /// Whether a bound license is currently usable or has lapsed. Mirrors the
-/// Exclusive Edition's own state enum without depending on that crate.
+/// Professional Edition's own state enum without depending on that crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LicenseDisplayState {
     Active,
@@ -36,10 +38,46 @@ pub struct LicenseDisplay {
     pub expires_at: Option<u64>,
 }
 
+impl LicenseDisplay {
+    /// Human-readable expiry line. Lives here rather than in one panel so the
+    /// About page and the activation dialog cannot drift into describing the
+    /// same license differently.
+    pub fn expiry_text(&self) -> String {
+        match (self.state, self.expires_at) {
+            (_, None) => "Perpetual".to_string(),
+            (LicenseDisplayState::Expired, Some(_)) => {
+                "Expired — reactivate to continue".to_string()
+            }
+            (LicenseDisplayState::Active, Some(expires_at)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_secs())
+                    .unwrap_or(0);
+                match expires_at.saturating_sub(now) / 86_400 {
+                    0 => "Under a day remaining".to_string(),
+                    1 => "1 day remaining".to_string(),
+                    days => format!("{days} days remaining"),
+                }
+            }
+        }
+    }
+}
+
+/// Badge text for a license, and whether it reads as a good state. `None` is a
+/// machine with no license at all, which is not an error — a Community-behaving
+/// Professional build is a supported state.
+pub fn license_status_label(license: Option<&LicenseDisplay>) -> (&'static str, bool) {
+    match license.map(|license| license.state) {
+        Some(LicenseDisplayState::Active) => ("Active", true),
+        Some(LicenseDisplayState::Expired) => ("Expired", false),
+        None => ("Not activated", false),
+    }
+}
+
 /// What the About panel shows about this build.
 #[derive(Debug, Clone)]
 pub struct EditionInfo {
-    /// Human-readable edition name, e.g. `"Exclusive"`.
+    /// Human-readable edition name, e.g. `"Professional"`.
     pub edition: &'static str,
     /// The application version string the app layer reports.
     pub app_version: String,
@@ -55,7 +93,7 @@ fn slot() -> &'static RwLock<Option<EditionProvider>> {
 }
 
 /// Install the edition/license provider. Called once by the app layer of an
-/// Exclusive build during startup. Idempotent: a later call replaces it.
+/// Professional build during startup. Idempotent: a later call replaces it.
 pub fn set_edition_provider(provider: EditionProvider) {
     if let Ok(mut guard) = slot().write() {
         *guard = Some(provider);
@@ -73,22 +111,68 @@ pub fn current_edition_info() -> Option<EditionInfo> {
     Some(provider())
 }
 
+// ── License action hand-off ──────────────────────────────────────────────────
+//
+// The About panel needs to be able to *open* activation, not just describe it —
+// a machine already inside a project should not have to close it to enter a key.
+// The dialog itself is Professional Edition code the shared crate must not depend
+// on, so the app layer installs a handler here, exactly like `crate::account`.
+
+type LicenseActionHandler = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>;
+
+fn license_action_slot() -> &'static RwLock<Option<LicenseActionHandler>> {
+    static SLOT: OnceLock<RwLock<Option<LicenseActionHandler>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+/// Install the handler that opens license activation. Called once by the app
+/// layer of an Professional build during startup.
+pub fn set_license_action_handler(handler: LicenseActionHandler) {
+    if let Ok(mut guard) = license_action_slot().write() {
+        *guard = Some(handler);
+    }
+}
+
+/// Whether this build can open license activation. Community builds cannot, so
+/// the About panel must not offer an action that would do nothing.
+pub fn license_action_available() -> bool {
+    license_action_slot()
+        .read()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+}
+
+/// Open license activation through the installed handler. No-op when unhandled,
+/// so a Community build (or a race at startup) simply does nothing.
+pub fn dispatch_license_action(window: &mut Window, cx: &mut App) {
+    let handler = {
+        let Ok(guard) = license_action_slot().read() else {
+            return;
+        };
+        guard.as_ref().cloned()
+    };
+    if let Some(handler) = handler {
+        handler(window, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Both halves in one test on purpose: the slots are process-global, so a
+    /// separate "nothing is installed" test races whichever test installs one —
+    /// which is exactly how the empty-slot assertion used to fail at random.
     #[test]
-    fn no_provider_reports_no_edition_info() {
-        // A fresh process with no provider installed (the Community case) must
-        // report nothing rather than fabricate an edition.
-        if slot().read().map(|g| g.is_some()).unwrap_or(false) {
-            return;
-        }
+    fn empty_slots_report_nothing_and_installed_ones_are_read_back() {
+        // A build with nothing installed (the Community case) must report
+        // nothing rather than fabricate an edition or offer a dead action.
         assert!(current_edition_info().is_none());
-    }
+        assert!(!license_action_available());
 
-    #[test]
-    fn an_installed_provider_is_read_back() {
+        set_license_action_handler(Arc::new(|_window, _cx| {}));
+        assert!(license_action_available());
+
         set_edition_provider(Arc::new(|| EditionInfo {
             edition: "Test",
             app_version: "9.9.9".to_string(),

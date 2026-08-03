@@ -21,6 +21,22 @@ use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{Artifact, Message};
 
 use crate::platform::Edition;
+use crate::toolchain;
+
+/// The Futureboard workspace root (xtask lives at `<root>/xtask`).
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask must live under the workspace root")
+        .to_path_buf()
+}
+
+/// Whether the build targets Windows, where ASIO exists at all.
+fn target_is_windows(target: Option<&str>) -> bool {
+    target
+        .map(|triple| triple.contains("windows"))
+        .unwrap_or(cfg!(target_os = "windows"))
+}
 
 /// The application package and its primary binary.
 pub const APP_PACKAGE: &str = "futureboard_native";
@@ -95,6 +111,14 @@ pub fn build(
         // treats relative CEF_PATH values as version roots and may append its
         // own version/platform components.
         command.env("CEF_PATH", cef_path);
+    }
+
+    // The Professional build compiles `asio-sys`, which needs the Steinberg SDK
+    // and libclang. Resolving them here — rather than letting `asio-sys` fetch
+    // the SDK into %TEMP% — is what stops a half-extracted download from being
+    // compiled against forever after.
+    if edition == Edition::Professional && target_is_windows(target) {
+        toolchain::prepare_professional(&workspace_root())?.apply(&mut command);
     }
 
     // Merge the edition features with the sidecar bin features into one
@@ -217,10 +241,10 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_features_prepend_edition_flags() {
+    fn professional_features_prepend_edition_flags() {
         assert_eq!(
-            merged_features(Edition::Exclusive),
-            "futureboard_native/exclusive,sphere_directaudioengine/asio,\
+            merged_features(Edition::Professional),
+            "futureboard_native/professional,sphere_directaudioengine/asio,\
 sphere-plugin-host/plugin-host-bin,sphere-plugin-host/plugin-scanner-bin"
         );
     }

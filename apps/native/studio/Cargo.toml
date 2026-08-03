@@ -41,13 +41,13 @@ ureq.workspace = true
 # CEF host for built-in plugin editors. Optional: linking it requires the CEF
 # SDK in `build/cef` (populate with SphereWebView's `install_cef` example).
 sphere-webview = { workspace = true, optional = true, features = ["cef-runtime"] }
-# Exclusive Edition license client + offline token verification. Private-only
+# Professional Edition license client + offline token verification. Private-only
 # dependencies remain optional so the Community manifest stays valid without
 # the private source tree; serde/sha2 are shared with the updater above.
 reqwest = { workspace = true, optional = true, features = ["blocking", "json"] }
 base64 = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
-# CSPRNG for the OAuth PKCE verifier / state nonce (Exclusive Edition auth).
+# CSPRNG for the OAuth PKCE verifier / state nonce (Professional Edition auth).
 rand = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -56,7 +56,7 @@ gpui_windows.workspace = true
 # Real MDX-NET stem separation with the DirectML GPU execution provider is a
 # default on Windows (auto-used when a GPU is detected, CPU fallback otherwise).
 sphere_ui_components = { workspace = true, features = ["stem-directml"] }
-# Exclusive Edition's private source registers this host at startup. Keeping
+# Professional Edition's private source registers this host at startup. Keeping
 # the dependency here lets the public Community manifest remain valid when the
 # ignored `crates/ExclusiveEdition` directory is absent.
 cpal = { workspace = true, optional = true, features = ["asio"] }
@@ -104,12 +104,12 @@ builtin-plugin-editor = [
     "sphere_ui_components/builtin-plugin-editor",
 ]
 # Developer builds only: allow Studio to start when elevated. Never enable for
-# Community or Exclusive production/distribution builds.
+# Community or Professional production/distribution builds.
 allow_elevated_for_testing = ["sphere-platform/allow_elevated_for_testing"]
-# Compile the private Exclusive Edition module and its Windows ASIO toolchain.
+# Compile the private Professional Edition module and its Windows ASIO toolchain.
 # This feature is not an entitlement: providers stay uninstalled until a signed
 # license token verifies for the running machine.
-exclusive = [
+professional = [
     "dep:cpal",
     "dep:reqwest",
     "dep:base64",

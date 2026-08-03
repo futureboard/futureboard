@@ -8,7 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../packages/shared/app/icons/icon.ico");
     println!("cargo:rerun-if-changed=../../../.discordrpcsecret");
 
-    stage_exclusive_sources();
+    stage_professional_sources();
     download_onnxruntime();
 
     // Optional override for the Discord application id. Futureboard's own is
@@ -238,31 +238,28 @@ fn lib_matches(entry_name: &str, lib_name: &str) -> bool {
 }
 
 /// Stage private implementation files only when Cargo is compiling the
-/// Exclusive Edition. `include!` cannot accept their crate-level `//!` comments
+/// Professional Edition. `include!` cannot accept their crate-level `//!` comments
 /// inside the application's bridge module, so those comments become ordinary
 /// comments in the generated copies.
-fn stage_exclusive_sources() {
-    // The license signing key and API endpoint are baked in via `option_env!`.
-    // Rebuild when either changes so a build never keeps stale license config
-    // and never silently ships without it.
+fn stage_professional_sources() {
+    // Service endpoints and the license signing key are baked in via
+    // `option_env!`, from the build environment or the repo `.env`. Rebuild when
+    // any of them changes so a build never keeps stale config and never
+    // silently ships without it.
+    println!("cargo:rerun-if-changed=../../../.env");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_API_URL");
-    // Supabase auth config is baked from the repo `.env` (or the build
-    // environment). Only the public URL and the *publishable* anon key are ever
-    // read here — never the service secret key.
-    println!("cargo:rerun-if-changed=../../../.env");
-    println!("cargo:rerun-if-env-changed=FUTUREBOARD_SUPABASE_URL");
-    println!("cargo:rerun-if-env-changed=FUTUREBOARD_SUPABASE_ANON_KEY");
+    println!("cargo:rerun-if-env-changed=FUTUREBOARD_AUTH_API_URL");
     // The EULA is embedded (include_str!) from the staged copies below; rebuild
     // when the source text changes.
     println!("cargo:rerun-if-changed=../../../crates/ExclusiveEdition/assets/EULA.EN.txt");
     println!("cargo:rerun-if-changed=../../../crates/ExclusiveEdition/assets/EULA.TH.txt");
 
-    if std::env::var_os("CARGO_FEATURE_EXCLUSIVE").is_none() {
+    if std::env::var_os("CARGO_FEATURE_PROFESSIONAL").is_none() {
         return;
     }
 
-    bake_supabase_config();
+    bake_service_config();
 
     let manifest_dir = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
@@ -270,49 +267,56 @@ fn stage_exclusive_sources() {
     let source_dir = manifest_dir.join("../../../crates/ExclusiveEdition/src");
     let assets_dir = manifest_dir.join("../../../crates/ExclusiveEdition/assets");
     let output_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"))
-        .join("futureboard-exclusive");
+        .join("futureboard-professional");
 
-    std::fs::create_dir_all(&output_dir).expect("failed to create Exclusive Edition output dir");
+    std::fs::create_dir_all(&output_dir).expect("failed to create Professional Edition output dir");
 
-    stage_exclusive_source(&source_dir, &output_dir, "license.rs");
-    stage_exclusive_source(&source_dir, &output_dir, "license_activation_dialog.rs");
-    stage_exclusive_source(&source_dir, &output_dir, "auth.rs");
-    stage_exclusive_source(&source_dir, &output_dir, "auth_dialog.rs");
-    stage_exclusive_source(&source_dir, &output_dir, "eula.rs");
-    stage_exclusive_source(&source_dir, &output_dir, "eula_dialog.rs");
+    stage_professional_source(&source_dir, &output_dir, "license.rs");
+    stage_professional_source(&source_dir, &output_dir, "license_activation_dialog.rs");
+    stage_professional_source(&source_dir, &output_dir, "auth.rs");
+    stage_professional_source(&source_dir, &output_dir, "auth_dialog.rs");
+    stage_professional_source(&source_dir, &output_dir, "eula.rs");
+    stage_professional_source(&source_dir, &output_dir, "eula_dialog.rs");
 
     // The EULA text is embedded into the binary. Copy it beside the staged
     // source so `include_str!(concat!(env!("OUT_DIR"), ...))` finds it.
-    copy_exclusive_asset(&assets_dir, &output_dir, "EULA.EN.txt");
-    copy_exclusive_asset(&assets_dir, &output_dir, "EULA.TH.txt");
+    copy_professional_asset(&assets_dir, &output_dir, "EULA.EN.txt");
+    copy_professional_asset(&assets_dir, &output_dir, "EULA.TH.txt");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        stage_exclusive_source(&source_dir, &output_dir, "asio.rs");
+        stage_professional_source(&source_dir, &output_dir, "asio.rs");
     }
 }
 
-/// Copy an Exclusive Edition asset verbatim into the staging directory so the
+/// Copy an Professional Edition asset verbatim into the staging directory so the
 /// staged source can embed it with `include_str!`.
-fn copy_exclusive_asset(assets_dir: &Path, output_dir: &Path, file_name: &str) {
+fn copy_professional_asset(assets_dir: &Path, output_dir: &Path, file_name: &str) {
     let source_path = assets_dir.join(file_name);
     println!("cargo:rerun-if-changed={}", source_path.display());
     std::fs::copy(&source_path, output_dir.join(file_name)).unwrap_or_else(|error| {
         panic!(
-            "Exclusive Edition asset is required for --features exclusive: {}: {error}",
+            "Professional Edition asset is required for --features professional: {}: {error}",
             source_path.display()
         )
     });
 }
 
-/// Bake the Supabase auth endpoint and publishable key for `option_env!` in the
-/// staged `auth.rs`. Source precedence: an explicit build-environment value
-/// wins (CI/distribution), otherwise the repo `.env` is read.
+/// Bake the account and licensing endpoints, plus the license signing key, for
+/// `option_env!` in the staged private sources. Source precedence: an explicit
+/// build-environment value wins (CI/distribution), otherwise the repo `.env` is
+/// read so a plain `cargo build` produces a working Professional build.
 ///
-/// SECURITY: the `.env` also contains `SUPABASE_SECRET_KEY` (a service-role
-/// secret). It is deliberately never read or emitted here — a service secret in
-/// a shipped desktop binary would be a full account-takeover credential. Only
-/// the public URL and the publishable anon key belong in the client.
-fn bake_supabase_config() {
+/// Everything baked here is public by construction:
+/// - the account API URL, which the app's sign-in opens in a browser;
+/// - the licensing API URL;
+/// - the Ed25519 **public** key licenses verify against.
+///
+/// SECURITY: no secret is ever read or emitted here. The `.env` also carries
+/// service-role and issuing secrets, and any of those in a shipped desktop
+/// binary would be a credential handed to every customer. The client needs none
+/// of them: it proves who it is with the user's own session, and verifies
+/// licenses with a public key.
+fn bake_service_config() {
     let dotenv = read_dotenv("../../../.env");
     let resolve = |build_key: &str, dotenv_key: &str| -> Option<String> {
         std::env::var(build_key)
@@ -327,11 +331,14 @@ fn bake_supabase_config() {
             .filter(|value| !value.is_empty())
     };
 
-    if let Some(url) = resolve("FUTUREBOARD_SUPABASE_URL", "SUPABASE_URL") {
-        println!("cargo:rustc-env=FUTUREBOARD_SUPABASE_URL={url}");
+    if let Some(url) = resolve("FUTUREBOARD_AUTH_API_URL", "AUTH_API_URL") {
+        println!("cargo:rustc-env=FUTUREBOARD_AUTH_API_URL={url}");
     }
-    if let Some(anon) = resolve("FUTUREBOARD_SUPABASE_ANON_KEY", "SUPABASE_PUBLISHABLE_KEY") {
-        println!("cargo:rustc-env=FUTUREBOARD_SUPABASE_ANON_KEY={anon}");
+    if let Some(url) = resolve("FUTUREBOARD_LICENSE_API_URL", "LICENSE_API_URL") {
+        println!("cargo:rustc-env=FUTUREBOARD_LICENSE_API_URL={url}");
+    }
+    if let Some(key) = resolve("FUTUREBOARD_LICENSE_PUBLIC_KEY", "LICENSE_PUBLIC_KEY") {
+        println!("cargo:rustc-env=FUTUREBOARD_LICENSE_PUBLIC_KEY={key}");
     }
 }
 
@@ -354,13 +361,13 @@ fn read_dotenv(relative: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn stage_exclusive_source(source_dir: &Path, output_dir: &Path, file_name: &str) {
+fn stage_professional_source(source_dir: &Path, output_dir: &Path, file_name: &str) {
     let source_path = source_dir.join(file_name);
     println!("cargo:rerun-if-changed={}", source_path.display());
 
     let source = std::fs::read_to_string(&source_path).unwrap_or_else(|error| {
         panic!(
-            "Exclusive Edition source is required for --features exclusive: {}: {error}",
+            "Professional Edition source is required for --features professional: {}: {error}",
             source_path.display()
         )
     });

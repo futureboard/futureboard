@@ -6,8 +6,8 @@ use std::borrow::Cow;
 pub const SPLASH_IMAGE_PATH: &str = "images/splash.png";
 /// Community Edition boot splash image.
 pub const SPLASH_CE_IMAGE_PATH: &str = "images/Splash_CE.png";
-/// Licensed Exclusive Edition boot splash image.
-pub const SPLASH_EXCLUSIVE_IMAGE_PATH: &str = "images/Splash_Exclusive.png";
+/// Licensed Professional Edition boot splash image.
+pub const SPLASH_PROFESSIONAL_IMAGE_PATH: &str = "images/Splash_Professional.png";
 /// Futureboard application icon/logo from packages/assets, resolvable via `gpui::img(...)`.
 pub const APP_LOGO_PATH: &str = "images/app.png";
 /// Futureboard horizontal wordmark from packages/assets, embedded for app chrome.
@@ -17,8 +17,8 @@ pub const LOGO_TEXT_PATH: &str = "images/logo-text.png";
 /// runtime file dependency on the source tree / install layout).
 static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
 static SPLASH_CE_PNG: &[u8] = include_bytes!("../../../packages/shared/images/Splash_CE.png");
-static SPLASH_EXCLUSIVE_PNG: &[u8] =
-    include_bytes!("../../../packages/shared/images/Splash_Exclusive.png");
+static SPLASH_PROFESSIONAL_PNG: &[u8] =
+    include_bytes!("../../../packages/shared/images/Splash_Professional.png");
 static APP_LOGO_PNG: &[u8] = include_bytes!("../../../packages/assets/app.png");
 // UI-sized 2x derivative (398x36) avoids asking the renderer to minify the
 // 3487x315 source at runtime, which produced visibly jagged text at 100% DPI.
@@ -28,7 +28,7 @@ pub fn splash_image_available(path: &str) -> bool {
     match path {
         SPLASH_IMAGE_PATH => !SPLASH_PNG.is_empty(),
         SPLASH_CE_IMAGE_PATH => !SPLASH_CE_PNG.is_empty(),
-        SPLASH_EXCLUSIVE_IMAGE_PATH => !SPLASH_EXCLUSIVE_PNG.is_empty(),
+        SPLASH_PROFESSIONAL_IMAGE_PATH => !SPLASH_PROFESSIONAL_PNG.is_empty(),
         _ => false,
     }
 }
@@ -55,8 +55,8 @@ impl AssetSource for EmbeddedAssets {
         if path == SPLASH_CE_IMAGE_PATH {
             return Ok(Some(Cow::Borrowed(SPLASH_CE_PNG)));
         }
-        if path == SPLASH_EXCLUSIVE_IMAGE_PATH {
-            return Ok(Some(Cow::Borrowed(SPLASH_EXCLUSIVE_PNG)));
+        if path == SPLASH_PROFESSIONAL_IMAGE_PATH {
+            return Ok(Some(Cow::Borrowed(SPLASH_PROFESSIONAL_PNG)));
         }
         if path == APP_LOGO_PATH {
             return Ok(Some(Cow::Borrowed(APP_LOGO_PNG)));
@@ -138,7 +138,7 @@ impl AssetSource for EmbeddedAssets {
             LOGO_TEXT_PATH,
             SPLASH_IMAGE_PATH,
             SPLASH_CE_IMAGE_PATH,
-            SPLASH_EXCLUSIVE_IMAGE_PATH,
+            SPLASH_PROFESSIONAL_IMAGE_PATH,
             assets::ICON_PLAY_PATH,
             assets::ICON_PAUSE_PATH,
             assets::ICON_SQUARE_PATH,

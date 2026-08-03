@@ -124,7 +124,7 @@ crates/SphereUIComponents/recent-test.json
 .discordrpcsecret
 .env
 
-# Proprietary Futureboard Exclusive Edition source. Community Edition must
+# Proprietary Futureboard Professional Edition source. Community Edition must
 # build without this directory being present.
 /crates/ExclusiveEdition/
 build-private.ps1

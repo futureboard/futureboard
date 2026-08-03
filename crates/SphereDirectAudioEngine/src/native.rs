@@ -114,7 +114,7 @@ impl AudioBackend {
 /// endpoint to WDM-KS, or a WDM-KS filter/pin path to a DAUx/cpal backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioDeviceId {
-    /// Windows MMDevice endpoint id/name used by WASAPI exclusive.
+    /// Windows MMDevice endpoint id/name used by WASAPI professional.
     WasapiEndpoint(String),
     /// Windows Kernel Streaming filter path plus render pin id.
     WdmKsFilterPin { filter_path: String, pin_id: u32 },
@@ -297,7 +297,7 @@ pub struct EngineStats {
     /// Authoritative for all timing; this is what the status bar shows.
     pub sample_rate: u32,
     /// Rate the device was requested to open at (Hz), or 0 for "device
-    /// default". Differs from `sample_rate` on a shared-mode/exclusive fallback.
+    /// default". Differs from `sample_rate` on a shared-mode/professional fallback.
     pub requested_sample_rate: u32,
     pub buffer_size: u32,
     pub backend_name: String,
@@ -401,13 +401,13 @@ impl AudioEngine {
     /// that are merely installed report zero capabilities until opened (the
     /// stream-open diagnostic is the real capability check).
     ///
-    /// Fails closed: without a registered Exclusive Edition ASIO host, no
+    /// Fails closed: without a registered Professional Edition ASIO host, no
     /// enumeration happens at all — a hand-edited settings file selecting
     /// "asio" yields an error and an empty device list, not registry output.
     fn ensure_asio_device_cache(&self) -> Result<(), SphereAudioError> {
         if !backend::asio_support_enabled() {
             return Err(SphereAudioError::BackendUnavailable(
-                "DAUx ASIO requires a Futureboard Exclusive Edition build".into(),
+                "DAUx ASIO requires a Futureboard Professional Edition build".into(),
             ));
         }
 

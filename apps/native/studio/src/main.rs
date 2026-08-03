@@ -5,8 +5,8 @@ mod audio_state;
 mod updater;
 mod window;
 
-#[cfg(feature = "exclusive")]
-mod exclusive_edition;
+#[cfg(feature = "professional")]
+mod professional_edition;
 
 use sphere_platform::platform;
 use sphere_ui_components::boot;
@@ -28,12 +28,12 @@ fn main() {
     dispatch_cef_process();
 
     // Privilege safety — must run before audio, plugins, settings, or project I/O.
-    // Community and Exclusive Edition both block elevated launches. Developer
+    // Community and Professional Edition both block elevated launches. Developer
     // builds may opt in with `--features allow_elevated_for_testing`.
     platform::abort_if_elevated();
 
-    #[cfg(feature = "exclusive")]
-    exclusive_edition::install().expect("failed to install Exclusive Edition providers");
+    #[cfg(feature = "professional")]
+    professional_edition::install().expect("failed to install Professional Edition providers");
 
     // ── Phase 0 — process setup ───────────────────────────────────────────────
     // env flags (before GPUI/window creation), panic hook, logging. No window,

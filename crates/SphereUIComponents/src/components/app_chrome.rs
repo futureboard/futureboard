@@ -914,7 +914,7 @@ fn report_bug_button() -> impl IntoElement {
 // ── Account chip ──────────────────────────────────────────────────────────────
 
 /// Compact app-chrome account control. Present only on builds that install an account
-/// provider (Exclusive Edition); Community builds render nothing. Signed out it
+/// provider (Professional Edition); Community builds render nothing. Signed out it
 /// is a "Sign in" chip; signed in it shows only the compact avatar and opens
 /// the account menu. Reads the account snapshot fresh each render, so sign-in /
 /// sign-out reflect here without extra wiring.

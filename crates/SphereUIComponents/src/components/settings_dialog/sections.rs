@@ -318,7 +318,7 @@ pub(crate) fn advanced_section(
 }
 
 /// About panel. `edition` is `Some` only on builds that install an edition
-/// provider (Exclusive Edition); Community builds pass `None` and see the plain
+/// provider (Professional Edition); Community builds pass `None` and see the plain
 /// panel. When present, the license rows re-read verified state each render, so
 /// activation — or a background renewal on a later launch — shows up here
 /// without extra refresh wiring.
@@ -359,7 +359,7 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
             }
             section = section.child(settings_row(
                 "Expires",
-                settings_readout(license_expiry_text(license)),
+                settings_readout(license.expiry_text()),
             ));
             if !license.entitlements.is_empty() {
                 section = section.child(settings_row(
@@ -367,6 +367,26 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
                     settings_readout(license.entitlements.join(", ")),
                 ));
             }
+        }
+
+        // Only offered where activation can actually open. The label follows the
+        // state: there is nothing to "manage" on a machine holding no license.
+        if crate::edition::license_action_available() {
+            let action_label = if info.license.is_some() {
+                "Manage License…"
+            } else {
+                "Activate License…"
+            };
+            section = section.child(settings_row(
+                "Activation",
+                fb_button(
+                    "settings-license-activate",
+                    action_label,
+                    FbButtonKind::Default,
+                    true,
+                    |_, window, cx| crate::edition::dispatch_license_action(window, cx),
+                ),
+            ));
         }
     }
 
@@ -377,35 +397,11 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
 }
 
 /// License row: a status badge that reads Active (accent) or Expired / Not
-/// activated (muted).
+/// activated (muted). The label comes from [`crate::edition`] so this panel and
+/// the activation dialog cannot disagree about the same license.
 fn license_status_row(license: Option<&crate::edition::LicenseDisplay>) -> impl IntoElement {
-    use crate::edition::LicenseDisplayState;
-    let (label, ok) = match license.map(|license| license.state) {
-        Some(LicenseDisplayState::Active) => ("Active", true),
-        Some(LicenseDisplayState::Expired) => ("Expired", false),
-        None => ("Not activated", false),
-    };
+    let (label, ok) = crate::edition::license_status_label(license);
     settings_row("License", settings_status_badge(label, ok))
-}
-
-/// Human-readable expiry line for the About panel.
-fn license_expiry_text(license: &crate::edition::LicenseDisplay) -> String {
-    use crate::edition::LicenseDisplayState;
-    match (license.state, license.expires_at) {
-        (_, None) => "Perpetual".to_string(),
-        (LicenseDisplayState::Expired, Some(_)) => "Expired — reactivate to continue".to_string(),
-        (LicenseDisplayState::Active, Some(expires_at)) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
-                .unwrap_or(0);
-            match expires_at.saturating_sub(now) / 86_400 {
-                0 => "Under a day remaining".to_string(),
-                1 => "1 day remaining".to_string(),
-                days => format!("{days} days remaining"),
-            }
-        }
-    }
 }
 
 /// Performance > Rendering section. Renderer and GPU Device choices are
@@ -747,7 +743,7 @@ pub(crate) fn audio_latency_report_section(
                         .child(i18n.tr("settings.latency.sample-rate-restart-pending")),
                 );
         } else if rate_mismatch {
-            // Requested vs active divergence (shared-mode resample / exclusive
+            // Requested vs active divergence (shared-mode resample / professional
             // fallback). Allowed but must be visible — timing follows the active
             // device rate, not the requested rate shown elsewhere in Preferences.
             card = card

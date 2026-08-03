@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::edition::{self, EditionInfo, LicenseDisplayState};
 use crate::embedded_assets::{
-    splash_image_available, SPLASH_CE_IMAGE_PATH, SPLASH_EXCLUSIVE_IMAGE_PATH, SPLASH_IMAGE_PATH,
+    splash_image_available, SPLASH_CE_IMAGE_PATH, SPLASH_IMAGE_PATH, SPLASH_PROFESSIONAL_IMAGE_PATH,
 };
 use crate::theme::{self, Colors};
 use crate::window_position::centered_window_bounds;
@@ -54,7 +54,7 @@ impl SplashWindow {
 }
 
 /// Select the branded splash from the same verified license snapshot used by
-/// Settings. A compiled Exclusive feature alone never grants Exclusive branding:
+/// Settings. A compiled Professional feature alone never grants Professional branding:
 /// missing, invalid, or expired licenses all remain Community Edition.
 fn splash_image_path_for_edition(info: Option<&EditionInfo>) -> &'static str {
     if info.is_some_and(|info| {
@@ -62,7 +62,7 @@ fn splash_image_path_for_edition(info: Option<&EditionInfo>) -> &'static str {
             .as_ref()
             .is_some_and(|license| license.state == LicenseDisplayState::Active)
     }) {
-        SPLASH_EXCLUSIVE_IMAGE_PATH
+        SPLASH_PROFESSIONAL_IMAGE_PATH
     } else {
         SPLASH_CE_IMAGE_PATH
     }
@@ -186,7 +186,7 @@ mod tests {
 
     fn edition_with_license(state: LicenseDisplayState) -> EditionInfo {
         EditionInfo {
-            edition: "Exclusive",
+            edition: "Professional",
             app_version: "test".to_string(),
             license: Some(LicenseDisplay {
                 state,
@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(splash_image_path_for_edition(None), SPLASH_CE_IMAGE_PATH);
 
         let unlicensed = EditionInfo {
-            edition: "Exclusive",
+            edition: "Professional",
             app_version: "test".to_string(),
             license: None,
         };
@@ -213,11 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn only_an_active_license_uses_exclusive_splash() {
+    fn only_an_active_license_uses_professional_splash() {
         let active = edition_with_license(LicenseDisplayState::Active);
         assert_eq!(
             splash_image_path_for_edition(Some(&active)),
-            SPLASH_EXCLUSIVE_IMAGE_PATH
+            SPLASH_PROFESSIONAL_IMAGE_PATH
         );
 
         let expired = edition_with_license(LicenseDisplayState::Expired);

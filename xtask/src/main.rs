@@ -19,9 +19,10 @@ mod package;
 mod platform;
 mod plugins;
 mod staging;
+mod toolchain;
 mod validation;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
@@ -50,13 +51,13 @@ enum XtaskCommand {
     /// Build and stage a runnable application into `out/`.
     Package(PackageArgs),
 
-    /// Run `build-ce`, then `build-exclusive-win` (extra args forwarded).
+    /// Run `build-ce`, then `build-professional-win` (extra args forwarded).
     BuildAll {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
 
-    /// Run `check-ce`, then `check-exclusive-win` (extra args forwarded).
+    /// Run `check-ce`, then `check-professional-win` (extra args forwarded).
     CheckAll {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -106,10 +107,10 @@ fn main() -> ExitCode {
     match cli.command {
         Some(XtaskCommand::Package(args)) => run_package(args),
         Some(XtaskCommand::BuildAll { args }) => {
-            run_aliases(&["build-ce", "build-exclusive-win"], &args)
+            run_aliases(&["build-ce", "build-professional-win"], &args)
         }
         Some(XtaskCommand::CheckAll { args }) => {
-            run_aliases(&["check-ce", "check-exclusive-win"], &args)
+            run_aliases(&["check-ce", "check-professional-win"], &args)
         }
         None => run_package(cli.package),
     }
@@ -155,11 +156,23 @@ fn run_cargo_alias(alias: &str, forwarded: &[String]) -> Result<(), ExitCode> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     eprintln!("[xtask] cargo {} {}", alias, forwarded.join(" "));
-    let status = Command::new(&cargo)
-        .arg(alias)
-        .args(forwarded)
-        .current_dir(root)
-        .status();
+    let mut command = Command::new(&cargo);
+    command.arg(alias).args(forwarded).current_dir(root);
+
+    // The professional aliases compile `asio-sys`, so they need the same SDK and
+    // libclang the packaging path resolves. Without this, `cargo xtask
+    // build-all` would still fall back to the %TEMP% download that breaks.
+    if alias.contains("professional") {
+        match toolchain::prepare_professional(Path::new(root)) {
+            Ok(toolchain) => toolchain.apply(&mut command),
+            Err(error) => {
+                eprintln!("[xtask] {error:#}");
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    let status = command.status();
     match status {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => {

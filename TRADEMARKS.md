@@ -19,7 +19,7 @@ Futureboard trademarks as the name, logo, or source identifier of a modified
 product, service, company, or distribution. Trademark permissions are governed
 by this policy and applicable law.
 
-Futureboard Exclusive Edition source, activation services, private modules,
+Futureboard Professional Edition source, activation services, private modules,
 credentials, signing materials, and other material not included in the public
 Community Edition repository are not licensed under the Community Edition MIT
 License unless a separate written license expressly says otherwise.
@@ -30,7 +30,7 @@ The marks covered by this policy include, without limitation:
 
 - FUTUREBOARD and Futureboard;
 - Futureboard Studio;
-- Futureboard Community Edition and Futureboard Exclusive Edition;
+- Futureboard Community Edition and Futureboard Professional Edition;
 - the Futureboard name as used in product, package, executable, application,
   service, organization, or domain names;
 - Futureboard logos, banners, icons, and other distinctive brand artwork; and
@@ -101,7 +101,7 @@ Edition distribution or publicly operated service, you must:
 4. Clearly identify material modifications and direct users to the fork's own
    support, security-reporting, privacy, release, and update channels.
 5. Do not represent that the fork includes, unlocks, or is licensed for
-   Futureboard Exclusive Edition components unless you hold a separate written
+   Futureboard Professional Edition components unless you hold a separate written
    license that expressly permits that representation.
 6. Display the following notice prominently in the fork's README and near any
    download or distribution page:
@@ -124,15 +124,15 @@ not alter the binaries, signatures, update configuration, or bundled notices.
 
 Any modified build must follow section 5 instead.
 
-## 7. Exclusive Edition and activation services
+## 7. Professional Edition and activation services
 
-The public `exclusive` build-feature name and shared extension hooks do not grant
-access to, a license for, or redistribution rights in Futureboard Exclusive
+The public `professional` build-feature name and shared extension hooks do not grant
+access to, a license for, or redistribution rights in Futureboard Professional
 Edition. Private source under `crates/ExclusiveEdition`, license activation
 infrastructure, service endpoints, signing keys, and related assets are governed
 by separate terms supplied to authorized recipients.
 
-You may not market a Community Edition fork as "Exclusive," "licensed,"
+You may not market a Community Edition fork as "Professional," "licensed,"
 "activated," or otherwise associated with Futureboard's commercial edition in a
 way likely to confuse users.
 

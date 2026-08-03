@@ -2,7 +2,7 @@
 //! and its dropdown).
 //!
 //! Like [`crate::edition`], this is a dependency-free hand-off point: the shared
-//! crate never depends on the private Exclusive Edition crate. The Exclusive
+//! crate never depends on the private Professional Edition crate. The Exclusive
 //! build installs a **snapshot provider** (for display) and an **action
 //! handler** (to open the sign-in dialog / sign out) here; the shared titlebar
 //! reads the snapshot each render and routes clicks back through the handler.

@@ -18,8 +18,8 @@ use anyhow::{Result, bail};
 pub enum Edition {
     /// Default public build (the `build-ce` / `check-ce` aliases).
     Community,
-    /// Windows Exclusive Edition with ASIO (the `*-exclusive-win` aliases).
-    Exclusive,
+    /// Windows Professional Edition with ASIO (the `*-professional-win` aliases).
+    Professional,
 }
 
 impl Edition {
@@ -27,18 +27,18 @@ impl Edition {
     pub fn as_str(self) -> &'static str {
         match self {
             Edition::Community => "community",
-            Edition::Exclusive => "exclusive",
+            Edition::Professional => "professional",
         }
     }
 
     /// Cargo `--features` argument for this edition, or `None` for the default
-    /// Community configuration. Mirrors `build-exclusive-win` in
+    /// Community configuration. Mirrors `build-professional-win` in
     /// `.cargo/config.toml`.
     pub fn cargo_features(self) -> Option<&'static str> {
         match self {
             Edition::Community => None,
-            Edition::Exclusive => {
-                Some("futureboard_native/exclusive,sphere_directaudioengine/asio")
+            Edition::Professional => {
+                Some("futureboard_native/professional,sphere_directaudioengine/asio")
             }
         }
     }
@@ -49,7 +49,7 @@ impl Edition {
     pub fn target_dir(self) -> &'static str {
         match self {
             Edition::Community => "target/community",
-            Edition::Exclusive => "target/exclusive",
+            Edition::Professional => "target/professional",
         }
     }
 }
@@ -66,8 +66,10 @@ impl std::str::FromStr for Edition {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "community" | "ce" => Ok(Edition::Community),
-            "exclusive" | "ee" => Ok(Edition::Exclusive),
-            other => bail!("unknown edition `{other}` (expected `community` or `exclusive`)"),
+            // `exclusive` / `ee` are the edition's former name, still accepted so
+            // existing scripts and muscle memory keep working after the rename.
+            "professional" | "pro" | "exclusive" | "ee" => Ok(Edition::Professional),
+            other => bail!("unknown edition `{other}` (expected `community` or `professional`)"),
         }
     }
 }
@@ -203,17 +205,20 @@ mod tests {
     #[test]
     fn edition_parsing_is_case_insensitive() {
         assert_eq!("Community".parse::<Edition>().unwrap(), Edition::Community);
-        assert_eq!("EXCLUSIVE".parse::<Edition>().unwrap(), Edition::Exclusive);
+        assert_eq!(
+            "PROFESSIONAL".parse::<Edition>().unwrap(),
+            Edition::Professional
+        );
         assert_eq!("ce".parse::<Edition>().unwrap(), Edition::Community);
         assert!("enterprise".parse::<Edition>().is_err());
     }
 
     #[test]
-    fn exclusive_carries_feature_flags_community_does_not() {
+    fn professional_carries_feature_flags_community_does_not() {
         assert_eq!(Edition::Community.cargo_features(), None);
         assert_eq!(
-            Edition::Exclusive.cargo_features(),
-            Some("futureboard_native/exclusive,sphere_directaudioengine/asio")
+            Edition::Professional.cargo_features(),
+            Some("futureboard_native/professional,sphere_directaudioengine/asio")
         );
     }
 }

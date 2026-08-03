@@ -2394,7 +2394,7 @@ impl StudioLayout {
                 &schema.hardware.audio.device_out,
             );
             // A *live* engine must never silently swap its timing rate from a
-            // generic settings sync — sample-rate changes go exclusively through
+            // generic settings sync — sample-rate changes go professionally through
             // the explicit "Re-open Project" flow (`restart_audio_for_sample_rate`).
             // So while the stream is open we pin the current active rate here and
             // let other device-shaping changes (backend / device / buffer size)

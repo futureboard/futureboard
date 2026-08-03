@@ -274,7 +274,7 @@ mod tests {
         let path = final_output_dir(out, "dev", Edition::Community, "windows-x64");
         assert_eq!(path, Path::new("out/dev/windows-x64"));
         // Edition does not change the dev path.
-        let path_ex = final_output_dir(out, "dev", Edition::Exclusive, "windows-x64");
+        let path_ex = final_output_dir(out, "dev", Edition::Professional, "windows-x64");
         assert_eq!(path_ex, path);
     }
 
@@ -286,8 +286,8 @@ mod tests {
             Path::new("out/release/community/windows-x64")
         );
         assert_eq!(
-            final_output_dir(out, "release", Edition::Exclusive, "windows-x64"),
-            Path::new("out/release/exclusive/windows-x64")
+            final_output_dir(out, "release", Edition::Professional, "windows-x64"),
+            Path::new("out/release/professional/windows-x64")
         );
     }
 
@@ -295,8 +295,8 @@ mod tests {
     fn staging_path_is_fully_qualified() {
         let out = Path::new("out");
         assert_eq!(
-            staging_dir(out, "release", Edition::Exclusive, "windows-x64"),
-            Path::new("out/.staging/windows-x64-exclusive-release")
+            staging_dir(out, "release", Edition::Professional, "windows-x64"),
+            Path::new("out/.staging/windows-x64-professional-release")
         );
     }
 

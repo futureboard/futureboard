@@ -3,7 +3,7 @@
 `xtask` is the Futureboard workspace task runner. It has two jobs:
 
 - **`build-all` / `check-all`** — chain the per-edition cargo aliases
-  (`build-ce`, `build-exclusive-win`, …) from `.cargo/config.toml`, because
+  (`build-ce`, `build-professional-win`, …) from `.cargo/config.toml`, because
   Cargo aliases cannot chain commands.
 - **`package`** — build `FutureboardNative` and stage a clean, runnable
   application tree into `out/`, kept separate from the Cargo `target/` cache.
@@ -60,8 +60,8 @@ out/
 └─ release/
    ├─ community/
    │  └─ windows-x64/         # cargo package-ce
-   └─ exclusive/
-      └─ windows-x64/         # cargo package-exclusive
+   └─ professional/
+      └─ windows-x64/         # cargo package-professional
 ```
 
 There is deliberately **no `CEF/` folder and no `PluginUI/` folder** — CEF ships
@@ -97,15 +97,15 @@ cargo run -p xtask -- package `
   --edition community
 ```
 
-Exclusive release (requires the private `crates/ExclusiveEdition/` source tree):
+Professional release (requires the private `crates/ExclusiveEdition/` source tree):
 
 ```powershell
-cargo package-exclusive
+cargo package-professional
 # equivalent to:
 cargo run -p xtask -- package `
   --profile release `
   --target x86_64-pc-windows-msvc `
-  --edition exclusive
+  --edition professional
 ```
 
 Optional flags:

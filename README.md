@@ -59,18 +59,18 @@
 
 ---
 
-## Community and Exclusive Editions
+## Community and Professional Editions
 
 This public repository contains **Futureboard Community Edition** source code,
 licensed under the [MIT License](LICENSE). A normal Community build does not
-contain the private Exclusive Edition crate, ASIO provider, license activation
+contain the private Professional Edition crate, ASIO provider, license activation
 client, or other separately licensed commercial components.
 
 Authorized private checkouts may add the Git-ignored
 `crates/ExclusiveEdition` source and use [build-private.ps1](build-private.ps1).
-The presence of shared extension hooks or the public `exclusive` build-feature
+The presence of shared extension hooks or the public `professional` build-feature
 name does not grant access to, a license for, or redistribution rights in
-Exclusive Edition.
+Professional Edition.
 
 ```bash
 # Public Community Edition
@@ -80,12 +80,12 @@ cargo build -p futureboard_native
 .\build-private.ps1
 
 # Equivalent direct Cargo command
-cargo build --release -p futureboard_native --features exclusive
+cargo build --release -p futureboard_native --features professional
 
 # Fully temporary LLVM + ASIO SDK setup (downloads about 822 MiB)
 python .\build-private-temporary.py --accept-asio-license
 
-# Build all default workspace targets with Exclusive enabled for Studio
+# Build all default workspace targets with Professional enabled for Studio
 python .\build-private-temporary.py --accept-asio-license --workspace
 ```
 
@@ -244,7 +244,7 @@ distinct product branding and prominently display this notice:
 Factual statements such as "based on Futureboard Community Edition" are allowed
 when accurate and when the fork's own branding is more prominent. See
 [TRADEMARKS.md](TRADEMARKS.md) for the complete naming, logo, redistribution,
-fork, and Exclusive Edition policy.
+fork, and Professional Edition policy.
 
 ---
 
@@ -256,6 +256,6 @@ applicable; see [NOTICE.md](NOTICE.md) and the relevant dependency directories.
 
 The Futureboard names, logos, product identity, and trade dress are not licensed
 for use as the branding of modified products merely because the source code is
-open source. See [TRADEMARKS.md](TRADEMARKS.md). Futureboard Exclusive Edition
+open source. See [TRADEMARKS.md](TRADEMARKS.md). Futureboard Professional Edition
 components are separately licensed and are not part of the public Community
 Edition repository.

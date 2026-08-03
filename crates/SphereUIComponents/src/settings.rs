@@ -229,7 +229,7 @@ fn ui_label_for_backend_id(id: &str) -> Option<String> {
 
 /// Map a persisted `driver_type` onto a backend this build can drive.
 ///
-/// Exclusive Edition may write `"ASIO"` into the shared `settings.json`. When
+/// Professional Edition may write `"ASIO"` into the shared `settings.json`. When
 /// Community Edition (or an Exclusive build without ASIO entitlement) loads
 /// that file, the selection must fall back to the platform default — typically
 /// WASAPI Shared on Windows — instead of leaving a latent ASIO pin that the UI

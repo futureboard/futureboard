@@ -1,4 +1,4 @@
-//! Full-duplex ASIO session (Windows, Exclusive Edition builds only).
+//! Full-duplex ASIO session (Windows, Professional Edition builds only).
 //!
 //! One ASIO driver is one duplex device with one buffer set and one
 //! buffer-switch lifecycle. This module opens the selected driver **once**,

@@ -32,7 +32,7 @@ use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
     log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
 };
-#[cfg(feature = "exclusive")]
+#[cfg(feature = "professional")]
 use sphere_ui_components::welcome::WelcomeFooterAction;
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
@@ -265,11 +265,11 @@ pub fn setup(cx: &mut App) {
             cx.update(|app| splash.close(app));
         }
 
-        // First-run EULA gate (Exclusive Edition). Opens on top of the first
+        // First-run EULA gate (Professional Edition). Opens on top of the first
         // surface; declining quits. No-op once accepted for this version.
-        #[cfg(feature = "exclusive")]
+        #[cfg(feature = "professional")]
         {
-            let _ = cx.update(|app| crate::exclusive_edition::show_eula_if_needed(app));
+            let _ = cx.update(|app| crate::professional_edition::show_eula_if_needed(app));
         }
     })
     .detach();
@@ -326,10 +326,10 @@ fn open_welcome_after_startup_scan(cx: &mut App) {
     log_startup_phase(StartupPhase::OpeningWelcome);
     open_welcome_window(cx);
 
-    // First-run EULA gate (Exclusive Edition) belongs on the first real app
+    // First-run EULA gate (Professional Edition) belongs on the first real app
     // surface, after the plug-in scan handoff has completed.
-    #[cfg(feature = "exclusive")]
-    let _ = crate::exclusive_edition::show_eula_if_needed(cx);
+    #[cfg(feature = "professional")]
+    let _ = crate::professional_edition::show_eula_if_needed(cx);
 }
 
 fn set_app_mode(cx: &mut App, mode: AppMode) {
@@ -654,26 +654,20 @@ fn open_welcome_window(cx: &mut App) {
             }
         }),
         footer_action: {
-            #[cfg(feature = "exclusive")]
+            #[cfg(feature = "professional")]
             {
                 Some(WelcomeFooterAction {
                     label: "License",
                     icon: assets::ICON_FILE_PATH,
                     on_click: Arc::new(|welcome_window, cx| {
-                        let activation = crate::exclusive_edition::configured_license_activator(
-                            env!("CARGO_PKG_VERSION"),
-                        );
-                        if let Err(error) = crate::exclusive_edition::open_license_activation_window(
+                        crate::professional_edition::open_license_activation(
                             Some(welcome_window.bounds()),
-                            activation,
                             cx,
-                        ) {
-                            eprintln!("[LicenseActivation] failed to open dialog: {error}");
-                        }
+                        );
                     }),
                 })
             }
-            #[cfg(not(feature = "exclusive"))]
+            #[cfg(not(feature = "professional"))]
             {
                 None
             }

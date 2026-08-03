@@ -58,7 +58,7 @@ that deliberately do **not** share a runtime:
 
 | Engine | Crate | Owns | Used by |
 |---|---|---|---|
-| **Direct audio engine (DAUx)** | [`crates/SphereDirectAudioEngine`](crates/SphereDirectAudioEngine) | The realtime graph, transport, mixer, device I/O (WASAPI exclusive + MMCSS / CoreAudio / ALSA via `cpal`), and the realtime render thread. | Native app (primary). Also exposes a C/N-API surface for the Electron bridge. |
+| **Direct audio engine (DAUx)** | [`crates/SphereDirectAudioEngine`](crates/SphereDirectAudioEngine) | The realtime graph, transport, mixer, device I/O (WASAPI professional + MMCSS / CoreAudio / ALSA via `cpal`), and the realtime render thread. | Native app (primary). Also exposes a C/N-API surface for the Electron bridge. |
 | **Web audio core** | [`crates/SphereWebAudioCore`](crates/SphereWebAudioCore) | A web-compatible transport, flat audio graph (tracks → master), mixer, and meters, compiled to WASM and run in an AudioWorklet. | Web app (Lite). |
 
 Rules of ownership:
@@ -73,7 +73,7 @@ Rules of ownership:
   SDKs (`external/vst3sdk`, `external/clap`) and embeds the native editor inside
   the GPUI window. This path is native-only.
 - **The two engines are intentionally separate.** Do not try to unify DAUx and
-  the web core into one runtime; they target different constraints (exclusive
+  the web core into one runtime; they target different constraints (professional
   low-latency native I/O vs. a sandboxed AudioWorklet). Shared *concepts* live in
   descriptors and IDs (e.g. stable plugin IDs like `sphere.eq8`), not in shared
   realtime code.

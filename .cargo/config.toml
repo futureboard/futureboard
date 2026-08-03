@@ -7,14 +7,14 @@ build-ce = [
     "target/community",
 ]
 
-# Build the Windows Exclusive Edition with ASIO.
-build-exclusive-win = [
+# Build the Windows Professional Edition with ASIO.
+build-professional-win = [
     "build",
     "--workspace",
     "--features",
-    "futureboard_native/exclusive,sphere_directaudioengine/asio",
+    "futureboard_native/professional,sphere_directaudioengine/asio",
     "--target-dir",
-    "target/exclusive",
+    "target/professional",
 ]
 
 # Check Community Edition in its isolated target directory.
@@ -25,14 +25,14 @@ check-ce = [
     "target/community",
 ]
 
-# Check Windows Exclusive Edition in its isolated target directory.
-check-exclusive-win = [
+# Check Windows Professional Edition in its isolated target directory.
+check-professional-win = [
     "check",
     "--workspace",
     "--features",
-    "futureboard_native/exclusive,sphere_directaudioengine/asio",
+    "futureboard_native/professional,sphere_directaudioengine/asio",
     "--target-dir",
-    "target/exclusive",
+    "target/professional",
 ]
 
 # Community Edition quality gates (CI uses these).
@@ -52,15 +52,15 @@ test-ce = [
 # Cargo unifies features within one build graph, so each edition must use
 # a separate target directory to avoid overwriting or reusing app artifacts.
 # Aliases cannot chain commands, so cross-edition combos live in the xtask:
-#   cargo xtask build-all [--release]   → build-ce, then build-exclusive-win
-#   cargo xtask check-all               → check-ce, then check-exclusive-win
+#   cargo xtask build-all [--release]   → build-ce, then build-professional-win
+#   cargo xtask check-all               → check-ce, then check-professional-win
 xtask = ["run", "--package", "xtask", "--"]
 
 # Binary packaging / staging into `out/` (see xtask/README.md). These build the
 # app and stage a clean runnable tree separate from the Cargo `target/` cache.
 #   cargo package-dev         → out/dev/<platform>
 #   cargo package-ce          → out/release/community/<platform>
-#   cargo package-exclusive   → out/release/exclusive/<platform>
+#   cargo package-professional   → out/release/professional/<platform>
 # The host target triple is used by default; pass `--target <triple>` to cross
 # the mapping to another platform folder.
 package-dev = [
@@ -85,7 +85,7 @@ package-ce = [
     "--edition",
     "community",
 ]
-package-exclusive = [
+package-professional = [
     "run",
     "--package",
     "xtask",
@@ -94,7 +94,7 @@ package-exclusive = [
     "--profile",
     "release",
     "--edition",
-    "exclusive",
+    "professional",
 ]
 
 # Do not set CEF_PATH or LIBCLANG_PATH globally here. Cargo has no target-scoped
