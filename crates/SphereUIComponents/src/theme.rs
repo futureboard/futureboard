@@ -60,6 +60,7 @@ pub const UI_TEXT_SCALE: f32 = 1.08;
 /// Bundled cross-surface theme template. Installed to AppData on first run and
 /// used as the fallback when no user theme exists or a user theme omits tokens.
 pub const DEFAULT_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Default.json");
+pub const LIGHT_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Light.json");
 pub const TEMPLATE_THEME_JSON: &str = include_str!("../../../packages/shared/themes/Template.json");
 
 /// Build a fallback list, dropping the primary family and any repeat. A duplicate
@@ -391,14 +392,32 @@ fn install_builtin_theme_templates(themes_dir: &Path) {
         let _ = fs::write(&default_path, DEFAULT_THEME_JSON);
     }
 
-    // Keep the authoring template outside the `**/theme.json` discovery pattern
-    // so it is available for users to copy but never auto-activates.
+    let light_path = themes_dir.join("Light").join("theme.json");
+    if !light_path.exists() {
+        if let Some(parent) = light_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&light_path, LIGHT_THEME_JSON);
+    }
+
+    // The authoring template sits directly in the themes root (not inside its
+    // own folder) so `discover_theme_files` below picks it up like any other
+    // flat custom theme; it never auto-activates because its id
+    // ("publisher.theme-id") is filtered out at the call sites that list and
+    // select themes.
     let template_path = themes_dir.join("Template.json");
     if !template_path.exists() {
         let _ = fs::write(&template_path, TEMPLATE_THEME_JSON);
     }
 }
 
+/// Finds every theme manifest under the themes root, recursively.
+///
+/// Supports both the packaged layout (`<Name>/theme.json`) and a custom theme
+/// dropped by a user as a flat file directly in the themes root
+/// (`{themes_dir}/*.json`, e.g. `MyTheme.json`) — any `.json` file counts as a
+/// candidate manifest and is parsed by [`load_theme_file`], which already
+/// discards anything that fails to parse or resolve a usable `id`/`tokens`.
 fn discover_theme_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -412,9 +431,9 @@ fn discover_theme_files(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 stack.push(path);
             } else if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.eq_ignore_ascii_case("theme.json"))
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("json"))
                 .unwrap_or(false)
             {
                 files.push(path);
@@ -949,5 +968,70 @@ mod font_stack_tests {
             ui_font_for_language("en-US").family.to_string(),
             ui_font().family.to_string()
         );
+    }
+}
+
+#[cfg(test)]
+mod theme_discovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn scratch_dir() -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "futureboard_theme_discovery_test_{}_{id}",
+            std::process::id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// A user-authored theme dropped as a flat `<Name>.json` directly in the
+    /// themes root (no `theme.json` wrapper folder) must be discovered, since
+    /// that is the documented custom-theme drop path (`{appdata}/Extensions/
+    /// Themes/*.json`).
+    #[test]
+    fn discovers_flat_custom_theme_json_in_root() {
+        let dir = scratch_dir();
+        let custom_path = dir.join("MyCustom.json");
+        fs::write(
+            &custom_path,
+            r##"{"id":"user.mycustom","name":"My Custom","tokens":{"surface":{"base":"#123456"}}}"##,
+        )
+        .unwrap();
+
+        let found = discover_theme_files(&dir);
+        assert!(
+            found.contains(&custom_path),
+            "flat custom theme not discovered: {found:?}"
+        );
+
+        let default = load_default_theme();
+        let loaded = load_theme_file(&custom_path, &default).expect("valid theme json");
+        assert_eq!(loaded.id, "user.mycustom");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Packaged themes still install and are discovered via their
+    /// `<Name>/theme.json` layout alongside flat custom themes.
+    #[test]
+    fn discovers_nested_theme_json_alongside_flat_custom_json() {
+        let dir = scratch_dir();
+        install_builtin_theme_templates(&dir);
+        fs::write(
+            dir.join("MyCustom.json"),
+            r#"{"id":"user.mycustom2","name":"My Custom 2","tokens":{}}"#,
+        )
+        .unwrap();
+
+        let found = discover_theme_files(&dir);
+        assert!(found.iter().any(|p| p.ends_with("Default/theme.json")));
+        assert!(found.iter().any(|p| p.ends_with("Light/theme.json")));
+        assert!(found.iter().any(|p| p.ends_with("MyCustom.json")));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
