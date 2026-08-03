@@ -1477,6 +1477,39 @@ impl StudioLayout {
             }
             return;
         }
+        if let Some(rest) = command_id.strip_prefix("mixer:set-output:") {
+            use crate::components::timeline::timeline_state::TrackOutputRouting;
+            let (track_id, output) = if let Some((track_id, bus_id)) = rest.split_once(":bus:") {
+                (
+                    track_id.to_string(),
+                    TrackOutputRouting::Bus {
+                        bus_id: bus_id.to_string(),
+                    },
+                )
+            } else if let Some(track_id) = rest.strip_suffix(":main") {
+                (track_id.to_string(), TrackOutputRouting::Main)
+            } else {
+                self.overlay.open_popover = None;
+                cx.notify();
+                return;
+            };
+            let changed = self.timeline.update(cx, |timeline, cx| {
+                let changed = timeline.state.set_track_output_routing(&track_id, output);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            self.overlay.open_popover = None;
+            if changed {
+                self.mark_dirty();
+                self.audio_bridge.project_dirty = true;
+                self.push_mixer_snapshot_to_window(cx);
+                self.schedule_audio_project_sync(cx, false, "mixer_set_output");
+            }
+            cx.notify();
+            return;
+        }
         if let Some((track_id, target)) =
             crate::components::timeline::timeline_state::parse_automation_target_menu_command(
                 command_id,
@@ -1856,7 +1889,10 @@ impl StudioLayout {
             "help:quick-start" => {
                 crate::user_manual::open_section(crate::user_manual::QUICK_START_FILE);
             }
-            "app:about" | "app:check-for-updates" => {
+            "app:about" => {
+                self.open_about_window(owner_bounds, cx);
+            }
+            "app:check-for-updates" => {
                 self.open_settings_dialog(owner_bounds, cx);
             }
 

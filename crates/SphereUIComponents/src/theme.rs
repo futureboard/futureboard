@@ -155,6 +155,52 @@ pub mod menu {
     pub const HEADER_HEIGHT: f32 = 21.0;
     pub const SEPARATOR_MARGIN_Y: f32 = 2.0;
     pub const ITEM_GAP: f32 = 1.0;
+
+    /// Approximate rendered width (px) of a menu label at `LABEL_TEXT_SIZE`.
+    ///
+    /// GPUI does not auto-size these absolutely-positioned popovers from their
+    /// text contents, so panel width is estimated up front. A flat
+    /// `chars * 6.1` figure is calibrated for Latin/Inter and badly
+    /// underestimates scripts whose glyphs are wider (CJK) or whose character
+    /// count is inflated by zero-advance combining marks (Thai/Lao), which made
+    /// localized labels truncate with an ellipsis. Estimate per character by
+    /// script instead so the panel reserves the room the text actually needs.
+    pub fn estimate_label_width(text: &str) -> f32 {
+        text.chars().map(char_advance).sum()
+    }
+
+    fn char_advance(ch: char) -> f32 {
+        let c = ch as u32;
+        // Thai and Lao above/below vowels and tone marks stack on the base
+        // glyph with no horizontal advance.
+        if is_south_east_asian_combining_mark(c) {
+            return 0.0;
+        }
+        match c {
+            // Hangul Jamo, CJK (radicals through unified ideographs), Hangul
+            // syllables, CJK compatibility, and fullwidth forms render at
+            // roughly the em width.
+            0x1100..=0x11FF
+            | 0x2E80..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6 => LABEL_TEXT_SIZE,
+            // Thai and Lao base consonants/vowels are visibly wider than Latin.
+            0x0E00..=0x0EFF => LABEL_TEXT_SIZE * 0.72,
+            // Latin and everything else: preserve the tuned Inter figure.
+            _ => 6.1,
+        }
+    }
+
+    fn is_south_east_asian_combining_mark(c: u32) -> bool {
+        matches!(c,
+            // Thai
+            0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E
+            // Lao
+            | 0x0EB1 | 0x0EB4..=0x0EBC | 0x0EC8..=0x0ECD)
+    }
 }
 
 #[derive(Debug, Clone)]

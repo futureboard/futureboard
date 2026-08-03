@@ -156,6 +156,12 @@ pub enum ContextTarget {
     SendPicker {
         track_id: String,
     },
+    /// Output-routing picker opened from a mixer strip's OUT dropdown button.
+    /// Lists Main plus the project's Bus/Return targets, wired to
+    /// `set_track_output_routing` (the same mutation the Inspector drives).
+    OutputPicker {
+        track_id: String,
+    },
     /// Automation target picker opened from a track's automation control lane.
     AutomationTargetPicker {
         track_id: String,

@@ -44,7 +44,7 @@ use crate::components::timeline::timeline_state::{
     is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
     vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
     vsti_output_child_insert_id, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState,
-    TrackState, TrackType, MASTER_TRACK_ID,
+    TrackOutputRouting, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
@@ -1399,6 +1399,99 @@ fn strip_footer(name: &str) -> impl IntoElement {
         )
 }
 
+/// Human-readable output-routing label for a strip: `Main`, the resolved
+/// Bus/Return name, or the routing's own fallback label.
+fn output_routing_label(track: &TrackState, all_tracks: &[TrackState]) -> String {
+    match &track.routing.output {
+        TrackOutputRouting::Main => "Main".to_string(),
+        TrackOutputRouting::Bus { bus_id } => all_tracks
+            .iter()
+            .find(|t| &t.id == bus_id)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| bus_id.clone()),
+        other => other.label(),
+    }
+}
+
+/// Vertical drop applied to the output picker's anchor so the menu opens
+/// just under the OUT pill rather than on top of it. Half the pill height
+/// (16px) plus a small gap clears the pill for a centred click.
+const OUTPUT_BUTTON_MENU_DROP: f32 = 12.0;
+
+/// Output-routing dropdown button. Shows the current target and opens the
+/// output picker (Main / Bus / Return) on click, wired through
+/// `on_open_output_picker` to the real `set_track_output_routing`.
+fn output_button(
+    track_id: &str,
+    label: String,
+    id_num: usize,
+    on_open: std::sync::Arc<
+        dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+    >,
+) -> impl IntoElement {
+    let track_id = track_id.to_string();
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(22.0))
+        .px(px(4.0))
+        .child(
+            div()
+                .id(("mix-output-btn", id_num))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(4.0))
+                .h(px(16.0))
+                .px(px(6.0))
+                .max_w_full()
+                .min_w(px(0.0))
+                .rounded_sm()
+                .bg(Colors::button_bg())
+                .border(px(1.0))
+                .border_color(Colors::border_default())
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| {
+                    s.bg(Colors::surface_control_hover())
+                        .border_color(Colors::border_strong())
+                })
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(8.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_muted())
+                        .child(label),
+                )
+                .child(
+                    svg()
+                        .path(assets::ICON_CHEVRON_DOWN_PATH)
+                        .w(px(9.0))
+                        .h(px(9.0))
+                        .flex_shrink_0()
+                        .text_color(Colors::text_faint()),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |event: &gpui::MouseDownEvent, w, cx| {
+                        let x: f32 = event.position.x.into();
+                        // Drop the menu just below the button instead of at the
+                        // click point, so it doesn't cover the button/footer.
+                        // The click lands inside the 16px pill; offsetting by ~half
+                        // its height clears the pill's bottom edge. The overlay
+                        // positioner still flips upward if it can't fit below.
+                        let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
+                        on_open(&(track_id.clone(), x, y), w, cx);
+                        cx.stop_propagation();
+                    },
+                )
+                .occlude(),
+        )
+}
+
 // ─── Vertical split handle ───────────────────────────────────────────────────
 
 /// Compact horizontal splitter between mixer vertical sections. 6px hitbox
@@ -1596,6 +1689,12 @@ fn channel_strip(
                 .child(fader_area(track, callbacks, is_selected))
                 .child(button_row(track, callbacks, id_num)),
         )
+        .child(output_button(
+            &track.id,
+            output_routing_label(track, all_tracks),
+            id_num,
+            callbacks.on_open_output_picker.clone(),
+        ))
         .child(strip_footer(&track.name))
 }
 

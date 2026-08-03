@@ -224,6 +224,8 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::stem_extractor_dialog::StemExtractorWindow>>,
     /// Keymap / keyboard shortcuts editor window.
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
+    /// About Futureboard Studio window.
+    pub about: Option<gpui::WindowHandle<crate::components::about_window::AboutWindow>>,
     /// Built-in Soundfont Player MDI window.
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
@@ -865,6 +867,27 @@ impl StudioLayout {
         match open_keymap_window(owner_bounds, manager, on_changed, cx) {
             Ok(handle) => self.external_windows.keymap = Some(handle),
             Err(err) => eprintln!("[keymap] failed to open window: {err}"),
+        }
+    }
+
+    pub(super) fn open_about_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.about.clone() {
+            if handle
+                .update(cx, |_about, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.about = None;
+        }
+
+        match crate::components::about_window::open_about_window(owner_bounds, cx) {
+            Ok(handle) => self.external_windows.about = Some(handle),
+            Err(err) => eprintln!("[about] failed to open window: {err}"),
         }
     }
 

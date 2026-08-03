@@ -1613,6 +1613,40 @@ impl StudioLayout {
             })
         };
 
+        // Output-routing dropdown: select the strip, then open the output
+        // picker menu anchored at the click. Selection mirrors `on_context_menu`
+        // so the picker and the rest of the mixer agree on the primary strip.
+        let on_open_output_picker: std::sync::Arc<
+            dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = owner.clone();
+            std::sync::Arc::new(move |(track_id, x, y): &(String, f32, f32), window, cx| {
+                let track_id = track_id.clone();
+                let x = *x;
+                let y = *y;
+                let window_id = window.window_handle().window_id();
+                StudioLayout::defer_update(&this, cx, move |this, cx| {
+                    let _ = this.timeline.update(cx, |timeline, cx| {
+                        if timeline.state.is_track_selected(&track_id) {
+                            timeline.state.selection.selected_track_id = Some(track_id.clone());
+                        } else {
+                            timeline.state.select_track(&track_id);
+                        }
+                        cx.notify();
+                    });
+                    this.try_open_context_menu(
+                        ContextMenuRequest::new(
+                            window_id,
+                            x,
+                            y,
+                            ContextMenuTarget::Extended(ContextTarget::OutputPicker { track_id }),
+                        ),
+                        cx,
+                    );
+                });
+            })
+        };
+
         // ── Plugin insert callbacks (Phase 1) ────────────────────────
         // Phase 1: add_insert seeds an empty slot followed by a stub
         // descriptor so the project round-trip exercises end-to-end.
@@ -1914,6 +1948,7 @@ impl StudioLayout {
             on_drop_plugin_preset,
             on_open_insert_editor,
             on_add_send,
+            on_open_output_picker,
             on_remove_send,
             on_send_gain_change,
             on_reorder_send,

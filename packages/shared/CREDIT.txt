@@ -1,0 +1,96 @@
+Created and Published by
+Nawaphol Bunchuea (Arizkami)
+
+Futureboard Studio Application
+Kittinan Srikokpho (YuumaHanasawa) - Developer
+Supakit Thongniem (Rondoknight) - UX/UI Designer
+Fam Kramonmanit - Quality Assurance
+
+Futureboard Markatplace
+Nawaphol Bunchuea (Arizkami) - Developer
+Kittinan Srikokpho (YuumaHanasawa) - Developer
+
+Consult
+Prim Ajarayangkura - Consult
+
+Special Thank [Donation]
+Thammanoon Ramiaddee
+Samith Sirasawan
+
+Technology Used
+
+Core & UI
+Rust - Systems programming language the native application is written in
+GPUI (From Zed) - GUI Framework with GPU Acceleration
+WGPU - Cross-platform GPU graphics and compute backend
+AccessKit - Cross-platform accessibility (screen reader) support
+font-kit - System font loading and shaping
+
+Audio, DSP & MIDI
+CPAL - Cross-platform real-time audio input/output
+midir - Cross-platform MIDI input/output
+Symphonia - Audio decoding (WAV, MP3, FLAC, AAC, ALAC, OGG/Vorbis, AIFF, MP4)
+LAME (libmp3lame) - MP3 encoding for export
+RustFFT - Fast Fourier Transform
+rubato - High-quality sample-rate conversion
+fundsp - DSP / synthesis building blocks
+biquad - Biquad audio filters
+nam-rs - Neural Amp Modeler (.nam) real-time inference
+rustysynth - SoundFont (SF2) synthesizer engine
+
+AI / Machine Learning (stem separation & analysis)
+ONNX Runtime (ort) - GPU-capable neural inference for MDX-NET stem separation (CUDA / DirectML / CoreML)
+tract-onnx - Pure-Rust CPU ONNX inference for offline audio analysis
+ndarray - N-dimensional array numerics
+
+Plugin Hosting & Embedded Editor UI
+CEF (Chromium Embedded Framework) - Hosts built-in plugin editor web views
+Svelte - Plugin editor UI framework
+React - Plugin editor UI framework
+Vite - Editor UI build tool (single-file static bundles)
+TypeScript - Editor UI language
+Tailwind CSS - Editor UI styling
+Bun - JavaScript runtime and bundler
+WebGPU - GPU rendering inside plugin editors
+VST3SDK - VST3 Third Party Plugin Hosting
+CLAP - Third Party Plugin Hosting
+
+Serialization & Data
+Serde (serde / serde_json) - Serialization framework
+SQLite (rusqlite) - Local data / plugin registry storage
+schemars - JSON schema generation
+roxmltree - XML parser for importing other DAW project files
+UUID - Unique identifier generation
+
+Async & Concurrency
+Tokio - Asynchronous runtime
+smol / futures - Lightweight async executor and primitives
+crossbeam-channel - Lock-free channels for the audio thread
+rayon - Data parallelism
+parking_lot - Fast synchronization primitives
+
+Networking & Security
+reqwest - HTTP client
+rustls - TLS implementation
+ureq - Lightweight HTTP client
+
+Platform Integration
+windows-rs - Windows APIs (Direct3D 11, DirectWrite, WASAPI)
+Cocoa / Metal / objc2 - macOS APIs and rendering
+X11 / Wayland - Linux windowing
+Discord RPC - Discord Rich Presence integration
+
+Compression & Packaging
+zip / flate2 / tar / lzma-rs - Archive and compression handling
+
+Graphics, Images & Fonts
+image - Image decoding and encoding
+Mona Sans - Interface typeface used in plugin editors
+
+Utilities
+clap - Command-line argument parsing
+chrono - Date and time handling
+regex - Regular expressions
+tracing / log - Structured logging and diagnostics
+rand - Random number generation
+itertools / strum / smallvec - Core Rust utility libraries

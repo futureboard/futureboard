@@ -1266,6 +1266,54 @@ impl StudioLayout {
                 ));
                 entries
             }
+            ContextTarget::OutputPicker { track_id } => {
+                use crate::components::timeline::timeline_state::TrackOutputRouting;
+                let state = &self.timeline.read(cx).state;
+                let Some(source) = state.find_track(track_id) else {
+                    return vec![ContextMenuEntry::disabled_item("Track unavailable", "noop")];
+                };
+                let current = source.routing.output.clone();
+                let mut entries = vec![ContextMenuEntry::Header("Output".to_string())];
+                entries.push(ContextMenuEntry::checked_item(
+                    "Main".to_string(),
+                    format!("mixer:set-output:{track_id}:main"),
+                    matches!(current, TrackOutputRouting::Main),
+                ));
+                let mut bus_count = 0usize;
+                for target in state
+                    .tracks
+                    .iter()
+                    .filter(|target| target.id != *track_id && is_project_routing_track(target))
+                {
+                    let type_label = match target.track_type {
+                        TrackType::Bus => "Bus",
+                        TrackType::Return => "Return",
+                        TrackType::Group => "Group",
+                        _ => "",
+                    };
+                    bus_count += 1;
+                    let checked = matches!(
+                        &current,
+                        TrackOutputRouting::Bus { bus_id } if bus_id == &target.id
+                    );
+                    entries.push(ContextMenuEntry::checked_item(
+                        if type_label.is_empty() {
+                            target.name.clone()
+                        } else {
+                            format!("{} ({type_label})", target.name)
+                        },
+                        format!("mixer:set-output:{track_id}:bus:{}", target.id),
+                        checked,
+                    ));
+                }
+                if bus_count == 0 {
+                    entries.push(ContextMenuEntry::disabled_item(
+                        "No bus/return available",
+                        "noop",
+                    ));
+                }
+                entries
+            }
             ContextTarget::AutomationTargetPicker { track_id } => {
                 use crate::components::timeline::timeline_state::{
                     automation_target_menu_command, AutomationTarget,

@@ -206,7 +206,6 @@ fn panel_width_for_items(items: &[MenuItem], i18n: I18n) -> f32 {
         }
 
         let label = i18n.tr_menu(&item.id, item.label.as_deref().unwrap_or(""));
-        let label_chars = label.chars().count() as f32;
         let shortcut_chars = item.shortcut.as_deref().unwrap_or_default().chars().count() as f32;
         let left_slot = if has_check {
             menu_style::CHECK_SLOT_W + 6.0
@@ -224,10 +223,10 @@ fn panel_width_for_items(items: &[MenuItem], i18n: I18n) -> f32 {
             0.0
         };
 
-        // Approximate Inter UI text width. GPUI rows do not currently
+        // Approximate text width per script. GPUI rows do not currently
         // auto-size popovers from text contents, so this preserves the WebUI
         // content-driven feel without making the panel a hard narrow width.
-        let label_slot = label_chars * 6.1;
+        let label_slot = menu_style::estimate_label_width(&label);
         let needed = menu_style::PANEL_PAD * 2.0
             + menu_style::ROW_PAD_X * 2.0
             + left_slot

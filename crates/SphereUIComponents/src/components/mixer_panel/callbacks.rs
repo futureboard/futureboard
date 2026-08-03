@@ -56,6 +56,9 @@ pub struct MixerCallbacks {
         std::sync::Arc<dyn Fn(&(String, usize, String), &mut Window, &mut App) + 'static>,
     /// Open the send target picker for `(track_id, x, y)`.
     pub on_add_send: std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>,
+    /// Open the output-routing picker (Main / Bus / Return) for `(track_id, x, y)`.
+    pub on_open_output_picker:
+        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>,
     /// Remove the named send `(track_id, send_id)`.
     pub on_remove_send: std::sync::Arc<dyn Fn(&(String, String), &mut Window, &mut App) + 'static>,
     /// Set the send gain `(track_id, send_id, gain_db)`.
@@ -111,6 +114,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_drop_plugin_preset: noop_preset_drop,
         on_open_insert_editor: noop_insert_open.clone(),
         on_add_send: noop_add_send,
+        on_open_output_picker: Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {}),
         on_remove_send: noop_insert_pair,
         on_send_gain_change: noop_send_gain,
         on_reorder_send: noop_send_reorder,
