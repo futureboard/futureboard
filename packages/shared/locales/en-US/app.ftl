@@ -562,6 +562,16 @@ project-switcher.section.this-window = This Window
 project-switcher.status.saved = Saved
 project-switcher.status.unsaved = Unsaved
 
+## Welcome
+welcome.button.continue-without-project = Continue Without Project
+welcome.nav.audio = Audio
+welcome.nav.feed = Feed
+welcome.nav.new = New
+welcome.nav.recent = Recent
+welcome.nav.start = Start
+welcome.open-project = Open Project
+
+
 ## Status & Errors
 
 project.default-name = Untitled Project

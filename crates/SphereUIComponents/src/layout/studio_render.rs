@@ -19,6 +19,11 @@ impl Render for StudioLayout {
         }
 
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
+        let i18n = crate::i18n::I18n::from_app(cx);
+        self.browser_search_input.placeholder =
+            Some(i18n.tr("search.browser.placeholder"));
+        self.project_switcher_search_input.placeholder =
+            Some(i18n.tr("search.projects.placeholder"));
         // Frame pacing tick. See FrameDiagnostics docs — only counts
         // real repaints, not display refreshes.
         let reason = self.frame_reason();
@@ -929,6 +934,7 @@ impl Render for StudioLayout {
                     on_switcher_row_action.clone(),
                     on_popover_command.clone(),
                     on_close_popover.clone(),
+                    i18n,
                 )
                 .into_any_element(),
             )
@@ -1642,6 +1648,7 @@ impl Render for StudioLayout {
                             on_browser_context,
                             on_browser_collapse_all,
                             on_browser_rescan,
+                            i18n,
                         ))
                     });
                 }
@@ -1692,6 +1699,7 @@ impl Render for StudioLayout {
                                     inspector_clip_name_callbacks,
                                     active_panel == WorkspaceActivePanel::Inspector,
                                     &inspector_callbacks,
+                                    i18n,
                                 ).into_any_element()
                             }
                             RightDockTab::ChordDisplay => self.chord_display_panel.clone().into_any_element(),

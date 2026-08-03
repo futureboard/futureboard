@@ -12,6 +12,7 @@ use crate::components::plugin_picker::{
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::{is_project_routing_track, ClipType, TrackType};
+use crate::i18n::I18n;
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::{
@@ -864,17 +865,22 @@ impl StudioLayout {
         target: &ContextTarget,
         cx: &mut Context<Self>,
     ) -> Vec<ContextMenuEntry> {
+        let i18n = I18n::new(&self.settings.read(cx).current.general.language);
         match target {
             ContextTarget::TimelineEmpty => vec![
-                ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
-                ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
-                ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
+                ContextMenuEntry::item(i18n.tr("context.timeline.add-audio"), "track:add-audio"),
+                ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
+                ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
                 ContextMenuEntry::Separator,
-                menu_item_enabled("Paste", "edit:paste", !self.clip_clipboard.is_empty())
-                    .with_shortcut("Ctrl+V"),
+                menu_item_enabled(
+                    i18n.tr("context.paste"),
+                    "edit:paste",
+                    !self.clip_clipboard.is_empty(),
+                )
+                .with_shortcut("Ctrl+V"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Zoom In", "view:zoom-in"),
-                ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                ContextMenuEntry::item(i18n.tr("context.zoom-in"), "view:zoom-in"),
+                ContextMenuEntry::item(i18n.tr("context.zoom-out"), "view:zoom-out"),
             ],
             ContextTarget::TrackLane { .. } => {
                 let split_enabled = {
@@ -889,16 +895,24 @@ impl StudioLayout {
                     })
                 };
                 vec![
-                    menu_item_enabled("Paste", "edit:paste", !self.clip_clipboard.is_empty())
-                        .with_shortcut("Ctrl+V"),
-                    menu_item_enabled("Split at Playhead", "clip:split-at-playhead", split_enabled),
+                    menu_item_enabled(
+                        i18n.tr("context.paste"),
+                        "edit:paste",
+                        !self.clip_clipboard.is_empty(),
+                    )
+                    .with_shortcut("Ctrl+V"),
+                    menu_item_enabled(
+                        i18n.tr("context.clip.split-at-playhead"),
+                        "clip:split-at-playhead",
+                        split_enabled,
+                    ),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
-                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
-                    ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
+                    ContextMenuEntry::item(i18n.tr("context.timeline.add-audio"), "track:add-audio"),
+                    ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
+                    ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Zoom In", "view:zoom-in"),
-                    ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                    ContextMenuEntry::item(i18n.tr("context.zoom-in"), "view:zoom-in"),
+                    ContextMenuEntry::item(i18n.tr("context.zoom-out"), "view:zoom-out"),
                 ]
             }
             ContextTarget::Clip(clip_id) => {
@@ -945,12 +959,24 @@ impl StudioLayout {
                     ));
                     entries.push(ContextMenuEntry::Separator);
                 }
-                entries.push(menu_item_enabled("Rename", "clip:rename", exists));
+                entries.push(menu_item_enabled(
+                    i18n.tr("context.clip.rename"),
+                    "clip:rename",
+                    exists,
+                ));
                 entries.push(
-                    menu_item_enabled("Duplicate", "clip:duplicate", exists || selected_count > 0)
-                        .with_shortcut("Ctrl+D"),
+                    menu_item_enabled(
+                        i18n.tr("context.clip.duplicate"),
+                        "clip:duplicate",
+                        exists || selected_count > 0,
+                    )
+                    .with_shortcut("Ctrl+D"),
                 );
-                let erase_label = if is_audio { "Erase" } else { "Delete" };
+                let erase_label = if is_audio {
+                    "Erase".to_string()
+                } else {
+                    i18n.tr("context.clip.delete")
+                };
                 let erase_command = if is_audio {
                     "clip:erase"
                 } else {
@@ -963,23 +989,27 @@ impl StudioLayout {
                 ));
                 entries.push(ContextMenuEntry::Separator);
                 entries.push(menu_item_enabled(
-                    "Split at Playhead",
+                    i18n.tr("context.clip.split-at-playhead"),
                     "clip:split-at-playhead",
                     split_enabled,
                 ));
                 if is_audio {
                     entries.push(menu_item_enabled(
                         if exists {
-                            "Reveal in Browser"
+                            i18n.tr("context.clip.reveal-browser")
                         } else {
-                            "Clip unavailable"
+                            i18n.tr("context.clip.unavailable")
                         },
                         "browser:reveal",
                         reveal_enabled,
                     ));
                 }
                 if is_midi {
-                    entries.push(menu_item_enabled("Quantize", "midi:quantize", exists));
+                    entries.push(menu_item_enabled(
+                        i18n.tr("menu.midi-quantize"),
+                        "midi:quantize",
+                        exists,
+                    ));
                     // Applies to the notes selected in the MIDI editor.
                     entries.push(ContextMenuEntry::Separator);
                     entries.push(ContextMenuEntry::Header("Articulation".to_string()));
@@ -1008,9 +1038,17 @@ impl StudioLayout {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
                 let exists = track.is_some();
                 let entries = vec![
-                    menu_item_enabled("Rename Track", "track:rename", exists),
-                    menu_item_enabled("Duplicate Track", "track:duplicate", false),
-                    danger_menu_item_enabled("Delete Track", "track:delete", exists),
+                    menu_item_enabled(i18n.tr("context.track.rename"), "track:rename", exists),
+                    menu_item_enabled(
+                        i18n.tr("context.track.duplicate"),
+                        "track:duplicate",
+                        false,
+                    ),
+                    danger_menu_item_enabled(
+                        i18n.tr("context.track.delete"),
+                        "track:delete",
+                        exists,
+                    ),
                     ContextMenuEntry::Separator,
                     menu_item_enabled("Track Color", "track:color", exists),
                     menu_item_enabled("Track Settings", "track:settings", exists),
@@ -1023,9 +1061,9 @@ impl StudioLayout {
                     menu_item_enabled("Reset Track Height", "track:height-reset", exists),
                     menu_item_enabled("Reset All Track Heights", "track:height-reset-all", exists),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Add Audio Track", "track:add-audio"),
-                    ContextMenuEntry::item("Add MIDI Track", "track:add-midi"),
-                    ContextMenuEntry::item("Add Bus Track", "track:add-bus"),
+                    ContextMenuEntry::item(i18n.tr("context.timeline.add-audio"), "track:add-audio"),
+                    ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
+                    ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
                 ];
                 entries
             }
@@ -1034,12 +1072,12 @@ impl StudioLayout {
                 vec![
                     ContextMenuEntry::disabled_item(format!("Marker at {label}"), "noop"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Add Marker", "ruler:add-marker"),
+                    ContextMenuEntry::item(i18n.tr("menu.project-add_marker"), "ruler:add-marker"),
                     ContextMenuEntry::item("Add Tempo Marker", "ruler:add-tempo-marker"),
                     ContextMenuEntry::item("Add Time Signature Marker", "ruler:add-ts-marker"),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item("Zoom In", "view:zoom-in"),
-                    ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                    ContextMenuEntry::item(i18n.tr("context.zoom-in"), "view:zoom-in"),
+                    ContextMenuEntry::item(i18n.tr("context.zoom-out"), "view:zoom-out"),
                 ]
             }
             ContextTarget::SongTextMarker { event_id, beat } => {
@@ -1055,7 +1093,7 @@ impl StudioLayout {
                     ContextMenuEntry::item("Edit", "panel:show-lyric-editor"),
                     ContextMenuEntry::item("Move to Playhead", "song_text.move_to_playhead"),
                     danger_menu_item_enabled(
-                        "Delete",
+                        i18n.tr("context.clip.delete"),
                         "song_text.delete_selected",
                         state.song_text_event(event_id).is_some(),
                     ),
@@ -1066,8 +1104,8 @@ impl StudioLayout {
                 ContextMenuEntry::item("Select All Points", "automation:select-all-points"),
                 ContextMenuEntry::item("Clear Selection", "automation:clear-selection"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Zoom In", "view:zoom-in"),
-                ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
+                ContextMenuEntry::item(i18n.tr("context.zoom-in"), "view:zoom-in"),
+                ContextMenuEntry::item(i18n.tr("context.zoom-out"), "view:zoom-out"),
             ],
             ContextTarget::Browser(path_opt) => {
                 let mut entries = Vec::new();
@@ -1075,22 +1113,39 @@ impl StudioLayout {
                     if path.is_dir() {
                         let is_drive = path.parent().is_none();
                         if is_drive {
-                            entries.push(ContextMenuEntry::item("Open Folder", "browser:reveal"));
-                            entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
-                        } else {
-                            entries.push(ContextMenuEntry::item("Open", "browser:open"));
                             entries.push(ContextMenuEntry::item(
-                                "Reveal in Explorer/Finder",
+                                i18n.tr("context.browser.open-folder"),
                                 "browser:reveal",
                             ));
-                            entries.push(ContextMenuEntry::item("Refresh", "browser:refresh"));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.refresh"),
+                                "browser:refresh",
+                            ));
+                        } else {
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.open"),
+                                "browser:open",
+                            ));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.reveal"),
+                                "browser:reveal",
+                            ));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.refresh"),
+                                "browser:refresh",
+                            ));
                             entries.push(ContextMenuEntry::disabled_item(
-                                "New Folder",
+                                i18n.tr("context.browser.new-folder"),
                                 "browser:new-folder",
                             ));
-                            entries
-                                .push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
-                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                            entries.push(ContextMenuEntry::disabled_item(
+                                i18n.tr("context.browser.rename"),
+                                "browser:rename",
+                            ));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.copy-path"),
+                                "browser:copy-path",
+                            ));
                         }
                     } else {
                         let ext = path
@@ -1101,47 +1156,67 @@ impl StudioLayout {
 
                         if is_supported_audio_ext(&ext) {
                             entries.push(ContextMenuEntry::item(
-                                "Import to Timeline",
+                                i18n.tr("context.browser.import"),
                                 "browser:import",
                             ));
                             entries.push(ContextMenuEntry::item(
-                                "Reveal in Explorer/Finder",
+                                i18n.tr("context.browser.reveal"),
                                 "browser:reveal",
                             ));
-                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
-                            entries
-                                .push(ContextMenuEntry::disabled_item("Rename", "browser:rename"));
-                        } else if ext == "fbproj" {
-                            entries.push(ContextMenuEntry::item("Open Project", "project:open"));
                             entries.push(ContextMenuEntry::item(
-                                "Reveal in Explorer/Finder",
+                                i18n.tr("context.browser.copy-path"),
+                                "browser:copy-path",
+                            ));
+                            entries.push(ContextMenuEntry::disabled_item(
+                                i18n.tr("context.browser.rename"),
+                                "browser:rename",
+                            ));
+                        } else if ext == "fbproj" {
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.project.open"),
+                                "project:open",
+                            ));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.reveal"),
                                 "browser:reveal",
                             ));
-                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.copy-path"),
+                                "browser:copy-path",
+                            ));
                         } else {
                             entries.push(ContextMenuEntry::item(
-                                "Reveal in Explorer/Finder",
+                                i18n.tr("context.browser.reveal"),
                                 "browser:reveal",
                             ));
-                            entries.push(ContextMenuEntry::item("Copy Path", "browser:copy-path"));
+                            entries.push(ContextMenuEntry::item(
+                                i18n.tr("context.browser.copy-path"),
+                                "browser:copy-path",
+                            ));
                         }
                     }
                 } else {
-                    entries.push(ContextMenuEntry::disabled_item("No file selected", "noop"));
+                    entries.push(ContextMenuEntry::disabled_item(
+                        i18n.tr("context.browser.no-selection"),
+                        "noop",
+                    ));
                 }
                 entries
             }
             ContextTarget::Mixer(_) => vec![
                 ContextMenuEntry::item("Add Bus", "mixer:create-bus"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Reset Volume", "mixer:reset-volume"),
-                ContextMenuEntry::item("Reset Pan", "mixer:reset-pan"),
+                ContextMenuEntry::item(
+                    i18n.tr("context.mixer.reset-volume"),
+                    "mixer:reset-volume",
+                ),
+                ContextMenuEntry::item(i18n.tr("context.mixer.reset-pan"), "mixer:reset-pan"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item("Mute", "track:mute"),
-                ContextMenuEntry::item("Solo", "track:solo"),
+                ContextMenuEntry::item(i18n.tr("context.track.mute"), "track:mute"),
+                ContextMenuEntry::item(i18n.tr("context.track.solo"), "track:solo"),
                 ContextMenuEntry::Separator,
                 ContextMenuEntry::item("Track Color", "track:color"),
-                ContextMenuEntry::danger_item("Delete Track", "track:delete"),
+                ContextMenuEntry::danger_item(i18n.tr("context.track.delete"), "track:delete"),
             ],
             ContextTarget::SendPicker { track_id } => {
                 let state = &self.timeline.read(cx).state;
