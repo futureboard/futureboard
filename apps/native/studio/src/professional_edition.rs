@@ -1,57 +1,81 @@
-//! Bridge to the ignored Exclusive Edition implementation.
+//! Bridge to the ignored Professional Edition implementation.
 //!
 //! This tracked module deliberately uses `include!` instead of a `#[path]`
 //! module. Rustfmt resolves `#[path]` modules even when their feature is
 //! disabled, which made Community Edition checks require the private source
 //! tree. The include macros are expanded only when this feature-gated module is
-//! compiled by an Exclusive Edition build.
+//! compiled by an Professional Edition build.
 //!
-//! Compiling with `--features exclusive` grants nothing on its own. Providers
+//! Compiling with `--features professional` grants nothing on its own. Providers
 //! below install only after a signed license token verifies for this machine,
-//! so an Exclusive build on an unlicensed machine behaves like Community.
+//! so an Professional build on an unlicensed machine behaves like Community.
 
 mod license {
     include!(concat!(
         env!("OUT_DIR"),
-        "/futureboard-exclusive/license.rs"
+        "/futureboard-professional/license.rs"
     ));
 }
 
 mod license_activation_dialog {
     include!(concat!(
         env!("OUT_DIR"),
-        "/futureboard-exclusive/license_activation_dialog.rs"
+        "/futureboard-professional/license_activation_dialog.rs"
     ));
 }
 
 mod auth {
-    include!(concat!(env!("OUT_DIR"), "/futureboard-exclusive/auth.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/futureboard-professional/auth.rs"
+    ));
 }
 
 mod auth_dialog {
     include!(concat!(
         env!("OUT_DIR"),
-        "/futureboard-exclusive/auth_dialog.rs"
+        "/futureboard-professional/auth_dialog.rs"
     ));
 }
 
 mod eula {
-    include!(concat!(env!("OUT_DIR"), "/futureboard-exclusive/eula.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/futureboard-professional/eula.rs"
+    ));
 }
 
 mod eula_dialog {
     include!(concat!(
         env!("OUT_DIR"),
-        "/futureboard-exclusive/eula_dialog.rs"
+        "/futureboard-professional/eula_dialog.rs"
     ));
 }
 
 #[cfg(target_os = "windows")]
 mod asio {
-    include!(concat!(env!("OUT_DIR"), "/futureboard-exclusive/asio.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/futureboard-professional/asio.rs"
+    ));
 }
 
 pub use license_activation_dialog::{configured_license_activator, open_license_activation_window};
+
+/// Open license activation over the given owner window.
+///
+/// One entry point for every surface that offers it — the Welcome footer and the
+/// About panel — so the dialog is always constructed with the same activator and
+/// the same failure handling.
+pub fn open_license_activation(
+    owner_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    cx: &mut gpui::App,
+) {
+    let activation = configured_license_activator(env!("CARGO_PKG_VERSION"));
+    if let Err(error) = open_license_activation_window(owner_bounds, activation, cx) {
+        eprintln!("[LicenseActivation] failed to open dialog: {error}");
+    }
+}
 
 use sphere_ui_components::account::{AccountAction, AccountSnapshot};
 
@@ -80,7 +104,7 @@ pub fn show_eula_if_needed(cx: &mut gpui::App) {
     }
 }
 
-/// Install the Exclusive Edition runtime providers that a verified license
+/// Install the Professional Edition runtime providers that a verified license
 /// grants. Safe to call more than once: provider registration is process-wide,
 /// while the cached live entitlement is refreshed on every call so activation,
 /// renewal, expiry, or entitlement changes take effect without a restart.
@@ -106,7 +130,7 @@ pub fn install_licensed_providers() -> Result<(), String> {
     Ok(())
 }
 
-/// Install Exclusive Edition runtime providers before the application starts.
+/// Install Professional Edition runtime providers before the application starts.
 ///
 /// Providers install from the stored token with no network involved, so this
 /// stays off the critical path. Renewal is kicked onto a background thread: a
@@ -117,6 +141,14 @@ pub fn install_licensed_providers() -> Result<(), String> {
 /// re-check with the service, and installs providers again on success.
 pub fn install() -> Result<(), String> {
     sphere_ui_components::edition::set_edition_provider(std::sync::Arc::new(edition_info));
+    // Lets the About panel open activation without the shared crate knowing what
+    // activation is. A machine already inside a project can then enter a key
+    // without closing it.
+    sphere_ui_components::edition::set_license_action_handler(std::sync::Arc::new(
+        |window: &mut gpui::Window, cx: &mut gpui::App| {
+            open_license_activation(Some(window.bounds()), cx);
+        },
+    ));
 
     // Account/auth is available only on a Supabase-configured build. When it is,
     // load any stored session (refreshing it in the background) and register the
@@ -131,6 +163,10 @@ pub fn install() -> Result<(), String> {
 
     install_licensed_providers()?;
     license::spawn_renewal_if_due();
+    // A signed-in account that owns a license licenses this machine on its own,
+    // with no key and no dialog. Background, like renewal: licensing never sits
+    // on the startup path.
+    license::spawn_account_activation_if_needed();
     Ok(())
 }
 
@@ -174,20 +210,14 @@ fn handle_account_action(action: AccountAction, window: &mut gpui::Window, cx: &
 /// and re-verifies the stored token on each call, so it always reflects current
 /// state (post-activation, post-renewal) with no explicit refresh wiring.
 fn edition_info() -> sphere_ui_components::edition::EditionInfo {
-    use sphere_ui_components::edition::{EditionInfo, LicenseDisplay, LicenseDisplayState};
+    use sphere_ui_components::edition::EditionInfo;
 
-    let license = license::stored_license_status().map(|status| LicenseDisplay {
-        state: match status.state {
-            license::LicenseState::Active => LicenseDisplayState::Active,
-            license::LicenseState::Expired => LicenseDisplayState::Expired,
-        },
-        licensee: status.licensee,
-        entitlements: status.entitlements,
-        expires_at: status.expires_at,
-    });
+    let license = license::stored_license_status()
+        .as_ref()
+        .map(license::LicenseStatus::to_display);
 
     EditionInfo {
-        edition: "Exclusive",
+        edition: "Professional",
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         license,
     }
@@ -198,7 +228,7 @@ mod tests {
     use super::license;
 
     /// ASIO registration must track the verified license exactly — never the
-    /// `exclusive` feature, which only decides whether the code is compiled in.
+    /// `professional` feature, which only decides whether the code is compiled in.
     ///
     /// Asserting both directions against the same machine keeps this honest on
     /// a developer box either way: unlicensed, ASIO must stay off; licensed, it
