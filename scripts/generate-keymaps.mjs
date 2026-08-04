@@ -1,7 +1,7 @@
 /**
  * Generate keyboard shortcut profiles from native-menu.json.
  *
- * Output: packages/keymaps/{default,ableton,cubase,fl_studio,studio_one}.json
+ * Output: packages/keymaps/{default,ableton,cubase,fl_studio,pro_tools,studio_one}.json
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -142,6 +142,52 @@ const DAW_OVERRIDES = {
     "view:reset-zoom": null,
     "tools:command-palette": null,
   },
+  pro_tools: {
+    // Pro Tools drives transport and edit modes from the numeric keypad, which
+    // this keymap format cannot express (a `+`-separated accelerator cannot
+    // carry a `Numpad+` base key). Only the bindings that survive on a laptop
+    // keyboard are mapped here; the rest keep the Futureboard default.
+    "transport:record": "F12",
+    "transport:go-to-start": "Return",
+    "transport:toggle-loop": "Ctrl+Shift+L",
+    // "Separate Clip at Selection" takes Ctrl+E from export-arrangement.
+    "clip:split-at-playhead": "Ctrl+E",
+    "file:export-arrangement": null,
+    "edit:duplicate": "Ctrl+D",
+    "edit:deselect-all": "Ctrl+Shift+A",
+    // Edit tools row: F7 Selector, F8 Grabber, F10 Pencil. Pro Tools has no
+    // cut/glue/automation tool, so those keep no binding in this profile.
+    "tools:select-time": "F7",
+    "tools:select-pointer": "F8",
+    "tools:select-pen": "F10",
+    "tools:select-cut": null,
+    "tools:select-glue": null,
+    "tools:select-automation": null,
+    // Edit modes F1–F4; Grid mode is the snap equivalent.
+    "timeline:toggle-snap": "F4",
+    // "New Tracks…" takes Ctrl+Shift+N from Futureboard's new-from-template.
+    "track:show-add-dialog": "Ctrl+Shift+N",
+    "project:new-from-template": null,
+    "track:add-midi": null,
+    "file:import-audio": "Ctrl+Shift+I",
+    // "Bounce to Disk".
+    "file:export-audio": "Ctrl+Alt+B",
+    "song_text.add_both_at_playhead": null,
+    // Event Operations ▸ Quantize.
+    "midi:quantize": "Alt+0",
+    "view:zoom-in": "Ctrl+]",
+    "view:zoom-out": "Ctrl+[",
+    "view:reset-zoom": null,
+    // Ctrl+= toggles the Edit and Mix windows.
+    "panel:toggle-mixer": "Ctrl+=",
+    // Workspace browser.
+    "panel:toggle-browser": "Alt+;",
+    "marker:add": null,
+    "audio:bounce-in-place": null,
+    "audio:render-selection": null,
+    "tools:command-palette": null,
+    "tools:quick-search": null,
+  },
   studio_one: {
     "transport:record": "Numpad*",
     "transport:stop": "Numpad0",
@@ -204,6 +250,12 @@ const PROFILES = [
     label: "FL Studio",
     description: "Shortcuts aligned with FL Studio defaults where commands overlap.",
     overrides: DAW_OVERRIDES.fl_studio,
+  },
+  {
+    id: "pro_tools",
+    label: "Pro Tools",
+    description: "Shortcuts aligned with Avid Pro Tools defaults where commands overlap.",
+    overrides: DAW_OVERRIDES.pro_tools,
   },
   {
     id: "studio_one",

@@ -481,4 +481,40 @@ mod default_binding_tests {
             Some("clip:split-at-playhead")
         );
     }
+
+    /// Every id offered in the profile picker must resolve to a shipped keymap.
+    /// A descriptor without a matching `builtin_profile_json` arm leaves the
+    /// picker offering a profile that cannot be selected.
+    #[test]
+    fn every_builtin_descriptor_has_a_profile() {
+        for descriptor in PROFILE_DESCRIPTORS.iter().filter(|p| p.builtin) {
+            super::super::storage::load_builtin_profile(descriptor.id).unwrap_or_else(|error| {
+                panic!("profile {} failed to load: {error}", descriptor.id)
+            });
+        }
+    }
+
+    /// The Pro Tools profile must carry real Pro Tools bindings rather than a
+    /// copy of the defaults — its whole point is muscle memory.
+    #[test]
+    fn pro_tools_profile_uses_pro_tools_bindings() {
+        let mut manager = KeymapManager::new(std::env::temp_dir());
+        manager.set_active_profile("pro-tools").expect("pro-tools");
+        let reverse = manager.dispatch_reverse();
+        assert_eq!(
+            reverse.get("f12").map(String::as_str),
+            Some("transport:record"),
+            "F12 must trigger record on the Pro Tools profile"
+        );
+        assert_eq!(
+            reverse.get("ctrl+e").map(String::as_str),
+            Some("clip:split-at-playhead"),
+            "Ctrl+E is Separate Clip at Selection"
+        );
+        assert_eq!(
+            reverse.get("f8").map(String::as_str),
+            Some("tools:select-pointer"),
+            "F8 is the Grabber"
+        );
+    }
 }
