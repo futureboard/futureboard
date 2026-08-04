@@ -81,6 +81,7 @@ pub mod title_bar;
 pub mod video_player_window;
 pub mod virtual_keyboard;
 
+pub use about_window::{open_about_window, AboutWindow};
 pub use add_track_dialog::{
     open_add_track_window, AddTrackDialogCallbacks, AddTrackDialogState, AddTrackKind,
     AddTrackWindow,
@@ -128,7 +129,6 @@ pub use inspector::{
     InspectorSelectOption,
 };
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
-pub use about_window::{open_about_window, AboutWindow};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;
 pub use mdi::{

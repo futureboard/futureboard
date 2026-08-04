@@ -470,15 +470,18 @@ fn build_settings_content(
                         },
                     )
                 }))
-                .child(settings_daw_row(i18n.tr("settings.field.update-channel"), {
-                    hardware_select(
-                        HardwareCombo::UpdateChannel,
-                        "settings-general-update-channel",
-                        schema.general.update_channel.label(),
-                        callbacks.open_hardware_combo,
-                        callbacks.on_toggle_hardware_combo.clone(),
-                    )
-                }))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.update-channel"),
+                    {
+                        hardware_select(
+                            HardwareCombo::UpdateChannel,
+                            "settings-general-update-channel",
+                            schema.general.update_channel.label(),
+                            callbacks.open_hardware_combo,
+                            callbacks.on_toggle_hardware_combo.clone(),
+                        )
+                    },
+                ))
                 .into_any_element(),
         );
     }

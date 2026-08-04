@@ -31,7 +31,6 @@ use gpui::{
 use std::collections::HashSet;
 
 use crate::assets;
-use crate::i18n::I18n;
 use crate::components::fader::{db_scale_column, db_value_pill, fader_with_drag_callbacks};
 use crate::components::knob::knob_bipolar;
 use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
@@ -47,6 +46,7 @@ use crate::components::timeline::timeline_state::{
     TrackOutputRouting, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
+use crate::i18n::I18n;
 use crate::theme::Colors;
 
 mod callbacks;
@@ -868,7 +868,11 @@ fn inserts_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header(i18n.tr("mixer.section.inserts"), track.color, header_plus))
+        .child(section_header(
+            i18n.tr("mixer.section.inserts"),
+            track.color,
+            header_plus,
+        ))
         .child(
             div()
                 .id(gpui::SharedString::from(format!(
@@ -928,7 +932,11 @@ fn master_inserts_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header(i18n.tr("mixer.section.inserts"), accent, header_plus))
+        .child(section_header(
+            i18n.tr("mixer.section.inserts"),
+            accent,
+            header_plus,
+        ))
         .child(
             div()
                 .id("insert-slot-scroll-master")
@@ -1184,7 +1192,11 @@ fn sends_section(
         .overflow_hidden()
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(section_header(i18n.tr("mixer.section.sends"), track.color, None))
+        .child(section_header(
+            i18n.tr("mixer.section.sends"),
+            track.color,
+            None,
+        ))
         .child(
             div()
                 .id(gpui::SharedString::from(format!(
@@ -1944,11 +1956,7 @@ pub(crate) fn master_strip(
                 ),
         )
         .child(master_inserts_section(
-            accent,
-            master,
-            callbacks,
-            insert_h,
-            i18n,
+            accent, master, callbacks, insert_h, i18n,
         ))
         // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
         .child(

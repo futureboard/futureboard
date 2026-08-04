@@ -6,8 +6,9 @@
 
 use gpui::{
     div, img, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, StyledImage, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    IntoElement, KeyDownEvent, ObjectFit, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::controls::{fb_button, FbButtonKind};

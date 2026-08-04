@@ -18,7 +18,6 @@ use SpherePluginHost::registry::{
 };
 
 use crate::assets;
-use crate::i18n::I18n;
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::plugin_format_badge::plugin_format_badge;
 use crate::components::progress_dialog::{
@@ -31,6 +30,7 @@ use crate::components::text_input::{
     TextInputState,
 };
 use crate::components::title_bar::external_window_titlebar;
+use crate::i18n::I18n;
 use crate::theme::{self, Colors};
 
 pub const PLUGIN_MANAGER_WINDOW_WIDTH: f32 = 980.0;
@@ -161,10 +161,7 @@ impl PluginManagerDialogState {
         self.status_text = if count == 0 {
             i18n.tr("plugin-manager.list.empty")
         } else {
-            i18n.tr_vars(
-                "plugin-manager.scan.found",
-                &[("count", count.to_string())],
-            )
+            i18n.tr_vars("plugin-manager.scan.found", &[("count", count.to_string())])
         };
     }
 
@@ -228,10 +225,7 @@ impl PluginManagerDialogState {
                 ],
             )
         } else {
-            i18n.tr_vars(
-                "plugin-manager.scan.found",
-                &[("count", count.to_string())],
-            )
+            i18n.tr_vars("plugin-manager.scan.found", &[("count", count.to_string())])
         };
 
         if let Some(id) = &self.selected_id {
@@ -724,7 +718,10 @@ fn details_panel(
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(detail_row(i18n.tr("plugin-manager.field.name"), &plugin.name))
+                .child(detail_row(
+                    i18n.tr("plugin-manager.field.name"),
+                    &plugin.name,
+                ))
                 .child(detail_row(
                     i18n.tr("plugin-manager.field.vendor"),
                     &plugin.vendor,
@@ -743,7 +740,10 @@ fn details_panel(
                     i18n.tr("plugin-manager.field.format"),
                     plugin.format.label(),
                 ))
-                .child(detail_row(i18n.tr("plugin-manager.field.kind"), &kind_label))
+                .child(detail_row(
+                    i18n.tr("plugin-manager.field.kind"),
+                    &kind_label,
+                ))
                 .child(detail_row(
                     i18n.tr("plugin-manager.field.path"),
                     &plugin.path.display().to_string(),
@@ -1646,8 +1646,7 @@ crate::impl_single_input_window_ime!(PluginManagerWindow, search_input);
 impl Render for PluginManagerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let i18n = I18n::from_app(cx);
-        self.search_input.placeholder =
-            Some(i18n.tr("search.plugins-manager.placeholder"));
+        self.search_input.placeholder = Some(i18n.tr("search.plugins-manager.placeholder"));
 
         if !self.initial_cache_loaded {
             self.initial_cache_loaded = true;
@@ -1824,10 +1823,8 @@ impl Render for PluginManagerWindow {
                                         .iter()
                                         .filter(|p| p.status == PluginStatus::PresetReady)
                                         .count() as u32;
-                                this.state.status_text = i18n.tr_vars(
-                                    "plugin-manager.register.success",
-                                    &[("name", name)],
-                                );
+                                this.state.status_text = i18n
+                                    .tr_vars("plugin-manager.register.success", &[("name", name)]);
                             }
                             Err(error) => {
                                 this.state.status_text = i18n.tr_vars(

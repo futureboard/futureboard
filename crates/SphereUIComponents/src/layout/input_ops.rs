@@ -907,7 +907,10 @@ impl StudioLayout {
                         split_enabled,
                     ),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item(i18n.tr("context.timeline.add-audio"), "track:add-audio"),
+                    ContextMenuEntry::item(
+                        i18n.tr("context.timeline.add-audio"),
+                        "track:add-audio",
+                    ),
                     ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
                     ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
                     ContextMenuEntry::Separator,
@@ -1039,11 +1042,7 @@ impl StudioLayout {
                 let exists = track.is_some();
                 let entries = vec![
                     menu_item_enabled(i18n.tr("context.track.rename"), "track:rename", exists),
-                    menu_item_enabled(
-                        i18n.tr("context.track.duplicate"),
-                        "track:duplicate",
-                        false,
-                    ),
+                    menu_item_enabled(i18n.tr("context.track.duplicate"), "track:duplicate", false),
                     danger_menu_item_enabled(
                         i18n.tr("context.track.delete"),
                         "track:delete",
@@ -1061,7 +1060,10 @@ impl StudioLayout {
                     menu_item_enabled("Reset Track Height", "track:height-reset", exists),
                     menu_item_enabled("Reset All Track Heights", "track:height-reset-all", exists),
                     ContextMenuEntry::Separator,
-                    ContextMenuEntry::item(i18n.tr("context.timeline.add-audio"), "track:add-audio"),
+                    ContextMenuEntry::item(
+                        i18n.tr("context.timeline.add-audio"),
+                        "track:add-audio",
+                    ),
                     ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
                     ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
                 ];
@@ -1206,10 +1208,7 @@ impl StudioLayout {
             ContextTarget::Mixer(_) => vec![
                 ContextMenuEntry::item("Add Bus", "mixer:create-bus"),
                 ContextMenuEntry::Separator,
-                ContextMenuEntry::item(
-                    i18n.tr("context.mixer.reset-volume"),
-                    "mixer:reset-volume",
-                ),
+                ContextMenuEntry::item(i18n.tr("context.mixer.reset-volume"), "mixer:reset-volume"),
                 ContextMenuEntry::item(i18n.tr("context.mixer.reset-pan"), "mixer:reset-pan"),
                 ContextMenuEntry::Separator,
                 ContextMenuEntry::item(i18n.tr("context.track.mute"), "track:mute"),

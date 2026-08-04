@@ -57,7 +57,11 @@ pub fn menu_bar(
     }
 }
 
-fn menu_bar_full(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb, i18n: I18n) -> impl IntoElement {
+fn menu_bar_full(
+    open_menu_id: Option<&str>,
+    on_open_menu: MenuOpenCb,
+    i18n: I18n,
+) -> impl IntoElement {
     let manifest = MenuManifest::load();
     let open_id_owned = open_menu_id.map(|s| s.to_string());
     let chrome_left: f32 = PlatformChromePolicy::current()

@@ -158,6 +158,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          # `target` is restored from the build cache, so installers from an
+          # earlier run survive here. They break the rename below and would be
+          # picked up by the `target/installer/*.exe` upload glob.
+          if (Test-Path target/installer) { Remove-Item -Recurse -Force target/installer }
           ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}" -SourceDir $env:FUTUREBOARD_PACKAGE_DIR
           Move-Item target/installer/FutureboardStudioSetup.exe "target/installer/Futureboard.Studio-${{ needs.version.outputs.app-version }}-windows-x86_64-Setup.exe"
 

@@ -20,8 +20,7 @@ impl Render for StudioLayout {
 
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
         let i18n = crate::i18n::I18n::from_app(cx);
-        self.browser_search_input.placeholder =
-            Some(i18n.tr("search.browser.placeholder"));
+        self.browser_search_input.placeholder = Some(i18n.tr("search.browser.placeholder"));
         self.project_switcher_search_input.placeholder =
             Some(i18n.tr("search.projects.placeholder"));
         // Frame pacing tick. See FrameDiagnostics docs — only counts

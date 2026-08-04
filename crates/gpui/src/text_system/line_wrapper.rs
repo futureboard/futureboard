@@ -150,9 +150,9 @@ impl LineWrapper {
         // ignored. That made localized text truncate with an ellipsis even
         // though it fit. Measure the actually-shaped line first and bail out of
         // truncation entirely when it fits within the target width.
-        let shaped_width =
-            self.text_system
-                .layout_str_width(self.font_id, self.font_size, line);
+        let shaped_width = self
+            .text_system
+            .layout_str_width(self.font_id, self.font_size, line);
         if shaped_width <= truncate_width {
             return None;
         }

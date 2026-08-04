@@ -183,7 +183,9 @@ fn panel(
                 .id("project-switcher-scroll")
                 .overflow_y_scroll()
                 .p(px(4.0))
-                .child(section_label(i18n.tr("project-switcher.section.this-window")))
+                .child(section_label(
+                    i18n.tr("project-switcher.section.this-window"),
+                ))
                 .child(project_row(
                     0,
                     &state.current_project,

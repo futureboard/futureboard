@@ -901,18 +901,14 @@ fn center_actions(
                 .mt(px(2.0))
                 .max_w(px(620.0))
                 .w_full()
-                .child(continue_row(
-                    continue_selected,
-                    i18n,
-                    move |window, cx| {
-                        let _ = target.update(cx, |this, cx| {
-                            this.selected = Some(WelcomeSelection::Continue);
-                            this.active_nav = StartupNav::Welcome;
-                            cx.notify();
-                        });
-                        on_continue(WelcomeAction::OpenEmptyWorkspace, window, cx);
-                    },
-                )),
+                .child(continue_row(continue_selected, i18n, move |window, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.selected = Some(WelcomeSelection::Continue);
+                        this.active_nav = StartupNav::Welcome;
+                        cx.notify();
+                    });
+                    on_continue(WelcomeAction::OpenEmptyWorkspace, window, cx);
+                })),
         )
         .into_any_element()
 }

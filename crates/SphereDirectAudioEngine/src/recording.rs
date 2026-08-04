@@ -442,7 +442,7 @@ fn reset_failed_own_stream_start(shared: &crate::engine::SharedState) {
 ///   1. monitor       → `shared.input_ring` (read by the output render callback)
 ///   2. record        → `tx` channel → disk-writer worker thread
 ///   3. preview        → min/max/rms bins → `shared.preview_ring` (drained by UI)
-///   3b. per-track preview → one ring per armed track → `shared.preview_rings`
+///      - per-track preview → one ring per armed track → `shared.preview_rings`
 ///   4. meters/diag    → raw input peak + lightweight counters
 ///
 /// Realtime-safe: the record path uses a bounded preallocated block pool and

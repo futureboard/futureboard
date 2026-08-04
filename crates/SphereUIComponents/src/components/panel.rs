@@ -20,7 +20,6 @@ use gpui::{
 
 use crate::assets;
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
-use crate::i18n::I18n;
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
 };
@@ -41,6 +40,7 @@ use crate::components::timeline::timeline_state::{
     StretchMode, TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
     TrackState, TrackType,
 };
+use crate::i18n::I18n;
 use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
 use crate::theme::Colors;
 

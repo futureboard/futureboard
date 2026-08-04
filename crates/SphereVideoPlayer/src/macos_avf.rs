@@ -16,6 +16,7 @@
 
 use std::path::Path;
 
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2_av_foundation::{AVAssetImageGenerator, AVMediaTypeVideo, AVURLAsset};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};

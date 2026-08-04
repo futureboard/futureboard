@@ -5,8 +5,8 @@
 //! directly.
 
 use crate::{
-    coalesce_detected_midi_devices, decode_midi_bytes, stable_id, stable_id_ordinal,
     DetectedMidiDevice, HardwareMidiInputMessage, MidiDeviceDirection,
+    coalesce_detected_midi_devices, decode_midi_bytes, stable_id, stable_id_ordinal,
 };
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int, c_ulong};
@@ -63,9 +63,7 @@ unsafe extern "C" {
     fn MIDIInputPortCreate(
         client: MIDIClientRef,
         port_name: CFStringRef,
-        read_proc: Option<
-            unsafe extern "C" fn(*const MIDIPacketList, *mut c_void, *mut c_void),
-        >,
+        read_proc: Option<unsafe extern "C" fn(*const MIDIPacketList, *mut c_void, *mut c_void)>,
         ref_con: *mut c_void,
         out_port: *mut MIDIPortRef,
     ) -> OSStatus;
@@ -156,8 +154,7 @@ fn endpoint_name(endpoint: MIDIEndpointRef) -> Option<String> {
         return None;
     }
     let mut name_ref: CFStringRef = ptr::null();
-    let status =
-        unsafe { MIDIObjectGetStringProperty(endpoint, prop, &mut name_ref) };
+    let status = unsafe { MIDIObjectGetStringProperty(endpoint, prop, &mut name_ref) };
     unsafe { CFRelease(prop) };
     if status != 0 || name_ref.is_null() {
         return None;
@@ -232,9 +229,8 @@ unsafe extern "C" fn midi_read_proc(
                 });
             }
             // Advance to next packet (variable-length: header + data[length], 4-byte aligned).
-            let packet_bytes = std::mem::size_of::<MIDITimeStamp>()
-                + std::mem::size_of::<u16>()
-                + len;
+            let packet_bytes =
+                std::mem::size_of::<MIDITimeStamp>() + std::mem::size_of::<u16>() + len;
             let aligned = (packet_bytes + 3) & !3;
             packet = (packet as *const u8).add(aligned) as *const MIDIPacket;
         }
@@ -328,9 +324,8 @@ pub fn open_inputs(
         if client_name.is_null() {
             continue;
         }
-        let status = unsafe {
-            MIDIClientCreate(client_name, ptr::null(), ptr::null_mut(), &mut client)
-        };
+        let status =
+            unsafe { MIDIClientCreate(client_name, ptr::null(), ptr::null_mut(), &mut client) };
         unsafe { CFRelease(client_name) };
         if status != 0 || client == 0 {
             eprintln!("[MIDI input] MIDIClientCreate failed for '{device_name}': {status}");
@@ -426,11 +421,7 @@ impl MacMidiOutputConnection {
                 return Err(-1);
             }
             let status = MIDISend(self.port, self.dest, pktlist);
-            if status != 0 {
-                Err(status)
-            } else {
-                Ok(())
-            }
+            if status != 0 { Err(status) } else { Ok(()) }
         }
     }
 }
