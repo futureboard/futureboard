@@ -35,6 +35,17 @@ pub enum ClipType {
         /// next event). Per-note articulations live on [`MidiNoteState`].
         articulations: Vec<MidiArticulationEvent>,
     },
+    /// A reference video placed on the Video track. Carries no samples and no
+    /// notes — the clip only says *which* file is on screen and, through
+    /// `start_beat`/`offset_beats`, *where in it* the playhead is. Frames are
+    /// decoded on demand by the Video Player window, never stored here.
+    Video {
+        /// Project asset id, shared with the video import bookkeeping.
+        file_id: String,
+        /// Absolute path to the source file. `None` while the clip is a
+        /// placeholder whose media has not been resolved yet.
+        source_path: Option<String>,
+    },
 }
 
 /// Background import/decode state for a real audio file (waveform + engine).
@@ -326,7 +337,7 @@ impl TimelineState {
                             .fold(0.0_f32, f32::max);
                         MIN_MIDI_CLIP_BEATS.max(last_note_end)
                     }
-                    ClipType::Audio { .. } => 0.25,
+                    ClipType::Audio { .. } | ClipType::Video { .. } => 0.25,
                 };
                 let duration_beats = duration_beats.max(min_len);
                 if (clip.duration_beats - duration_beats).abs() > 0.0001 {
@@ -357,7 +368,7 @@ impl TimelineState {
                             .fold(0.0_f32, f32::max);
                         MIN_MIDI_CLIP_BEATS.max(last_note_end)
                     }
-                    ClipType::Audio { .. } => 0.25,
+                    ClipType::Audio { .. } | ClipType::Video { .. } => 0.25,
                 };
                 let duration_beats = duration_beats.max(min_len);
                 let before = (
@@ -541,6 +552,15 @@ impl TimelineState {
                     .iter()
                     .map(|event| MidiArticulationEvent::new(event.beat, event.articulation))
                     .collect(),
+            },
+            // A duplicated video clip references the same media; only its
+            // placement differs.
+            ClipType::Video {
+                file_id,
+                source_path,
+            } => ClipType::Video {
+                file_id: file_id.clone(),
+                source_path: source_path.clone(),
             },
         };
         cloned

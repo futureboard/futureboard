@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-08-04T04:10:05.076Z",
+  "generatedAt": "2026-08-04T05:26:13.831Z",
   "menus": [
     {
       "id": "file",
@@ -1102,6 +1102,21 @@
           "checked": false,
           "danger": false,
           "description": null,
+          "children": []
+        },
+        {
+          "id": "window.video_player",
+          "kind": "normal",
+          "label": "Video Player",
+          "icon": "film",
+          "shortcut": null,
+          "command": "window:video-player",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Preview the Video track's reference video against the playhead",
           "children": []
         },
         {

@@ -1,0 +1,54 @@
+[package]
+name = "sphere-video-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sphere_video_player"
+path = "src/lib.rs"
+
+# Video preview/reference decoding for the arrangement Video Track.
+#
+# No FFmpeg / libav is bundled or linked on any platform. Decoding is delegated
+# to the media framework the operating system already ships:
+#
+#   Windows — Media Foundation Source Reader (`IMFSourceReader`) with the
+#             built-in Video Processor MFT converting to RGB32/BGRA.
+#   macOS   — AVFoundation `AVAssetImageGenerator` + Core Graphics.
+#   Linux   — not implemented yet. VAAPI (`libva`) is the intended backend;
+#             see the crate docs for why that is a larger job than the other
+#             two and what it still needs.
+#
+# A build with no backend reports `VideoError::UnsupportedPlatform` and the UI
+# disables the player rather than faking a preview.
+[dependencies]
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSArray", "NSError"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-core-media = { version = "0.3", features = ["CMTime"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+objc2-av-foundation = { version = "0.3", features = [
+    "AVAsset",
+    "AVAssetImageGenerator",
+    "AVAssetTrack",
+    "AVMediaFormat",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }

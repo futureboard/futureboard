@@ -368,7 +368,11 @@ impl Render for Timeline {
                         }
                     }
                     Some(
-                        TrackType::Bus | TrackType::Return | TrackType::Group | TrackType::Master,
+                        TrackType::Bus
+                        | TrackType::Return
+                        | TrackType::Group
+                        | TrackType::Master
+                        | TrackType::Video,
                     )
                     | None => {}
                 }
@@ -687,6 +691,11 @@ impl Render for Timeline {
                             .tracks
                             .iter()
                             .any(|track| track.track_type == TrackType::Master),
+                        has_video_track: this
+                            .state
+                            .tracks
+                            .iter()
+                            .any(|track| track.track_type == TrackType::Video),
                     },
                     window,
                     cx,
@@ -1334,7 +1343,8 @@ impl Render for Timeline {
             for path in paths.paths().iter() {
                 let imported =
                     this.import_midi_path_at_last_drag(path, force_new_track, _window, cx)
-                        || this.import_audio_path_at_last_drag(path, force_new_track, _window, cx);
+                        || this.import_audio_path_at_last_drag(path, force_new_track, _window, cx)
+                        || this.import_video_path_at_last_drag(path, force_new_track, _window, cx);
                 any_imported |= imported;
                 force_new_track |= imported;
             }
@@ -1363,6 +1373,7 @@ impl Render for Timeline {
             let had_hint = this.file_drop_hint.take().is_some();
             let imported = this.import_midi_path_at_last_drag(&item.path, false, window, cx)
                 || this.import_audio_path_at_last_drag(&item.path, false, window, cx)
+                || this.import_video_path_at_last_drag(&item.path, false, window, cx)
                 || this.drop_plugin_preset_at_last_drag(&item.path, window, cx);
             if imported {
                 this.last_drag_position = None;
@@ -2445,6 +2456,12 @@ pub(crate) fn format_arrangement_target_debug(target: &ArrangementHitTarget) -> 
             clip_id,
             timeline_beat,
             local_beat,
+        }
+        | ArrangementHitTarget::VideoClip {
+            track_id,
+            clip_id,
+            timeline_beat,
+            local_beat,
         } => format!(
             "track_id={track_id}\nclip_id={clip_id}\ntimeline_beat={timeline_beat:.3}\nlocal_beat={local_beat:.3}"
         ),
@@ -2468,6 +2485,11 @@ fn file_drop_hint_label(paths: &[std::path::PathBuf]) -> &'static str {
         "Drop Audio to import"
     } else if paths.iter().any(|path| is_supported_midi_ext(path)) {
         "Drop MIDI to import"
+    } else if paths
+        .iter()
+        .any(|path| sphere_video_player::is_supported_video_path(path))
+    {
+        "Drop Video to import"
     } else {
         "Drop files to import"
     }
@@ -2598,6 +2620,7 @@ fn clip_clone_hint_overlay(
     let kind = match &source_clip.clip_type {
         ClipType::Audio { .. } => "Audio",
         ClipType::Midi { .. } => "MIDI",
+        ClipType::Video { .. } => "Video",
     };
     let label = format!(
         "Copy {kind} to {} · {}",

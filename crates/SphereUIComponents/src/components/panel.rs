@@ -294,6 +294,7 @@ fn track_type_badge(t: TrackType) -> &'static str {
         TrackType::Return => "Return",
         TrackType::Group => "Group",
         TrackType::Master => "Master",
+        TrackType::Video => "Video Track",
     }
 }
 
@@ -309,6 +310,7 @@ fn track_type_color(t: TrackType) -> gpui::Rgba {
         TrackType::Return => Colors::track_return(),
         TrackType::Group => Colors::accent_primary(),
         TrackType::Master => Colors::track_master(),
+        TrackType::Video => Colors::accent_purple(),
     }
 }
 
@@ -1416,6 +1418,8 @@ fn routing_section(
         TrackType::Bus | TrackType::Return | TrackType::Group | TrackType::Master => {
             section = section.child(fb_form_row("Output", output_selector(track, callbacks)));
         }
+        // A Video track has no audio path, so it exposes no routing controls.
+        TrackType::Video => {}
     }
 
     section
@@ -3411,6 +3415,7 @@ pub fn clip_type_label(clip_type: &ClipType) -> &'static str {
     match clip_type {
         ClipType::Audio { .. } => "Audio",
         ClipType::Midi { .. } => "MIDI",
+        ClipType::Video { .. } => "Video",
     }
 }
 

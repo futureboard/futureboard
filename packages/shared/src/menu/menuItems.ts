@@ -598,6 +598,14 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "floatingwindow:mixer",
       },
       {
+        id: "window.video_player",
+        label: "Video Player",
+        icon: "film",
+        action: "window:video-player",
+        description:
+          "Preview the Video track's reference video against the playhead",
+      },
+      {
         type: "separator",
         id: "window.sep.extensions",
       },

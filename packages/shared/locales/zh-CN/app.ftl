@@ -26,6 +26,7 @@ add-track.description.master = 最终输出和主总线
 add-track.description.midi = 用音符编排乐器
 add-track.description.plugin = 托管虚拟乐器与效果
 add-track.description.return = 接收来自其他轨道的发送
+add-track.description.video = 用于配乐的参考视频
 add-track.detail.audio = WAV - MP3 - AIFF
 add-track.detail.bus = 发送 - 编组
 add-track.detail.group = 子混音 - 分轨
@@ -49,6 +50,7 @@ add-track.kind.master = 主轨道
 add-track.kind.midi = MIDI 轨道
 add-track.kind.plugin = 插件轨道
 add-track.kind.return = 返送轨道
+add-track.kind.video = 视频轨道
 add-track.tab.audio = 音频
 add-track.tab.automation = 自动化
 add-track.tab.bus = 总线
@@ -79,6 +81,7 @@ add-track.option.auto-color = 自动颜色
 add-track.summary.group-unwired = 编组轨道在 Native 中尚未连接
 add-track.summary.master-managed = Native 使用托管主总线
 add-track.summary.plugin-unwired = 插件轨道在 Native 中尚未连接
+add-track.tab.video = 视频
 add-track.title = 新建轨道
 
 ## Panels & Timeline

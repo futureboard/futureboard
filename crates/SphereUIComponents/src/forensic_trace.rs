@@ -98,6 +98,7 @@ fn track_type_label(ty: TrackType) -> &'static str {
         TrackType::Return => "return",
         TrackType::Group => "group",
         TrackType::Master => "master",
+        TrackType::Video => "video",
     }
 }
 

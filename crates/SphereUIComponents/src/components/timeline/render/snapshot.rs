@@ -33,6 +33,7 @@ pub struct VisibleBeatRange {
 pub enum RenderClipKind {
     Audio,
     Midi,
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +350,7 @@ fn build_clip_snapshot(
     let kind = match clip.clip_type {
         ClipType::Audio { .. } => RenderClipKind::Audio,
         ClipType::Midi { .. } => RenderClipKind::Midi,
+        ClipType::Video { .. } => RenderClipKind::Video,
     };
     let waveform = clip
         .audio_asset_key()

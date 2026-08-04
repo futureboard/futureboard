@@ -67,6 +67,7 @@ mod studio_state;
 mod track_clip_ops;
 mod transport_freeze_debug;
 mod transport_ops;
+mod video_ops;
 mod window_ops;
 
 pub use audio_transport::SeekReason;
@@ -1977,6 +1978,9 @@ impl StudioLayout {
             }
             "floatingwindow:routing-matrix" | "window:audio-connections" => {
                 self.open_routing_matrix_window(owner_bounds, cx);
+            }
+            "window:video-player" | "floatingwindow:video-player" => {
+                self.open_video_player_window(owner_bounds, cx);
             }
             "window:extensions" | "extensions:manager" => {
                 self.open_extensions_window(owner_bounds, cx);

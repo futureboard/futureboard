@@ -618,6 +618,7 @@ impl Render for StudioLayout {
                             AddTrackKind::Audio,
                             request.track_count,
                             request.has_master_track,
+                            request.has_video_track,
                             None,
                             cx,
                         );

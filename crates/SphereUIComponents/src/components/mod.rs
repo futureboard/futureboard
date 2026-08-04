@@ -77,6 +77,7 @@ pub mod stem_extractor_dialog;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+pub mod video_player_window;
 pub mod virtual_keyboard;
 
 pub use add_track_dialog::{
@@ -193,6 +194,7 @@ pub use stem_extractor_dialog::{
     StemSourceClip, STEM_EXTRACTOR_WINDOW_WIDTH,
 };
 pub use text_input::{text_field, TextInputAction, TextInputState};
+pub use video_player_window::{open_video_player_window, VideoPlayerSnapshot, VideoPlayerWindow};
 pub use virtual_keyboard::{
     VirtualKeyboardEventSink, VirtualKeyboardPanel, VirtualKeyboardPanelState,
     VirtualKeyboardService,

@@ -59,6 +59,7 @@ pub mod icons {
     pub const PLUG: &str = include_str!("../../../packages/shared/lucide/icons/plug.svg");
     pub const ROUTE: &str = include_str!("../../../packages/shared/lucide/icons/route.svg");
     pub const MIC: &str = include_str!("../../../packages/shared/lucide/icons/mic.svg");
+    pub const FILM: &str = include_str!("../../../packages/shared/lucide/icons/film.svg");
     pub const CPU: &str = include_str!("../../../packages/shared/lucide/icons/cpu.svg");
     pub const MUSIC: &str = include_str!("../../../packages/shared/lucide/icons/music.svg");
     pub const GIT_MERGE: &str = include_str!("../../../packages/shared/lucide/icons/git-merge.svg");
@@ -132,6 +133,7 @@ pub const ICON_PLUS_PATH: &str = "icons/plus.svg";
 pub const ICON_PLUG_PATH: &str = "icons/plug.svg";
 pub const ICON_ROUTE_PATH: &str = "icons/route.svg";
 pub const ICON_MIC_PATH: &str = "icons/mic.svg";
+pub const ICON_FILM_PATH: &str = "icons/film.svg";
 pub const ICON_CPU_PATH: &str = "icons/cpu.svg";
 pub const ICON_MUSIC_PATH: &str = "icons/music.svg";
 pub const ICON_GIT_MERGE_PATH: &str = "icons/git-merge.svg";

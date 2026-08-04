@@ -26,6 +26,7 @@ add-track.description.master = 最終出力とマスターバスです
 add-track.description.midi = ノート情報で楽器をシーケンスします
 add-track.description.plugin = ソフト音源やエフェクトをホストします
 add-track.description.return = 他のトラックからのセンドを受け取ります
+add-track.description.video = 映像に合わせて作曲するためのリファレンス映像
 add-track.detail.audio = WAV - MP3 - AIFF
 add-track.detail.bus = センド - グループ
 add-track.detail.group = サブミックス - ステム
@@ -49,6 +50,7 @@ add-track.kind.master = マスタートラック
 add-track.kind.midi = MIDI トラック
 add-track.kind.plugin = プラグイントラック
 add-track.kind.return = リターントラック
+add-track.kind.video = ビデオトラック
 add-track.tab.audio = オーディオ
 add-track.tab.automation = オート
 add-track.tab.bus = バス
@@ -79,6 +81,7 @@ add-track.option.auto-color = 自動カラー
 add-track.summary.group-unwired = グループトラックはネイティブ版ではまだ未実装です
 add-track.summary.master-managed = ネイティブ版では管理されたマスターバスを使用します
 add-track.summary.plugin-unwired = プラグイントラックはネイティブ版ではまだ未実装です
+add-track.tab.video = ビデオ
 add-track.title = 新規トラック
 
 ## Panels & Timeline

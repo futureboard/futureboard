@@ -141,6 +141,8 @@ impl MixerTreeModel {
                 TrackType::Group => bus_children.push(track_node(track, TrackType::Group)),
                 TrackType::Return => return_children.push(track_node(track, TrackType::Return)),
                 TrackType::Master => {}
+                // Video carries no audio, so it has no mixer channel.
+                TrackType::Video => {}
             }
         }
 
@@ -347,6 +349,8 @@ fn group_id_for_channel(tracks: &[TrackState], channel_id: &str) -> Option<&'sta
             TrackType::Group => MIXER_TREE_GROUP_BUS,
             TrackType::Return => MIXER_TREE_GROUP_RETURN,
             TrackType::Master => MIXER_TREE_GROUP_OUTPUT,
+            // Never reached: Video tracks are not added to the mixer tree.
+            TrackType::Video => MIXER_TREE_GROUP_OUTPUT,
         })
 }
 
@@ -359,6 +363,8 @@ fn track_kind_for_type(ty: TrackType) -> MixerTreeNodeKind {
         TrackType::Group => MixerTreeNodeKind::Group,
         TrackType::Return => MixerTreeNodeKind::FxReturn,
         TrackType::Master => MixerTreeNodeKind::Group,
+        // Never reached: Video tracks are not added to the mixer tree.
+        TrackType::Video => MixerTreeNodeKind::Group,
     }
 }
 

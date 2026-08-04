@@ -102,6 +102,7 @@ fn track_type_color(kind: TrackType) -> gpui::Rgba {
         TrackType::Return => Colors::track_return(),
         TrackType::Group => Colors::accent_primary(),
         TrackType::Master => Colors::track_master(),
+        TrackType::Video => Colors::accent_purple(),
     }
 }
 
@@ -114,6 +115,7 @@ fn type_badge(kind: TrackType) -> impl IntoElement {
         TrackType::Return => "RTN",
         TrackType::Group => "GRP",
         TrackType::Master => "MAS",
+        TrackType::Video => "VID",
     };
     let color = track_type_color(kind);
     // Readable, not neon: muted tinted chip with a slightly dimmed label.

@@ -336,6 +336,7 @@ fn strip_header(
         TrackType::Return => "RTN",
         TrackType::Group => "GRP",
         TrackType::Master => "MST",
+        TrackType::Video => "VID",
     };
 
     div()
@@ -2068,6 +2069,11 @@ pub(crate) fn collect_mixer_render_items(
             continue;
         }
         if hidden_channels.contains(&track.id) {
+            continue;
+        }
+        // A Video track is picture-only — it has no fader, meter, or signal to
+        // mix, so it never gets a channel strip.
+        if !track.track_type.carries_audio() {
             continue;
         }
         items.push(MixerRenderItem::Track { track_index });
