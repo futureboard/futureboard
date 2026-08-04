@@ -26,7 +26,6 @@ add-track.description.master = เอาต์พุตสุดท้ายข�
 add-track.description.midi = เรียบเรียงโน้ตและควบคุมเครื่องดนตรีด้วย MIDI
 add-track.description.plugin = โหลดเครื่องดนตรีหรือเอฟเฟกต์เสมือนเป็นแทร็ก
 add-track.description.return = รับสัญญาณจาก Send ของแทร็กอื่น
-add-track.description.video = วิดีโออ้างอิงสำหรับทำเพลงประกอบภาพ
 add-track.detail.audio = WAV · MP3 · AIFF
 add-track.detail.bus = Send · Group
 add-track.detail.group = Submix · Stem
@@ -50,7 +49,6 @@ add-track.kind.master = แทร็กมาสเตอร์
 add-track.kind.midi = แทร็ก MIDI
 add-track.kind.plugin = แทร็กปลั๊กอิน
 add-track.kind.return = แทร็กรีเทิร์น
-add-track.kind.video = แทร็กวิดีโอ
 add-track.tab.audio = เสียง
 add-track.tab.automation = ออโต
 add-track.tab.bus = บัส
@@ -81,7 +79,6 @@ add-track.option.auto-color = สีอัตโนมัติ
 add-track.summary.group-unwired = แทร็กกลุ่มยังไม่ได้เชื่อมต่อใน Native
 add-track.summary.master-managed = Native จัดการมาสเตอร์บัสให้อัตโนมัติ
 add-track.summary.plugin-unwired = แทร็กปลั๊กอินยังไม่ได้เชื่อมต่อใน Native
-add-track.tab.video = วิดีโอ
 add-track.title = เพิ่มแทร็กใหม่
 
 ## Panels & Timeline

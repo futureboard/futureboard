@@ -98,8 +98,6 @@ pub enum AddTrackKind {
     Return,
     Group,
     Master,
-    /// Reference/preview video lane. Like Master, a project holds at most one.
-    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +166,6 @@ impl AddTrackKind {
             Self::Master => "add-track.kind.master",
             Self::Automation => "add-track.kind.automation",
             Self::Folder => "add-track.kind.folder",
-            Self::Video => "add-track.kind.video",
         }
     }
 
@@ -184,7 +181,6 @@ impl AddTrackKind {
             Self::Master => "add-track.description.master",
             Self::Automation => "add-track.description.automation",
             Self::Folder => "add-track.description.folder",
-            Self::Video => "add-track.description.video",
         }
     }
 
@@ -200,7 +196,6 @@ impl AddTrackKind {
             Self::Return => "Return",
             Self::Group => "Group",
             Self::Master => "Master",
-            Self::Video => "Video",
         }
     }
 
@@ -217,7 +212,6 @@ impl AddTrackKind {
             Self::Master => "add-track.tab.master",
             Self::Automation => "add-track.tab.automation",
             Self::Folder => "add-track.tab.folder",
-            Self::Video => "add-track.tab.video",
         }
     }
 
@@ -233,7 +227,6 @@ impl AddTrackKind {
             Self::Return => "Return Track",
             Self::Group => "Group Track",
             Self::Master => "Master Track",
-            Self::Video => "Video Track",
         }
     }
 
@@ -249,7 +242,6 @@ impl AddTrackKind {
             Self::Return => assets::ICON_CORNER_DOWN_LEFT_PATH,
             Self::Group => assets::ICON_GIT_FORK_PATH,
             Self::Master => assets::ICON_VOLUME_2_PATH,
-            Self::Video => assets::ICON_FILM_PATH,
         }
     }
 
@@ -261,7 +253,6 @@ impl AddTrackKind {
             Self::Bus => Some(TrackType::Bus),
             Self::Return => Some(TrackType::Return),
             Self::Folder | Self::Group => Some(TrackType::Group),
-            Self::Video => Some(TrackType::Video),
             Self::Automation | Self::Plugin | Self::Master => None,
         }
     }
@@ -283,7 +274,6 @@ impl AddTrackKind {
             Self::Bus,
             Self::Automation,
             Self::Folder,
-            Self::Video,
         ]
     }
 
@@ -334,9 +324,6 @@ pub struct AddTrackDialogState {
     pub monitor_mode: &'static str,
     pub next_number: usize,
     pub has_master_track: bool,
-    /// A project holds at most one Video track, so the tab is disabled once one
-    /// exists — same rule as Master.
-    pub has_video_track: bool,
     pub base_track_count: usize,
 }
 
@@ -357,17 +344,16 @@ pub(crate) fn add_track_debug(message: &str) {
 
 impl AddTrackDialogState {
     pub fn closed() -> Self {
-        Self::open_for(0, false, false)
+        Self::open_for(0, false)
     }
 
-    pub fn open_for(track_count: usize, has_master_track: bool, has_video_track: bool) -> Self {
-        Self::open_for_with_monitor(track_count, has_master_track, has_video_track, "off")
+    pub fn open_for(track_count: usize, has_master_track: bool) -> Self {
+        Self::open_for_with_monitor(track_count, has_master_track, "off")
     }
 
     pub fn open_for_with_monitor(
         track_count: usize,
         has_master_track: bool,
-        has_video_track: bool,
         default_monitor_mode: &'static str,
     ) -> Self {
         let next_number = track_count.saturating_add(1);
@@ -397,7 +383,6 @@ impl AddTrackDialogState {
             monitor_mode: valid_monitor_mode(default_monitor_mode),
             next_number,
             has_master_track,
-            has_video_track,
             base_track_count: track_count,
         }
     }
@@ -491,7 +476,6 @@ fn kind_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
 fn kind_singleton_available(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
     match kind {
         AddTrackKind::Master => !state.has_master_track,
-        AddTrackKind::Video => !state.has_video_track,
         _ => true,
     }
 }
@@ -550,7 +534,7 @@ fn audio_output_select_options(bus_targets: &[(String, String)]) -> Vec<SelectOp
 
 /// MIDI input options for the Instrument/MIDI routing selects: real detected
 /// input devices (from `device_registry::cached_midi_devices`, resolved
-/// against Preferences → MIDI enable state) sandwiched between the two
+/// against Preferences โ’ MIDI enable state) sandwiched between the two
 /// synthetic entries every track kind supports. Empty `devices` (no hardware,
 /// or everything disconnected/disabled) still yields a usable All/None list.
 fn midi_input_select_options(devices: &[String]) -> Vec<SelectOption> {
@@ -579,7 +563,7 @@ fn instrument_plugin_options(plugins: &[RegistryPlugin]) -> Vec<SelectOption> {
         return vec![SelectOption::new("", "No Instrument")
             .description("Open Plugin Manager to scan instruments")];
     }
-    // Prefer VST3 when the same instrument ships as CLAP/LV2 too — native
+    // Prefer VST3 when the same instrument ships as CLAP/LV2 too โ€” native
     // host-owned editors are VST3-only today, and identical display names made
     // the dropdown pick CLAP first during Surge XT testing.
     let mut sorted: Vec<&RegistryPlugin> = plugins.iter().collect();
@@ -710,8 +694,8 @@ fn add_track_select(
 }
 
 /// The number portion of the Count control. While editing it is a text field
-/// (click-to-type); otherwise it is a draggable scrubber — drag up/down to
-/// change the value, click to edit — reusing the transport BPM drag pattern.
+/// (click-to-type); otherwise it is a draggable scrubber โ€” drag up/down to
+/// change the value, click to edit โ€” reusing the transport BPM drag pattern.
 fn count_field(
     state: &AddTrackDialogState,
     count_input: &TextInputState,
@@ -976,7 +960,7 @@ pub struct AddTrackColorUi<'a> {
 }
 
 /// A single bordered color box: an integrated Auto option, the full DAW palette
-/// as a swatch grid, and a "Custom…" trigger for arbitrary hex/RGB colors.
+/// as a swatch grid, and a "Customโ€ฆ" trigger for arbitrary hex/RGB colors.
 /// Selecting a manual swatch turns Auto off (via `on_pick`); selecting Auto
 /// re-enables automatic color assignment and previews the computed color.
 fn color_row(
@@ -991,7 +975,7 @@ fn color_row(
     // Color previewed while Auto is on (index-derived, matches track creation).
     let computed_auto = track_color(state.color_index);
 
-    // Auto option — integrated into the box, left of the palette. Clicking it
+    // Auto option โ€” integrated into the box, left of the palette. Clicking it
     // enables automatic color assignment; the chip previews the computed color.
     let auto_chip = div()
         .id("add-track-auto-color")
@@ -1042,7 +1026,7 @@ fn color_row(
                 .child(i18n.tr("add-track.option.auto-color")),
         );
 
-    // Palette grid — square swatches inside the box. Selecting one turns Auto
+    // Palette grid โ€” square swatches inside the box. Selecting one turns Auto
     // off (shared `on_pick` keeps the custom-picker preview in sync).
     let mut grid = div()
         .flex()
@@ -1734,7 +1718,7 @@ pub struct AddTrackWindow {
     instrument_plugin_query: String,
     instrument_search_input: TextInputState,
     instrument_plugins: Vec<RegistryPlugin>,
-    /// Real detected MIDI input device names (Preferences → MIDI enabled
+    /// Real detected MIDI input device names (Preferences โ’ MIDI enabled
     /// inputs), refreshed whenever the dialog opens or devices change.
     midi_input_devices: Vec<String>,
     focus_handle: FocusHandle,
@@ -1791,13 +1775,11 @@ impl AddTrackWindow {
         kind: AddTrackKind,
         track_count: usize,
         has_master: bool,
-        has_video: bool,
         default_monitor_mode: &'static str,
     ) {
         let mut dialog = AddTrackDialogState::open_for_with_monitor(
             track_count,
             has_master,
-            has_video,
             default_monitor_mode,
         );
         dialog.set_kind(kind);
@@ -2170,7 +2152,7 @@ impl Render for AddTrackWindow {
         let count_focused = self.count_editing;
         // Snapshot the open select for this frame. The dismiss backdrop (below)
         // sits above the form and resets `open_select` first on a click, so the
-        // trigger must decide open-vs-close against the frame it was drawn for —
+        // trigger must decide open-vs-close against the frame it was drawn for โ€”
         // otherwise re-clicking the active trigger would reopen it.
         let open_select_at_render = self.open_select;
 
@@ -2470,7 +2452,7 @@ impl Render for AddTrackWindow {
             select_dismiss_backdrop(on_dismiss)
         });
 
-        // Color picker callbacks — mutate the host-owned `ColorPickerState` and
+        // Color picker callbacks โ€” mutate the host-owned `ColorPickerState` and
         // mirror the result into the dialog state so the confirm path sees it.
         let picker_callbacks = ColorPickerCallbacks {
             on_toggle: Arc::new({
@@ -2691,7 +2673,6 @@ pub fn open_add_track_window(
     kind: AddTrackKind,
     track_count: usize,
     has_master_track: bool,
-    has_video_track: bool,
     default_monitor_mode: &'static str,
     language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -2711,7 +2692,6 @@ pub fn open_add_track_window(
     let mut state = AddTrackDialogState::open_for_with_monitor(
         track_count,
         has_master_track,
-        has_video_track,
         default_monitor_mode,
     );
     state.selected_kind = kind;
@@ -2776,7 +2756,7 @@ mod tests {
 
     #[test]
     fn format_changes_preserve_mono_selections_and_replace_stereo_pairs() {
-        let mut state = AddTrackDialogState::open_for(0, false, false);
+        let mut state = AddTrackDialogState::open_for(0, false);
         assert_eq!(state.input_label, FIRST_STEREO_PAIR_INPUT_LABEL);
 
         state.input_label = "Input 2".to_string();
@@ -2791,7 +2771,7 @@ mod tests {
 
     #[test]
     fn kind_round_trip_restores_a_format_compatible_audio_input() {
-        let mut state = AddTrackDialogState::open_for(0, false, false);
+        let mut state = AddTrackDialogState::open_for(0, false);
         state.set_audio_format(AudioFormat::Mono);
         state.set_kind(AddTrackKind::Midi);
         state.set_kind(AddTrackKind::Audio);
@@ -2800,28 +2780,19 @@ mod tests {
         assert_eq!(state.input_label, "Input 1");
     }
 
+    /// The Video track is created by dropping a video onto the arrangement, not
+    /// from this dialog. No tab may offer it, or a project could end up with an
+    /// empty Video lane the drop path would then have to reuse or duplicate.
     #[test]
-    fn video_tab_creates_a_native_video_track_until_one_exists() {
-        let mut state = AddTrackDialogState::open_for(0, false, false);
-        state.set_kind(AddTrackKind::Video);
-        assert_eq!(
-            AddTrackKind::Video.native_track_type(),
-            Some(TrackType::Video)
-        );
-        assert!(state.is_valid());
-
-        // A project already holding a Video track cannot add a second one.
-        let mut state = AddTrackDialogState::open_for(1, false, true);
-        state.set_kind(AddTrackKind::Video);
-        assert!(!state.is_valid());
-        assert!(!kind_supported(AddTrackKind::Video, &state));
-        // Only the Video kind is gated — other kinds stay addable.
-        assert!(kind_supported(AddTrackKind::Audio, &state));
+    fn no_tab_creates_a_video_track() {
+        for kind in AddTrackKind::visible_tabs(AddTrackKind::Audio) {
+            assert_ne!(kind.native_track_type(), Some(TrackType::Video));
+        }
     }
 
     #[test]
     fn folder_tab_creates_a_native_group_container() {
-        let mut state = AddTrackDialogState::open_for(0, false, false);
+        let mut state = AddTrackDialogState::open_for(0, false);
         state.set_kind(AddTrackKind::Folder);
 
         assert_eq!(

@@ -324,7 +324,6 @@ impl StudioLayout {
     ) {
         let mut track_count = 0;
         let mut has_master_track = false;
-        let mut has_video_track = false;
         let _ = self.timeline.update(cx, |timeline, _cx| {
             track_count = timeline.state.tracks.len();
             has_master_track = timeline
@@ -332,18 +331,12 @@ impl StudioLayout {
                 .tracks
                 .iter()
                 .any(|track| track.track_type == TrackType::Master);
-            has_video_track = timeline
-                .state
-                .tracks
-                .iter()
-                .any(|track| track.track_type == TrackType::Video);
         });
 
         self.open_add_track_external_window_with_context(
             kind,
             track_count,
             has_master_track,
-            has_video_track,
             owner_bounds,
             cx,
         );
@@ -361,7 +354,6 @@ impl StudioLayout {
         kind: AddTrackKind,
         track_count: usize,
         has_master_track: bool,
-        has_video_track: bool,
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
@@ -388,13 +380,7 @@ impl StudioLayout {
                         &self.plugin_catalog,
                     ));
                     win.set_midi_input_devices(midi_input_devices.clone());
-                    win.set_context(
-                        kind,
-                        track_count,
-                        has_master_track,
-                        has_video_track,
-                        default_monitor_mode,
-                    );
+                    win.set_context(kind, track_count, has_master_track, default_monitor_mode);
                     win.set_audio_output_targets(audio_output_targets);
                     window.activate_window();
                     cx.notify();
@@ -649,7 +635,6 @@ impl StudioLayout {
             kind,
             track_count,
             has_master_track,
-            has_video_track,
             default_monitor_mode,
             language,
             instrument_plugins,

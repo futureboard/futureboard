@@ -286,7 +286,6 @@ pub type TimelineContextMenuCb = std::sync::Arc<
 pub struct TimelineAddTrackRequest {
     pub track_count: usize,
     pub has_master_track: bool,
-    pub has_video_track: bool,
 }
 
 pub type TimelineAddTrackCb =

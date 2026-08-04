@@ -691,11 +691,6 @@ impl Render for Timeline {
                             .tracks
                             .iter()
                             .any(|track| track.track_type == TrackType::Master),
-                        has_video_track: this
-                            .state
-                            .tracks
-                            .iter()
-                            .any(|track| track.track_type == TrackType::Video),
                     },
                     window,
                     cx,
