@@ -599,6 +599,18 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         type: "separator",
+        id: "window.sep.extensions",
+      },
+      {
+        id: "window.extensions",
+        label: "Extensions...",
+        icon: "blocks",
+        action: "window:extensions",
+        description:
+          "Browse and install community themes and extensions from the registry",
+      },
+      {
+        type: "separator",
         id: "window.sep.song_text",
       },
       {

@@ -228,6 +228,9 @@ pub(crate) struct ExternalWindows {
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
     >,
+    /// Extensions registry browser window.
+    pub extensions:
+        Option<gpui::WindowHandle<crate::components::extensions_window::ExtensionsWindow>>,
     /// Audio Routing Matrix ("Audio Connections") window.
     pub routing_matrix:
         Option<gpui::WindowHandle<crate::components::routing_matrix_window::RoutingMatrixWindow>>,
@@ -875,6 +878,39 @@ impl StudioLayout {
     ) -> crate::components::RoutingMatrixSnapshot {
         crate::components::RoutingMatrixSnapshot {
             tracks: self.timeline.read(cx).state.tracks.clone(),
+        }
+    }
+
+    /// Opens the Extensions registry browser, or focuses it if already open.
+    /// The window owns no studio state — it talks to the public registry and
+    /// installs into the user extensions directory — so closing it only clears
+    /// the handle.
+    pub(super) fn open_extensions_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.extensions.clone() {
+            if handle
+                .update(cx, |_window, w, _cx| w.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.extensions = None;
+        }
+
+        let studio = cx.entity().clone();
+        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new(move |_, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.external_windows.extensions = None;
+                cx.notify();
+            });
+        });
+
+        match crate::components::open_extensions_window(owner_bounds, on_close, cx) {
+            Ok(handle) => self.external_windows.extensions = Some(handle),
+            Err(err) => eprintln!("[extensions] failed to open window: {err}"),
         }
     }
 

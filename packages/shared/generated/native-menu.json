@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-19T04:35:19.637Z",
+  "generatedAt": "2026-08-04T04:10:05.076Z",
   "menus": [
     {
       "id": "file",
@@ -1102,6 +1102,27 @@
           "checked": false,
           "danger": false,
           "description": null,
+          "children": []
+        },
+        {
+          "id": "window.sep.extensions",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "window.extensions",
+          "kind": "normal",
+          "label": "Extensions...",
+          "icon": "blocks",
+          "shortcut": null,
+          "command": "window:extensions",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Browse and install community themes and extensions from the registry",
           "children": []
         },
         {

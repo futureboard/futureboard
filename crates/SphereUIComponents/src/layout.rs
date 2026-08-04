@@ -1978,6 +1978,9 @@ impl StudioLayout {
             "floatingwindow:routing-matrix" | "window:audio-connections" => {
                 self.open_routing_matrix_window(owner_bounds, cx);
             }
+            "window:extensions" | "extensions:manager" => {
+                self.open_extensions_window(owner_bounds, cx);
+            }
 
             "track:add" | "track:show-add-dialog" | "project:add-track" => {
                 self.open_add_track_external_window(AddTrackKind::Audio, owner_bounds, cx)

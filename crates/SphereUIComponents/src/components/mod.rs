@@ -18,6 +18,7 @@ pub mod controls;
 pub mod edit;
 mod editor_panel;
 mod effect_editor_tab_view;
+pub mod extensions_window;
 pub mod fader;
 pub mod file_browser;
 pub mod form;
@@ -114,6 +115,7 @@ pub use controls::{
 };
 pub use editor_panel::ClipEditorPanel;
 pub(crate) use effect_editor_tab_view::EffectEditorTabView;
+pub use extensions_window::{open_extensions_window, ExtensionsWindow};
 pub use fader::fader;
 pub use icon::icon;
 pub use icon_button::icon_button;
