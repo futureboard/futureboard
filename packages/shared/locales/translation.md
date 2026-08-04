@@ -1,6 +1,8 @@
 # Locale translation status
 
 Source of truth for shipped UI strings: committed `*/app.ftl` under this directory.
+Despite the historical extension, these catalogs are flat `key = value` files
+with dotted keys, not standard Fluent resources.
 
 Locales: `en-US`, `ja-JP`, `th-TH`, `zh-CN` (selected by `settings.general.language`).
 
@@ -11,6 +13,15 @@ Native UI loads FTL at compile time via `crates/SphereUIComponents/src/i18n.rs`.
 Surfaces call `I18n::new(&language)` or `I18n::from_app(cx)`, then `tr` / `tr_vars` / `tr_menu`.
 
 Menu labels use stable IDs from `native-menu.json` mapped as `menu.{id_with_dots_as_dashes}`.
+
+## Crowdin
+
+`crowdin.yml` uploads the English catalog as a virtual `app.properties` source
+and downloads translations back to `*/app.ftl`. The explicit `properties` type
+is required because Fluent message IDs do not support the dotted keys used by
+the native runtime. Properties escaping is disabled so downloaded punctuation
+stays compatible with the runtime's flat-file parser. Do not add `multilingual`
+to this mapping: each downloaded file contains one locale.
 
 ## Maintainer pipeline
 

@@ -1,4 +1,13 @@
+preserve_hierarchy: true
+
 files:
-  - source: packages/shared/locales/en-US/*.ftl
-    translation: packages/shared/locales/%locale%/%original_file_name%
-    multilingual: 1
+  - source: /packages/shared/locales/en-US/*.ftl
+    # These catalogs use dotted flat keys and are parsed as `key = value` by
+    # the native runtime. Give Crowdin a .properties destination so an existing
+    # empty Fluent resource is replaced with a resource it can parse.
+    dest: /packages/shared/locales/en-US/%file_name%.properties
+    translation: /packages/shared/locales/%locale%/%file_name%.ftl
+    type: properties
+    # The native flat-file parser does not unescape Java properties output.
+    escape_quotes: 0
+    escape_special_characters: 0
