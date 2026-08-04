@@ -84,6 +84,11 @@ pub struct VideoPlayerWindow {
     /// Comparing revisions is what stops a re-upload per tick.
     image: Option<Arc<RenderImage>>,
     image_revision: u64,
+    /// Frames replaced since the last render pass. Each one still owns a sprite
+    /// atlas tile — 33 MB apiece for a 4K source — and GPUI only frees a tile on
+    /// an explicit `drop_image`, which needs a `Window`. Uploading without this
+    /// leaks every frame the player ever showed.
+    stale_images: Vec<Arc<RenderImage>>,
     frame_size: Option<(u32, u32)>,
     info: Option<VideoInfo>,
     status: PreviewStatus,
@@ -118,6 +123,7 @@ impl VideoPlayerWindow {
             preview: None,
             image: None,
             image_revision: 0,
+            stale_images: Vec::new(),
             frame_size: None,
             info: None,
             status: PreviewStatus::Ready,
@@ -146,7 +152,11 @@ impl VideoPlayerWindow {
         if media_changed {
             // Dropping the old preview stops its worker and closes the file.
             self.preview = None;
-            self.image = None;
+            // The outgoing picture still holds its atlas tile until a render
+            // pass can free it.
+            if let Some(previous) = self.image.take() {
+                self.stale_images.push(previous);
+            }
             self.image_revision = 0;
             self.frame_size = None;
             self.info = None;
@@ -191,7 +201,9 @@ impl VideoPlayerWindow {
         if let Some((revision, frame)) = preview.frame_if_newer(self.image_revision) {
             if let Some(image) = render_image_from_frame(&frame) {
                 self.frame_size = Some((frame.width, frame.height));
-                self.image = Some(Arc::new(image));
+                if let Some(previous) = self.image.replace(Arc::new(image)) {
+                    self.stale_images.push(previous);
+                }
                 self.image_revision = revision;
                 changed = true;
             }
@@ -258,6 +270,13 @@ fn format_timecode(seconds: f64) -> String {
 
 impl Render for VideoPlayerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Superseded frames still hold a sprite atlas tile; this is the first
+        // point in the frame where a `Window` exists to free them. Without it a
+        // 4K reference video grows the atlas by 33 MB per decoded frame.
+        for image in self.stale_images.drain(..) {
+            cx.drop_image(image, Some(window));
+        }
+
         if !self.focus_handle.is_focused(window) {
             self.focus_handle.focus(window, cx);
         }
@@ -345,9 +364,13 @@ pub fn open_video_player_window(
         ),
         cx,
     );
-    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    // A picture monitor is watched *while* working the arrangement, so it is an
+    // independent top-level window (taskbar entry, minimize, resize), not a
+    // dialog owned by the studio. `Floating` additionally keeps it above the
+    // studio window, so it cannot be buried by the surface being scored to.
+    let mut options = crate::platform_chrome::external_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    options.kind = WindowKind::Dialog;
+    options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = true;
     options.window_background = WindowBackgroundAppearance::Opaque;

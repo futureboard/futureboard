@@ -15,6 +15,7 @@
 //! never touch the GPUI render thread.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use objc2::AnyThread;
 use objc2::rc::Retained;
@@ -36,6 +37,10 @@ const TIME_SCALE: i32 = 600;
 pub(crate) struct AvFoundationDecoder {
     generator: Retained<AVAssetImageGenerator>,
     info: VideoInfo,
+    /// Most recently decoded frame, reused while the playhead stays inside it.
+    /// Behind an `Arc` so handing it out is a refcount bump, never a memcpy of
+    /// the uncompressed image.
+    last_frame: Option<Arc<VideoFrame>>,
 }
 
 impl AvFoundationDecoder {
@@ -88,6 +93,7 @@ impl AvFoundationDecoder {
                         0.0
                     },
                 },
+                last_frame: None,
             })
         }
     }
@@ -96,9 +102,30 @@ impl AvFoundationDecoder {
         self.info
     }
 
-    pub(crate) fn frame_at(&mut self, seconds: f64) -> Result<VideoFrame, VideoError> {
+    /// Nominal duration of one frame, used to decide whether the cached frame
+    /// still covers the requested position.
+    fn frame_duration_seconds(&self) -> f64 {
+        if self.info.frame_rate > 0.0 {
+            1.0 / self.info.frame_rate
+        } else {
+            1.0 / 30.0
+        }
+    }
+
+    pub(crate) fn frame_at(&mut self, seconds: f64) -> Result<Arc<VideoFrame>, VideoError> {
         if self.info.duration_seconds > 0.0 && seconds > self.info.duration_seconds {
             return Err(VideoError::EndOfStream);
+        }
+
+        // The transport pushes a position every tick, but a tick is far shorter
+        // than a video frame. Without this check every tick ran a full
+        // `copyCGImageAtTime` decode plus a CoreGraphics redraw for a picture
+        // that was already on screen.
+        if let Some(frame) = &self.last_frame {
+            let start = frame.timestamp_seconds;
+            if seconds >= start && seconds < start + self.frame_duration_seconds() {
+                return Ok(Arc::clone(frame));
+            }
         }
 
         unsafe {
@@ -119,7 +146,9 @@ impl AvFoundationDecoder {
                 }
             };
 
-            render_cgimage_to_bgra(&image, timestamp_seconds)
+            let frame = Arc::new(render_cgimage_to_bgra(&image, timestamp_seconds)?);
+            self.last_frame = Some(Arc::clone(&frame));
+            Ok(frame)
         }
     }
 }

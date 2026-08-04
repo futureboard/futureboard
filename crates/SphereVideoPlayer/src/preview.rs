@@ -198,9 +198,24 @@ impl Shared {
         }
     }
 
-    fn publish_frame(&self, frame: VideoFrame) {
+    /// Publishes `frame` and bumps the revision — but only when it is not the
+    /// frame already on screen.
+    ///
+    /// The decoder hands back the same cached `Arc` for every position inside
+    /// the current frame, which is most transport ticks. Bumping the revision
+    /// for those made the window rebuild its `RenderImage` (a full copy of the
+    /// uncompressed image plus a GPU upload) many times per second for a
+    /// picture that never changed.
+    fn publish_frame(&self, frame: VideoPreviewFrame) {
         if let Ok(mut published) = self.published.lock() {
-            published.frame = Some(Arc::new(frame));
+            if published
+                .frame
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &frame))
+            {
+                return;
+            }
+            published.frame = Some(frame);
         }
         self.revision.fetch_add(1, Ordering::Release);
     }
@@ -274,6 +289,36 @@ mod tests {
         ));
         assert_eq!(preview.revision(), 0);
         assert!(preview.frame().is_none());
+    }
+
+    fn test_frame() -> VideoPreviewFrame {
+        Arc::new(VideoFrame {
+            width: 2,
+            height: 2,
+            timestamp_seconds: 0.0,
+            bgra: vec![0u8; 2 * 2 * 4],
+        })
+    }
+
+    /// Republishing the frame already on screen must not bump the revision, or
+    /// the window re-uploads an identical image on every transport tick.
+    #[test]
+    fn republishing_the_same_frame_does_not_bump_the_revision() {
+        let preview = VideoPreview::open(crate::tests::missing_video_path());
+        let frame = test_frame();
+
+        preview.shared.publish_frame(Arc::clone(&frame));
+        let first = preview.revision();
+        assert_eq!(first, 1);
+
+        preview.shared.publish_frame(Arc::clone(&frame));
+        assert_eq!(preview.revision(), first, "same frame must not republish");
+        assert!(preview.frame_if_newer(first).is_none());
+
+        // A genuinely different decode does publish.
+        preview.shared.publish_frame(test_frame());
+        assert_eq!(preview.revision(), first + 1);
+        assert!(preview.frame_if_newer(first).is_some());
     }
 
     #[test]

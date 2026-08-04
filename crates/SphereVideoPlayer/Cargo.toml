@@ -27,6 +27,9 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

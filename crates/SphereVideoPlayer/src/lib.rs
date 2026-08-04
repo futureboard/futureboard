@@ -28,6 +28,7 @@
 //! platform does the same.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 mod preview;
 pub use preview::{PreviewStatus, VideoPreview, VideoPreviewFrame};
@@ -210,7 +211,11 @@ impl VideoDecoder {
     ///
     /// Seeks only when the target is behind the reader or far ahead of it, so
     /// playback-rate stepping reads forward instead of re-seeking every frame.
-    pub fn frame_at(&mut self, seconds: f64) -> Result<VideoFrame, VideoError> {
+    ///
+    /// Returns the frame behind an `Arc`: a decoded frame is a full
+    /// uncompressed image, and the backends hand the same one out repeatedly
+    /// while the playhead stays inside it.
+    pub fn frame_at(&mut self, seconds: f64) -> Result<Arc<VideoFrame>, VideoError> {
         #[cfg(any(windows, target_os = "macos"))]
         {
             self.inner.frame_at(seconds.max(0.0))

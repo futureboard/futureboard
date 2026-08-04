@@ -473,6 +473,12 @@ impl WindowsWindow {
         if params.kind == WindowKind::Dialog {
             dwstyle |= WINDOW_STYLE(DS_MODALFRAME as u32);
         }
+        if params.kind == WindowKind::Floating {
+            // macOS gives `Floating` NSFloatingWindowLevel and X11 gives it
+            // WM_TRANSIENT_FOR; WS_EX_TOPMOST is the Win32 equivalent. Without
+            // it the kind silently degrades to a plain window here.
+            dwexstyle |= WS_EX_TOPMOST;
+        }
         if !disable_direct_composition {
             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
         }
