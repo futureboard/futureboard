@@ -5,35 +5,70 @@
 //! whatever the machine's installed codecs already handle (H.264/AAC MP4 and
 //! MOV out of the box, HEVC/VP9 when the corresponding OS codec is present).
 //!
-//! Threading: `IMFSourceReader` is apartment-bound and this type is neither
-//! `Send` nor `Sync`. Construct and use it from exactly one worker thread —
+//! ## Two paths, chosen at open time
+//!
+//! ```text
+//! hardware: file -> Source Reader (D3D manager) -> DXVA decoder
+//!                -> NV12/P010 ID3D11Texture2D   -> D3D11 Video Processor
+//!                -> BGRA (preview size)         -> VideoFrame
+//!
+//! software: file -> Source Reader (video processing MFT)
+//!                -> RGB32 system memory         -> VideoFrame
+//! ```
+//!
+//! The hardware path deliberately never asks the decoder for `MFVideoFormat_RGB32`.
+//! No hardware decoder emits RGB, so with a DXGI device manager installed the
+//! reader has to build an RGB32 chain out of transforms that cannot consume D3D
+//! surfaces, and negotiation fails with
+//! `MF_E_TOPO_CODEC_NOT_FOUND (0xC00D5212)`. NV12 (or P010 for 10-bit) is the
+//! decoder's own output; colour conversion and downscale are done afterwards on
+//! the GPU by [`crate::windows_d3d::FrameConverter`].
+//!
+//! RGB32 survives only in the software configuration, where there is no D3D
+//! manager and the OS Video Processor MFT is the intended converter. The
+//! hardware path never silently falls back to it.
+//!
+//! ## Threading
+//!
+//! `IMFSourceReader` is apartment-bound and this type is neither `Send` nor
+//! `Sync`. Construct and use it from exactly one worker thread —
 //! `crate::preview::VideoPreview` owns that thread. `ReadSample` blocks, so it
 //! must never run on the GPUI render thread.
+//!
+//! ## Frame budget
+//!
+//! This is a picture monitor, not a playback engine: it decodes the single
+//! frame under the playhead on demand and caches exactly one. There is no
+//! decode-ahead queue to bound and no way for the decoder to run ahead of
+//! presentation — the transport asks, the worker answers, and the previous
+//! answer is dropped.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
-    D3D11CreateDevice, ID3D11Device, ID3D11Multithread,
-};
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFDXGIDeviceManager, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
+    IMF2DBuffer, IMFDXGIBuffer, IMFMediaType, IMFSample, IMFSourceReader, MF_MT_DEFAULT_STRIDE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX, MF_PD_DURATION,
     MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+    MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_DISABLE_DXVA,
     MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager,
-    MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_NOSOCKET,
-    MFStartup, MFVideoFormat_RGB32,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
+    MFCreateSourceReaderFromURL, MFMediaType_Video, MFNominalRange_0_255, MFSTARTUP_NOSOCKET,
+    MFStartup, MFVideoFormat_ARGB32, MFVideoFormat_NV12, MFVideoFormat_P010, MFVideoFormat_RGB32,
+    MFVideoInterlace_Progressive, MFVideoTransferMatrix_BT709,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::System::Variant::VT_I8;
-use windows::core::{HSTRING, Interface};
+use windows::core::{GUID, HSTRING, Interface};
 
+use crate::windows_d3d::{
+    ColorInfo, FrameConverter, HwPixelFormat, VideoDevice, YuvPlanes, cpu_convert_to_bgra,
+    shared_video_device,
+};
 use crate::{VideoError, VideoFrame, VideoInfo};
 
 /// Media Foundation timestamps and durations are in 100-nanosecond units.
@@ -48,6 +83,17 @@ const FORWARD_SCAN_WINDOW_SECONDS: f64 = 2.0;
 /// stream cannot pin the worker thread indefinitely. On overrun the most
 /// recently decoded frame is returned rather than an error.
 const MAX_SAMPLES_PER_REQUEST: u32 = 480;
+
+/// Longest edge the preview presents at. A picture monitor is watched at a few
+/// hundred points across, so presenting a 4K source at full size buys nothing
+/// and costs 33 MB per frame in readback, copy, and texture upload. The GPU
+/// video processor does the scale, so the decoder still runs at native size and
+/// nothing full-resolution is ever produced on the CPU.
+const PREVIEW_MAX_EDGE: u32 = 1280;
+
+/// How often the per-frame timing summary is emitted. One line per decoded
+/// frame would be noise in a release build.
+const PERF_LOG_INTERVAL_SECONDS: f64 = 1.0;
 
 fn hresult_error(context: &str, err: windows::core::Error) -> VideoError {
     VideoError::Backend(format!("{context}: {err}"))
@@ -73,90 +119,36 @@ fn ensure_media_foundation_started() -> Result<(), VideoError> {
         .map_err(VideoError::Backend)
 }
 
-/// D3D11 device manager handed to the Source Reader so it can pick a hardware
-/// (DXVA) decoder MFT. Built once per process and shared by every decoder: the
-/// device is created multithread-protected, which is exactly what lets several
-/// preview workers submit to it.
-///
-/// `None` when this machine has no usable D3D11 video device (no GPU, a remote
-/// session, a driver that refuses `VIDEO_SUPPORT`). Callers fall back to the
-/// software Source Reader configuration rather than failing to open the file —
-/// a soft picture monitor is better than no picture monitor.
-fn dxgi_device_manager() -> Option<IMFDXGIDeviceManager> {
-    use std::sync::OnceLock;
-    static MANAGER: OnceLock<Option<DxgiManager>> = OnceLock::new();
-
-    MANAGER
-        .get_or_init(|| {
-            let manager = create_dxgi_device_manager();
-            if manager.is_none() {
-                tracing::info!(
-                    "video: no D3D11 video device; decoding reference video in software"
-                );
-            }
-            manager.map(DxgiManager)
-        })
-        .as_ref()
-        .map(|manager| manager.0.clone())
+/// The negotiated output of the Source Reader, and how to turn it into BGRA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputKind {
+    /// Hardware decoder output. Samples are expected to carry an
+    /// `IMFDXGIBuffer`; when one does not, the CPU converter handles it.
+    Hardware(HwPixelFormat),
+    /// Software configuration: the OS Video Processor MFT already produced
+    /// packed 32-bit BGRA in system memory.
+    SoftwareRgb32,
 }
 
-/// `IMFDXGIDeviceManager` is `Send`/`Sync`-hostile in the `windows` crate's
-/// view because it is a raw COM pointer, but the underlying manager is
-/// documented as thread-safe once the device is multithread-protected, which is
-/// what `create_dxgi_device_manager` guarantees before this wrapper is built.
-struct DxgiManager(IMFDXGIDeviceManager);
-
-// SAFETY: the wrapped manager is only ever handed out by cloning the COM
-// pointer (an interlocked AddRef), and the D3D11 device behind it has
-// `ID3D11Multithread::SetMultithreadProtected(true)` applied at creation, so
-// concurrent use from several preview worker threads is serialized by D3D
-// itself.
-unsafe impl Send for DxgiManager {}
-unsafe impl Sync for DxgiManager {}
-
-fn create_dxgi_device_manager() -> Option<IMFDXGIDeviceManager> {
-    unsafe {
-        let mut device: Option<ID3D11Device> = None;
-        // `VIDEO_SUPPORT` is what makes the device usable by a decoder MFT;
-        // `BGRA_SUPPORT` lets the video processor emit the RGB32 this backend
-        // asks for without a second conversion pass.
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&[D3D_FEATURE_LEVEL_11_0]),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            None,
-        )
-        .ok()?;
-        let device = device?;
-
-        // Media Foundation drives this device from its own decoder threads, so
-        // it must be multithread-protected before the manager publishes it.
-        let multithread: ID3D11Multithread = device.cast().ok()?;
-        // Returns the *previous* setting, not a status — nothing to check.
-        let _ = multithread.SetMultithreadProtected(true);
-
-        let mut reset_token = 0u32;
-        let mut manager: Option<IMFDXGIDeviceManager> = None;
-        MFCreateDXGIDeviceManager(&mut reset_token, &mut manager).ok()?;
-        let manager = manager?;
-        manager.ResetDevice(&device, reset_token).ok()?;
-        Some(manager)
+impl OutputKind {
+    fn subtype_name(self) -> &'static str {
+        match self {
+            Self::Hardware(format) => format.name(),
+            Self::SoftwareRgb32 => "RGB32",
+        }
     }
 }
 
-/// Frame geometry as the reader currently reports it. Re-read whenever the
-/// source reader signals a mid-stream media type change.
+/// Frame geometry and colour as the reader currently reports it. Re-read
+/// whenever the source reader signals a mid-stream media type change.
 #[derive(Debug, Clone, Copy)]
 struct OutputFormat {
+    kind: OutputKind,
     width: u32,
     height: u32,
-    /// Row pitch in bytes. Negative means the frame is stored bottom-up.
+    /// Row pitch in bytes for the RGB32 path. Negative means bottom-up.
     stride: i32,
+    color: ColorInfo,
 }
 
 impl OutputFormat {
@@ -167,20 +159,86 @@ impl OutputFormat {
     fn abs_stride(&self) -> usize {
         self.stride.unsigned_abs() as usize
     }
+
+    /// Size the preview presents at: the source size, capped on the long edge.
+    fn preview_size(&self) -> (u32, u32) {
+        preview_frame_size(self.width, self.height).unwrap_or((self.width, self.height))
+    }
+}
+
+/// Rate-limited timing summary. Every field is filled by the decode path and
+/// drained once a second, so a release build never logs per frame.
+#[derive(Default)]
+struct PerfCounters {
+    decoded_frames: u32,
+    decode_seconds: f64,
+    convert_seconds: f64,
+    last_report: Option<Instant>,
+}
+
+impl PerfCounters {
+    fn record(&mut self, decode: f64, convert: f64) {
+        self.decoded_frames += 1;
+        self.decode_seconds += decode;
+        self.convert_seconds += convert;
+    }
+
+    fn maybe_report(&mut self, source_fps: f64, queued: usize) {
+        let now = Instant::now();
+        let elapsed = match self.last_report {
+            None => {
+                self.last_report = Some(now);
+                return;
+            }
+            Some(previous) => now.duration_since(previous).as_secs_f64(),
+        };
+        if elapsed < PERF_LOG_INTERVAL_SECONDS {
+            return;
+        }
+        if self.decoded_frames > 0 {
+            let frames = self.decoded_frames as f64;
+            eprintln!(
+                "[video-perf] source_fps={source_fps:.0} decode_fps={:.1} queue={queued} \
+                 decode_ms={:.2} convert_ms={:.2}",
+                frames / elapsed,
+                self.decode_seconds * 1000.0 / frames,
+                self.convert_seconds * 1000.0 / frames,
+            );
+        }
+        self.decoded_frames = 0;
+        self.decode_seconds = 0.0;
+        self.convert_seconds = 0.0;
+        self.last_report = Some(now);
+    }
 }
 
 pub(crate) struct MediaFoundationDecoder {
     reader: IMFSourceReader,
     format: OutputFormat,
     info: VideoInfo,
+    /// The shared D3D11 device, when the reader was configured for hardware
+    /// decode. `None` in the software configuration.
+    device: Option<Arc<VideoDevice>>,
+    /// GPU colour-convert/scale stage. Built lazily on the first hardware
+    /// sample (the decoder's real surface size is only known then) and rebuilt
+    /// if the stream changes geometry mid-play.
+    converter: Option<FrameConverter>,
+    /// `true` once a sample has been seen without an `IMFDXGIBuffer` and the CPU
+    /// fallback took over, so the choice is logged exactly once.
+    logged_cpu_fallback: bool,
+    /// `true` once the GPU conversion stage failed to build on this driver. Set
+    /// once so the failed creation is not retried for every subsequent frame.
+    gpu_conversion_unavailable: bool,
     /// Most recently decoded frame. Behind an `Arc` because it is handed out on
     /// every cache hit and every end-of-stream hold — cloning the `VideoFrame`
-    /// itself would memcpy the whole uncompressed image (8 MB at 1080p) several
-    /// times per transport tick.
+    /// itself would memcpy the whole uncompressed image several times per
+    /// transport tick. Exactly one frame is retained: this is the whole decoded
+    /// "queue", so it cannot grow with playback or with repeated seeking.
     last_frame: Option<Arc<VideoFrame>>,
     /// `true` once the reader has produced end-of-stream and has not been
     /// seeked since; further forward reads would return nothing.
     at_end: bool,
+    perf: PerfCounters,
 }
 
 impl MediaFoundationDecoder {
@@ -188,119 +246,123 @@ impl MediaFoundationDecoder {
         ensure_media_foundation_started()?;
 
         unsafe {
+            let device = shared_video_device();
+
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 4)
-                .map_err(|e| hresult_error("MFCreateAttributes", e))?;
-            let attributes =
-                attributes.ok_or_else(|| VideoError::Backend("null reader attributes".into()))?;
+                .map_err(|e| hresult_error("source open: MFCreateAttributes", e))?;
+            let attributes = attributes
+                .ok_or_else(|| VideoError::Backend("source open: null reader attributes".into()))?;
 
             // Hardware decode. Without a D3D manager the Source Reader only ever
-            // instantiates *software* decoder MFTs, which is what made a 4K/long-GOP
-            // reference video crawl: every seek re-decoded a GOP on the CPU.
+            // instantiates *software* decoder MFTs, which is what made a 4K
+            // long-GOP reference video crawl: every seek re-decoded a GOP on the
+            // CPU.
             //
-            // The two attributes go together — `HARDWARE_TRANSFORMS` lets the
-            // reader consider hardware MFTs at all, and `D3D_MANAGER` gives them
-            // the device to decode onto. `ADVANCED_VIDEO_PROCESSING` is required
-            // instead of the plain flag once samples live in D3D surfaces,
-            // because the plain Video Processor cannot read them.
-            let hardware = dxgi_device_manager();
-            if let Some(manager) = &hardware {
+            // `ENABLE_VIDEO_PROCESSING` is deliberately *not* set here. It
+            // inserts the OS Video Processor MFT, which cannot consume D3D
+            // surfaces, and combining it with a D3D manager is what made RGB32
+            // negotiation fail. The GPU conversion this backend does itself
+            // replaces it.
+            if let Some(device) = &device {
                 attributes
                     .SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)
-                    .map_err(|e| hresult_error("enable hardware transforms", e))?;
+                    .map_err(|e| hresult_error("source open: enable hardware transforms", e))?;
                 attributes
-                    .SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager)
-                    .map_err(|e| hresult_error("set D3D manager", e))?;
+                    .SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, device.manager())
+                    .map_err(|e| hresult_error("source open: set D3D manager", e))?;
                 attributes
-                    .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
-                    .map_err(|e| hresult_error("enable advanced video processing", e))?;
+                    .SetUINT32(&MF_SOURCE_READER_DISABLE_DXVA, 0)
+                    .map_err(|e| hresult_error("source open: enable DXVA", e))?;
             } else {
-                // Software path: lets the Source Reader insert the OS Video
-                // Processor MFT, which converts the decoder's native NV12/YUV
-                // output to RGB32.
+                // Software configuration: let the Source Reader insert the OS
+                // Video Processor MFT, which converts the decoder's native
+                // NV12/YUV output to RGB32 in system memory. This is the only
+                // place RGB32 is legitimate.
                 attributes
                     .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
-                    .map_err(|e| hresult_error("enable video processing", e))?;
+                    .map_err(|e| hresult_error("source open: enable video processing", e))?;
             }
 
             let url = HSTRING::from(path.as_os_str());
             let reader = MFCreateSourceReaderFromURL(&url, &attributes)
-                .map_err(|e| hresult_error("MFCreateSourceReaderFromURL", e))?;
+                .map_err(|e| hresult_error("source open: MFCreateSourceReaderFromURL", e))?;
 
             let video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
             reader
                 .SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false)
-                .map_err(|e| hresult_error("deselect streams", e))?;
+                .map_err(|e| hresult_error("source open: deselect streams", e))?;
             // A container with no video stream fails here rather than later with
             // an opaque read error.
             reader
                 .SetStreamSelection(video_stream, true)
                 .map_err(|_| VideoError::NoVideoStream)?;
 
-            let native = read_native_frame_size(&reader);
+            let native = reader.GetNativeMediaType(video_stream, 0).ok();
+            let native_size = native.as_ref().and_then(frame_size);
+            let native_subtype = native
+                .as_ref()
+                .and_then(|t| t.GetGUID(&MF_MT_SUBTYPE).ok())
+                .map(|guid| subtype_name(&guid))
+                .unwrap_or_else(|| "unknown".to_string());
 
-            let requested =
-                MFCreateMediaType().map_err(|e| hresult_error("MFCreateMediaType", e))?;
-            requested
-                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .map_err(|e| hresult_error("set major type", e))?;
-            requested
-                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
-                .map_err(|e| hresult_error("set RGB32 subtype", e))?;
+            let kind = negotiate_output(
+                &reader,
+                video_stream,
+                device.is_some(),
+                &native_subtype,
+                native_size,
+            )?;
 
-            // Ask the video processor to downscale oversized sources. A 4K frame
-            // is 33 MB of BGRA; every one of those is read back from the GPU,
-            // copied, and uploaded as a texture for a window that is a few
-            // hundred pixels wide. Scaling on the GPU before readback cuts all
-            // three costs by the square of the ratio.
-            //
-            // Only the advanced (hardware) video processor can resize — the
-            // basic one converts format only — so this is attempted, not
-            // required, and negotiation retries at native size if it is refused.
-            let scaled = native
-                .filter(|_| hardware.is_some())
-                .and_then(|(width, height)| preview_frame_size(width, height));
-            let negotiated_scaled = if let Some((width, height)) = scaled {
-                requested
-                    .SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(width, height))
-                    .map_err(|e| hresult_error("set preview frame size", e))?;
-                reader
-                    .SetCurrentMediaType(video_stream, None, &requested)
-                    .is_ok()
-            } else {
-                false
-            };
-            if !negotiated_scaled {
-                if scaled.is_some() {
-                    // Put the native size back so the retry is a plain
-                    // format-only negotiation.
-                    if let Some((width, height)) = native {
-                        let _ =
-                            requested.SetUINT64(&MF_MT_FRAME_SIZE, pack_frame_size(width, height));
-                    }
-                }
-                reader
-                    .SetCurrentMediaType(video_stream, None, &requested)
-                    .map_err(|e| hresult_error("negotiate RGB32 output", e))?;
-            }
-
-            let format = read_output_format(&reader)?;
-            // `info` describes the *source*, so it keeps the native dimensions
-            // even when the preview decodes smaller.
-            let (info_width, info_height) = native.unwrap_or((format.width, format.height));
+            let format = read_output_format(&reader, kind)?;
             let info = VideoInfo {
-                width: info_width,
-                height: info_height,
+                // `info` describes the *source*, so it keeps native dimensions.
+                width: native_size.map(|(w, _)| w).unwrap_or(format.width),
+                height: native_size.map(|(_, h)| h).unwrap_or(format.height),
                 duration_seconds: read_duration_seconds(&reader),
                 frame_rate: read_frame_rate(&reader),
             };
+
+            let (preview_width, preview_height) = format.preview_size();
+            eprintln!("[video-mf] hardware-transform  = {}", device.is_some());
+            eprintln!(
+                "[video-mf] requested-output    = {}",
+                if device.is_some() {
+                    "NV12/P010"
+                } else {
+                    "RGB32"
+                }
+            );
+            eprintln!(
+                "[video-mf] negotiated-output   = {} {}x{} @ {:.3} fps ({})",
+                kind.subtype_name(),
+                format.width,
+                format.height,
+                info.frame_rate,
+                interlace_mode_name(&reader),
+            );
+            eprintln!(
+                "[video-mf] render-bridge       = {}",
+                if device.is_some() {
+                    "d3d11-video-processor -> bgra readback -> gpui atlas"
+                } else {
+                    "mf video processor -> rgb32 -> gpui atlas"
+                }
+            );
+            eprintln!("[video-mf] present-size        = {preview_width}x{preview_height}");
+            eprintln!("[video-mf] frame-queue-limit   = 1 (on-demand picture monitor)");
 
             Ok(Self {
                 reader,
                 format,
                 info,
+                device,
+                converter: None,
+                logged_cpu_fallback: false,
+                gpu_conversion_unavailable: false,
                 last_frame: None,
                 at_end: false,
+                perf: PerfCounters::default(),
             })
         }
     }
@@ -349,9 +411,17 @@ impl MediaFoundationDecoder {
         self.read_forward_to(seconds, frame_duration)
     }
 
+    /// Flushes the reader and drops every frame decoded for the old position,
+    /// so a seek can never present a stale picture from where the playhead was.
     fn seek(&mut self, seconds: f64) -> Result<(), VideoError> {
         let hns = (seconds * HNS_PER_SECOND).round().max(0.0) as i64;
         unsafe {
+            let video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
+            // Discards samples the decoder already produced for the previous
+            // position; without it the first read after a seek can return a
+            // frame from before it.
+            let _ = self.reader.Flush(video_stream);
+
             let mut position: windows::Win32::System::Com::StructuredStorage::PROPVARIANT =
                 std::mem::zeroed();
             // `PROPVARIANT`'s payload sits behind a `ManuallyDrop` union field,
@@ -360,8 +430,8 @@ impl MediaFoundationDecoder {
             (*position.Anonymous.Anonymous).vt = VT_I8;
             (*position.Anonymous.Anonymous).Anonymous.hVal = hns;
             self.reader
-                .SetCurrentPosition(&windows::core::GUID::zeroed(), &position)
-                .map_err(|e| hresult_error("SetCurrentPosition", e))?;
+                .SetCurrentPosition(&GUID::zeroed(), &position)
+                .map_err(|e| hresult_error("seek: SetCurrentPosition", e))?;
         }
         self.last_frame = None;
         self.at_end = false;
@@ -381,6 +451,7 @@ impl MediaFoundationDecoder {
             let mut timestamp_hns = 0i64;
             let mut sample = None;
 
+            let decode_started = Instant::now();
             unsafe {
                 self.reader
                     .ReadSample(
@@ -391,13 +462,22 @@ impl MediaFoundationDecoder {
                         Some(&mut timestamp_hns),
                         Some(&mut sample),
                     )
-                    .map_err(|e| hresult_error("ReadSample", e))?;
+                    .map_err(|e| hresult_error("decode: ReadSample", e))?;
             }
+            let decode_seconds = decode_started.elapsed().as_secs_f64();
 
             if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
-                // Output geometry only. `info` reports the source's own size,
-                // which a change in the decoded preview size does not alter.
-                self.format = read_output_format(&self.reader)?;
+                // Geometry or pixel format changed mid-stream. Re-read it and
+                // drop the conversion stage; it is rebuilt against the new
+                // format on the next sample.
+                self.format = read_output_format(&self.reader, self.format.kind)?;
+                self.converter = None;
+                eprintln!(
+                    "[video-mf] media type changed  = {} {}x{}",
+                    self.format.kind.subtype_name(),
+                    self.format.width,
+                    self.format.height
+                );
             }
 
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
@@ -413,8 +493,15 @@ impl MediaFoundationDecoder {
             };
 
             let timestamp_seconds = timestamp_hns as f64 / HNS_PER_SECOND;
-            let frame = Arc::new(convert_sample(&sample, self.format, timestamp_seconds)?);
+            let convert_started = Instant::now();
+            let frame = Arc::new(self.frame_from_sample(&sample, timestamp_seconds)?);
+            self.perf
+                .record(decode_seconds, convert_started.elapsed().as_secs_f64());
+            self.perf.maybe_report(self.info.frame_rate, 1);
+
             let reached_target = timestamp_seconds + frame_duration > target_seconds;
+            // Replacing the cached frame releases the previous one's pixels and,
+            // on the hardware path, the previous sample's decoder surface.
             self.last_frame = Some(Arc::clone(&frame));
             if reached_target {
                 return Ok(frame);
@@ -425,9 +512,197 @@ impl MediaFoundationDecoder {
         // what was decoded rather than blocking the worker for another pass.
         self.last_frame.clone().ok_or(VideoError::EndOfStream)
     }
+
+    /// Turns one decoded sample into a BGRA frame, on whichever path the
+    /// sample's buffer supports.
+    fn frame_from_sample(
+        &mut self,
+        sample: &IMFSample,
+        timestamp_seconds: f64,
+    ) -> Result<VideoFrame, VideoError> {
+        match self.format.kind {
+            OutputKind::SoftwareRgb32 => {
+                convert_rgb32_sample(sample, self.format, timestamp_seconds)
+            }
+            OutputKind::Hardware(pixel_format) => {
+                // The sample owns the decoder surface; it must outlive the blt,
+                // which it does — `sample` is borrowed for this whole call and
+                // the converter's readback completes before returning.
+                let surface = (!self.gpu_conversion_unavailable)
+                    .then(|| dxgi_surface(sample))
+                    .flatten();
+
+                // A `None` from the converter means the GPU stage could not be
+                // built on this driver; fall through to the CPU converter,
+                // which this sample's buffer still supports.
+                if let Some((texture, subresource)) = surface
+                    && let Some(frame) = self.convert_hardware_sample(
+                        &texture,
+                        subresource,
+                        pixel_format,
+                        timestamp_seconds,
+                    )?
+                {
+                    return Ok(frame);
+                }
+
+                // Either the sample never carried an `IMFDXGIBuffer` (a software
+                // decoder MFT ran despite the D3D manager) or the GPU conversion
+                // stage could not be built on this driver. Both keep showing
+                // picture through the CPU converter: `IMFMediaBuffer::Lock` on a
+                // D3D-backed buffer makes Media Foundation stage it into system
+                // memory.
+                if !self.logged_cpu_fallback {
+                    self.logged_cpu_fallback = true;
+                    eprintln!(
+                        "[video-mf] dxgi-buffer         = false ({} converted on the CPU)",
+                        pixel_format.name()
+                    );
+                    eprintln!("[video-mf] cpu-readback        = full frame");
+                }
+                convert_system_memory_yuv(sample, self.format, pixel_format, timestamp_seconds)
+            }
+        }
+    }
+
+    fn convert_hardware_sample(
+        &mut self,
+        texture: &ID3D11Texture2D,
+        subresource: u32,
+        pixel_format: HwPixelFormat,
+        timestamp_seconds: f64,
+    ) -> Result<Option<VideoFrame>, VideoError> {
+        let Some(device) = self.device.clone() else {
+            return Err(VideoError::Backend(
+                "hardware surface retrieval: a D3D surface arrived with no D3D device".into(),
+            ));
+        };
+
+        let (width, height) = (self.format.width, self.format.height);
+        let (preview_width, preview_height) = self.format.preview_size();
+
+        let needs_build = !self
+            .converter
+            .as_ref()
+            .is_some_and(|c| c.matches(pixel_format, width, height, preview_width, preview_height));
+        if needs_build {
+            match FrameConverter::new(
+                Arc::clone(&device),
+                pixel_format,
+                width,
+                height,
+                preview_width,
+                preview_height,
+                self.format.color,
+            ) {
+                Ok(converter) => {
+                    eprintln!(
+                        "[video-mf] dxgi-buffer         = true ({} {width}x{height} -> BGRA \
+                         {preview_width}x{preview_height})",
+                        pixel_format.name()
+                    );
+                    eprintln!("[video-mf] cpu-readback        = preview-size only");
+                    self.converter = Some(converter);
+                }
+                Err(err) => {
+                    // The GPU stage could not be built on this driver. Say so
+                    // once, stop trying, and let the caller keep showing picture
+                    // through the CPU converter rather than failing the file.
+                    eprintln!(
+                        "[video-mf] gpu conversion unavailable ({err}); \
+                         falling back to CPU {} conversion",
+                        pixel_format.name()
+                    );
+                    self.gpu_conversion_unavailable = true;
+                    return Ok(None);
+                }
+            }
+        }
+
+        let converter = self
+            .converter
+            .as_mut()
+            .expect("converter was just built or already matched");
+        let bgra = converter.convert(texture, subresource)?;
+        let (width, height) = converter.output_size();
+        Ok(Some(VideoFrame {
+            width,
+            height,
+            timestamp_seconds,
+            bgra,
+        }))
+    }
+}
+
+/// Negotiates the reader's output format and returns which path was chosen.
+///
+/// Hardware order is NV12 first (what every mainstream SDR decoder emits), then
+/// P010 for 10-bit sources. RGB32 is never requested with a D3D manager
+/// installed. The software configuration asks for RGB32, then ARGB32, which the
+/// OS Video Processor MFT produces from any decoder output.
+fn negotiate_output(
+    reader: &IMFSourceReader,
+    stream: u32,
+    hardware: bool,
+    native_subtype: &str,
+    native_size: Option<(u32, u32)>,
+) -> Result<OutputKind, VideoError> {
+    let candidates: &[(GUID, OutputKind)] = if hardware {
+        &[
+            (
+                MFVideoFormat_NV12,
+                OutputKind::Hardware(HwPixelFormat::Nv12),
+            ),
+            (
+                MFVideoFormat_P010,
+                OutputKind::Hardware(HwPixelFormat::P010),
+            ),
+        ]
+    } else {
+        &[
+            (MFVideoFormat_RGB32, OutputKind::SoftwareRgb32),
+            (MFVideoFormat_ARGB32, OutputKind::SoftwareRgb32),
+        ]
+    };
+
+    let mut last_error: Option<windows::core::Error> = None;
+    let mut attempted = Vec::new();
+
+    for (subtype, kind) in candidates {
+        attempted.push(subtype_name(subtype));
+        unsafe {
+            let requested = MFCreateMediaType()
+                .map_err(|e| hresult_error("decoder negotiation: MFCreateMediaType", e))?;
+            if let Err(err) = requested.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video) {
+                last_error = Some(err);
+                continue;
+            }
+            if let Err(err) = requested.SetGUID(&MF_MT_SUBTYPE, subtype) {
+                last_error = Some(err);
+                continue;
+            }
+            match reader.SetCurrentMediaType(stream, None, &requested) {
+                Ok(()) => return Ok(*kind),
+                Err(err) => last_error = Some(err),
+            }
+        }
+    }
+
+    let (width, height) = native_size.unwrap_or((0, 0));
+    let hresult = last_error
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "no HRESULT reported".to_string());
+    Err(VideoError::Backend(format!(
+        "decoder negotiation failed: requested [{}], source subtype {native_subtype}, \
+         {width}x{height}, d3d-manager={hardware}, {hresult}",
+        attempted.join(", "),
+    )))
 }
 
 /// `MF_MT_FRAME_SIZE` packs width in the high 32 bits and height in the low.
+/// Only the read direction is needed now that output size is never requested;
+/// the writer stays for the round-trip test that pins the layout.
+#[cfg(test)]
 fn pack_frame_size(width: u32, height: u32) -> u64 {
     ((width as u64) << 32) | height as u64
 }
@@ -436,23 +711,37 @@ fn unpack_frame_size(packed: u64) -> (u32, u32) {
     ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32)
 }
 
-/// The stream's own frame size, before any output negotiation.
-fn read_native_frame_size(reader: &IMFSourceReader) -> Option<(u32, u32)> {
+fn frame_size(media_type: &IMFMediaType) -> Option<(u32, u32)> {
     unsafe {
-        let media_type = reader
-            .GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0)
-            .ok()?;
         let (width, height) = unpack_frame_size(media_type.GetUINT64(&MF_MT_FRAME_SIZE).ok()?);
         (width > 0 && height > 0).then_some((width, height))
     }
 }
 
-/// Longest edge the preview decodes at. A picture monitor is watched at a few
-/// hundred points across, so decoding a 4K source at full size buys nothing and
-/// costs 33 MB per frame in readback, copy, and texture upload.
-const PREVIEW_MAX_EDGE: u32 = 1280;
+/// Human-readable name for the well-known subtypes this backend deals in. MF
+/// subtype GUIDs embed a FourCC in `data1`, so anything else prints as its tag.
+fn subtype_name(subtype: &GUID) -> String {
+    if *subtype == MFVideoFormat_NV12 {
+        return "NV12".into();
+    }
+    if *subtype == MFVideoFormat_P010 {
+        return "P010".into();
+    }
+    if *subtype == MFVideoFormat_RGB32 {
+        return "RGB32".into();
+    }
+    if *subtype == MFVideoFormat_ARGB32 {
+        return "ARGB32".into();
+    }
+    let fourcc = subtype.data1.to_le_bytes();
+    if fourcc.iter().all(|b| b.is_ascii_graphic()) {
+        String::from_utf8_lossy(&fourcc).into_owned()
+    } else {
+        format!("{subtype:?}")
+    }
+}
 
-/// The size to decode `width`x`height` at, or `None` when it already fits.
+/// The size to present `width`x`height` at, or `None` when it already fits.
 ///
 /// Never upscales, and keeps the aspect ratio. Both edges are rounded to even
 /// numbers because chroma-subsampled sources scale to odd sizes badly.
@@ -466,34 +755,65 @@ fn preview_frame_size(width: u32, height: u32) -> Option<(u32, u32)> {
     Some((even(width), even(height)))
 }
 
-/// Reads width/height/stride from the reader's *current* output type. Called
-/// after negotiation and again on every media-type change.
-fn read_output_format(reader: &IMFSourceReader) -> Result<OutputFormat, VideoError> {
+/// Reads geometry, stride and colour from the reader's *current* output type.
+/// Called after negotiation and again on every media-type change.
+fn read_output_format(
+    reader: &IMFSourceReader,
+    kind: OutputKind,
+) -> Result<OutputFormat, VideoError> {
     unsafe {
         let media_type = reader
             .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
-            .map_err(|e| hresult_error("GetCurrentMediaType", e))?;
+            .map_err(|e| hresult_error("decoder negotiation: GetCurrentMediaType", e))?;
 
-        let packed = media_type
-            .GetUINT64(&MF_MT_FRAME_SIZE)
-            .map_err(|e| hresult_error("MF_MT_FRAME_SIZE", e))?;
-        let (width, height) = unpack_frame_size(packed);
-        if width == 0 || height == 0 {
-            return Err(VideoError::NoVideoStream);
-        }
+        let (width, height) = frame_size(&media_type).ok_or(VideoError::NoVideoStream)?;
 
-        // Absent on some transforms; a positive packed stride is the safe
-        // default because the video processor emits top-down RGB32 there.
+        // Absent on some transforms. The fallback is one packed row in the
+        // negotiated format — 4 bytes per pixel for RGB32, one luma byte per
+        // pixel for NV12, two for P010 — and positive, because a transform that
+        // reports no stride emits top-down.
+        let default_stride = match kind {
+            OutputKind::SoftwareRgb32 => width * 4,
+            OutputKind::Hardware(HwPixelFormat::Nv12) => width,
+            OutputKind::Hardware(HwPixelFormat::P010) => width * 2,
+        };
         let stride = media_type
             .GetUINT32(&MF_MT_DEFAULT_STRIDE)
             .map(|value| value as i32)
-            .unwrap_or((width * 4) as i32);
+            .unwrap_or(default_stride as i32);
+
+        // Trust the stream when it declares a matrix or range, and fall back to
+        // the conventional reading of the frame height when it does not.
+        let mut color = ColorInfo::assume_from_height(height);
+        if let Ok(matrix) = media_type.GetUINT32(&MF_MT_YUV_MATRIX) {
+            color.bt709 = matrix == MFVideoTransferMatrix_BT709.0 as u32;
+        }
+        if let Ok(range) = media_type.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE) {
+            color.studio_range = range != MFNominalRange_0_255.0 as u32;
+        }
 
         Ok(OutputFormat {
+            kind,
             width,
             height,
             stride,
+            color,
         })
+    }
+}
+
+fn interlace_mode_name(reader: &IMFSourceReader) -> &'static str {
+    unsafe {
+        let Ok(media_type) =
+            reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
+        else {
+            return "unknown";
+        };
+        match media_type.GetUINT32(&MF_MT_INTERLACE_MODE) {
+            Ok(mode) if mode == MFVideoInterlace_Progressive.0 as u32 => "progressive",
+            Ok(_) => "interlaced",
+            Err(_) => "unknown",
+        }
     }
 }
 
@@ -531,23 +851,43 @@ fn read_duration_seconds(reader: &IMFSourceReader) -> f64 {
     }
 }
 
+/// The `ID3D11Texture2D` and array slice behind a hardware-decoded sample, or
+/// `None` when the sample lives in system memory.
+///
+/// The returned texture is a strong COM reference: the caller may use it after
+/// the buffer goes out of scope, though the sample must stay alive for the
+/// surface's *contents* to remain the decoded frame.
+fn dxgi_surface(sample: &IMFSample) -> Option<(ID3D11Texture2D, u32)> {
+    unsafe {
+        let buffer = sample.GetBufferByIndex(0).ok()?;
+        let dxgi = buffer.cast::<IMFDXGIBuffer>().ok()?;
+
+        let mut resource: Option<ID3D11Texture2D> = None;
+        dxgi.GetResource(
+            &ID3D11Texture2D::IID,
+            &mut resource as *mut _ as *mut *mut core::ffi::c_void,
+        )
+        .ok()?;
+        let resource = resource?;
+        let subresource = dxgi.GetSubresourceIndex().ok()?;
+        Some((resource, subresource))
+    }
+}
+
 /// Copies one RGB32 sample into a tightly packed, top-down BGRA buffer.
 ///
-/// Two lock paths, because the hardware path changes where the pixels live.
-/// A D3D-backed sample's mapped row pitch is chosen by the driver and need not
-/// match `MF_MT_DEFAULT_STRIDE`, so trusting the media type's stride there
-/// would skew the picture. `IMF2DBuffer::Lock2D` reports the real pitch and is
-/// tried first; the plain `Lock` path stays for system-memory buffers that do
-/// not implement it.
-fn convert_sample(
-    sample: &windows::Win32::Media::MediaFoundation::IMFSample,
+/// Software path only. `IMF2DBuffer::Lock2D` reports the real pitch and is
+/// tried first; the plain `Lock` path stays for buffers that do not implement
+/// it.
+fn convert_rgb32_sample(
+    sample: &IMFSample,
     format: OutputFormat,
     timestamp_seconds: f64,
 ) -> Result<VideoFrame, VideoError> {
     unsafe {
         let buffer = sample
             .ConvertToContiguousBuffer()
-            .map_err(|e| hresult_error("ConvertToContiguousBuffer", e))?;
+            .map_err(|e| hresult_error("presentation: ConvertToContiguousBuffer", e))?;
 
         let row_bytes = format.row_bytes();
         let height = format.height as usize;
@@ -564,12 +904,12 @@ fn convert_sample(
         let (base, step) = if let Some(two_d) = &two_d {
             two_d
                 .Lock2D(&mut scanline0, &mut pitch)
-                .map_err(|e| hresult_error("IMF2DBuffer::Lock2D", e))?;
+                .map_err(|e| hresult_error("presentation: IMF2DBuffer::Lock2D", e))?;
             (scanline0, pitch as isize)
         } else {
             buffer
                 .Lock(&mut scanline0, None, Some(&mut locked_len))
-                .map_err(|e| hresult_error("IMFMediaBuffer::Lock", e))?;
+                .map_err(|e| hresult_error("presentation: IMFMediaBuffer::Lock", e))?;
             let stride = format.abs_stride();
             if format.stride < 0 && !scanline0.is_null() {
                 // Bottom-up: buffer row 0 is the image's last row.
@@ -586,7 +926,7 @@ fn convert_sample(
         let enough_bytes = two_d.is_some() || (locked_len as usize) >= usable_pitch * height;
         let result = if base.is_null() || usable_pitch < row_bytes || !enough_bytes {
             Err(VideoError::Backend(format!(
-                "unexpected frame layout: {}x{} pitch={step} bytes={locked_len}",
+                "presentation: unexpected frame layout: {}x{} pitch={step} bytes={locked_len}",
                 format.width, format.height
             )))
         } else {
@@ -596,10 +936,7 @@ fn convert_sample(
                 std::ptr::copy_nonoverlapping(source, destination, row_bytes);
             }
             // RGB32's fourth channel is undefined padding; force it opaque so
-            // the frame composites correctly in the UI. One flat pass over the
-            // packed buffer, outside the row loop: the old per-row `add`
-            // arithmetic recomputed a base pointer for every pixel and blocked
-            // vectorization.
+            // the frame composites correctly in the UI.
             for pixel in bgra.chunks_exact_mut(4) {
                 pixel[3] = 0xFF;
             }
@@ -616,6 +953,87 @@ fn convert_sample(
         Ok(VideoFrame {
             width: format.width,
             height: format.height,
+            timestamp_seconds,
+            bgra,
+        })
+    }
+}
+
+/// CPU conversion of an NV12/P010 sample that arrived in system memory.
+///
+/// Reached when the reader negotiated a hardware output format but the sample
+/// carries no `IMFDXGIBuffer` — a software decoder MFT ran, or the driver
+/// declined to allocate D3D surfaces.
+fn convert_system_memory_yuv(
+    sample: &IMFSample,
+    format: OutputFormat,
+    pixel_format: HwPixelFormat,
+    timestamp_seconds: f64,
+) -> Result<VideoFrame, VideoError> {
+    unsafe {
+        let buffer = sample
+            .ConvertToContiguousBuffer()
+            .map_err(|e| hresult_error("presentation: ConvertToContiguousBuffer", e))?;
+
+        let two_d = buffer.cast::<IMF2DBuffer>().ok();
+        let mut base: *mut u8 = std::ptr::null_mut();
+        let mut pitch = 0i32;
+        let mut locked_len = 0u32;
+
+        if let Some(two_d) = &two_d {
+            two_d
+                .Lock2D(&mut base, &mut pitch)
+                .map_err(|e| hresult_error("presentation: IMF2DBuffer::Lock2D", e))?;
+        } else {
+            buffer
+                .Lock(&mut base, None, Some(&mut locked_len))
+                .map_err(|e| hresult_error("presentation: IMFMediaBuffer::Lock", e))?;
+            pitch = format.abs_stride().max(format.width as usize) as i32;
+        }
+
+        let height = format.height as usize;
+        let luma_pitch = pitch.unsigned_abs() as usize;
+        // NV12/P010 store the full-height luma plane followed by an
+        // interleaved chroma plane of half the height and the same pitch.
+        let total = luma_pitch * height + luma_pitch * height.div_ceil(2);
+        let result = if base.is_null() || luma_pitch == 0 {
+            Err(VideoError::Backend(format!(
+                "presentation: unexpected {} layout {}x{} pitch={pitch}",
+                pixel_format.name(),
+                format.width,
+                format.height
+            )))
+        } else {
+            let planes = std::slice::from_raw_parts(base as *const u8, total);
+            let (luma, chroma) = planes.split_at(luma_pitch * height);
+            let (preview_width, preview_height) = format.preview_size();
+            cpu_convert_to_bgra(
+                YuvPlanes {
+                    luma,
+                    luma_pitch,
+                    chroma,
+                    chroma_pitch: luma_pitch,
+                    format: pixel_format,
+                    width: format.width,
+                    height: format.height,
+                },
+                preview_width,
+                preview_height,
+                format.color,
+            )
+        };
+
+        if let Some(two_d) = &two_d {
+            let _ = two_d.Unlock2D();
+        } else {
+            let _ = buffer.Unlock();
+        }
+
+        let bgra = result?;
+        let (preview_width, preview_height) = format.preview_size();
+        Ok(VideoFrame {
+            width: preview_width,
+            height: preview_height,
             timestamp_seconds,
             bgra,
         })
@@ -662,5 +1080,28 @@ mod tests {
     fn degenerate_sizes_do_not_scale() {
         assert_eq!(preview_frame_size(0, 0), None);
         assert_eq!(preview_frame_size(3840, 0), None);
+    }
+
+    /// The hardware path must never name RGB32 — asking a DXVA decoder for RGB
+    /// is what produced `0xC00D5212`.
+    #[test]
+    fn hardware_output_candidates_never_include_rgb32() {
+        assert_eq!(subtype_name(&MFVideoFormat_NV12), "NV12");
+        assert_eq!(subtype_name(&MFVideoFormat_P010), "P010");
+        assert_ne!(subtype_name(&MFVideoFormat_NV12), "RGB32");
+        assert_ne!(subtype_name(&MFVideoFormat_P010), "RGB32");
+    }
+
+    #[test]
+    fn output_kinds_report_the_subtype_they_negotiated() {
+        assert_eq!(
+            OutputKind::Hardware(HwPixelFormat::Nv12).subtype_name(),
+            "NV12"
+        );
+        assert_eq!(
+            OutputKind::Hardware(HwPixelFormat::P010).subtype_name(),
+            "P010"
+        );
+        assert_eq!(OutputKind::SoftwareRgb32.subtype_name(), "RGB32");
     }
 }

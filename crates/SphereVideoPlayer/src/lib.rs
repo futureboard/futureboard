@@ -34,6 +34,8 @@ mod preview;
 pub use preview::{PreviewStatus, VideoPreview, VideoPreviewFrame};
 
 #[cfg(windows)]
+mod windows_d3d;
+#[cfg(windows)]
 mod windows_mf;
 
 #[cfg(target_os = "macos")]

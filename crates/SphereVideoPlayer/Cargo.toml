@@ -13,8 +13,11 @@ path = "src/lib.rs"
 # No FFmpeg / libav is bundled or linked on any platform. Decoding is delegated
 # to the media framework the operating system already ships:
 #
-#   Windows — Media Foundation Source Reader (`IMFSourceReader`) with the
-#             built-in Video Processor MFT converting to RGB32/BGRA.
+#   Windows — Media Foundation Source Reader (`IMFSourceReader`) driving a DXVA
+#             hardware decoder onto a shared D3D11 device, with the D3D11 Video
+#             Processor converting NV12/P010 to BGRA. A software Source Reader
+#             configuration (RGB32 via the OS Video Processor MFT) is kept for
+#             machines with no usable D3D11 video device.
 #   macOS   — AVFoundation `AVAssetImageGenerator` + Core Graphics.
 #   Linux   — not implemented yet. VAAPI (`libva`) is the intended backend;
 #             see the crate docs for why that is a larger job than the other
@@ -22,13 +25,17 @@ path = "src/lib.rs"
 #
 # A build with no backend reports `VideoError::UnsupportedPlatform` and the UI
 # disables the player rather than faking a preview.
+# No logging facade: the workspace installs no `tracing` subscriber, so
+# `tracing::…` output from here would be dropped. Diagnostics go to stderr with
+# a `[video-mf]` / `[video-perf]` tag, matching `[video-import]` and
+# `[video-player]` in the UI crate.
 [dependencies]
-tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
