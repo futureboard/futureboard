@@ -53,6 +53,8 @@ pub enum ProjectTrackType {
     Return,
     Group,
     Master,
+    /// Reference/preview video lane (v33+).
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,6 +115,12 @@ pub enum ClipSource {
         sysex_events: Vec<MidiSysExEvent>,
         /// Direction articulation events (v25+). Older projects have none.
         articulations: Vec<MidiArticulation>,
+    },
+    /// Reference video placed on the Video track (v33+). Only the media
+    /// reference is stored; frames are always decoded from the source file.
+    Video {
+        asset_id: String,
+        source_path: Option<PathBuf>,
     },
     Empty,
 }
@@ -342,7 +350,9 @@ impl TrackRouting {
             ProjectTrackType::Bus
             | ProjectTrackType::Return
             | ProjectTrackType::Group
-            | ProjectTrackType::Master => Self::default(),
+            | ProjectTrackType::Master
+            // A Video track has no audio or MIDI routing at all.
+            | ProjectTrackType::Video => Self::default(),
         }
     }
 }
@@ -853,6 +863,7 @@ impl From<&TimelineState> for FutureboardProject {
                     TlTrackType::Return => ProjectTrackType::Return,
                     TlTrackType::Group => ProjectTrackType::Group,
                     TlTrackType::Master => ProjectTrackType::Master,
+                    TlTrackType::Video => ProjectTrackType::Video,
                 };
                 let clips = t
                     .clips
@@ -956,6 +967,13 @@ impl From<&TimelineState> for FutureboardProject {
                                         articulation: event.articulation.to_tag(),
                                     })
                                     .collect(),
+                            },
+                            ClipType::Video {
+                                file_id,
+                                source_path,
+                            } => ClipSource::Video {
+                                asset_id: file_id.clone(),
+                                source_path: source_path.as_deref().map(PathBuf::from),
                             },
                         };
                         ProjectClip {
@@ -1361,6 +1379,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 ProjectTrackType::Return => TlTrackType::Return,
                 ProjectTrackType::Group => TlTrackType::Group,
                 ProjectTrackType::Master => TlTrackType::Master,
+                ProjectTrackType::Video => TlTrackType::Video,
             };
             let clips = pt
                 .clips
@@ -1458,6 +1477,15 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                     })
                                 })
                                 .collect(),
+                        },
+                        ClipSource::Video {
+                            asset_id,
+                            source_path,
+                        } => ClipType::Video {
+                            file_id: asset_id.clone(),
+                            source_path: source_path
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().into_owned()),
                         },
                         ClipSource::Empty => ClipType::Midi {
                             notes: Vec::new(),

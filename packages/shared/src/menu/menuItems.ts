@@ -598,6 +598,26 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "floatingwindow:mixer",
       },
       {
+        id: "window.video_player",
+        label: "Video Player",
+        icon: "film",
+        action: "window:video-player",
+        description:
+          "Preview the Video track's reference video against the playhead",
+      },
+      {
+        type: "separator",
+        id: "window.sep.extensions",
+      },
+      {
+        id: "window.extensions",
+        label: "Extensions...",
+        icon: "blocks",
+        action: "window:extensions",
+        description:
+          "Browse and install community themes and extensions from the registry",
+      },
+      {
         type: "separator",
         id: "window.sep.song_text",
       },

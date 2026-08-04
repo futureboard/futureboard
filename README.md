@@ -8,6 +8,7 @@
 [![Status](https://img.shields.io/badge/status-pre--alpha-f59e0b?style=for-the-badge&labelColor=0f172a)](ARCHITECTURE.md)
 [![License](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge&labelColor=0f172a)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-38bdf8?style=for-the-badge&labelColor=0f172a)](CONTRIBUTING.md)
+[![Translate on Crowdin](https://img.shields.io/badge/Translate-Crowdin-2e3340?style=for-the-badge&logo=crowdin&logoColor=white&labelColor=0f172a)](https://crowdin.com/project/futureboard-studio)
 
 [![Rust](https://img.shields.io/badge/Rust-2024-f97316?style=for-the-badge&logo=rust&logoColor=white&labelColor=0f172a)](https://rustup.rs)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3b82f6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=0f172a)](https://www.typescriptlang.org)
@@ -23,6 +24,7 @@
 [Getting Started](#getting-started) ·
 [Build](#building-the-native-app) ·
 [Debugging](#debugging--diagnostics) ·
+[Translations](#translations) ·
 [Contributing](#contributing) ·
 [Forks & Trademarks](#third-party-forks--trademarks)
 
@@ -219,6 +221,16 @@ Futureboard
 ## Roadmap
 
 Toward a usable native DAW foundation: a stable native GPUI shell, audio clip editing, timeline & MIDI editing, mixer routing, native plugin hosting (VST3 editor embedding, CLAP support), a project file format, automation lanes, audio export, and cross-platform packaging. See [ARCHITECTURE.md](ARCHITECTURE.md) for current status.
+
+---
+
+## Translations
+
+Help translate Futureboard Studio through the
+[Futureboard Studio project on Crowdin](https://crowdin.com/project/futureboard-studio).
+The English source catalog and downloaded locale files live under
+`packages/shared/locales`; see the [translation guide](packages/shared/locales/translation.md)
+for the catalog format and maintainer workflow.
 
 ---
 

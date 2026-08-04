@@ -26,6 +26,7 @@ add-track.description.master = Final output and master bus
 add-track.description.midi = Sequence instruments with notes
 add-track.description.plugin = Host virtual instruments & effects
 add-track.description.return = Receive sends from other tracks
+add-track.description.video = Reference video for scoring to picture
 add-track.detail.audio = WAV - MP3 - AIFF
 add-track.detail.bus = Sends - Groups
 add-track.detail.group = Sub-mix - Stem
@@ -49,6 +50,7 @@ add-track.kind.master = Master Track
 add-track.kind.midi = MIDI Track
 add-track.kind.plugin = Plugin Track
 add-track.kind.return = Return Track
+add-track.kind.video = Video Track
 add-track.tab.audio = Audio
 add-track.tab.automation = Auto
 add-track.tab.bus = Bus
@@ -79,6 +81,7 @@ add-track.option.auto-color = Auto Color
 add-track.summary.group-unwired = Group tracks are not wired in Native yet
 add-track.summary.master-managed = Native uses a managed master bus
 add-track.summary.plugin-unwired = Plugin tracks are not wired in Native yet
+add-track.tab.video = Video
 add-track.title = New Track
 
 ## Panels & Timeline
@@ -212,6 +215,7 @@ inspector.track-type.instrument = Instrument
 inspector.track-type.master = Master
 inspector.track-type.midi = MIDI
 inspector.track-type.return = Return
+inspector.track-type.video = Video
 inspector.volume.db = { $db } dB
 
 ## Application Menu
@@ -474,6 +478,7 @@ mixer.track-type.instrument = INST
 mixer.track-type.master = MST
 mixer.track-type.midi = MIDI
 mixer.track-type.return = RTN
+mixer.track-type.video = VID
 panel.browser = BROWSER
 panel.inspector = INSPECT
 panel.mixer = MIXER

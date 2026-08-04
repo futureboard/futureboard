@@ -60,7 +60,11 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// degrades to Standard rather than failing the load.
 /// v30 adds arrangement group membership; v31 persists folder collapse state;
 /// v32 persists each track's volume-automation read/bypass state.
-pub const PROJECT_VERSION: u32 = 32;
+/// v33 adds the reference Video track (track type tag 7) and the video clip
+/// source (clip source tag 4), which stores only the asset id and source path —
+/// frames are always decoded from the file, never persisted. Pre-v33 projects
+/// have no Video track, which is exactly what they had before the type existed.
+pub const PROJECT_VERSION: u32 = 33;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -624,6 +628,14 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             w.write_u64(*start_frame);
             w.write_u64(*length_frames);
         }
+        ClipSource::Video {
+            asset_id,
+            source_path,
+        } => {
+            w.write_u8(4);
+            w.write_str(asset_id);
+            w.write_opt_path(source_path);
+        }
         ClipSource::Midi {
             notes,
             controller_lanes,
@@ -674,6 +686,7 @@ fn encode_track_type(w: &mut FbWriter, t: ProjectTrackType) {
         ProjectTrackType::Return => 4,
         ProjectTrackType::Group => 5,
         ProjectTrackType::Master => 6,
+        ProjectTrackType::Video => 7,
     });
 }
 
@@ -1474,6 +1487,10 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
             asset_id: r.read_str()?,
             source_path: r.read_opt_path()?,
         },
+        4 if version >= 33 => ClipSource::Video {
+            asset_id: r.read_str()?,
+            source_path: r.read_opt_path()?,
+        },
         3 if version >= 14 => ClipSource::Rauf {
             asset_id: r.read_str()?,
             source_path: PathBuf::from(r.read_str()?),
@@ -1567,6 +1584,7 @@ fn decode_track_type(r: &mut FbReader) -> Result<ProjectTrackType, ProjectError>
         4 => ProjectTrackType::Return,
         5 => ProjectTrackType::Group,
         6 => ProjectTrackType::Master,
+        7 => ProjectTrackType::Video,
         t => return Err(ProjectError::Corrupted(format!("unknown track type {t}"))),
     })
 }

@@ -35,6 +35,7 @@ mod tempo;
 mod time_signature;
 mod track;
 mod track_row_layout;
+mod video;
 mod viewport;
 
 #[cfg(test)]
@@ -73,5 +74,5 @@ pub use track::*;
 pub use track_row_layout::*;
 pub use viewport::*;
 
-// `audio`, `recording`, and `demo` only contribute `impl TimelineState`
+// `audio`, `recording`, `video`, and `demo` only contribute `impl TimelineState`
 // methods (no nameable items), so they need no `pub use` re-export.

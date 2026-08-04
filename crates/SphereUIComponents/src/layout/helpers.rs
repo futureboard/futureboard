@@ -195,6 +195,10 @@ pub(super) fn find_clip_summary<'a>(
                 crate::components::timeline::timeline_state::ClipType::Midi { notes, .. } => {
                     ("MIDI", None, Some(notes.len()))
                 }
+                crate::components::timeline::timeline_state::ClipType::Video {
+                    source_path,
+                    ..
+                } => ("Video", source_path.as_deref(), None),
             };
             return Some(crate::components::panel::SelectedClipSummary {
                 clip_id: &c.id,

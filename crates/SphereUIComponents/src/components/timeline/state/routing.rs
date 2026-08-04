@@ -244,6 +244,16 @@ impl TrackRoutingState {
                 midi_input_filter: MidiInputChannelFilter::All,
                 midi_output_per_note: false,
             },
+            // A Video track is picture-only: no input, no output, no MIDI.
+            TrackType::Video => Self {
+                input: TrackInputRouting::None,
+                output: TrackOutputRouting::None,
+                audio_format: TrackAudioFormat::Stereo,
+                midi_input: TrackMidiInputRouting::None,
+                midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
+            },
         }
     }
 }

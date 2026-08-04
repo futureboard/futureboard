@@ -6,6 +6,7 @@ use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
     ClipState, ClipType, TimelineState, TimelineTool, TrackState, TrackType, HEADER_WIDTH,
 };
+use crate::components::timeline::video_clip::video_clip;
 use crate::{custom_cursors, theme::Colors};
 use gpui::prelude::FluentBuilder;
 use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
@@ -116,6 +117,19 @@ pub fn track_lane(
                 )
                 .into_any_element(),
                 ClipType::Midi { .. } => midi_clip(
+                    clip,
+                    &track.id,
+                    track_color,
+                    state,
+                    row_height,
+                    on_sel_clip,
+                    on_clip_context,
+                    on_open,
+                    on_del,
+                    erase_target,
+                )
+                .into_any_element(),
+                ClipType::Video { .. } => video_clip(
                     clip,
                     &track.id,
                     track_color,

@@ -19,6 +19,7 @@ pub mod controls;
 pub mod edit;
 mod editor_panel;
 mod effect_editor_tab_view;
+pub mod extensions_window;
 pub mod fader;
 pub mod file_browser;
 pub mod form;
@@ -77,6 +78,7 @@ pub mod stem_extractor_dialog;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+pub mod video_player_window;
 pub mod virtual_keyboard;
 
 pub use add_track_dialog::{
@@ -115,6 +117,7 @@ pub use controls::{
 };
 pub use editor_panel::ClipEditorPanel;
 pub(crate) use effect_editor_tab_view::EffectEditorTabView;
+pub use extensions_window::{open_extensions_window, ExtensionsWindow};
 pub use fader::fader;
 pub use icon::icon;
 pub use icon_button::icon_button;
@@ -193,6 +196,7 @@ pub use stem_extractor_dialog::{
     StemSourceClip, STEM_EXTRACTOR_WINDOW_WIDTH,
 };
 pub use text_input::{text_field, TextInputAction, TextInputState};
+pub use video_player_window::{open_video_player_window, VideoPlayerSnapshot, VideoPlayerWindow};
 pub use virtual_keyboard::{
     VirtualKeyboardEventSink, VirtualKeyboardPanel, VirtualKeyboardPanelState,
     VirtualKeyboardService,

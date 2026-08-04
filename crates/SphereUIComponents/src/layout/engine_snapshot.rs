@@ -636,6 +636,9 @@ fn build_engine_project_snapshot_inner(
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
         .iter()
+        // A Video track produces no audio, so it gets no engine route. Sending
+        // one would add a permanently silent node to the graph and to PDC.
+        .filter(|track| track.track_type.carries_audio())
         .map(|track| EngineTrackSnapshot {
             id: track.id.clone(),
             track_type: track_type_name(track.track_type).to_string(),
@@ -1004,6 +1007,7 @@ fn track_type_name(track_type: TrackType) -> &'static str {
         TrackType::Return => "return",
         TrackType::Group => "group",
         TrackType::Master => "master",
+        TrackType::Video => "video",
     }
 }
 

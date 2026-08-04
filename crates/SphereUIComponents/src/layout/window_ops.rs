@@ -230,6 +230,12 @@ pub(crate) struct ExternalWindows {
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
     >,
+    /// Extensions registry browser window.
+    pub extensions:
+        Option<gpui::WindowHandle<crate::components::extensions_window::ExtensionsWindow>>,
+    /// Video Player — reference/preview monitor for the Video track.
+    pub video_player:
+        Option<gpui::WindowHandle<crate::components::video_player_window::VideoPlayerWindow>>,
     /// Audio Routing Matrix ("Audio Connections") window.
     pub routing_matrix:
         Option<gpui::WindowHandle<crate::components::routing_matrix_window::RoutingMatrixWindow>>,
@@ -318,6 +324,7 @@ impl StudioLayout {
     ) {
         let mut track_count = 0;
         let mut has_master_track = false;
+        let mut has_video_track = false;
         let _ = self.timeline.update(cx, |timeline, _cx| {
             track_count = timeline.state.tracks.len();
             has_master_track = timeline
@@ -325,12 +332,18 @@ impl StudioLayout {
                 .tracks
                 .iter()
                 .any(|track| track.track_type == TrackType::Master);
+            has_video_track = timeline
+                .state
+                .tracks
+                .iter()
+                .any(|track| track.track_type == TrackType::Video);
         });
 
         self.open_add_track_external_window_with_context(
             kind,
             track_count,
             has_master_track,
+            has_video_track,
             owner_bounds,
             cx,
         );
@@ -348,6 +361,7 @@ impl StudioLayout {
         kind: AddTrackKind,
         track_count: usize,
         has_master_track: bool,
+        has_video_track: bool,
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
@@ -374,7 +388,13 @@ impl StudioLayout {
                         &self.plugin_catalog,
                     ));
                     win.set_midi_input_devices(midi_input_devices.clone());
-                    win.set_context(kind, track_count, has_master_track, default_monitor_mode);
+                    win.set_context(
+                        kind,
+                        track_count,
+                        has_master_track,
+                        has_video_track,
+                        default_monitor_mode,
+                    );
                     win.set_audio_output_targets(audio_output_targets);
                     window.activate_window();
                     cx.notify();
@@ -629,6 +649,7 @@ impl StudioLayout {
             kind,
             track_count,
             has_master_track,
+            has_video_track,
             default_monitor_mode,
             language,
             instrument_plugins,
@@ -898,6 +919,39 @@ impl StudioLayout {
     ) -> crate::components::RoutingMatrixSnapshot {
         crate::components::RoutingMatrixSnapshot {
             tracks: self.timeline.read(cx).state.tracks.clone(),
+        }
+    }
+
+    /// Opens the Extensions registry browser, or focuses it if already open.
+    /// The window owns no studio state — it talks to the public registry and
+    /// installs into the user extensions directory — so closing it only clears
+    /// the handle.
+    pub(super) fn open_extensions_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.extensions.clone() {
+            if handle
+                .update(cx, |_window, w, _cx| w.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.extensions = None;
+        }
+
+        let studio = cx.entity().clone();
+        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new(move |_, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.external_windows.extensions = None;
+                cx.notify();
+            });
+        });
+
+        match crate::components::open_extensions_window(owner_bounds, on_close, cx) {
+            Ok(handle) => self.external_windows.extensions = Some(handle),
+            Err(err) => eprintln!("[extensions] failed to open window: {err}"),
         }
     }
 

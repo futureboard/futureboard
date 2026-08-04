@@ -224,6 +224,7 @@ fn mixer_track_type_label(track_type: TrackType, i18n: I18n) -> String {
         TrackType::Return => i18n.tr("mixer.track-type.return"),
         TrackType::Group => "GRP".to_string(),
         TrackType::Master => i18n.tr("mixer.track-type.master"),
+        TrackType::Video => i18n.tr("mixer.track-type.video"),
     }
 }
 
@@ -344,10 +345,7 @@ fn strip_header(
     i18n: I18n,
 ) -> impl IntoElement {
     let type_label = mixer_track_type_label(track.track_type, i18n);
-    let channel_label = i18n.tr_vars(
-        "mixer.channel",
-        &[("nn", format!("{:02}", index + 1))],
-    );
+    let channel_label = i18n.tr_vars("mixer.channel", &[("nn", format!("{:02}", index + 1))]);
 
     div()
         .flex()
@@ -2198,6 +2196,11 @@ pub(crate) fn collect_mixer_render_items(
             continue;
         }
         if hidden_channels.contains(&track.id) {
+            continue;
+        }
+        // A Video track is picture-only — it has no fader, meter, or signal to
+        // mix, so it never gets a channel strip.
+        if !track.track_type.carries_audio() {
             continue;
         }
         items.push(MixerRenderItem::Track { track_index });

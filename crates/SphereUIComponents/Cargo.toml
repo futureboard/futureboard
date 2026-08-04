@@ -83,6 +83,7 @@ builtin-ui-embed = { workspace = true, optional = true }
 sphere-graphic-engine.workspace = true
 sphere-midi-service.workspace = true
 sphere-soundfont-player.workspace = true
+sphere-video-player.workspace = true
 # Cross-platform user directories for the file browser default location.
 dirs.workspace = true
 # Reading other DAWs' XML project files (Cubase track archives).

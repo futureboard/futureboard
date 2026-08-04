@@ -192,7 +192,7 @@ pub fn selected_audio_clip<'a>(
     let (track, clip) = state.find_clip(clip_id)?;
     match clip.clip_type {
         ClipType::Audio { .. } => Some((track, clip)),
-        ClipType::Midi { .. } => None,
+        ClipType::Midi { .. } | ClipType::Video { .. } => None,
     }
 }
 
@@ -204,5 +204,7 @@ pub fn clip_type_hint_for_selection(
     match clip.clip_type {
         ClipType::Audio { .. } => Some(sphere_audio_editor::ClipTypeHint::Audio),
         ClipType::Midi { .. } => Some(sphere_audio_editor::ClipTypeHint::Midi),
+        // The audio editor has nothing to show for a reference video clip.
+        ClipType::Video { .. } => None,
     }
 }

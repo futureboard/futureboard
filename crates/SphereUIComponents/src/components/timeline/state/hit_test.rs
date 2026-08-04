@@ -29,6 +29,12 @@ pub enum ArrangementHitTarget {
         timeline_beat: f64,
         local_beat: f64,
     },
+    VideoClip {
+        track_id: TrackId,
+        clip_id: ClipId,
+        timeline_beat: f64,
+        local_beat: f64,
+    },
     Ruler {
         timeline_beat: f64,
     },
@@ -51,6 +57,7 @@ impl ArrangementHitTarget {
             Self::TrackLane { .. } => "TrackLane",
             Self::AudioClip { .. } => "AudioClip",
             Self::MidiClip { .. } => "MidiClip",
+            Self::VideoClip { .. } => "VideoClip",
             Self::Ruler { .. } => "Ruler",
             Self::Marker { .. } => "Marker",
             Self::AutomationLane { .. } => "AutomationLane",
@@ -175,6 +182,12 @@ pub fn hit_test_arrangement(
                         local_beat,
                     },
                     ClipType::Midi { .. } => ArrangementHitTarget::MidiClip {
+                        track_id: track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        timeline_beat: beat,
+                        local_beat,
+                    },
+                    ClipType::Video { .. } => ArrangementHitTarget::VideoClip {
                         track_id: track.id.clone(),
                         clip_id: clip.id.clone(),
                         timeline_beat: beat,

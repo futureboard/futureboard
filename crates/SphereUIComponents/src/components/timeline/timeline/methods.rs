@@ -101,6 +101,7 @@ impl Timeline {
                 beat: timeline_beat,
                 local_beat,
             },
+            ArrangementHitTarget::VideoClip { clip_id, .. } => TimelineContextTarget::Clip(clip_id),
             ArrangementHitTarget::Ruler { timeline_beat } => {
                 TimelineContextTarget::Ruler(timeline_beat)
             }
@@ -1666,6 +1667,82 @@ impl Timeline {
             cx,
         );
         true
+    }
+
+    /// Places a dropped video on the Video track, creating the track if the
+    /// project has none.
+    ///
+    /// Unlike audio and MIDI this ignores `force_new_track`: the Video track is
+    /// a singleton, so a multi-file drop stacks reference videos on the one
+    /// track rather than minting a second one.
+    pub(super) fn import_video_path_at_last_drag(
+        &mut self,
+        path: &std::path::Path,
+        _force_new_track: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !sphere_video_player::is_supported_video_path(path) {
+            return false;
+        }
+
+        let path_key = path.to_string_lossy().to_string();
+        let clip_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Reference Video".to_string());
+
+        let (drop_x, _drop_y) = self.drop_position_or_new_track(false);
+        let clip_id = self.state.import_video_at(path_key, clip_name, drop_x);
+        self.mark_project_changed(cx);
+        self.mark_media_changed(cx);
+        self.spawn_video_duration_probe(path.to_path_buf(), clip_id, cx);
+        true
+    }
+
+    /// Replaces an imported video clip's placeholder length with the container's
+    /// real duration.
+    ///
+    /// Opening a decoder blocks (it parses the container and may seek), so the
+    /// probe runs on the background executor and only the resulting number
+    /// crosses back to the UI. A file the platform cannot decode simply leaves
+    /// the placeholder length in place — the clip is still movable and the
+    /// player window reports the real error.
+    fn spawn_video_duration_probe(
+        &mut self,
+        path: std::path::PathBuf,
+        clip_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let probe_path = path.clone();
+            let probed = cx
+                .background_executor()
+                .spawn(async move { sphere_video_player::probe(&probe_path) })
+                .await;
+            let seconds = match probed {
+                Ok(info) if info.duration_seconds > 0.0 => info.duration_seconds,
+                Ok(_) => return,
+                Err(error) => {
+                    eprintln!(
+                        "[video-import] probe failed path={} err={error}",
+                        path.display()
+                    );
+                    return;
+                }
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .state
+                    .set_video_clip_duration_seconds(&clip_id, seconds)
+                {
+                    this.mark_project_changed(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn import_midi_path_at_last_drag(

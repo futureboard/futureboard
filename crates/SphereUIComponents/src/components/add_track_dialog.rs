@@ -98,6 +98,8 @@ pub enum AddTrackKind {
     Return,
     Group,
     Master,
+    /// Reference/preview video lane. Like Master, a project holds at most one.
+    Video,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +168,7 @@ impl AddTrackKind {
             Self::Master => "add-track.kind.master",
             Self::Automation => "add-track.kind.automation",
             Self::Folder => "add-track.kind.folder",
+            Self::Video => "add-track.kind.video",
         }
     }
 
@@ -181,6 +184,7 @@ impl AddTrackKind {
             Self::Master => "add-track.description.master",
             Self::Automation => "add-track.description.automation",
             Self::Folder => "add-track.description.folder",
+            Self::Video => "add-track.description.video",
         }
     }
 
@@ -196,6 +200,7 @@ impl AddTrackKind {
             Self::Return => "Return",
             Self::Group => "Group",
             Self::Master => "Master",
+            Self::Video => "Video",
         }
     }
 
@@ -212,6 +217,7 @@ impl AddTrackKind {
             Self::Master => "add-track.tab.master",
             Self::Automation => "add-track.tab.automation",
             Self::Folder => "add-track.tab.folder",
+            Self::Video => "add-track.tab.video",
         }
     }
 
@@ -227,6 +233,7 @@ impl AddTrackKind {
             Self::Return => "Return Track",
             Self::Group => "Group Track",
             Self::Master => "Master Track",
+            Self::Video => "Video Track",
         }
     }
 
@@ -242,6 +249,7 @@ impl AddTrackKind {
             Self::Return => assets::ICON_CORNER_DOWN_LEFT_PATH,
             Self::Group => assets::ICON_GIT_FORK_PATH,
             Self::Master => assets::ICON_VOLUME_2_PATH,
+            Self::Video => assets::ICON_FILM_PATH,
         }
     }
 
@@ -253,6 +261,7 @@ impl AddTrackKind {
             Self::Bus => Some(TrackType::Bus),
             Self::Return => Some(TrackType::Return),
             Self::Folder | Self::Group => Some(TrackType::Group),
+            Self::Video => Some(TrackType::Video),
             Self::Automation | Self::Plugin | Self::Master => None,
         }
     }
@@ -274,6 +283,7 @@ impl AddTrackKind {
             Self::Bus,
             Self::Automation,
             Self::Folder,
+            Self::Video,
         ]
     }
 
@@ -324,6 +334,9 @@ pub struct AddTrackDialogState {
     pub monitor_mode: &'static str,
     pub next_number: usize,
     pub has_master_track: bool,
+    /// A project holds at most one Video track, so the tab is disabled once one
+    /// exists — same rule as Master.
+    pub has_video_track: bool,
     pub base_track_count: usize,
 }
 
@@ -344,16 +357,17 @@ pub(crate) fn add_track_debug(message: &str) {
 
 impl AddTrackDialogState {
     pub fn closed() -> Self {
-        Self::open_for(0, false)
+        Self::open_for(0, false, false)
     }
 
-    pub fn open_for(track_count: usize, has_master_track: bool) -> Self {
-        Self::open_for_with_monitor(track_count, has_master_track, "off")
+    pub fn open_for(track_count: usize, has_master_track: bool, has_video_track: bool) -> Self {
+        Self::open_for_with_monitor(track_count, has_master_track, has_video_track, "off")
     }
 
     pub fn open_for_with_monitor(
         track_count: usize,
         has_master_track: bool,
+        has_video_track: bool,
         default_monitor_mode: &'static str,
     ) -> Self {
         let next_number = track_count.saturating_add(1);
@@ -383,6 +397,7 @@ impl AddTrackDialogState {
             monitor_mode: valid_monitor_mode(default_monitor_mode),
             next_number,
             has_master_track,
+            has_video_track,
             base_track_count: track_count,
         }
     }
@@ -402,7 +417,7 @@ impl AddTrackDialogState {
         name_ok
             && count_ok
             && self.selected_kind.native_track_type().is_some()
-            && !(self.selected_kind == AddTrackKind::Master && self.has_master_track)
+            && kind_singleton_available(self.selected_kind, self)
     }
 
     pub fn sync_channel_count_from_format(&mut self) {
@@ -469,7 +484,16 @@ fn color_picker_value_for(state: &AddTrackDialogState) -> ColorPickerValue {
 }
 
 fn kind_supported(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
-    kind.native_track_type().is_some() && !(kind == AddTrackKind::Master && state.has_master_track)
+    kind.native_track_type().is_some() && kind_singleton_available(kind, state)
+}
+
+/// `false` when `kind` is a one-per-project track type the project already has.
+fn kind_singleton_available(kind: AddTrackKind, state: &AddTrackDialogState) -> bool {
+    match kind {
+        AddTrackKind::Master => !state.has_master_track,
+        AddTrackKind::Video => !state.has_video_track,
+        _ => true,
+    }
 }
 
 fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
@@ -1767,11 +1791,13 @@ impl AddTrackWindow {
         kind: AddTrackKind,
         track_count: usize,
         has_master: bool,
+        has_video: bool,
         default_monitor_mode: &'static str,
     ) {
         let mut dialog = AddTrackDialogState::open_for_with_monitor(
             track_count,
             has_master,
+            has_video,
             default_monitor_mode,
         );
         dialog.set_kind(kind);
@@ -2327,9 +2353,7 @@ impl Render for AddTrackWindow {
                         if select_id == AddTrackSelectId::InstrumentPlugin {
                             this.clear_instrument_search();
                             if opening {
-                                this.instrument_search_input
-                                    .focus_handle
-                                    .focus(window, cx);
+                                this.instrument_search_input.focus_handle.focus(window, cx);
                             }
                         }
                         if crate::ui_debug_enabled() {
@@ -2599,10 +2623,9 @@ impl Render for AddTrackWindow {
                     let extend = event.extend;
                     let _ = target.update(cx, |this, cx| {
                         match phase {
-                            TextInputMousePhase::Down => {
-                                this.instrument_search_input
-                                    .handle_mouse_down(index, extend)
-                            }
+                            TextInputMousePhase::Down => this
+                                .instrument_search_input
+                                .handle_mouse_down(index, extend),
                             TextInputMousePhase::Drag => {
                                 this.instrument_search_input.handle_mouse_drag(index)
                             }
@@ -2668,6 +2691,7 @@ pub fn open_add_track_window(
     kind: AddTrackKind,
     track_count: usize,
     has_master_track: bool,
+    has_video_track: bool,
     default_monitor_mode: &'static str,
     language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -2687,6 +2711,7 @@ pub fn open_add_track_window(
     let mut state = AddTrackDialogState::open_for_with_monitor(
         track_count,
         has_master_track,
+        has_video_track,
         default_monitor_mode,
     );
     state.selected_kind = kind;
@@ -2751,7 +2776,7 @@ mod tests {
 
     #[test]
     fn format_changes_preserve_mono_selections_and_replace_stereo_pairs() {
-        let mut state = AddTrackDialogState::open_for(0, false);
+        let mut state = AddTrackDialogState::open_for(0, false, false);
         assert_eq!(state.input_label, FIRST_STEREO_PAIR_INPUT_LABEL);
 
         state.input_label = "Input 2".to_string();
@@ -2766,7 +2791,7 @@ mod tests {
 
     #[test]
     fn kind_round_trip_restores_a_format_compatible_audio_input() {
-        let mut state = AddTrackDialogState::open_for(0, false);
+        let mut state = AddTrackDialogState::open_for(0, false, false);
         state.set_audio_format(AudioFormat::Mono);
         state.set_kind(AddTrackKind::Midi);
         state.set_kind(AddTrackKind::Audio);
@@ -2776,8 +2801,27 @@ mod tests {
     }
 
     #[test]
+    fn video_tab_creates_a_native_video_track_until_one_exists() {
+        let mut state = AddTrackDialogState::open_for(0, false, false);
+        state.set_kind(AddTrackKind::Video);
+        assert_eq!(
+            AddTrackKind::Video.native_track_type(),
+            Some(TrackType::Video)
+        );
+        assert!(state.is_valid());
+
+        // A project already holding a Video track cannot add a second one.
+        let mut state = AddTrackDialogState::open_for(1, false, true);
+        state.set_kind(AddTrackKind::Video);
+        assert!(!state.is_valid());
+        assert!(!kind_supported(AddTrackKind::Video, &state));
+        // Only the Video kind is gated — other kinds stay addable.
+        assert!(kind_supported(AddTrackKind::Audio, &state));
+    }
+
+    #[test]
     fn folder_tab_creates_a_native_group_container() {
-        let mut state = AddTrackDialogState::open_for(0, false);
+        let mut state = AddTrackDialogState::open_for(0, false, false);
         state.set_kind(AddTrackKind::Folder);
 
         assert_eq!(

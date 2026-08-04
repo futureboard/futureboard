@@ -618,6 +618,9 @@ impl StudioLayout {
                         });
                     }
                 }
+                let _ = this.update(cx, |layout, cx| {
+                    layout.push_video_player_snapshot_to_window(cx);
+                });
             }
         })
         .detach();
