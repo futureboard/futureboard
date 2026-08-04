@@ -2,6 +2,7 @@
 # Extracted from SphereUIComponents + native-menu.json
 # Generated: 2026-05-29
 
+
 ## Application Menu
 
 
@@ -84,15 +85,17 @@ add-track.summary.plugin-unwired = Plugin tracks are not wired in Native yet
 add-track.tab.video = Video
 add-track.title = New Track
 
+
 ## Panels & Timeline
 
-bottom-panel.mix-level = Mix\: 80%
+bottom-panel.mix-level = Mix: 80%
 bottom-panel.plugin.compressor = Compressor
 bottom-panel.plugin.delay = Delay Unit
 bottom-panel.plugin.equalizer = Equalizer
 bottom-panel.tab.editor = Editor
 bottom-panel.tab.effect-editor = Effect Editor
 bottom-panel.tab.mixer = Mixer
+
 
 ## Browser
 
@@ -107,9 +110,10 @@ browser.file.unavailable = unavailable
 browser.loading = Loading…
 browser.panel.title = BROWSER
 browser.root.current-project = Current Project
-browser.root.project-prefix = PROJECT\: { $name }
+browser.root.project-prefix = PROJECT: { $name }
 browser.selection.label = SEL
 browser.selection.none = No file selected
+
 
 ## App Chrome
 
@@ -120,9 +124,11 @@ chrome.report-bug = Report bug
 chrome.save = SAVE
 chrome.share = SHARE
 
+
 ## Components
 
 clip.imported-audio = Imported Audio
+
 
 ## Context Menus
 
@@ -156,6 +162,7 @@ context.track.solo = Solo
 context.zoom-in = Zoom In
 context.zoom-out = Zoom Out
 
+
 ## Status & Errors
 
 dialog.choose-project-location = Choose Project Location
@@ -164,6 +171,7 @@ dialog.open-project = Open Project
 dialog.save-copy = Save Copy
 dialog.save-project-as = Save Project As
 
+
 ## Components
 
 edit.copy = Copy
@@ -171,17 +179,20 @@ edit.cut = Cut
 edit.paste = Paste
 edit.select-all = Select All
 
+
 ## Status & Errors
 
 error.audio-engine-unavailable = audio engine unavailable
-error.create-project-folder = Failed to create project folder\: { $e }
+error.create-project-folder = Failed to create project folder: { $e }
 error.plugin-instantiate-failed = Plugin failed to instantiate
-error.save-initial-project = Failed to save initial project file\: { $e }
-error.update-studio-window = Unable to update the main studio window\: { $error }
+error.save-initial-project = Failed to save initial project file: { $e }
+error.update-studio-window = Unable to update the main studio window: { $error }
+
 
 ## Components
 
 insert.slot.empty = Empty
+
 
 ## Panels & Timeline
 
@@ -217,6 +228,7 @@ inspector.track-type.midi = MIDI
 inspector.track-type.return = Return
 inspector.track-type.video = Video
 inspector.volume.db = { $db } dB
+
 
 ## Application Menu
 
@@ -263,8 +275,8 @@ menu.automation = Automation
 menu.automation-add_pan_lane = Add Pan Automation
 menu.automation-add_volume_lane = Add Volume Automation
 menu.automation-clear_lane = Clear Selected Lane
-menu.automation-curve_hold = Curve\: Hold
-menu.automation-curve_linear = Curve\: Linear
+menu.automation-curve_hold = Curve: Hold
+menu.automation-curve_linear = Curve: Linear
 menu.automation-delete_selected_points = Delete Selected Points
 menu.automation-mode = Automation Mode
 menu.automation-mode-latch = Latch
@@ -461,6 +473,7 @@ menu.window-workspace_layouts = Workspace Layouts
 menu.window-zoom_in = Zoom In
 menu.window-zoom_out = Zoom Out
 
+
 ## Panels & Timeline
 
 mixer.channel = CH{ $nn }
@@ -483,6 +496,7 @@ panel.browser = BROWSER
 panel.inspector = INSPECT
 panel.mixer = MIXER
 
+
 ## Plugins
 
 plugin-manager.action.editor = Open Plug-in Editor
@@ -493,9 +507,9 @@ plugin-manager.action.reveal-preset = Reveal Preset in Explorer
 plugin-manager.add-location = + Add Location
 plugin-manager.column.status = Status
 plugin-manager.details.title = Plug-in Details
-plugin-manager.editor.hint = Editor\: VST3 plug-ins with an available preset only.
-plugin-manager.error.editor-not-connected = Plug-in editor\: not connected yet.
-plugin-manager.error.insert-not-connected = Insert on track\: not connected yet.
+plugin-manager.editor.hint = Editor: VST3 plug-ins with an available preset only.
+plugin-manager.error.editor-not-connected = Plug-in editor: not connected yet.
+plugin-manager.error.insert-not-connected = Insert on track: not connected yet.
 plugin-manager.error.panic = Scan thread panicked.
 plugin-manager.field.category = Category
 plugin-manager.field.class-id = Class ID
@@ -520,7 +534,7 @@ plugin-manager.list.empty = No cached plug-ins yet. Run Rescan to build the regi
 plugin-manager.list.no-match = No plug-ins match the current filter.
 plugin-manager.list.scanning = Scanning… plug-ins will appear here one by one.
 plugin-manager.ready = Ready to scan VST3 and CLAP plug-ins.
-plugin-manager.register.failed = Register failed\: { $error }
+plugin-manager.register.failed = Register failed: { $error }
 plugin-manager.register.success = Registered preset for { $name }.
 plugin-manager.rescan = Rescan
 plugin-manager.rescan-all = Rescan All
@@ -534,7 +548,7 @@ plugin-manager.scan.in-progress = Scanning and registering VST3/CLAP plug-ins…
 plugin-manager.scan.none-found = No plug-ins found in scan locations.
 plugin-manager.scan.path-errors = Scan finished with { $n } path error(s).
 plugin-manager.scan.progress = Scanning { $current } of { $total } — { $name }
-plugin-manager.scan.reading = Reading metadata\: { $name }
+plugin-manager.scan.reading = Reading metadata: { $name }
 plugin-manager.scan.registered = Registered { $presets } preset(s). { $count } plug-in(s) cached.
 plugin-manager.scan.rescan-all = Deleting presets and rescanning all plug-ins…
 plugin-manager.sort.category = Category
@@ -558,6 +572,7 @@ plugin.format.unknown = ?
 plugin.format.vst3 = VST3
 plugin.stub.display-name = Stub Effect
 
+
 ## Components
 
 project-switcher.empty.no-match = No projects match "{ $query }"
@@ -567,7 +582,9 @@ project-switcher.section.this-window = This Window
 project-switcher.status.saved = Saved
 project-switcher.status.unsaved = Unsaved
 
+
 ## Welcome
+
 welcome.button.continue-without-project = Continue Without Project
 welcome.nav.audio = Audio
 welcome.nav.feed = Feed
@@ -577,20 +594,22 @@ welcome.nav.start = Start
 welcome.open-project = Open Project
 
 
+
 ## Status & Errors
 
 project.default-name = Untitled Project
-project.error.checksum = Checksum mismatch\: expected { $expected }, got { $got }
-project.error.corrupted = Corrupted project\: { $msg }
+project.error.checksum = Checksum mismatch: expected { $expected }, got { $got }
+project.error.corrupted = Corrupted project: { $msg }
 project.error.invalid-magic = Not a Futureboard project file
-project.error.io = I/O error\: { $e }
-project.error.unsupported-version = Unsupported project version\: { $v }
+project.error.io = I/O error: { $e }
+project.error.unsupported-version = Unsupported project version: { $v }
 project.file.missing = Missing
 project.subtitle.opened = Opened
-project.subtitle.save-failed = Save failed\: { $error }
+project.subtitle.save-failed = Save failed: { $error }
 project.subtitle.saved = Saved
 project.subtitle.saved-locally = Saved locally
 project.subtitle.unsaved-changes = Unsaved changes
+
 
 ## Browser
 
@@ -599,6 +618,7 @@ search.plugins-manager.placeholder = Search plug-ins...
 search.plugins.placeholder = Search plugins...
 search.projects.placeholder = Search projects...
 search.settings.placeholder = Search settings...
+
 
 ## Settings
 
@@ -816,15 +836,17 @@ settings.theme.fleet-dark = Fleet Dark
 settings.title = Preferences
 settings.ui-scale.value = { $scale }x
 
+
 ## Status & Errors
 
-status.audio-error = Audio\: { $error }
-status.audio-info = { $rate } Hz  { $backend }  Latency\: { $ms } ms
+status.audio-error = Audio: { $error }
+status.audio-info = { $rate } Hz  { $backend }  Latency: { $ms } ms
 status.audio-offline = Audio offline
 status.audio-ready = Audio ready
 status.fps = { $fps } fps  { $ms } ms
 status.playing = Playing
 status.ready = Ready
+
 
 ## Dialogs
 
@@ -843,6 +865,7 @@ template.recording.metadata = 4 audio | 120 BPM
 template.scoring.description = MIDI-first layout for cues and arrangement sketches.
 template.scoring.label = Scoring
 template.scoring.metadata = 8 MIDI | 120 BPM
+
 
 ## Panels & Timeline
 
@@ -864,6 +887,7 @@ track-header.type.master = MAS
 track-header.type.midi = MID
 track-header.type.return = RTN
 
+
 ## App Chrome
 
 transport.bpm-label = BPM
@@ -879,6 +903,7 @@ window.close = X
 window.maximize = MAX
 window.minimize = -
 window.restore = RESTORE
+
 
 ## Dialogs
 
