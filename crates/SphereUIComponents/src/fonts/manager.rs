@@ -239,7 +239,7 @@ mod tests {
             !fallbacks
                 .fallback_list()
                 .iter()
-                .any(|family| SharedString::from(family.clone()) == descriptor.family),
+                .any(|family| *family == descriptor.family),
             "anchor must not repeat inside its fallback chain"
         );
     }

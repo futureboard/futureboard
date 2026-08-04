@@ -914,9 +914,10 @@ pub fn plugin_manager_panel(
                 .text_color(Colors::text_faint())
                 .child(if state.scanning {
                     i18n.tr("plugin-manager.list.scanning")
-                } else if state.plugins.is_empty() && state.cache_loaded {
-                    i18n.tr("plugin-manager.list.empty")
                 } else if state.plugins.is_empty() {
+                    // Nothing registered at all, cache loaded or not: "empty"
+                    // is honest either way. Only a non-empty registry with no
+                    // visible rows means the filter excluded everything.
                     i18n.tr("plugin-manager.list.empty")
                 } else {
                     i18n.tr("plugin-manager.list.no-match")
