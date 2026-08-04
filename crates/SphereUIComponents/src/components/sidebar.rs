@@ -592,7 +592,7 @@ fn tree_row(
     };
 
     let icon_path = browser_icon_path(node.icon, expanded);
-    let icon_color = browser_icon_color(node.icon, selected);
+    let icon_color = browser_icon_color(selected);
 
     // Depth indent guides (start at depth 2 — depth-1 items sit under headers).
     let mut indent_guides = Vec::new();
@@ -771,23 +771,14 @@ fn browser_icon_path(icon: BrowserIcon, expanded: bool) -> &'static str {
     }
 }
 
-/// Token-driven icon tint: selection wins, then content-type meaning.
-fn browser_icon_color(icon: BrowserIcon, selected: bool) -> gpui::Rgba {
+/// Monochrome icon tint. Browser glyphs carry their meaning in the shape, so
+/// they share one neutral ramp instead of a per-content-type hue; selection is
+/// already signalled by the row background and the brighter label.
+fn browser_icon_color(selected: bool) -> gpui::Rgba {
     if selected {
-        return Colors::accent_primary();
-    }
-    match icon {
-        BrowserIcon::Favorites => Colors::accent_warning(),
-        BrowserIcon::AudioFiles
-        | BrowserIcon::Music
-        | BrowserIcon::AudioFile
-        | BrowserIcon::Samples => Colors::status_success(),
-        BrowserIcon::MidiFile => Colors::status_warning(),
-        BrowserIcon::Plugins | BrowserIcon::PresetFile | BrowserIcon::Instruments => {
-            Colors::status_warning()
-        }
-        BrowserIcon::Projects | BrowserIcon::ProjectFile => Colors::accent_primary(),
-        _ => Colors::text_muted(),
+        Colors::text_primary()
+    } else {
+        Colors::text_muted()
     }
 }
 
