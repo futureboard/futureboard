@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "id": "futureboard.light",
+  "name": "Futureboard Light",
+  "version": "1.0.0",
+  "author": "Futureboard Studio",
+  "appearance": "light",
+  "targets": ["native-gpui", "web-ui"],
+  "tokens": {
+    "surface": {
+      "base": "#F5F6F8",
+      "panel": "#FFFFFF",
+      "panelAlt": "#EEF0F3",
+      "panelRaised": "#FFFFFF",
+      "canvas": "#E9EBEF",
+      "raised": "#FFFFFF",
+      "selected": "#DCE6FA",
+      "selectedSoft": "#E7EEFC",
+      "pressed": "#D8DEE8",
+      "muted": "#EFF1F4",
+      "input": "#FFFFFF",
+      "window": "#EDEFF2",
+      "titlebar": "#E7E9ED",
+      "sidebar": "#EEF0F3",
+      "card": "#FFFFFF",
+      "cardHover": "#F2F4F7",
+      "cardSelected": "#DCE6FA",
+      "code": "#F4F5F7",
+      "badge": "#EEF0F3",
+      "hover": "#EEF1F6",
+      "active": "#DCE3EE",
+      "controlHover": "#E7EAF0",
+      "overlay": "#00000033",
+      "bottomPanel": "#FFFFFF",
+      "bottomPanelHeader": "#E7E9ED",
+      "mixerStrip": "#FFFFFF",
+      "mixerStripAlt": "#F2F3F6",
+      "mixerStripSelected": "#DCE6FA",
+      "masterStripHeader": "#E7E9ED"
+    },
+    "border": {
+      "subtle": "#00000014",
+      "normal": "#00000022",
+      "default": "#0000001F",
+      "strong": "#00000040",
+      "focus": "#4C8DFFC0",
+      "accent": "#4C8DFF80",
+      "divider": "#0000000F",
+      "panel": "#00000014",
+      "strip": "#0000001F",
+      "stripSubtle": "#00000014",
+      "masterStrip": "#0000001F"
+    },
+    "text": {
+      "primary": "#1E1F22",
+      "secondary": "#3C3F46",
+      "muted": "#6B717C",
+      "faint": "#00000045",
+      "dim": "#00000066",
+      "disabled": "#0000003B",
+      "inverse": "#F5F6F8"
+    },
+    "accent": {
+      "primary": "#4C8DFF",
+      "primaryHover": "#6BA1FF",
+      "hover": "#6BA1FF",
+      "active": "#4C8DFF28",
+      "focus": "#4C8DFFC0",
+      "soft": "#4C8DFF30",
+      "muted": "#4C8DFF20",
+      "pressed": "#4C8DFF28",
+      "onAccent": "#FFFFFF",
+      "success": "#2F9E5C",
+      "warning": "#B8862E",
+      "danger": "#E0413D",
+      "purple": "#6B717C",
+      "cyan": "#1E9E9E",
+      "green": "#3F9A66"
+    },
+    "tab": {
+      "text": "#3C3F46",
+      "text_muted": "#6B717C",
+      "text_active": "#2F6FE0",
+      "indicator_active": "#2F6FE0",
+      "backgroundActive": "#4C8DFF20",
+      "backgroundHover": "#00000010"
+    },
+    "panel": {
+      "border_focused": "#4C8DFF80",
+      "header_active": "#4C8DFF"
+    },
+    "automation": {
+      "curve": "#2F6FE0",
+      "curveHover": "#4C8DFF",
+      "laneBg": "#F7F8FA",
+      "laneBgSelected": "#EAF0FC",
+      "laneHeaderBg": "#F0F1F4",
+      "canvasBg": "#00000008",
+      "canvasBgSelected": "#4C8DFF0D",
+      "valueRegionBg": "#4C8DFF08",
+      "centerLine": "#4C8DFF2E",
+      "centerBand": "#4C8DFF06",
+      "separator": "#00000014",
+      "separatorStrong": "#00000022",
+      "rail": "#B7C4DA",
+      "railActive": "#2F6FE0",
+      "point": "#2F5FB8"
+    },
+    "button": {
+      "bg": "#FFFFFF",
+      "bgHover": "#F2F4F7",
+      "bgPressed": "#E7EAEF",
+      "bgActive": "#D7E4FB",
+      "border": "#D8DCE3",
+      "borderHover": "#C3C8D2",
+      "text": "#22262D",
+      "textMuted": "#6B717C"
+    },
+    "status": {
+      "error": "#E0413D",
+      "warning": "#B8862E",
+      "success": "#2F9E5C"
+    },
+    "semantic": {
+      "warning": "#B8862E"
+    },
+    "feed": {
+      "badgeBackground": "#00000010",
+      "badgeText": "#5B6472",
+      "unreadDot": "#1E9E9E"
+    },
+    "meter": {
+      "background": "#00000010",
+      "low": "#2F9E5C",
+      "mid": "#B8862E",
+      "high": "#E0413D",
+      "rail": "#0000000A",
+      "peak": "#D9A404"
+    },
+    "fader": {
+      "rail": "#00000014",
+      "thumb": "#2A2D33",
+      "tick": "#0000001F",
+      "scaleText": "#6B717C",
+      "groove": "#E9EBEF",
+      "thumbBorder": "#00000040"
+    },
+    "knob": {
+      "background": "#FFFFFF",
+      "ring": "#2F6FE0"
+    },
+    "slot": {
+      "background": "#FFFFFF",
+      "border": "#0000001F",
+      "backgroundHover": "#F2F4F7",
+      "emptyText": "#6B717C"
+    },
+    "statusbar": {
+      "background": "#E7E9ED",
+      "text": "#6B717C",
+      "textMuted": "#00000066",
+      "accent": "#2F6FE0",
+      "warning": "#B8862E"
+    },
+    "mixer": {
+      "background": "#EDEFF2",
+      "masterStripBackground": "#E7E9ED"
+    },
+    "timeline": {
+      "gridMajor": "#00000022",
+      "gridMinor": "#00000014",
+      "gridBar": "#00000030",
+      "playhead": "#E0413D",
+      "background": "#F5F6F8",
+      "contentBackground": "#F5F6F8",
+      "regionBackground": "#00000006",
+      "regionBackgroundAlt": "#00000004",
+      "laneBackground": "#00000007",
+      "laneAltBackground": "#00000010",
+      "selectedLaneBackground": "#00000012",
+      "emptyBodyBackground": "#00000008",
+      "rulerBackground": "#FFFFFF",
+      "rulerTick": "#0000001F",
+      "rulerText": "#3C3F46",
+      "selection": "#4C8DFF30"
+    },
+    "track": {
+      "audio": "#1E9E9E",
+      "midi": "#B8862E",
+      "instrument": "#3F9A66",
+      "bus": "#2F6FE0",
+      "return": "#2F9E5C",
+      "master": "#22262D",
+      "selectedOverlay": "#DCE6FA",
+      "mutedOverlay": "#00000010"
+    }
+  },
+  "trackColors": [
+    "#2FA8AA",
+    "#4FBE76",
+    "#D9A93F",
+    "#D65850",
+    "#5A8FEA",
+    "#3E93C4",
+    "#C97B3F",
+    "#B85E92",
+    "#84AC48",
+    "#7690C4",
+    "#9C7748",
+    "#4FAE8D"
+  ],
+  "web": {
+    "cssVariables": {
+      "--color-daw-bg": "surface.base",
+      "--color-daw-sunken": "surface.canvas",
+      "--color-daw-surface": "surface.panel",
+      "--color-daw-surface-high": "surface.raised",
+      "--color-daw-surface-higher": "surface.hover",
+      "--color-daw-panel": "surface.panel",
+      "--color-daw-border": "border.strong",
+      "--color-daw-border-light": "border.default",
+      "--color-daw-text": "text.primary",
+      "--color-daw-dim": "text.secondary",
+      "--color-daw-faint": "text.muted",
+      "--color-daw-accent": "accent.primary",
+      "--color-daw-accent-h": "accent.primaryHover",
+      "--color-daw-green": "status.success",
+      "--color-daw-yellow": "status.warning",
+      "--color-daw-red": "status.error",
+      "--color-daw-purple": "accent.purple",
+      "--color-daw-cyan": "track.audio",
+      "--color-daw-ink": "surface.canvas"
+    }
+  }
+}

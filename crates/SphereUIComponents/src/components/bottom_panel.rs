@@ -1,4 +1,5 @@
 use crate::assets;
+use crate::i18n::I18n;
 use crate::theme::Colors;
 use gpui::{
     div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
@@ -83,7 +84,8 @@ fn effect_editor_panel() -> impl IntoElement {
 // ─── Main Bottom Panel ───────────────────────────────────────────────────────
 
 fn tab_button(
-    label: &'static str,
+    id: &'static str,
+    label: impl Into<String>,
     icon_path: &'static str,
     tab: BottomTab,
     active_tab: BottomTab,
@@ -113,7 +115,7 @@ fn tab_button(
         // only the icon got `.text_color`, so inactive labels rendered with
         // the default (black) text color.
         .text_color(text_color)
-        .id(label)
+        .id(id)
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
         })
@@ -124,7 +126,7 @@ fn tab_button(
                 .h(px(14.0))
                 .text_color(text_color),
         )
-        .child(label);
+        .child(label.into());
 
     if active {
         btn = btn
@@ -160,6 +162,7 @@ pub fn bottom_panel(
     on_resize_move: impl Fn(&gpui::DragMoveEvent<BottomPanelResizeDrag>, &mut Window, &mut App)
         + 'static,
     on_resize_end: impl Fn(&gpui::MouseUpEvent, &mut Window, &mut App) + 'static,
+    i18n: I18n,
 ) -> impl IntoElement {
     let on_tab_click = std::sync::Arc::new(on_tab_click);
     let mut editor_content = editor_content;
@@ -203,21 +206,24 @@ pub fn bottom_panel(
                 .border_color(Colors::panel_border())
                 .bg(Colors::bottom_panel_header_bg())
                 .child(tab_button(
-                    "Mixer",
+                    "bottom-tab-mixer",
+                    i18n.tr("bottom-panel.tab.mixer"),
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,
                     BottomTab::Mixer,
                     active_tab,
                     on_tab_click.clone(),
                 ))
                 .child(tab_button(
-                    "Editor",
+                    "bottom-tab-editor",
+                    i18n.tr("bottom-panel.tab.editor"),
                     assets::ICON_PENCIL_PATH,
                     BottomTab::Editor,
                     active_tab,
                     on_tab_click.clone(),
                 ))
                 .child(tab_button(
-                    "Effect Editor",
+                    "bottom-tab-effect-editor",
+                    i18n.tr("bottom-panel.tab.effect-editor"),
                     assets::ICON_SPARKLES_PATH,
                     BottomTab::EffectEditor,
                     active_tab,

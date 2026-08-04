@@ -1,3 +1,4 @@
+pub mod about_window;
 pub mod add_track_dialog;
 pub(crate) mod app_chrome;
 mod audio_editor_adapter;
@@ -127,6 +128,7 @@ pub use inspector::{
     InspectorSelectOption,
 };
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
+pub use about_window::{open_about_window, AboutWindow};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;
 pub use mdi::{

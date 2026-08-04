@@ -224,6 +224,8 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::stem_extractor_dialog::StemExtractorWindow>>,
     /// Keymap / keyboard shortcuts editor window.
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
+    /// About Futureboard Studio window.
+    pub about: Option<gpui::WindowHandle<crate::components::about_window::AboutWindow>>,
     /// Built-in Soundfont Player MDI window.
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
@@ -889,6 +891,27 @@ impl StudioLayout {
         }
     }
 
+    pub(super) fn open_about_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.about.clone() {
+            if handle
+                .update(cx, |_about, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.about = None;
+        }
+
+        match crate::components::about_window::open_about_window(owner_bounds, cx) {
+            Ok(handle) => self.external_windows.about = Some(handle),
+            Err(err) => eprintln!("[about] failed to open window: {err}"),
+        }
+    }
+
     /// Builds the routing-matrix view-model from the current timeline tracks.
     fn build_routing_matrix_snapshot(
         &self,
@@ -1179,6 +1202,7 @@ impl StudioLayout {
                 .is_ok()
             {
                 self.panels.mixer_docked = false;
+                self.sync_timeline_chrome_metrics(cx);
                 self.push_mixer_snapshot_to_window(cx);
                 cx.notify();
                 return;
@@ -1248,14 +1272,20 @@ impl StudioLayout {
             Ok(handle) => {
                 self.external_windows.mixer = Some(handle);
                 // Removing the docked mixer changes the arrangement's client
-                // rectangle. Force both DirectComposition surfaces to repaint
-                // once so no pixels from the old bottom-panel bounds survive.
+                // rectangle. Refresh the timeline's own reserved-chrome
+                // metric too — `cx.refresh_windows()` only repaints the
+                // already-computed layout, it doesn't recompute the bottom
+                // panel height the timeline subtracts for its scroll/clip
+                // geometry, which otherwise stays stale at the docked mixer's
+                // height and clips the arrangement view.
+                self.sync_timeline_chrome_metrics(cx);
                 cx.refresh_windows();
                 cx.notify();
             }
             Err(err) => {
                 eprintln!("[mixer] failed to open external mixer window: {err}");
                 self.panels.mixer_docked = true;
+                self.sync_timeline_chrome_metrics(cx);
                 self.set_active_panel(crate::layout::WorkspaceActivePanel::Mixer, cx);
                 cx.notify();
             }

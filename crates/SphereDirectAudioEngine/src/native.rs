@@ -1090,6 +1090,23 @@ impl AudioEngine {
         self.inner.drain_recording_preview_peaks(from_index)
     }
 
+    /// Per-track recording-preview metadata (multi-track). Poll this, then
+    /// drain each track with
+    /// [`AudioEngine::drain_recording_preview_peaks_for_track`].
+    pub fn recording_preview_tracks(&self) -> Vec<crate::types::JsRecordingPreviewTrackInfo> {
+        self.inner.recording_preview_tracks()
+    }
+
+    /// Drain one track's finalized preview peak bins in `[from_index, head)`.
+    pub fn drain_recording_preview_peaks_for_track(
+        &self,
+        track_id: String,
+        from_index: f64,
+    ) -> Vec<crate::types::JsWaveformPeak> {
+        self.inner
+            .drain_recording_preview_peaks_for_track(&track_id, from_index)
+    }
+
     /// Aggregate latency report: device buffer latency plus per-track and master
     /// plug-in latency. Reporting only (Phase V); full plug-in delay
     /// compensation is Phase W.

@@ -323,10 +323,7 @@ pub(crate) fn advanced_section(
 /// activation — or a background renewal on a later launch — shows up here
 /// without extra refresh wiring.
 pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> impl IntoElement {
-    let version = edition
-        .as_ref()
-        .map(|info| info.app_version.clone())
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let version = crate::edition::app_version();
     let edition_name = edition
         .as_ref()
         .map(|info| info.edition)

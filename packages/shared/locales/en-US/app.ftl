@@ -215,6 +215,7 @@ inspector.track-type.instrument = Instrument
 inspector.track-type.master = Master
 inspector.track-type.midi = MIDI
 inspector.track-type.return = Return
+inspector.track-type.video = Video
 inspector.volume.db = { $db } dB
 
 ## Application Menu
@@ -477,6 +478,7 @@ mixer.track-type.instrument = INST
 mixer.track-type.master = MST
 mixer.track-type.midi = MIDI
 mixer.track-type.return = RTN
+mixer.track-type.video = VID
 panel.browser = BROWSER
 panel.inspector = INSPECT
 panel.mixer = MIXER
@@ -564,6 +566,16 @@ project-switcher.section.recent = Recent Projects
 project-switcher.section.this-window = This Window
 project-switcher.status.saved = Saved
 project-switcher.status.unsaved = Unsaved
+
+## Welcome
+welcome.button.continue-without-project = Continue Without Project
+welcome.nav.audio = Audio
+welcome.nav.feed = Feed
+welcome.nav.new = New
+welcome.nav.recent = Recent
+welcome.nav.start = Start
+welcome.open-project = Open Project
+
 
 ## Status & Errors
 
@@ -657,6 +669,7 @@ settings.field.system-notifications = System Notifications
 settings.field.theme-preset = Theme Preset
 settings.field.ui-scale = UI Scale
 settings.field.update-check = Update Check
+settings.field.update-channel = Update channel
 settings.field.vst3-folders = VST3 Folders
 settings.field.warnings = Warnings
 settings.field.zoom-sensitivity = Zoom Sensitivity

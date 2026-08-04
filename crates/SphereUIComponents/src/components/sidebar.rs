@@ -31,6 +31,7 @@ use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::components::timeline::waveform_cache;
+use crate::i18n::I18n;
 use crate::theme::Colors;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
@@ -110,6 +111,7 @@ pub fn sidebar(
     on_context_menu: BrowserContextCb,
     on_collapse_all: BrowserActionCb,
     on_rescan: BrowserActionCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     // ── Top utility toolbar ─────────────────────────────────────────
     let collapse_cb = on_collapse_all.clone();
@@ -137,7 +139,7 @@ pub fn sidebar(
                 })
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("BROWSER"),
+                .child(i18n.tr("browser.panel.title")),
         )
         .child(div().flex_1())
         .child(
@@ -235,6 +237,7 @@ pub fn sidebar(
                         on_select.clone(),
                         on_activate.clone(),
                         on_context.clone(),
+                        i18n,
                     )
                     .into_any_element(),
                 }
@@ -263,7 +266,7 @@ pub fn sidebar(
         .selected
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "No item selected".to_string());
+        .unwrap_or_else(|| i18n.tr("browser.selection.none"));
     let footer = div()
         .flex()
         .flex_row()
@@ -279,7 +282,7 @@ pub fn sidebar(
                 .text_size(px(8.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_muted())
-                .child("SEL"),
+                .child(i18n.tr("browser.selection.label")),
         )
         .child(
             div()
@@ -551,6 +554,7 @@ fn tree_row(
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
     on_context_menu: BrowserContextCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let id = node.id.clone();
     let path = node.path.clone();
@@ -679,7 +683,7 @@ fn tree_row(
             div()
                 .text_size(px(9.0))
                 .text_color(Colors::status_error())
-                .child("unavailable")
+                .child(i18n.tr("browser.file.unavailable"))
         }));
 
     // Clicks and toggles

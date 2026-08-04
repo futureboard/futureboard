@@ -470,7 +470,7 @@ fn build_settings_content(
                         },
                     )
                 }))
-                .child(settings_daw_row("Update channel", {
+                .child(settings_daw_row(i18n.tr("settings.field.update-channel"), {
                     hardware_select(
                         HardwareCombo::UpdateChannel,
                         "settings-general-update-channel",
@@ -907,12 +907,13 @@ fn build_settings_content(
         let on_update = callbacks.on_update_setting.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header(
-                    "Theme & Interface",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.theme-interface",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Theme Preset",
+                    i18n.tr("settings.field.theme-preset"),
                     hardware_select(
                         HardwareCombo::Theme,
                         "settings-theme",
@@ -926,7 +927,7 @@ fn build_settings_content(
                     ),
                 ))
                 .child(settings_daw_row(
-                    "UI Scale",
+                    i18n.tr("settings.field.ui-scale"),
                     div()
                         .flex()
                         .flex_row()
@@ -961,12 +962,13 @@ fn build_settings_content(
 
         sections.push(
             settings_section_card()
-                .child(settings_header(
-                    "Timeline",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.timeline",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Grid Intensity",
+                    i18n.tr("settings.field.grid-intensity"),
                     div()
                         .flex()
                         .flex_row()
@@ -1007,9 +1009,13 @@ fn build_settings_content(
         let up = on_update.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header("Piano Roll", assets::ICON_PENCIL_PATH))
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.piano-roll",
+                    assets::ICON_PENCIL_PATH,
+                ))
                 .child(settings_daw_row(
-                    "Key Guides",
+                    i18n.tr("settings.field.key-guides"),
                     div()
                         .flex()
                         .flex_row()
@@ -1032,7 +1038,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Show piano key guides in background"),
+                                .child(i18n.tr("settings.piano-roll.key-guides")),
                         ),
                 ))
                 .into_any_element(),
@@ -1041,12 +1047,13 @@ fn build_settings_content(
         let up = on_update.clone();
         sections.push(
             settings_section_card()
-                .child(settings_header(
-                    "Mixer & Metering",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.mixer-metering",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Meter Decay",
+                    i18n.tr("settings.field.meter-decay"),
                     div()
                         .flex()
                         .flex_row()
@@ -1082,7 +1089,7 @@ fn build_settings_content(
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Peak Hold",
+                    i18n.tr("settings.field.peak-hold"),
                     div()
                         .flex()
                         .flex_row()
@@ -1135,12 +1142,13 @@ fn build_settings_content(
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(settings_header(
-                    "Editing > Mouse & Navigation",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.editing-mouse",
                     assets::ICON_PENCIL_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Zoom Sensitivity",
+                    i18n.tr("settings.field.zoom-sensitivity"),
                     div()
                         .flex()
                         .flex_row()
@@ -1173,7 +1181,7 @@ fn build_settings_content(
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Natural Scroll",
+                    i18n.tr("settings.field.natural-scroll"),
                     div()
                         .flex()
                         .flex_row()
@@ -1194,7 +1202,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Invert trackpad/mousewheel scroll direction"),
+                                .child(i18n.tr("settings.natural-scroll")),
                         ),
                 ))
                 .into_any_element(),
@@ -1207,12 +1215,13 @@ fn build_settings_content(
                 .flex_col()
                 .gap(px(8.0))
                 .mt(px(12.0))
-                .child(settings_header(
-                    "Editing > Grid & Snap",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.editing-snap",
                     assets::ICON_SLIDERS_HORIZONTAL_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Snap to Grid",
+                    i18n.tr("settings.field.snap-to-grid"),
                     div()
                         .flex()
                         .flex_row()
@@ -1233,11 +1242,11 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Snap clips/notes to current grid lines"),
+                                .child(i18n.tr("settings.snap-to-grid")),
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Default Snap",
+                    i18n.tr("settings.field.default-snap"),
                     div()
                         .flex()
                         .flex_row()
@@ -1315,12 +1324,13 @@ fn build_settings_content(
                 .flex_col()
                 .gap(px(8.0))
                 .mt(px(12.0))
-                .child(settings_header(
-                    "Editing > History",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.editing-history",
                     assets::ICON_CLOCK_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Max Undo Steps",
+                    i18n.tr("settings.field.max-undo-steps"),
                     div()
                         .flex()
                         .flex_row()
@@ -1390,12 +1400,13 @@ fn build_settings_content(
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(settings_header(
-                    "Recording > Audio Format",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.recording-audio-format",
                     assets::ICON_CIRCLE_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Format Type",
+                    i18n.tr("settings.field.format-type"),
                     div()
                         .flex()
                         .flex_row()
@@ -1405,7 +1416,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-format-wav",
-                                "WAV",
+                                i18n.tr("settings.format.wav"),
                                 val == "wav",
                                 move |_, w, cx| {
                                     up(
@@ -1421,7 +1432,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-format-aiff",
-                                "AIFF",
+                                i18n.tr("settings.format.aiff"),
                                 val == "aiff",
                                 move |_, w, cx| {
                                     up(
@@ -1437,7 +1448,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-format-flac",
-                                "FLAC",
+                                i18n.tr("settings.format.flac"),
                                 val == "flac",
                                 move |_, w, cx| {
                                     up(
@@ -1450,7 +1461,7 @@ fn build_settings_content(
                         }),
                 ))
                 .child(settings_daw_row(
-                    "Bit Depth",
+                    i18n.tr("settings.field.bit-depth"),
                     div()
                         .flex()
                         .flex_row()
@@ -1460,7 +1471,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-depth-16",
-                                "16-bit",
+                                i18n.tr("settings.bit-depth.16"),
                                 val == 16,
                                 move |_, w, cx| {
                                     up(Arc::new(|s| s.recording.audio.bit_depth = 16), w, cx);
@@ -1472,7 +1483,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-depth-24",
-                                "24-bit",
+                                i18n.tr("settings.bit-depth.24"),
                                 val == 24,
                                 move |_, w, cx| {
                                     up(Arc::new(|s| s.recording.audio.bit_depth = 24), w, cx);
@@ -1484,7 +1495,7 @@ fn build_settings_content(
                             let up = on_update.clone();
                             fb_segmented_button(
                                 "rec-depth-32",
-                                "32-bit float",
+                                i18n.tr("settings.bit-depth.32-float"),
                                 val == 32,
                                 move |_, w, cx| {
                                     up(Arc::new(|s| s.recording.audio.bit_depth = 32), w, cx);
@@ -1684,12 +1695,13 @@ fn build_settings_content(
                 .flex_col()
                 .gap(px(8.0))
                 .mt(px(12.0))
-                .child(settings_header(
-                    "Recording > Metronome Click",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.recording-metronome",
                     assets::ICON_CIRCLE_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Enable Click",
+                    i18n.tr("settings.field.enable-click"),
                     div()
                         .flex()
                         .flex_row()
@@ -1710,11 +1722,11 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Hear metronome click during recording & playback"),
+                                .child(i18n.tr("settings.metronome.enable")),
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Click Volume",
+                    i18n.tr("settings.field.click-volume"),
                     div()
                         .flex()
                         .flex_row()
@@ -1748,7 +1760,7 @@ fn build_settings_content(
                         ),
                 ))
                 .child(settings_daw_row(
-                    "Click Sound",
+                    i18n.tr("settings.field.click-sound"),
                     div()
                         .flex()
                         .flex_row()
@@ -1758,7 +1770,7 @@ fn build_settings_content(
                             let up_snd = up.clone();
                             fb_segmented_button(
                                 "met-sound-wood",
-                                "Woodblock",
+                                i18n.tr("settings.metronome.woodblock"),
                                 val == "Woodblock",
                                 move |_, w, cx| {
                                     up_snd(
@@ -1777,7 +1789,7 @@ fn build_settings_content(
                             let up_snd = up.clone();
                             fb_segmented_button(
                                 "met-sound-beep",
-                                "Beep",
+                                i18n.tr("settings.metronome.beep"),
                                 val == "Beep",
                                 move |_, w, cx| {
                                     up_snd(
@@ -1935,31 +1947,32 @@ fn build_settings_content(
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(settings_header(
-                    "Playback > Transport",
+                .child(settings_i18n_header(
+                    i18n,
+                    "settings.section.playback-transport",
                     assets::ICON_PLAY_PATH,
                 ))
                 .child(settings_daw_row(
-                    "Spacebar Action",
+                    i18n.tr("settings.field.spacebar-action"),
                     div()
                         .flex()
                         .flex_row()
                         .gap(px(4.0))
                         .child(fb_segmented_button(
                             "space-play-pause",
-                            "Play / Pause",
+                            i18n.tr("settings.spacebar.play-pause"),
                             true,
                             |_e, _w, _cx| {},
                         ))
                         .child(fb_segmented_button(
                             "space-play-stop",
-                            "Play / Stop (Soon)",
+                            i18n.tr("settings.spacebar.play-stop-soon"),
                             false,
                             |_e, _w, _cx| {},
                         )),
                 ))
                 .child(settings_daw_row(
-                    "Return to Start",
+                    i18n.tr("settings.field.return-to-start"),
                     div()
                         .flex()
                         .flex_row()
@@ -1970,7 +1983,7 @@ fn build_settings_content(
                             div()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child("Return playhead to start position on Stop"),
+                                .child(i18n.tr("settings.return-on-stop")),
                         ),
                 ))
                 .into_any_element(),

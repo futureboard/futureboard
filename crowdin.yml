@@ -1,0 +1,4 @@
+files:
+  - source: packages/shared/locales/en-US/*.ftl
+    translation: packages/shared/locales/%locale%/%original_file_name%
+    multilingual: 1

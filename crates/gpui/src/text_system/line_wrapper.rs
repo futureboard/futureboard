@@ -143,6 +143,20 @@ impl LineWrapper {
         truncation_affix: &str,
         truncate_from: TruncateFrom,
     ) -> Option<usize> {
+        // The char-by-char width sum below measures each character in
+        // isolation, which for complex scripts (Thai, Arabic, Indic, …) badly
+        // overestimates the real line width: combining marks that shape with
+        // zero advance are counted as full glyphs, and contextual forms are
+        // ignored. That made localized text truncate with an ellipsis even
+        // though it fit. Measure the actually-shaped line first and bail out of
+        // truncation entirely when it fits within the target width.
+        let shaped_width =
+            self.text_system
+                .layout_str_width(self.font_id, self.font_size, line);
+        if shaped_width <= truncate_width {
+            return None;
+        }
+
         let mut width = px(0.);
         let suffix_width = truncation_affix
             .chars()

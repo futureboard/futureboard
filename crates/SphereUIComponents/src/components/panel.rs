@@ -20,6 +20,7 @@ use gpui::{
 
 use crate::assets;
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
+use crate::i18n::I18n;
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
 };
@@ -298,6 +299,19 @@ fn track_type_badge(t: TrackType) -> &'static str {
     }
 }
 
+fn track_type_label(i18n: I18n, t: TrackType) -> String {
+    match t {
+        TrackType::Audio => i18n.tr("inspector.track-type.audio"),
+        TrackType::Midi => i18n.tr("inspector.track-type.midi"),
+        TrackType::Instrument => i18n.tr("inspector.track-type.instrument"),
+        TrackType::Bus => i18n.tr("inspector.track-type.bus"),
+        TrackType::Return => i18n.tr("inspector.track-type.return"),
+        TrackType::Group => "Group".to_string(),
+        TrackType::Master => i18n.tr("inspector.track-type.master"),
+        TrackType::Video => i18n.tr("inspector.track-type.video"),
+    }
+}
+
 /// Semantic hue per track type — drives the inspector title rail/badge so the
 /// header reads by type at a glance, independent of the per-track identity color
 /// (which the user still edits via the Color row).
@@ -317,7 +331,8 @@ fn track_type_color(t: TrackType) -> gpui::Rgba {
 /// Legacy entry point — kept so any existing call sites still compile. Returns
 /// an empty placeholder identical to the pre-state version.
 pub fn right_panel() -> impl IntoElement {
-    inspector_shell(false).child(no_selection(0))
+    let i18n = I18n::new("en");
+    inspector_shell(false, i18n).child(no_selection(0, i18n))
 }
 
 /// Inspector driven by the live selection. Renders one of:
@@ -338,6 +353,7 @@ pub fn inspector_panel<'a>(
     clip_name_callbacks: TextInputCallbacks,
     active: bool,
     callbacks: &InspectorCallbacks,
+    i18n: I18n,
 ) -> impl IntoElement {
     let body: gpui::AnyElement = if let Some(clip) = clip_summary {
         let tempo = stretch_tempo.unwrap_or_default();
@@ -348,6 +364,7 @@ pub fn inspector_panel<'a>(
             clip_name_callbacks,
             tempo,
             callbacks,
+            i18n,
         )
         .into_any_element()
     } else if let Some(tid) = selected_track_id {
@@ -368,20 +385,21 @@ pub fn inspector_panel<'a>(
                     name_callbacks,
                     &instrument_targets,
                     callbacks,
+                    i18n,
                 )
                 .into_any_element()
             }
-            None => no_selection(tracks.len()).into_any_element(),
+            None => no_selection(tracks.len(), i18n).into_any_element(),
         }
     } else {
         let _ = selected_clip_id; // currently only used via clip_summary
-        no_selection(tracks.len()).into_any_element()
+        no_selection(tracks.len(), i18n).into_any_element()
     };
 
-    inspector_shell(active).child(body)
+    inspector_shell(active, i18n).child(body)
 }
 
-fn inspector_shell(active: bool) -> gpui::Div {
+fn inspector_shell(active: bool, i18n: I18n) -> gpui::Div {
     div()
         .flex()
         .flex_col()
@@ -429,7 +447,7 @@ fn inspector_shell(active: bool) -> gpui::Div {
                         })
                         .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child("INSPECTOR"),
+                        .child(i18n.tr("panel.inspector")),
                 ),
         )
 }
@@ -448,7 +466,7 @@ fn scroll_body() -> gpui::Stateful<gpui::Div> {
         .gap(px(12.0))
 }
 
-fn no_selection(track_count: usize) -> impl IntoElement {
+fn no_selection(track_count: usize, i18n: I18n) -> impl IntoElement {
     div()
         .flex_1()
         .flex()
@@ -486,14 +504,14 @@ fn no_selection(track_count: usize) -> impl IntoElement {
                         .text_color(Colors::text_secondary())
                         .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("No Selection"),
+                        .child(i18n.tr("inspector.no-selection.title")),
                 )
                 .child(
                     div()
                         .text_color(Colors::text_faint())
                         .text_size(px(10.5))
                         .text_center()
-                        .child("Select a track, clip, note, or plugin to edit its details."),
+                        .child(i18n.tr("inspector.no-selection.hint")),
                 ),
         )
         .child(
@@ -507,7 +525,10 @@ fn no_selection(track_count: usize) -> impl IntoElement {
                 .flex_col()
                 .gap(px(2.0))
                 .child(fb_section_header("PROJECT"))
-                .child(kv_row("Tracks", track_count.to_string())),
+                .child(kv_row(
+                    i18n.tr("wizard.summary.tracks"),
+                    track_count.to_string(),
+                )),
         )
 }
 
@@ -542,8 +563,9 @@ fn kv_row(key: impl Into<String>, value: impl Into<String>) -> impl IntoElement 
 fn inspector_header(
     accent: gpui::Rgba,
     title: impl Into<String>,
-    badge: &'static str,
+    badge: impl Into<String>,
 ) -> impl IntoElement {
+    let badge = badge.into();
     let mut row = div()
         .flex()
         .flex_row()
@@ -578,24 +600,27 @@ fn inspector_header(
     row
 }
 
-fn format_pan(pan: f32) -> String {
+fn format_pan(i18n: I18n, pan: f32) -> String {
     if pan.abs() < 0.01 {
-        "Center".to_string()
+        i18n.tr("inspector.pan.center")
     } else if pan < 0.0 {
-        format!("L {}", (pan * -100.0).round().clamp(1.0, 100.0) as i32)
+        let percent = (pan * -100.0).round().clamp(1.0, 100.0) as i32;
+        i18n.tr_vars("inspector.pan.left", &[("percent", percent.to_string())])
     } else {
-        format!("R {}", (pan * 100.0).round().clamp(1.0, 100.0) as i32)
+        let percent = (pan * 100.0).round().clamp(1.0, 100.0) as i32;
+        i18n.tr_vars("inspector.pan.right", &[("percent", percent.to_string())])
     }
 }
 
 /// Clickable M/S/R/I-style state badge.
 fn toggle_badge(
     id: impl Into<gpui::ElementId>,
-    label: &'static str,
+    label: impl Into<String>,
     active: bool,
     accent: gpui::Rgba,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = label.into();
     let (bg, fg) = if active {
         (accent, Colors::on_accent())
     } else {
@@ -1796,6 +1821,7 @@ fn track_inspector(
     name_callbacks: TextInputCallbacks,
     instrument_targets: &[(String, String)],
     callbacks: &InspectorCallbacks,
+    i18n: I18n,
 ) -> impl IntoElement {
     let automation_points: usize = track
         .automation_lanes
@@ -1884,11 +1910,16 @@ fn track_inspector(
                     .min_w(px(48.0))
                     .text_size(px(10.0))
                     .text_color(Colors::text_secondary())
-                    .child(format!(
-                        "{} dB{}",
-                        volume::format_db(display_vol),
-                        if automation_active { " [A]" } else { "" }
-                    ))
+                    .child({
+                        let mut label = i18n.tr_vars(
+                            "inspector.volume.db",
+                            &[("db", volume::format_db(display_vol))],
+                        );
+                        if automation_active {
+                            label.push_str(" [A]");
+                        }
+                        label
+                    })
                     .when(has_volume_automation, |this| {
                         this.child(
                             div()
@@ -1933,7 +1964,7 @@ fn track_inspector(
                     .min_w(px(40.0))
                     .text_size(px(10.0))
                     .text_color(Colors::text_secondary())
-                    .child(format_pan(track.pan)),
+                    .child(format_pan(i18n, track.pan)),
             )
     };
 
@@ -1950,39 +1981,40 @@ fn track_inspector(
             .gap(px(4.0))
             .child(toggle_badge(
                 "inspector-mute",
-                "M",
+                i18n.tr("inspector.badge.mute"),
                 track.muted,
                 Colors::accent_warning(),
                 move |_, w, cx| mute(&t1, w, cx),
             ))
             .child(toggle_badge(
                 "inspector-solo",
-                "S",
+                i18n.tr("inspector.badge.solo"),
                 track.solo,
                 Colors::accent_success(),
                 move |_, w, cx| solo(&t2, w, cx),
             ))
             .child(toggle_badge(
                 "inspector-arm",
-                "R",
+                i18n.tr("inspector.badge.record"),
                 track.armed,
                 Colors::accent_danger(),
                 move |_, w, cx| arm(&t3, w, cx),
             ))
             .child(toggle_badge(
                 "inspector-input",
-                "I",
+                i18n.tr("inspector.badge.input"),
                 track.input_monitor.is_active(track.armed),
                 Colors::accent_primary(),
                 move |_, w, cx| input(&t4, w, cx),
             ))
     };
 
+    let type_label = track_type_label(i18n, track.track_type);
     scroll_body()
         .child(inspector_header(
             track_type_color(track.track_type),
             track.name.clone(),
-            track_type_badge(track.track_type),
+            type_label.clone(),
         ))
         // ── Basic ────────────────────────────────────────────────────────
         .child(
@@ -1990,19 +2022,19 @@ fn track_inspector(
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .child(fb_section_header("TRACK"))
-                .child(kv_row("Type", track_type_badge(track.track_type)))
+                .child(fb_section_header(i18n.tr("inspector.section.track")))
+                .child(kv_row(i18n.tr("inspector.field.type"), type_label))
                 .child(fb_form_row(
                     "Name",
                     text_field_with_callbacks(name_input, name_focused, name_callbacks),
                 ))
-                .child(fb_form_row("Volume", volume_row))
-                .child(fb_form_row("Pan", pan_row))
+                .child(fb_form_row(i18n.tr("inspector.field.volume"), volume_row))
+                .child(fb_form_row(i18n.tr("inspector.field.pan"), pan_row))
                 .child(fb_form_row(
                     "Color",
                     color_palette(tid.clone(), track.color, callbacks.on_set_color.clone()),
                 ))
-                .child(fb_form_row("State", state_row)),
+                .child(fb_form_row(i18n.tr("inspector.section.state"), state_row)),
         )
         .child(routing_section(track, instrument_targets, callbacks))
         .when(track.track_type == TrackType::Instrument, |this| {
@@ -2019,7 +2051,10 @@ fn track_inspector(
                 .flex_col()
                 .gap(px(2.0))
                 .child(fb_section_header("CONTENTS"))
-                .child(kv_row("Clips", track.clips.len().to_string()))
+                .child(kv_row(
+                    i18n.tr("inspector.field.clips"),
+                    track.clips.len().to_string(),
+                ))
                 .child(kv_row("Inserts", track.effect_inserts().len().to_string()))
                 .child(kv_row("Sends", track.sends.len().to_string()))
                 .child(kv_row(
@@ -2996,6 +3031,7 @@ fn clip_inspector(
     clip_name_callbacks: TextInputCallbacks,
     tempo: StretchTempoUiSnapshot,
     callbacks: &InspectorCallbacks,
+    i18n: I18n,
 ) -> impl IntoElement {
     let clip_id = clip.clip_id.to_string();
     let open_bottom = callbacks.on_open_clip_bottom_editor.clone();
@@ -3080,7 +3116,7 @@ fn clip_inspector(
                     ),
             )
             .child(inspector_section(
-                "CLIP",
+                i18n.tr("inspector.section.clip"),
                 div()
                     .flex()
                     .flex_col()
@@ -3101,7 +3137,7 @@ fn clip_inspector(
                     .flex_col()
                     .gap(px(3.0))
                     .child(compact_property_row(
-                        "Start",
+                        i18n.tr("inspector.clip.start"),
                         beat_stepper(
                             "clip-start",
                             clip.clip_id,
@@ -3112,7 +3148,7 @@ fn clip_inspector(
                         ),
                     ))
                     .child(compact_property_row(
-                        "Length",
+                        i18n.tr("inspector.clip.length"),
                         beat_stepper(
                             "clip-length",
                             clip.clip_id,
@@ -3285,6 +3321,11 @@ fn clip_inspector(
         return body;
     }
 
+    let clip_type_label = match clip.kind {
+        "Audio" => i18n.tr("inspector.clip.type.audio"),
+        "MIDI" => i18n.tr("inspector.clip.type.midi"),
+        other => other.to_string(),
+    };
     let mut body = scroll_body()
         .child(inspector_header(
             Colors::accent_primary(),
@@ -3296,9 +3337,12 @@ fn clip_inspector(
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(fb_section_header("CLIP"))
-                .child(kv_row("Type", clip.kind.to_string()))
-                .child(kv_row("Track", clip.track_name.to_string()))
+                .child(fb_section_header(i18n.tr("inspector.section.clip")))
+                .child(kv_row(i18n.tr("inspector.clip.type"), clip_type_label))
+                .child(kv_row(
+                    i18n.tr("inspector.clip.track"),
+                    clip.track_name.to_string(),
+                ))
                 .child(kv_row("Track ID", clip.track_id.to_string()))
                 .child(fb_form_row(
                     "Name",
@@ -3309,7 +3353,7 @@ fn clip_inspector(
                     ),
                 ))
                 .child(fb_form_row(
-                    "Start",
+                    i18n.tr("inspector.clip.start"),
                     beat_stepper(
                         "clip-start",
                         clip.clip_id,
@@ -3320,7 +3364,7 @@ fn clip_inspector(
                     ),
                 ))
                 .child(fb_form_row(
-                    "Length",
+                    i18n.tr("inspector.clip.length"),
                     beat_stepper(
                         "clip-length",
                         clip.clip_id,

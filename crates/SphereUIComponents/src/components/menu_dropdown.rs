@@ -28,6 +28,7 @@ use gpui::{
 
 use crate::assets;
 use crate::components::title_bar::TITLEBAR_HEIGHT;
+use crate::i18n::I18n;
 use crate::menu::{Menu, MenuItem, MenuItemKind};
 use crate::overlay::{
     compute_overlay_position, OverlayAnchor, OverlayPlacement, OverlaySize, OVERLAY_WINDOW_MARGIN,
@@ -62,12 +63,13 @@ pub fn menu_dropdown(
     on_toggle_submenu: ToggleSubmenuCb,
     on_command: CommandCb,
     on_close: CloseCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let window_bounds = gpui::bounds(
         gpui::point(px(0.0), px(0.0)),
         gpui::size(px(viewport_width), px(viewport_height)),
     );
-    let root_width = panel_width_for_items(&menu.items);
+    let root_width = panel_width_for_items(&menu.items, i18n);
     let root_height = panel_height_for_items(&menu.items);
     let root_pos = compute_overlay_position(
         anchor.bounds,
@@ -90,7 +92,7 @@ pub fn menu_dropdown(
     let mut panel_top = root_top;
 
     for depth in 0..=submenu_path.len() {
-        let current_width = panel_width_for_items(items_ref);
+        let current_width = panel_width_for_items(items_ref, i18n);
         panels.push(
             panel_view(
                 depth,
@@ -102,6 +104,7 @@ pub fn menu_dropdown(
                 on_toggle_submenu.clone(),
                 on_command.clone(),
                 on_close.clone(),
+                i18n,
             )
             .into_any_element(),
         );
@@ -122,7 +125,7 @@ pub fn menu_dropdown(
         // the parent panel, matching the WebUI DOMRect-based submenu anchor.
         let trigger_y = trigger_top_offset(items_ref, trigger_index);
         items_ref = &submenu.children;
-        let child_width = panel_width_for_items(items_ref);
+        let child_width = panel_width_for_items(items_ref, i18n);
         panel_top = clamp_top(panel_top + trigger_y, viewport_height);
         panel_left = submenu_left(panel_left, current_width, child_width, viewport_width);
     }
@@ -191,7 +194,7 @@ fn trigger_top_offset(items: &[MenuItem], trigger_index: usize) -> f32 {
     y
 }
 
-fn panel_width_for_items(items: &[MenuItem]) -> f32 {
+fn panel_width_for_items(items: &[MenuItem], i18n: I18n) -> f32 {
     let has_check = items
         .iter()
         .any(|it| it.visible && it.kind == MenuItemKind::Checkbox);
@@ -202,7 +205,7 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
             continue;
         }
 
-        let label_chars = item.label.as_deref().unwrap_or_default().chars().count() as f32;
+        let label = i18n.tr_menu(&item.id, item.label.as_deref().unwrap_or(""));
         let shortcut_chars = item.shortcut.as_deref().unwrap_or_default().chars().count() as f32;
         let left_slot = if has_check {
             menu_style::CHECK_SLOT_W + 6.0
@@ -220,10 +223,10 @@ fn panel_width_for_items(items: &[MenuItem]) -> f32 {
             0.0
         };
 
-        // Approximate Inter UI text width. GPUI rows do not currently
+        // Approximate text width per script. GPUI rows do not currently
         // auto-size popovers from text contents, so this preserves the WebUI
         // content-driven feel without making the panel a hard narrow width.
-        let label_slot = label_chars * 6.1;
+        let label_slot = menu_style::estimate_label_width(&label);
         let needed = menu_style::PANEL_PAD * 2.0
             + menu_style::ROW_PAD_X * 2.0
             + left_slot
@@ -268,6 +271,7 @@ fn panel_view(
     on_toggle_submenu: ToggleSubmenuCb,
     on_command: CommandCb,
     on_close: CloseCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     // Per-panel decision: only reserve a left check-slot if the panel
     // actually contains a checkbox item. That removes the empty gutter
@@ -293,6 +297,7 @@ fn panel_view(
                     on_toggle_submenu.clone(),
                     on_command.clone(),
                     on_close.clone(),
+                    i18n,
                 )
                 .into_any_element(),
             ),
@@ -335,9 +340,10 @@ fn menu_item_row(
     on_toggle_submenu: ToggleSubmenuCb,
     on_command: CommandCb,
     on_close: CloseCb,
+    i18n: I18n,
 ) -> impl IntoElement {
     let enabled = item.enabled;
-    let label = item.label.clone().unwrap_or_default();
+    let label = i18n.tr_menu(&item.id, item.label.as_deref().unwrap_or(""));
     let shortcut = item.shortcut.clone();
     let is_submenu = item.kind == MenuItemKind::Submenu;
     let is_checkbox = item.kind == MenuItemKind::Checkbox;

@@ -14,6 +14,7 @@ use crate::components::text_input::{
 use crate::components::title_bar::{
     chrome_button, draggable_spacer, section_separator, CHROME_TITLE_SIZE, WINDOW_CONTROL_WIDTH,
 };
+use crate::i18n::I18n;
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::theme::Colors;
 
@@ -314,13 +315,18 @@ fn menu_area(
     open_menu_id: Option<&str>,
     on_open_menu: MenuOpenCb,
     viewport_width: f32,
+    i18n: I18n,
 ) -> impl IntoElement {
-    menu_bar::menu_bar(open_menu_id, on_open_menu, viewport_width)
+    menu_bar::menu_bar(open_menu_id, on_open_menu, viewport_width, i18n)
 }
 
-fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
+fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl IntoElement {
     let on_open = state.on_open_project_menu.clone();
-    let status = if state.is_dirty { "Unsaved" } else { "Saved" };
+    let status = if state.is_dirty {
+        i18n.tr("chrome.project.unsaved")
+    } else {
+        i18n.tr("chrome.project.saved")
+    };
     let status_color = if state.is_dirty {
         Colors::status_warning()
     } else {
@@ -376,14 +382,14 @@ fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
                         .text_color(Colors::text_muted())
                         .text_size(px(8.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child(status.to_uppercase()),
+                        .child(status),
                 ),
         )
 }
 
 // ── Right section — transport + panel toggles + utility ───────────────────────
 
-fn transport_controls(state: TransportChromeState) -> impl IntoElement {
+fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
     let play_color = if state.playing {
         Colors::accent_primary()
     } else {
@@ -447,6 +453,14 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let ts_den_input = state.ts_den_input.clone();
     let ts_den_input_callbacks = state.ts_den_input_callbacks.clone();
     let ts_edit_focus_num = state.ts_edit_focus_num;
+    let label_skip_back = i18n.tr_or("transport.skip-back", "<<");
+    let label_play = i18n.tr_or("transport.play", ">");
+    let label_stop = i18n.tr_or("transport.stop", "[]");
+    let label_record = i18n.tr("transport.record");
+    let label_loop = i18n.tr("transport.loop");
+    let label_metronome = i18n.tr("transport.metronome");
+    let label_follow = i18n.tr("transport.follow");
+    let label_bpm = i18n.tr("transport.bpm-label");
 
     div()
         .flex()
@@ -457,7 +471,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .child(
             chrome_button(
                 Some(assets::ICON_SKIP_BACK_PATH),
-                "<<",
+                label_skip_back,
                 false,
                 Colors::text_muted(),
             )
@@ -469,18 +483,23 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         )
         // Play
         .child(
-            chrome_button(Some(assets::ICON_PLAY_PATH), ">", state.playing, play_color)
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    on_play(&(), window, cx);
-                })
-                .occlude(),
+            chrome_button(
+                Some(assets::ICON_PLAY_PATH),
+                label_play,
+                state.playing,
+                play_color,
+            )
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                on_play(&(), window, cx);
+            })
+            .occlude(),
         )
         // Stop
         .child(
             chrome_button(
                 Some(assets::ICON_SQUARE_PATH),
-                "[]",
+                label_stop,
                 false,
                 Colors::text_muted(),
             )
@@ -494,7 +513,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .child(
             chrome_button(
                 Some(assets::ICON_CIRCLE_PATH),
-                "REC",
+                label_record,
                 state.recording,
                 record_color,
             )
@@ -561,7 +580,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .child(
             chrome_button(
                 Some(assets::ICON_REPEAT2_PATH),
-                "LOOP",
+                label_loop,
                 state.loop_enabled,
                 loop_color,
             )
@@ -575,7 +594,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .child(
             chrome_button(
                 Some(assets::ICON_METRONOME_PATH),
-                "MET",
+                label_metronome,
                 state.metronome_enabled,
                 metronome_color,
             )
@@ -592,7 +611,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
         .child(
             chrome_button(
                 Some(assets::TIMELINE_SCROLL_PATH),
-                "FOLLOW",
+                label_follow,
                 state.follow_playhead,
                 follow_color,
             )
@@ -637,7 +656,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                         .text_color(Colors::text_muted())
                         .text_size(px(9.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .child("BPM"),
+                        .child(label_bpm),
                 )
                 .child(bpm_display(
                     bpm_value,
@@ -797,7 +816,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
 
 fn panel_toggle_button(
     icon_path: &'static str,
-    fallback: &'static str,
+    fallback: impl Into<gpui::SharedString>,
     active: bool,
     on_click: ChromeActionCb,
 ) -> impl IntoElement {
@@ -815,7 +834,7 @@ fn panel_toggle_button(
         .occlude()
 }
 
-fn panel_toggles(state: PanelChromeState) -> impl IntoElement {
+fn panel_toggles(state: PanelChromeState, i18n: I18n) -> impl IntoElement {
     let on_browser = state.on_toggle_browser.clone();
     let on_mixer = state.on_toggle_mixer.clone();
     let on_inspector = state.on_toggle_inspector.clone();
@@ -826,25 +845,26 @@ fn panel_toggles(state: PanelChromeState) -> impl IntoElement {
         .gap(px(2.0))
         .child(panel_toggle_button(
             assets::ICON_FOLDER_OPEN_PATH,
-            "BROWSER",
+            i18n.tr("panel.browser"),
             state.browser_visible,
             on_browser,
         ))
         .child(panel_toggle_button(
             assets::ICON_PANEL_BOTTOM_PATH,
-            "MIXER",
+            i18n.tr("panel.mixer"),
             state.mixer_visible,
             on_mixer,
         ))
         .child(panel_toggle_button(
             assets::ICON_PANEL_RIGHT_PATH,
-            "INSPECT",
+            i18n.tr("panel.inspector"),
             state.inspector_visible,
             on_inspector,
         ))
 }
 
-fn utility_buttons() -> impl IntoElement {
+#[allow(dead_code)]
+fn utility_buttons(i18n: I18n) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
@@ -854,30 +874,32 @@ fn utility_buttons() -> impl IntoElement {
         // Import audio
         .child(chrome_button(
             Some(assets::ICON_FOLDER_PATH),
-            "IMPORT",
+            i18n.tr("chrome.import"),
             false,
             Colors::text_muted(),
         ))
         // Save
         .child(chrome_button(
             Some(assets::ICON_SAVE_PATH),
-            "SAVE",
+            i18n.tr("chrome.save"),
             false,
             Colors::text_muted(),
         ))
         // Share
         .child(chrome_button(
             Some(assets::ICON_SHARE_PATH),
-            "SHARE",
+            i18n.tr("chrome.share"),
             false,
             Colors::text_muted(),
         ))
 }
 
-fn report_bug_button() -> impl IntoElement {
+#[allow(dead_code)]
+fn report_bug_button(i18n: I18n) -> impl IntoElement {
     let amber_bg = Colors::with_alpha(Colors::status_warning(), 0.07);
     let amber_text = Colors::with_alpha(Colors::status_warning(), 0.70);
     let amber_border = Colors::with_alpha(Colors::status_warning(), 0.22);
+    let label = i18n.tr("chrome.report-bug");
 
     div()
         .flex()
@@ -906,7 +928,7 @@ fn report_bug_button() -> impl IntoElement {
                 .text_color(amber_text)
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("Report bug"),
+                .child(label),
         )
         .occlude()
 }
@@ -998,17 +1020,23 @@ fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElemen
         .child(initial)
 }
 
-fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> impl IntoElement {
+fn window_controls(
+    window: &gpui::Window,
+    on_close: Option<ChromeActionCb>,
+    i18n: I18n,
+) -> impl IntoElement {
     let is_maximized = window.is_maximized();
     let (max_path, max_fallback) = if is_maximized {
-        (assets::ICON_RESTORE_PATH, "RESTORE")
+        (assets::ICON_RESTORE_PATH, i18n.tr("window.restore"))
     } else {
-        (assets::ICON_MAXIMIZE_PATH, "MAX")
+        (assets::ICON_MAXIMIZE_PATH, i18n.tr("window.maximize"))
     };
+    let min_fallback = i18n.tr_or("window.minimize", "-");
+    let close_fallback = i18n.tr_or("window.close", "X");
 
     let control_button = |area: WindowControlArea,
                           icon_path: &'static str,
-                          fallback_text: &'static str,
+                          fallback_text: gpui::SharedString,
                           on_linux: Option<ChromeActionCb>| {
         let button =
             crate::components::title_bar::window_control_icon(area, icon_path, fallback_text)
@@ -1061,19 +1089,19 @@ fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> i
         .child(control_button(
             WindowControlArea::Min,
             assets::ICON_MINIMIZE_PATH,
-            "-",
+            min_fallback.into(),
             None,
         ))
         .child(control_button(
             WindowControlArea::Max,
             max_path,
-            max_fallback,
+            max_fallback.into(),
             None,
         ))
         .child(control_button(
             WindowControlArea::Close,
             assets::ICON_X_PATH,
-            "X",
+            close_fallback.into(),
             on_close,
         ))
 }
@@ -1088,12 +1116,13 @@ pub fn app_chrome(
     transport: TransportChromeState,
     panels: PanelChromeState,
     on_window_close: Option<ChromeActionCb>,
+    i18n: I18n,
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
     let viewport_width: f32 = window.bounds().size.width.into();
     let chrome_left: f32 = policy.traffic_light_left_padding().into();
     let menu_width = if policy.show_in_window_menubar {
-        menu_bar::menu_bar_chrome_width(viewport_width) + 7.0
+        menu_bar::menu_bar_chrome_width(viewport_width, i18n) + 7.0
     } else {
         0.0
     };
@@ -1127,16 +1156,16 @@ pub fn app_chrome(
 
     if policy.show_in_window_menubar {
         chrome = chrome
-            .child(menu_area(open_menu_id, on_open_menu, viewport_width))
+            .child(menu_area(open_menu_id, on_open_menu, viewport_width, i18n))
             .child(section_separator());
     }
 
     chrome = chrome
-        .child(project_title(project, project_anchor_x))
+        .child(project_title(project, project_anchor_x, i18n))
         .child(draggable_spacer())
-        .child(transport_controls(transport))
+        .child(transport_controls(transport, i18n))
         .child(section_separator())
-        .child(panel_toggles(panels))
+        .child(panel_toggles(panels, i18n))
         .child(section_separator());
 
     // Account chip sits between the panel toggles and the window controls. Only
@@ -1146,7 +1175,7 @@ pub fn app_chrome(
     }
 
     if policy.show_window_controls {
-        chrome = chrome.child(window_controls(window, on_window_close));
+        chrome = chrome.child(window_controls(window, on_window_close, i18n));
     }
 
     chrome

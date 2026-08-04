@@ -19,6 +19,11 @@ impl Render for StudioLayout {
         }
 
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
+        let i18n = crate::i18n::I18n::from_app(cx);
+        self.browser_search_input.placeholder =
+            Some(i18n.tr("search.browser.placeholder"));
+        self.project_switcher_search_input.placeholder =
+            Some(i18n.tr("search.projects.placeholder"));
         // Frame pacing tick. See FrameDiagnostics docs — only counts
         // real repaints, not display refreshes.
         let reason = self.frame_reason();
@@ -727,6 +732,8 @@ impl Render for StudioLayout {
         let submenu_path = self.menu_bar.submenu_path.clone();
         let viewport_width: f32 = window.bounds().size.width.into();
         let viewport_height: f32 = window.bounds().size.height.into();
+        let ui_language = self.settings.read(cx).current.general.language.clone();
+        let i18n = crate::i18n::I18n::new(&ui_language);
 
         let chrome_policy = crate::platform_chrome::PlatformChromePolicy::current();
         let dropdown_overlay = if chrome_policy.show_in_window_menubar {
@@ -739,6 +746,7 @@ impl Render for StudioLayout {
                             viewport_height,
                             on_open_menu.clone(),
                             on_close_menu.clone(),
+                            i18n,
                         )
                         .into_any_element(),
                     )
@@ -769,6 +777,7 @@ impl Render for StudioLayout {
                             on_toggle_submenu.clone(),
                             on_menu_command.clone(),
                             on_close_menu.clone(),
+                            i18n,
                         )
                         .into_any_element()
                     })
@@ -927,6 +936,7 @@ impl Render for StudioLayout {
                     on_switcher_row_action.clone(),
                     on_popover_command.clone(),
                     on_close_popover.clone(),
+                    i18n,
                 )
                 .into_any_element(),
             )
@@ -1608,6 +1618,7 @@ impl Render for StudioLayout {
                     transport_chrome,
                     panel_chrome,
                     Some(on_window_close),
+                    i18n,
                 )
             })
             .child({
@@ -1639,6 +1650,7 @@ impl Render for StudioLayout {
                             on_browser_context,
                             on_browser_collapse_all,
                             on_browser_rescan,
+                            i18n,
                         ))
                     });
                 }
@@ -1689,6 +1701,7 @@ impl Render for StudioLayout {
                                     inspector_clip_name_callbacks,
                                     active_panel == WorkspaceActivePanel::Inspector,
                                     &inspector_callbacks,
+                                    i18n,
                                 ).into_any_element()
                             }
                             RightDockTab::ChordDisplay => self.chord_display_panel.clone().into_any_element(),

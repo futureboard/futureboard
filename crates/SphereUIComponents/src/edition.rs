@@ -111,6 +111,35 @@ pub fn current_edition_info() -> Option<EditionInfo> {
     Some(provider())
 }
 
+fn app_version_slot() -> &'static RwLock<Option<String>> {
+    static SLOT: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| RwLock::new(None))
+}
+
+/// Record the running application's package version. Called once by the app
+/// layer at startup with its own `env!("CARGO_PKG_VERSION")` — the shared UI
+/// crate's own package version differs, so it cannot read the app version
+/// itself.
+pub fn set_app_version(version: impl Into<String>) {
+    if let Ok(mut guard) = app_version_slot().write() {
+        *guard = Some(version.into());
+    }
+}
+
+/// The running application's version string, resolved in priority order:
+/// the value the app layer set via [`set_app_version`], then the edition
+/// provider's `app_version`, then this crate's own package version as a last
+/// resort (only hit in unit tests / standalone UI harnesses).
+pub fn app_version() -> String {
+    if let Some(version) = app_version_slot().read().ok().and_then(|g| g.clone()) {
+        return version;
+    }
+    if let Some(info) = current_edition_info() {
+        return info.app_version;
+    }
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 // ── License action hand-off ──────────────────────────────────────────────────
 //
 // The About panel needs to be able to *open* activation, not just describe it —

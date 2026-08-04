@@ -43,6 +43,11 @@ fn main() {
         "[process] role=main pid={} exe=futureboard_native",
         std::process::id()
     );
+    // Publish the app package version to the shared UI crate. `CARGO_PKG_VERSION`
+    // here is the application crate's version; the UI crate cannot read it
+    // itself because its own package version differs.
+    sphere_ui_components::edition::set_app_version(env!("CARGO_PKG_VERSION"));
+
     // Plugin runtime selection diagnostics. External PluginHost bridge is the
     // default; legacy in-process VST3 requires FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1.
     sphere_ui_components::plugin_host_client::log_bridge_env();

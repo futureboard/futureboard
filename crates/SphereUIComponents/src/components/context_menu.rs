@@ -151,7 +151,7 @@ fn panel_width_for_entries(entries: &[ContextMenuEntry]) -> f32 {
         } else {
             0.0
         };
-        let label_slot = label.chars().count() as f32 * 6.1;
+        let label_slot = menu_style::estimate_label_width(label);
         let shortcut_slot = shortcut
             .as_ref()
             .map(|s| 14.0 + s.chars().count() as f32 * 6.0)

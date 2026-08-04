@@ -46,6 +46,7 @@ pub mod embedded_assets;
 pub mod export;
 pub mod extensions_registry;
 pub mod feeds;
+pub mod fonts;
 pub mod forensic_trace;
 pub mod frame_scheduler;
 pub mod i18n;

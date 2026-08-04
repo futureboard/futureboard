@@ -151,6 +151,12 @@ pub struct WaveformPeak {
 const PREVIEW_CAPACITY: usize = 1 << 16;
 const PREVIEW_MASK: usize = PREVIEW_CAPACITY - 1;
 
+/// Max simultaneously-armed tracks whose live recording waveform can be
+/// previewed at once. Chosen generously for typical multitrack sessions;
+/// tracks armed beyond this cap still record to disk correctly (the writer
+/// path is unrelated), they just don't get a live waveform preview.
+pub(crate) const MAX_RECORDING_PREVIEW_TRACKS: usize = 32;
+
 /// Lock-free ring of finalized preview peaks. The recording input callback
 /// (producer) pushes one bin every `samples_per_bin` frames; the control thread
 /// (consumer) drains completed bins for the UI. SPSC, atomics only.

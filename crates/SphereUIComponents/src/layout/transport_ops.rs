@@ -263,7 +263,7 @@ impl StudioLayout {
                 | RecordingUiState::Recording
                 | RecordingUiState::Finalizing
         ) || self.timeline.read(cx).state.transport.recording
-            || self.recording.preview.is_some()
+            || !self.recording.preview.is_empty()
             || self.recording.midi.is_some()
             || self
                 .audio_bridge
@@ -283,7 +283,7 @@ impl StudioLayout {
             event,
             timeline.state.transport.playing,
             timeline.state.transport.recording,
-            self.recording.preview.as_ref().map(|p| p.recording_id),
+            self.recording.preview.values().next().map(|p| p.recording_id),
             action
         );
     }

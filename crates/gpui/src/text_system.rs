@@ -228,6 +228,33 @@ impl TextSystem {
             .width
     }
 
+    /// Returns the shaped width of an entire run of text in the given font and
+    /// size.
+    ///
+    /// Unlike summing [`Self::layout_width`] over each `char`, this shapes the
+    /// string as a whole, so contextual forms and zero-advance combining marks
+    /// (Thai, Arabic, Indic, …) are measured the way they actually render.
+    pub(crate) fn layout_str_width(
+        &self,
+        font_id: FontId,
+        font_size: Pixels,
+        text: &str,
+    ) -> Pixels {
+        if text.is_empty() {
+            return px(0.0);
+        }
+        self.platform_text_system
+            .layout_line(
+                text,
+                font_size,
+                &[FontRun {
+                    len: text.len(),
+                    font_id,
+                }],
+            )
+            .width
+    }
+
     /// Returns the width of an `em`.
     ///
     /// Uses the width of the `m` character in the given font and size.

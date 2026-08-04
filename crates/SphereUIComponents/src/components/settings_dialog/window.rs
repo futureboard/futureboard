@@ -482,7 +482,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .size_full()
             .relative()
-            .font(theme::ui_font_for_language(&schema.general.language))
+            .font(theme::ui_font())
             .bg(Colors::surface_window())
             .overflow_hidden()
             .capture_key_down({
