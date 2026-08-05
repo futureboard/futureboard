@@ -126,6 +126,20 @@ impl StudioLayout {
         self.start_native_recording_now(cx);
     }
 
+    /// Run the record count-in, then start the take **at** `target_beat`.
+    ///
+    /// The audible count-in is a transport pre-roll, so it can only use timeline
+    /// that exists *before* the record start. Rolling the requested number of
+    /// bars unconditionally overshoots whenever the playhead sits closer to bar 1
+    /// than the count-in is long: the seek clamps at beat 0 but the wait does
+    /// not, so the transport plays straight through the region about to be
+    /// recorded before snapping back. The roll is therefore clamped to the room
+    /// actually available and its wait is measured on the same tempo map the
+    /// transport reads, which lands playback exactly on `target_beat`.
+    ///
+    /// With no room at all (playhead at beat 0) there is no timeline to roll
+    /// through, so the count-in is a silent wait in place — the engine metronome
+    /// is scheduled off the transport position and cannot click while stopped.
     fn begin_record_count_in(
         &mut self,
         bars: u32,
@@ -136,22 +150,49 @@ impl StudioLayout {
     ) {
         self.recording.count_in_token = self.recording.count_in_token.wrapping_add(1);
         let token = self.recording.count_in_token;
-        let restore_metronome = self.timeline.update(cx, |timeline, cx| {
-            let previous = timeline.state.transport.metronome_enabled;
-            timeline.state.transport.metronome_enabled = true;
-            cx.notify();
-            previous
-        });
-        self.recording.count_in_restore_metronome = Some(restore_metronome);
-        self.recording.ui_state = RecordingUiState::CountingIn { bars };
+
+        let requested_beats = (bars as f32 * beats_per_bar).max(0.0);
+        let target_beat = target_beat.max(0.0);
+        let preroll_beats = requested_beats.min(target_beat);
+        let preroll_start = (target_beat - preroll_beats).max(0.0);
+        let rolls = preroll_beats > 0.0;
+
+        let seconds = if rolls {
+            let timeline = self.timeline.read(cx);
+            let base = timeline.state.bpm.max(1.0) as f64;
+            let map = &timeline.state.tempo_map;
+            (map.seconds_at_beat(target_beat as f64, base)
+                - map.seconds_at_beat(preroll_start as f64, base))
+            .max(0.01) as f32
+        } else {
+            (requested_beats * 60.0 / bpm.max(1.0)).max(0.01)
+        };
+
+        // Only force the metronome on when the roll can actually click.
+        if rolls {
+            let restore_metronome = self.timeline.update(cx, |timeline, cx| {
+                let previous = timeline.state.transport.metronome_enabled;
+                timeline.state.transport.metronome_enabled = true;
+                cx.notify();
+                previous
+            });
+            self.recording.count_in_restore_metronome = Some(restore_metronome);
+        }
+        // Report the bars the count-in really covers, not the bars requested.
+        let counted_bars = if rolls {
+            (preroll_beats / beats_per_bar.max(1.0)).ceil().max(1.0) as u32
+        } else {
+            bars
+        };
+        self.recording.ui_state = RecordingUiState::CountingIn { bars: counted_bars };
         self.sync_metronome_controls(cx);
 
-        let count_beats = bars as f32 * beats_per_bar;
-        self.seek_native_playhead(cx, (target_beat - count_beats).max(0.0));
-        self.start_native_playback(cx);
+        if rolls {
+            self.seek_native_playhead(cx, preroll_start);
+            self.start_native_playback(cx);
+        }
         cx.notify();
 
-        let seconds = (count_beats * 60.0 / bpm.max(1.0)).max(0.01);
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
             cx.background_executor()
@@ -163,8 +204,12 @@ impl StudioLayout {
                 {
                     return;
                 }
-                this.stop_native_playback(cx);
-                this.seek_native_playhead(cx, target_beat);
+                if rolls {
+                    this.stop_native_playback(cx);
+                    // Re-seek so timer jitter cannot leave the take a few
+                    // milliseconds off the beat the user asked to record from.
+                    this.seek_native_playhead(cx, target_beat);
+                }
                 this.restore_record_count_in_metronome(cx);
                 this.start_native_recording_now(cx);
             });
