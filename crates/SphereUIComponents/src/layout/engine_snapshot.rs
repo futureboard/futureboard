@@ -103,17 +103,31 @@ fn sphere_stretch_params_from_clip_stretch(
     stretch.to_sphere_stretch_params(project_bpm)
 }
 
-fn is_renderable_audio_clip(clip: &ClipState) -> bool {
-    if clip.muted {
-        return false;
-    }
-    matches!(
-        &clip.clip_type,
+/// The `(asset id, media path)` a clip renders audio from, or `None` when it
+/// has no audio source.
+///
+/// A Video clip resolves here too: the engine decodes the audio stream of the
+/// container (`mp4`/`m4v`/`mov`), so a reference video plays its own sound
+/// through the Video track's channel rather than running silent against
+/// picture. Containers with no audio track simply fail to load and are skipped
+/// by the engine, exactly like an unreadable audio file.
+fn clip_media_source(clip: &ClipState) -> Option<(&String, &String)> {
+    let (file_id, source_path) = match &clip.clip_type {
         ClipType::Audio {
-            source_path: Some(path),
-            ..
-        } if !path.trim().is_empty()
-    )
+            file_id,
+            source_path: Some(source_path),
+        }
+        | ClipType::Video {
+            file_id,
+            source_path: Some(source_path),
+        } => (file_id, source_path),
+        _ => return None,
+    };
+    (!source_path.trim().is_empty()).then_some((file_id, source_path))
+}
+
+fn is_renderable_audio_clip(clip: &ClipState) -> bool {
+    !clip.muted && clip_media_source(clip).is_some()
 }
 
 fn clip_source_offset_seconds(state: &TimelineState, clip: &ClipState) -> f64 {
@@ -636,9 +650,6 @@ fn build_engine_project_snapshot_inner(
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
         .iter()
-        // A Video track produces no audio, so it gets no engine route. Sending
-        // one would add a permanently silent node to the graph and to PDC.
-        .filter(|track| track.track_type.carries_audio())
         .map(|track| EngineTrackSnapshot {
             id: track.id.clone(),
             track_type: track_type_name(track.track_type).to_string(),
@@ -727,16 +738,7 @@ fn build_engine_project_snapshot_inner(
                 if clip.muted {
                     return None;
                 }
-                let ClipType::Audio {
-                    file_id,
-                    source_path: Some(source_path),
-                } = &clip.clip_type
-                else {
-                    return None;
-                };
-                if source_path.trim().is_empty() {
-                    return None;
-                }
+                let (file_id, source_path) = clip_media_source(clip)?;
 
                 // Resolve the non-destructive stretch/pitch state into the
                 // engine's render parameters. `speed_ratio` folds time-stretch

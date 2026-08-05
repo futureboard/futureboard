@@ -59,9 +59,11 @@ pub enum TrackType {
     /// and does not implicitly change the child's audio routing.
     Group,
     Master,
-    /// Reference/preview video lane. Carries no audio and never joins the mixer
-    /// or the engine graph — it exists so the arrangement can be scored against
-    /// picture. A project holds at most one (see [`TrackType::is_singleton`]).
+    /// Reference/preview video lane. Picture is decoded by the Video Player
+    /// window; the container's audio track plays through the ordinary engine
+    /// graph, so the lane has a real fader, meter, and mixer strip like any
+    /// other channel. A project holds at most one (see
+    /// [`TrackType::is_singleton`]).
     Video,
 }
 
@@ -75,13 +77,6 @@ impl TrackType {
     /// Bus/Return live in the mixer only — they never occupy arrangement lanes.
     pub fn is_mixer_only(self) -> bool {
         matches!(self, TrackType::Bus | TrackType::Return)
-    }
-
-    /// `true` for track types that produce or route audio. A Video track does
-    /// not: it is skipped by mixer strips, routing, metering, and the engine
-    /// graph rather than being wired up as a silent channel.
-    pub fn carries_audio(self) -> bool {
-        !matches!(self, TrackType::Video)
     }
 
     /// `true` for track types a project may hold only one of.

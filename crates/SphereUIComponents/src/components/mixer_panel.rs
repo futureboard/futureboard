@@ -2206,11 +2206,6 @@ pub(crate) fn collect_mixer_render_items(
         if hidden_channels.contains(&track.id) {
             continue;
         }
-        // A Video track is picture-only — it has no fader, meter, or signal to
-        // mix, so it never gets a channel strip.
-        if !track.track_type.carries_audio() {
-            continue;
-        }
         items.push(MixerRenderItem::Track { track_index });
 
         let Some(slot) = track.instrument_insert().filter(|slot| !slot.is_empty()) else {

@@ -205,6 +205,10 @@ pub enum AudioFileFormat {
     Flac,
     Ogg,
     M4a,
+    /// ISO base-media video container (`mp4`/`m4v`/`mov`) read for its audio
+    /// track only — the Video track's sound. Same demuxer as [`Self::M4a`];
+    /// kept separate so diagnostics say which kind of file was opened.
+    Mp4,
     Aiff,
     Unknown,
 }
@@ -218,6 +222,7 @@ impl AudioFileFormat {
             Self::Flac => "flac",
             Self::Ogg => "ogg",
             Self::M4a => "m4a",
+            Self::Mp4 => "mp4",
             Self::Aiff => "aiff",
             Self::Unknown => "unknown",
         }
@@ -634,6 +639,7 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
         | AudioFileFormat::Flac
         | AudioFileFormat::Ogg
         | AudioFileFormat::M4a
+        | AudioFileFormat::Mp4
         | AudioFileFormat::Aiff => probe_via_symphonia(path, format),
         AudioFileFormat::Unknown => Err(SphereAudioError::NativeError(format!(
             "unsupported audio format for '{}'",
@@ -645,7 +651,8 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
 /// Load an audio file from `path` into a decoded `AudioFileBuffer`.
 ///
 /// Supported extensions: `rauf`, `wav`, `wave`, `mp3`, `flac`, `ogg`, `oga`,
-/// `m4a`, `aiff`, `aif`.
+/// `m4a`, `aiff`, `aif`, and the ISO base-media video containers `mp4`, `m4v`,
+/// `mov` (audio track only — the Video track's sound).
 ///
 /// Returns an error string on failure; the caller logs it and skips the clip.
 pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
@@ -662,7 +669,9 @@ pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
         "rauf" => load_rauf(p),
 
         // Symphonia handles everything else.
-        "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif" => load_via_symphonia(p),
+        "mp3" | "flac" | "ogg" | "oga" | "m4a" | "aiff" | "aif" | "mp4" | "m4v" | "mov" => {
+            load_via_symphonia(p)
+        }
 
         other => Err(format!("unsupported native audio format '{other}'")),
     }
@@ -682,6 +691,7 @@ fn audio_file_format(path: &Path) -> AudioFileFormat {
         "flac" => AudioFileFormat::Flac,
         "ogg" | "oga" => AudioFileFormat::Ogg,
         "m4a" => AudioFileFormat::M4a,
+        "mp4" | "m4v" | "mov" => AudioFileFormat::Mp4,
         "aiff" | "aif" => AudioFileFormat::Aiff,
         _ => AudioFileFormat::Unknown,
     }
@@ -771,10 +781,15 @@ fn probe_via_symphonia(
         .map_err(|e| SphereAudioError::NativeError(format!("Format probe failed: {e}")))?;
 
     let mut format = probed.format;
+    // A video container also exposes its picture track, so require a sample
+    // rate — that is what distinguishes an audio stream from a video one.
     let track = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .find(|t| {
+            t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
+                && t.codec_params.sample_rate.is_some()
+        })
         .ok_or_else(|| SphereAudioError::NativeError("No decodable audio track found".to_string()))?
         .clone();
 
@@ -1007,11 +1022,16 @@ fn load_via_symphonia(path: &Path) -> Result<AudioFileBuffer, String> {
 
     let mut format = probed.format;
 
-    // Pick the first decodable audio track.
+    // Pick the first decodable audio track. A video container also exposes its
+    // picture track here, so a sample rate is required as well — that is what
+    // distinguishes an audio stream from a video one.
     let track = format
         .tracks()
         .iter()
-        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .find(|t| {
+            t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
+                && t.codec_params.sample_rate.is_some()
+        })
         .ok_or_else(|| "No decodable audio track found".to_string())?
         .clone();
 
