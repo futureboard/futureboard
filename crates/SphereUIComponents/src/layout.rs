@@ -1906,8 +1906,13 @@ impl StudioLayout {
                 }
             }
 
-            "app:preferences" | "edit:preferences" | "project:settings" => {
+            "app:preferences" | "edit:preferences" => {
                 self.open_settings_dialog(owner_bounds, cx);
+            }
+            // Project-scoped settings live in their own window; the Settings
+            // dialog stays application-scoped.
+            "project:settings" => {
+                self.open_project_settings_window(owner_bounds, cx);
             }
 
             "panel:toggle-browser" | "window.show_browser" => self.toggle_browser_panel(cx),

@@ -600,6 +600,14 @@ fn build_settings_content(
                 .child(settings_section_hint(
                     i18n.tr("settings.project-defaults.hint"),
                 ))
+                // These are application defaults for *new* projects. The open
+                // project's own tempo, meter, and sample rate are edited in the
+                // Project Settings window (Project → Project Settings), so the
+                // two scopes are not confused for each other.
+                .child(settings_section_hint(
+                    "The open project's tempo, time signature, and sample rate are edited in \
+                     Project Settings.",
+                ))
                 .child(settings_daw_row(
                     i18n.tr("settings.field.default-tempo"),
                     div()

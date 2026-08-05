@@ -620,6 +620,10 @@ impl StudioLayout {
                 }
                 let _ = this.update(cx, |layout, cx| {
                     layout.push_video_player_snapshot_to_window(cx);
+                    // Keeps Project Settings in step with tempo/meter edits made
+                    // elsewhere (transport display, tempo track). Both pushes
+                    // no-op when their window is closed.
+                    layout.push_project_settings_snapshot_to_window(cx);
                 });
             }
         })

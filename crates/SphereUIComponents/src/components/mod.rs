@@ -59,6 +59,7 @@ pub mod plugin_manager;
 pub mod plugin_picker;
 pub mod plugin_shell_text;
 pub mod progress_dialog;
+pub mod project_settings_window;
 pub mod project_switcher;
 pub mod reorder;
 pub mod routing_matrix_window;

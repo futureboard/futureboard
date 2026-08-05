@@ -226,6 +226,10 @@ pub(crate) struct ExternalWindows {
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
     /// About Futureboard Studio window.
     pub about: Option<gpui::WindowHandle<crate::components::about_window::AboutWindow>>,
+    /// Project Settings — tempo, meter, and sample rate for the open project.
+    pub project_settings: Option<
+        gpui::WindowHandle<crate::components::project_settings_window::ProjectSettingsWindow>,
+    >,
     /// Built-in Soundfont Player MDI window.
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
@@ -894,6 +898,168 @@ impl StudioLayout {
         match crate::components::about_window::open_about_window(owner_bounds, cx) {
             Ok(handle) => self.external_windows.about = Some(handle),
             Err(err) => eprintln!("[about] failed to open window: {err}"),
+        }
+    }
+
+    /// Build the Project Settings view-model from live project state. Cheap —
+    /// a handful of scalars plus the project name/path — so it is safe to
+    /// re-derive whenever the window needs refreshing.
+    pub(crate) fn build_project_settings_snapshot(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::components::project_settings_window::ProjectSettingsSnapshot {
+        let timeline = self.timeline.read(cx);
+        let base_ts = timeline
+            .state
+            .time_signature_map
+            .time_signature_at_beat(0.0);
+        let engine_sample_rate = self.audio_bridge.engine.as_ref().and_then(|engine| {
+            engine
+                .stats()
+                .stream_open
+                .then(|| self.current_audio_sample_rate())
+        });
+        crate::components::project_settings_window::ProjectSettingsSnapshot {
+            name: self.project_switcher.current_project.name.clone(),
+            path: self.project_path.clone(),
+            is_dirty: self.project_switcher.current_project.is_dirty,
+            bpm: timeline.state.bpm,
+            time_signature: (base_ts.numerator as u32, base_ts.denominator as u32),
+            has_tempo_markers: !timeline.state.tempo_map.points.is_empty(),
+            has_time_signature_markers: timeline.state.time_signature_has_markers(),
+            sample_rate: self
+                .settings
+                .read(cx)
+                .current
+                .general
+                .project_defaults
+                .sample_rate,
+            engine_sample_rate,
+            track_count: timeline.state.tracks.len(),
+        }
+    }
+
+    /// Push fresh project state to the Project Settings window. No-op when the
+    /// window is closed, so ordinary edits pay nothing for a window that is not
+    /// on screen.
+    pub(crate) fn push_project_settings_snapshot_to_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.external_windows.project_settings.clone() else {
+            return;
+        };
+        let snapshot = self.build_project_settings_snapshot(cx);
+        let _ = handle.update(cx, |view, _window, cx| {
+            if view.set_snapshot(snapshot) {
+                cx.notify();
+            }
+        });
+    }
+
+    pub(super) fn open_project_settings_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.project_settings.clone() {
+            if handle
+                .update(cx, |_view, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                self.push_project_settings_snapshot_to_window(cx);
+                return;
+            }
+            self.external_windows.project_settings = None;
+        }
+
+        let snapshot = self.build_project_settings_snapshot(cx);
+        let owner = cx.entity().clone();
+        let callbacks = crate::components::project_settings_window::ProjectSettingsCallbacks {
+            on_set_bpm: {
+                let owner = owner.clone();
+                Arc::new(move |bpm, cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        // Same command the transport tempo display uses, so the
+                        // engine, tempo map, and dirty flag all follow.
+                        this.set_native_bpm(bpm, cx);
+                        this.mark_dirty();
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
+            on_set_time_signature: {
+                let owner = owner.clone();
+                Arc::new(move |numerator, denominator, cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.set_project_base_time_signature(numerator, denominator, cx);
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
+            on_set_sample_rate: {
+                let owner = owner.clone();
+                Arc::new(move |rate, cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        // Routes through the settings path that owns the
+                        // engine-restart confirmation; the window never restarts
+                        // the engine itself.
+                        this.handle_setting_update(
+                            Arc::new(move |s| s.general.project_defaults.sample_rate = rate),
+                            cx,
+                        );
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
+            on_close: {
+                let owner = owner.clone();
+                Arc::new(move |window, cx| {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.external_windows.project_settings = None;
+                        cx.notify();
+                    });
+                    window.remove_window();
+                })
+            },
+        };
+
+        match crate::components::project_settings_window::open_project_settings_window(
+            owner_bounds,
+            snapshot,
+            callbacks,
+            cx,
+        ) {
+            Ok(handle) => self.external_windows.project_settings = Some(handle),
+            Err(err) => eprintln!("[project-settings] failed to open window: {err}"),
+        }
+    }
+
+    /// Set the meter at beat 0 — the project's base time signature — and push
+    /// the resulting map to the engine.
+    fn set_project_base_time_signature(
+        &mut self,
+        numerator: u32,
+        denominator: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let numerator = numerator.clamp(1, 64) as u16;
+        let denominator = denominator.clamp(1, 64) as u16;
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let before = timeline
+                .state
+                .time_signature_map
+                .time_signature_at_beat(0.0);
+            if before.numerator == numerator && before.denominator == denominator {
+                return false;
+            }
+            timeline
+                .state
+                .add_time_signature_point(0.0, numerator, denominator);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.sync_time_signature_map_to_engine(cx);
+            cx.notify();
         }
     }
 
