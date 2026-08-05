@@ -70,6 +70,38 @@ enum StartupNav {
     AudioSetup,
 }
 
+/// Which New Project dropdown is open. Only one may be open at a time, so the
+/// pane needs a single piece of state rather than one flag per field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectFieldMenu {
+    SampleRate,
+    Bpm,
+    TimeSignature,
+}
+
+/// Sample rates offered when creating a project. Matches the rates the audio
+/// settings expose, so a new project cannot be created at a rate the engine is
+/// never configured for.
+const PROJECT_SAMPLE_RATES: [u32; 5] = [44_100, 48_000, 88_200, 96_000, 192_000];
+
+/// Tempo presets. Free entry stays available in Project Settings once the
+/// project exists; the start screen only needs the common starting points.
+const PROJECT_BPM_PRESETS: [f32; 10] = [
+    70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 128.0, 140.0, 160.0, 174.0,
+];
+
+/// Time signatures offered when creating a project.
+const PROJECT_TIME_SIGNATURES: [(u32, u32); 8] = [
+    (4, 4),
+    (3, 4),
+    (2, 4),
+    (6, 8),
+    (5, 4),
+    (7, 8),
+    (9, 8),
+    (12, 8),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum WelcomeSelection {
     Start(usize),
@@ -137,6 +169,8 @@ pub struct WelcomeWindow {
     project_sample_rate: u32,
     project_bpm: f32,
     project_time_signature: (u32, u32),
+    /// Open New Project dropdown, if any.
+    open_project_menu: Option<ProjectFieldMenu>,
     // Default project location (resolved at construction from settings)
     default_project_dir: PathBuf,
     default_dir_configured: bool,
@@ -184,6 +218,7 @@ impl WelcomeWindow {
             project_sample_rate: schema.general.project_defaults.sample_rate,
             project_bpm: 120.0,
             project_time_signature: (4, 4),
+            open_project_menu: None,
             default_project_dir,
             default_dir_configured,
             audio_backend: SharedString::from(schema.hardware.audio.driver_type),
@@ -230,7 +265,14 @@ impl WelcomeWindow {
                     }
                 }
             }
-            "escape" => window.remove_window(),
+            // Escape cancels the transient dropdown before it closes the window.
+            "escape" => {
+                if self.open_project_menu.take().is_some() {
+                    cx.notify();
+                } else {
+                    window.remove_window();
+                }
+            }
             _ => {}
         }
     }
@@ -491,9 +533,12 @@ impl WelcomeWindow {
                 self.project_name_input.is_focused(window),
                 project_name_callbacks,
                 self.selected_template,
-                self.project_sample_rate,
-                self.project_bpm,
-                self.project_time_signature,
+                ProjectFieldValues {
+                    sample_rate: self.project_sample_rate,
+                    bpm: self.project_bpm,
+                    time_signature: self.project_time_signature,
+                    open_menu: self.open_project_menu,
+                },
                 self.default_project_dir.clone(),
                 &self.callbacks,
                 i18n,
@@ -521,7 +566,13 @@ impl WelcomeWindow {
             ),
         };
 
+        let dismiss_target = cx.entity().clone();
+        let menu_open = self.open_project_menu.is_some();
+
         div()
+            // Anchor plane for the New Project dropdowns' click-outside
+            // backdrop, which must cover the whole start-screen body.
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -546,6 +597,16 @@ impl WelcomeWindow {
                         i18n,
                     )),
             )
+            .when(menu_open, |root| {
+                root.child(crate::components::form::select_dismiss_backdrop(Arc::new(
+                    move |_: &(), _window, cx| {
+                        let _ = dismiss_target.update(cx, |this, cx| {
+                            this.open_project_menu = None;
+                            cx.notify();
+                        });
+                    },
+                )))
+            })
             .into_any_element()
     }
 }
@@ -923,6 +984,67 @@ fn template_for_action(action: &WelcomeAction) -> Option<ProjectTemplate> {
     }
 }
 
+/// The project-format fields the New Project pane edits, plus which of their
+/// dropdowns is open. Grouped so the pane keeps one argument for "the format of
+/// the project being created" instead of four positional ones.
+#[derive(Clone, Copy)]
+struct ProjectFieldValues {
+    sample_rate: u32,
+    bpm: f32,
+    time_signature: (u32, u32),
+    open_menu: Option<ProjectFieldMenu>,
+}
+
+/// One labelled dropdown row in the New Project pane. Every option commits
+/// straight into `WelcomeWindow`'s real create-project state, so what the pane
+/// shows is what [`WelcomeWindow::create_project_from_welcome`] sends.
+fn project_field_row(
+    cx: &mut Context<WelcomeWindow>,
+    id: &'static str,
+    label: impl Into<SharedString>,
+    menu: ProjectFieldMenu,
+    open_menu: Option<ProjectFieldMenu>,
+    selected_id: String,
+    options: Vec<crate::components::form::SelectOption>,
+    apply: impl Fn(&mut WelcomeWindow, &str) + 'static,
+) -> impl IntoElement {
+    let toggle_target = cx.entity().clone();
+    let change_target = cx.entity().clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .child(form_label(label))
+        .child(crate::components::form::select(
+            id,
+            Some(selected_id.as_str()),
+            "-",
+            options,
+            open_menu == Some(menu),
+            false,
+            Arc::new(move |_: &(), _window, cx| {
+                let _ = toggle_target.update(cx, |this, cx| {
+                    this.open_project_menu = if this.open_project_menu == Some(menu) {
+                        None
+                    } else {
+                        Some(menu)
+                    };
+                    cx.notify();
+                });
+            }),
+            Arc::new(move |value: &String, _window, cx| {
+                let value = value.clone();
+                let _ = change_target.update(cx, |this, cx| {
+                    apply(this, &value);
+                    this.open_project_menu = None;
+                    cx.notify();
+                });
+            }),
+        ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn new_project_pane(
     cx: &mut Context<WelcomeWindow>,
@@ -930,13 +1052,17 @@ fn new_project_pane(
     name_focused: bool,
     name_callbacks: TextInputCallbacks,
     selected_template: ProjectTemplate,
-    sample_rate: u32,
-    bpm: f32,
-    time_signature: (u32, u32),
+    fields: ProjectFieldValues,
     default_dir: PathBuf,
     callbacks: &WelcomeCallbacks,
     i18n: I18n,
 ) -> gpui::AnyElement {
+    let ProjectFieldValues {
+        sample_rate,
+        bpm,
+        time_signature,
+        open_menu,
+    } = fields;
     let safe_name = crate::project::io::sanitize_project_name(&project_name_input.value);
     let preview = default_dir.join(&safe_name).to_string_lossy().to_string();
     let target = cx.entity().clone();
@@ -1054,19 +1180,78 @@ fn new_project_pane(
         )
         .child(form_label(i18n.tr("wizard.summary.template")))
         .child(template_row)
-        .child(form_label(i18n.tr("welcome.nav.audio")))
         .child(
             div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
-                .gap(px(6.0))
-                .child(readout_chip(format!("{} Hz", sample_rate)))
-                .child(readout_chip(format!("{:.0} BPM", bpm)))
-                .child(readout_chip(format!(
-                    "{}/{}",
-                    time_signature.0, time_signature.1
-                ))),
+                .items_start()
+                .gap(px(8.0))
+                .child(project_field_row(
+                    cx,
+                    "welcome-project-sample-rate",
+                    i18n.tr("settings.field.sample-rate"),
+                    ProjectFieldMenu::SampleRate,
+                    open_menu,
+                    sample_rate.to_string(),
+                    PROJECT_SAMPLE_RATES
+                        .iter()
+                        .map(|rate| {
+                            crate::components::form::SelectOption::new(
+                                rate.to_string(),
+                                format!("{rate} Hz"),
+                            )
+                        })
+                        .collect(),
+                    |this, value| {
+                        if let Ok(rate) = value.parse::<u32>() {
+                            this.project_sample_rate = rate;
+                        }
+                    },
+                ))
+                .child(project_field_row(
+                    cx,
+                    "welcome-project-bpm",
+                    i18n.tr("settings.bpm"),
+                    ProjectFieldMenu::Bpm,
+                    open_menu,
+                    format!("{bpm:.0}"),
+                    PROJECT_BPM_PRESETS
+                        .iter()
+                        .map(|preset| {
+                            crate::components::form::SelectOption::new(
+                                format!("{preset:.0}"),
+                                format!("{preset:.0} BPM"),
+                            )
+                        })
+                        .collect(),
+                    |this, value| {
+                        if let Ok(parsed) = value.parse::<f32>() {
+                            this.project_bpm = parsed.clamp(20.0, 999.0);
+                        }
+                    },
+                ))
+                .child(project_field_row(
+                    cx,
+                    "welcome-project-time-signature",
+                    "Time Signature",
+                    ProjectFieldMenu::TimeSignature,
+                    open_menu,
+                    format!("{}/{}", time_signature.0, time_signature.1),
+                    PROJECT_TIME_SIGNATURES
+                        .iter()
+                        .map(|(num, den)| {
+                            let label = format!("{num}/{den}");
+                            crate::components::form::SelectOption::new(label.clone(), label)
+                        })
+                        .collect(),
+                    |this, value| {
+                        if let Some((num, den)) = value.split_once('/') {
+                            if let (Ok(num), Ok(den)) = (num.parse::<u32>(), den.parse::<u32>()) {
+                                this.project_time_signature = (num.max(1), den.max(1));
+                            }
+                        }
+                    },
+                )),
         )
         .child(
             div()
@@ -1284,19 +1469,6 @@ fn form_label(label: impl Into<SharedString>) -> impl IntoElement {
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(Colors::text_muted())
-        .child(label.into())
-}
-
-fn readout_chip(label: impl Into<String>) -> impl IntoElement {
-    div()
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_card())
-        .px(px(8.0))
-        .py(px(5.0))
-        .text_size(px(10.5))
-        .text_color(Colors::text_primary())
         .child(label.into())
 }
 
