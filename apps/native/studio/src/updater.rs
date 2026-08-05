@@ -7,11 +7,15 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sphere_ui_components::settings::UpdateChannel;
+use sphere_ui_components::update_service::{
+    DownloadProgressFn, InstallOutcome, UpdateCandidate, UpdateProvider,
+};
 
 const RELEASES_API: &str = "https://api.github.com/repos/futureboard/Futureboard/releases";
 const USER_AGENT: &str = "Futureboard-Studio-Updater";
@@ -158,7 +162,11 @@ pub fn check_for_update(
     Ok(choose_release(releases, channel, &current))
 }
 
-pub fn download_update(update: &AvailableUpdate, cache_root: &Path) -> Result<PathBuf, String> {
+pub fn download_update(
+    update: &AvailableUpdate,
+    cache_root: &Path,
+    progress: &dyn Fn(u64, u64),
+) -> Result<PathBuf, String> {
     let file_name = Path::new(&update.asset.name)
         .file_name()
         .and_then(|name| name.to_str())
@@ -199,6 +207,7 @@ pub fn download_update(update: &AvailableUpdate, cache_root: &Path) -> Result<Pa
         }
         hasher.update(&buffer[..count]);
         downloaded = downloaded.saturating_add(count as u64);
+        progress(downloaded, update.asset.size);
     }
     if let Err(error) = writer.flush() {
         drop(writer);
@@ -232,46 +241,319 @@ pub fn download_update(update: &AvailableUpdate, cache_root: &Path) -> Result<Pa
     Ok(destination)
 }
 
-pub fn launch_update(path: &Path) -> Result<(), String> {
+/// Hand the staged download to the platform installer.
+///
+/// Every platform path either replaces this installation in place — which needs
+/// the process to exit first — or hands the file to the platform and lets the
+/// user drive it.
+pub fn install_update(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, String> {
     #[cfg(target_os = "windows")]
-    let mut command = Command::new(path);
+    return install_windows(staged, cache_root);
     #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(path);
-        command
-    };
-    #[cfg(target_os = "linux")]
-    let mut command = {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)
-            .map_err(|error| format!("failed to inspect AppImage: {error}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions)
-            .map_err(|error| format!("failed to make AppImage executable: {error}"))?;
-        if let Some(current) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
-            if current.is_file() {
-                let staged = current.with_extension("AppImage.update");
-                fs::copy(path, &staged)
-                    .map_err(|error| format!("failed to stage AppImage update: {error}"))?;
-                let mut staged_permissions = fs::metadata(&staged)
-                    .map_err(|error| format!("failed to inspect staged AppImage: {error}"))?
-                    .permissions();
-                staged_permissions.set_mode(0o755);
-                fs::set_permissions(&staged, staged_permissions)
-                    .map_err(|error| format!("failed to prepare staged AppImage: {error}"))?;
-                fs::rename(&staged, &current)
-                    .map_err(|error| format!("failed to install AppImage update: {error}"))?;
-                return Ok(());
-            }
-        }
-        Command::new(path)
-    };
+    return install_macos(staged, cache_root);
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    return install_linux(staged, cache_root);
+}
+
+/// Windows: the release asset is the Inno Setup installer. Run it with Inno's
+/// command-line switches so the update applies to the *current* installation
+/// (same directory, same scope) instead of opening a fresh wizard.
+///
+/// Switch reference (Inno Setup 6):
+///   `/SILENT`             progress window only, no wizard pages
+///   `/SP-`                skip the "This will install..." prompt
+///   `/SUPPRESSMSGBOXES`   accept the default answer for setup message boxes
+///   `/NORESTART`          never reboot the machine on our behalf
+///   `/CLOSEAPPLICATIONS`  let Restart Manager close remaining app processes
+///   `/DIR`, `/ALLUSERS` / `/CURRENTUSER`  keep the existing install location
+///
+/// `installer.iss` declares `PrivilegesRequired=lowest` with
+/// `PrivilegesRequiredOverridesAllowed=dialog commandline`, so `/ALLUSERS`
+/// is the supported way to update a machine-wide install (Windows shows the
+/// elevation prompt).
+#[cfg(target_os = "windows")]
+fn install_windows(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, String> {
+    let install_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    let log_path = cache_root.join("Updates").join("install.log");
+
+    let mut command = Command::new(staged);
+    command
+        .arg("/SILENT")
+        .arg("/SP-")
+        .arg("/SUPPRESSMSGBOXES")
+        .arg("/NORESTART")
+        .arg("/CLOSEAPPLICATIONS")
+        .arg(format!("/LOG={}", log_path.display()));
+    if let Some(dir) = install_dir.as_deref() {
+        command.arg(format!("/DIR={}", dir.display()));
+        command.arg(if is_machine_wide(dir) {
+            "/ALLUSERS"
+        } else {
+            "/CURRENTUSER"
+        });
+    }
     command
         .spawn()
+        .map_err(|error| format!("failed to start the installer: {error}"))?;
+    Ok(InstallOutcome::QuitRequired)
+}
+
+/// True when the install directory sits under a Program Files root, which is
+/// what an all-users Inno install produces.
+#[cfg(target_os = "windows")]
+fn is_machine_wide(install_dir: &Path) -> bool {
+    ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key))
+        .any(|root| install_dir.starts_with(PathBuf::from(root)))
+}
+
+/// macOS: the asset is a DMG. Mount it, copy the bundle out, unmount, then let
+/// a detached shell script swap the running bundle once this process exits.
+#[cfg(target_os = "macos")]
+fn install_macos(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, String> {
+    let Some(target) = current_macos_bundle() else {
+        // Not running from a bundle (cargo run, CI). Reveal the DMG instead of
+        // guessing an install location.
+        Command::new("open")
+            .arg(staged)
+            .spawn()
+            .map_err(|error| format!("failed to open the disk image: {error}"))?;
+        return Ok(InstallOutcome::Handoff);
+    };
+
+    let work_dir = cache_root.join("Updates").join("macos");
+    let _ = fs::remove_dir_all(&work_dir);
+    fs::create_dir_all(&work_dir)
+        .map_err(|error| format!("failed to create the update workspace: {error}"))?;
+    let mount_point = work_dir.join("mount");
+    fs::create_dir_all(&mount_point)
+        .map_err(|error| format!("failed to create the disk image mount point: {error}"))?;
+
+    run_tool(
+        "hdiutil",
+        &[
+            "attach".as_ref(),
+            staged.as_os_str(),
+            "-nobrowse".as_ref(),
+            "-quiet".as_ref(),
+            "-mountpoint".as_ref(),
+            mount_point.as_os_str(),
+        ],
+    )?;
+
+    let mounted_bundle = fs::read_dir(&mount_point)
+        .map_err(|error| format!("failed to read the disk image: {error}"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"));
+    let mounted_bundle = match mounted_bundle {
+        Some(bundle) => bundle,
+        None => {
+            let _ = run_tool(
+                "hdiutil",
+                &[
+                    "detach".as_ref(),
+                    mount_point.as_os_str(),
+                    "-quiet".as_ref(),
+                ],
+            );
+            return Err("the disk image does not contain an application bundle".to_string());
+        }
+    };
+
+    let bundle_name = mounted_bundle
+        .file_name()
+        .ok_or_else(|| "the disk image bundle has no name".to_string())?;
+    let staged_bundle = work_dir.join(bundle_name);
+    let copy_result = run_tool(
+        "ditto",
+        &[mounted_bundle.as_os_str(), staged_bundle.as_os_str()],
+    );
+    let _ = run_tool(
+        "hdiutil",
+        &[
+            "detach".as_ref(),
+            mount_point.as_os_str(),
+            "-quiet".as_ref(),
+        ],
+    );
+    copy_result?;
+
+    let script_path = work_dir.join("swap-bundle.sh");
+    let script = format!(
+        "#!/bin/sh\n\
+         while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
+         /bin/rm -rf \"{target}\"\n\
+         /usr/bin/ditto \"{staged}\" \"{target}\" || exit 1\n\
+         /usr/bin/xattr -dr com.apple.quarantine \"{target}\" 2>/dev/null\n\
+         /bin/rm -rf \"{staged}\"\n\
+         /usr/bin/open \"{target}\"\n",
+        pid = std::process::id(),
+        target = target.display(),
+        staged = staged_bundle.display(),
+    );
+    fs::write(&script_path, script)
+        .map_err(|error| format!("failed to write the update script: {error}"))?;
+    spawn_detached_script(&script_path)?;
+    Ok(InstallOutcome::QuitRequired)
+}
+
+/// `/Applications/Futureboard Studio.app` for
+/// `/Applications/Futureboard Studio.app/Contents/MacOS/FutureboardNative`.
+#[cfg(target_os = "macos")]
+fn current_macos_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .map(Path::to_path_buf)
+}
+
+/// Linux: the asset is an AppImage. When Studio is itself running from an
+/// AppImage, replace that file and relaunch it after this process exits;
+/// otherwise just run the downloaded image.
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn install_linux(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, String> {
+    make_executable(staged)?;
+
+    let Some(current) = std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    else {
+        Command::new(staged)
+            .spawn()
+            .map_err(|error| format!("failed to start the AppImage: {error}"))?;
+        return Ok(InstallOutcome::Handoff);
+    };
+
+    // Replace via a sibling temp file + rename so the swap is atomic and stays
+    // on the same filesystem as the running image.
+    let replacement = current.with_extension("AppImage.update");
+    fs::copy(staged, &replacement)
+        .map_err(|error| format!("failed to stage the AppImage update: {error}"))?;
+    make_executable(&replacement)?;
+    fs::rename(&replacement, &current).map_err(|error| {
+        let _ = fs::remove_file(&replacement);
+        format!("failed to install the AppImage update: {error}")
+    })?;
+
+    let work_dir = cache_root.join("Updates");
+    fs::create_dir_all(&work_dir)
+        .map_err(|error| format!("failed to create the update workspace: {error}"))?;
+    let script_path = work_dir.join("relaunch-appimage.sh");
+    let script = format!(
+        "#!/bin/sh\n\
+         while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n\
+         exec \"{target}\"\n",
+        pid = std::process::id(),
+        target = current.display(),
+    );
+    fs::write(&script_path, script)
+        .map_err(|error| format!("failed to write the relaunch script: {error}"))?;
+    spawn_detached_script(&script_path)?;
+    Ok(InstallOutcome::QuitRequired)
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn make_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| format!("failed to inspect the AppImage: {error}"))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("failed to make the AppImage executable: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_tool(program: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run {program}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr);
+    let detail = detail.trim();
+    Err(if detail.is_empty() {
+        format!("{program} failed with status {}", output.status)
+    } else {
+        format!("{program} failed: {detail}")
+    })
+}
+
+/// Run the swap/relaunch helper in its own session so it outlives this process.
+#[cfg(not(target_os = "windows"))]
+fn spawn_detached_script(script: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(script)
+        .map_err(|error| format!("failed to inspect the update script: {error}"))?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(script, permissions)
+        .map_err(|error| format!("failed to prepare the update script: {error}"))?;
+
+    // The child is reparented to init once this process exits, so no extra
+    // detach step is needed; only the standard streams must be released.
+    Command::new("/bin/sh")
+        .arg(script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map(|_| ())
-        .map_err(|error| format!("failed to open update installer: {error}"))
+        .map_err(|error| format!("failed to start the update script: {error}"))
+}
+
+/// Update provider registered with `sphere_ui_components` at boot so the
+/// Software Update dialog can drive this module.
+pub struct GithubUpdateProvider;
+
+impl UpdateProvider for GithubUpdateProvider {
+    fn current_version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    fn check(&self, channel: UpdateChannel) -> Result<Option<UpdateCandidate>, String> {
+        Ok(check_for_update(channel, env!("CARGO_PKG_VERSION"))?.map(candidate_from))
+    }
+
+    fn download(
+        &self,
+        candidate: &UpdateCandidate,
+        progress: DownloadProgressFn<'_>,
+    ) -> Result<PathBuf, String> {
+        let update = candidate
+            .payload
+            .downcast_ref::<AvailableUpdate>()
+            .ok_or_else(|| "update candidate came from a different provider".to_string())?;
+        download_update(update, &cache_root(), &|received, total| {
+            progress(received, total)
+        })
+    }
+
+    fn install(&self, staged: &Path) -> Result<InstallOutcome, String> {
+        install_update(staged, &cache_root())
+    }
+}
+
+fn cache_root() -> PathBuf {
+    sphere_ui_components::paths::FutureboardPaths::resolve().app_cache
+}
+
+pub fn candidate_from(update: AvailableUpdate) -> UpdateCandidate {
+    UpdateCandidate {
+        version: update.version.to_string(),
+        channel: update.channel,
+        asset_name: update.asset.name.clone(),
+        asset_size: update.asset.size,
+        release_url: None,
+        payload: Arc::new(update),
+    }
 }
 
 #[cfg(test)]

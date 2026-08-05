@@ -1899,7 +1899,11 @@ impl StudioLayout {
                 self.open_about_window(owner_bounds, cx);
             }
             "app:check-for-updates" => {
-                self.open_settings_dialog(owner_bounds, cx);
+                if let Err(error) =
+                    crate::components::update_dialog::open_update_dialog(owner_bounds, cx)
+                {
+                    eprintln!("[update] failed to open Software Update window: {error}");
+                }
             }
 
             "app:preferences" | "edit:preferences" | "project:settings" => {

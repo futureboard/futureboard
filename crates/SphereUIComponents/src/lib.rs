@@ -66,6 +66,7 @@ pub mod settings;
 pub mod shutdown;
 pub mod soundfont_player;
 pub mod tap_tempo;
+pub mod update_service;
 pub mod window_lifecycle;
 pub mod window_position;
 pub use shutdown::ShutdownState;

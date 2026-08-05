@@ -87,6 +87,7 @@ pub fn setup(cx: &mut App) {
     sphere_ui_components::settings::install_settings_change_listener(Arc::new(|settings| {
         set_discord_enabled(settings.general.discord_rpc_enabled);
     }));
+    register_update_provider();
 
     let theme_report = sphere_ui_components::theme::initialize_theme_system();
     let saved_theme = sphere_ui_components::settings::SettingsSchema::load_from_disk()
@@ -467,71 +468,23 @@ fn schedule_auto_update_check(cx: &mut App) {
     .detach();
 }
 
+/// Register the GitHub-backed update transport with the UI crate so the
+/// Software Update dialog (Help → Check for Updates) can drive it.
+fn register_update_provider() {
+    sphere_ui_components::update_service::set_update_provider(std::sync::Arc::new(
+        crate::updater::GithubUpdateProvider,
+    ));
+}
+
+/// The automatic check hands the release it found to the same Software Update
+/// window the menu command opens, so download / install has one surface.
 fn show_update_available(update: crate::updater::AvailableUpdate, cx: &mut App) {
-    let options = MessageBoxOptions::new(format!(
-        "Futureboard Studio {} is available on the {} channel.",
-        update.version,
-        update.channel.label()
-    ))
-    .title("Software Update")
-    .detail(format!(
-        "Download {} now? The installer will open when the download finishes.",
-        update.asset_name()
-    ))
-    .kind(MessageBoxKind::Question)
-    .buttons(["Download", "Later"])
-    .default_id(0)
-    .cancel_id(1);
-    let callback: MessageBoxResponseCb = Arc::new(move |result, _window, cx| {
-        if result.response != 0 {
-            return;
-        }
-        let update = update.clone();
-        let cache_root = sphere_ui_components::paths::FutureboardPaths::resolve().app_cache;
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |cx| {
-            let result = executor
-                .spawn(async move { crate::updater::download_update(&update, &cache_root) })
-                .await;
-            cx.update(|app| match result {
-                Ok(path) => show_update_ready(path, app),
-                Err(error) => show_update_error(error, app),
-            });
-        })
-        .detach();
-    });
-    if let Err(error) = open_standalone_message_box_window(options, callback, cx) {
+    let candidate = crate::updater::candidate_from(update);
+    if let Err(error) =
+        sphere_ui_components::components::update_dialog::open_update_dialog_for(candidate, cx)
+    {
         boot::log(&format!("failed to show software update prompt: {error}"));
     }
-}
-
-fn show_update_ready(path: PathBuf, cx: &mut App) {
-    let options = MessageBoxOptions::new("The update has been downloaded.")
-        .title("Software Update")
-        .detail("Save your current project before continuing with the installer.")
-        .kind(MessageBoxKind::Info)
-        .buttons(["Install / Open", "Later"])
-        .default_id(0)
-        .cancel_id(1);
-    let callback: MessageBoxResponseCb = Arc::new(move |result, _window, cx| {
-        if result.response == 0 {
-            if let Err(error) = crate::updater::launch_update(&path) {
-                show_update_error(error, cx);
-            }
-        }
-    });
-    if let Err(error) = open_standalone_message_box_window(options, callback, cx) {
-        boot::log(&format!("failed to show downloaded update prompt: {error}"));
-    }
-}
-
-fn show_update_error(error: String, cx: &mut App) {
-    let options = MessageBoxOptions::new("Futureboard could not prepare the update.")
-        .title("Software Update")
-        .detail(error)
-        .kind(MessageBoxKind::Error);
-    let callback: MessageBoxResponseCb = Arc::new(|_, _, _| {});
-    let _ = open_standalone_message_box_window(options, callback, cx);
 }
 
 fn finish_loading_to_studio(cx: &mut App) {
