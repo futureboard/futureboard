@@ -20,6 +20,9 @@ use crate::assets;
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
+use crate::components::form::{
+    select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
+};
 use crate::components::knob::knob;
 use crate::components::mdi::{
     mdi_workspace, MdiDocumentKind, MdiWorkspaceCallbacks, MdiWorkspaceState,
@@ -137,7 +140,6 @@ pub struct SoundfontPlayerCallbacks {
     pub on_shift_octave: SoundfontI32Cb,
 }
 
-const PRESET_LIST_MAX_H: f32 = 150.0;
 const POLYPHONY_MIN: usize = 1;
 const POLYPHONY_MAX: usize = 256;
 const POLYPHONY_STEP: usize = 8;
@@ -201,9 +203,6 @@ pub fn soundfont_player_panel(
     let mut source = section("Source")
         .child(soundfont_row(panel, &cb))
         .child(preset_row(panel, &cb));
-    if panel.preset_list_open {
-        source = source.child(preset_list(panel, &cb));
-    }
     if let Some(hint) = preset_routing_hint(panel) {
         source = source.child(hint);
     }
@@ -226,7 +225,11 @@ pub fn soundfont_player_panel(
         body = body.child(status_banner(status));
     }
 
-    div()
+    let dismiss = cb.on_toggle_preset_list.clone();
+    let mut root = div()
+        // Layout owner for the panel and the anchor plane for the preset
+        // dropdown's click-outside backdrop.
+        .relative()
         .flex()
         .flex_col()
         .size_full()
@@ -247,8 +250,15 @@ pub fn soundfont_player_panel(
                 .bg(Colors::surface_base())
                 .child(keyboard_header(panel, &cb))
                 .child(keyboard(panel, &cb)),
-        )
-        .into_any_element()
+        );
+    if panel.preset_list_open {
+        // The deferred menu paints above this and occludes its own clicks, so
+        // only a genuine outside click reaches the backdrop and closes it.
+        root = root.child(select_dismiss_backdrop(Arc::new(
+            move |_: &(), window, app| dismiss(window, app),
+        )));
+    }
+    root.into_any_element()
 }
 
 /// Padding shared by the header, the scrolling body, and the keyboard footer so
@@ -464,123 +474,99 @@ fn soundfont_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallback
     )
 }
 
+/// Stable option id for one preset. `select` keys on strings, so bank/patch —
+/// the identity the player actually selects on — round-trips through this pair.
+fn preset_option_id(bank: i32, patch: i32) -> String {
+    format!("{bank}:{patch}")
+}
+
+fn parse_preset_option_id(id: &str) -> Option<(i32, i32)> {
+    let (bank, patch) = id.split_once(':')?;
+    Some((bank.parse().ok()?, patch.parse().ok()?))
+}
+
+/// Preset/bank chooser plus the audition buttons.
+///
+/// The chooser is the shared overlay [`select`] rather than a list that expands
+/// inside the panel: a General MIDI bank is 128+ presets, and pushing the rest
+/// of the instrument down the page to browse them made the control unusable at
+/// the window's minimum height. The overlay menu floats above the panel and is
+/// dismissed by [`select_dismiss_backdrop`] at the panel root.
 fn preset_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
     let has_presets = !panel.presets.is_empty();
-    let value = if let Some((bank, patch)) = panel.selected_preset {
-        panel
-            .presets
-            .iter()
-            .find(|preset| preset.bank == bank && preset.patch == patch)
-            .map(|preset| format!("{} — Bank {} / Patch {}", preset.name, bank, patch))
-            .unwrap_or_else(|| "—".to_string())
-    } else if has_presets {
-        "No preset selected".to_string()
-    } else {
-        "—".to_string()
-    };
+    let selected_id = panel
+        .selected_preset
+        .map(|(bank, patch)| preset_option_id(bank, patch));
+    let options = panel
+        .presets
+        .iter()
+        .map(|preset| {
+            SelectOption::new(
+                preset_option_id(preset.bank, preset.patch),
+                preset.name.clone(),
+            )
+            .description(format!("Bank {} · Patch {}", preset.bank, preset.patch))
+        })
+        .collect::<Vec<_>>();
+
     let toggle = cb.on_toggle_preset_list.clone();
-    let toggle_label = if panel.preset_list_open {
-        "Close"
-    } else {
-        "Choose…"
-    };
+    let on_select = cb.on_select_preset.clone();
     let test = cb.on_test.clone();
     let panic = cb.on_all_notes_off.clone();
     let playing = panel.testing || !panel.active_notes.is_empty();
-    field_row(
-        "Preset",
-        value,
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(fb_button(
-                    "soundfont-preset-toggle",
-                    toggle_label,
-                    FbButtonKind::Default,
-                    has_presets,
-                    move |_, w, cx| toggle(w, cx),
-                ))
-                .child(if playing {
-                    fb_button(
-                        "soundfont-test-stop",
-                        "Stop",
-                        FbButtonKind::Default,
-                        true,
-                        move |_, w, cx| panic(w, cx),
-                    )
-                    .into_any_element()
-                } else {
-                    fb_button(
-                        "soundfont-test",
-                        "Test",
-                        FbButtonKind::Primary,
-                        panel.is_playable(),
-                        move |_, w, cx| test(w, cx),
-                    )
-                    .into_any_element()
-                })
-                .into_any_element(),
-        ),
-    )
-}
 
-fn preset_list(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) -> AnyElement {
-    let select = cb.on_select_preset.clone();
     div()
-        .id("soundfont-preset-list")
         .flex()
-        .flex_col()
-        .max_h(px(PRESET_LIST_MAX_H))
-        .overflow_y_scroll()
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_card())
-        .children(panel.presets.iter().enumerate().map(|(index, preset)| {
-            let active = panel.selected_preset == Some((preset.bank, preset.patch));
-            let key = (preset.bank, preset.patch);
-            let select = select.clone();
+        .flex_row()
+        .items_center()
+        .min_h(px(26.0))
+        .gap(px(8.0))
+        .child(
             div()
-                .id(("soundfont-preset-item", index))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(24.0))
-                .px(px(8.0))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .bg(if active {
-                    Colors::accent_muted()
-                } else {
-                    Colors::surface_card()
-                })
-                .hover(|s| s.bg(Colors::surface_hover()))
-                .on_click(move |_, w, cx| select(&key, w, cx))
-                .child(
-                    div()
-                        .w(px(64.0))
-                        .flex_shrink_0()
-                        .text_size(px(9.5))
-                        .text_color(Colors::text_faint())
-                        .child(format!("{}:{}", preset.bank, preset.patch)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(11.0))
-                        .text_color(if active {
-                            Colors::text_primary()
-                        } else {
-                            Colors::text_secondary()
-                        })
-                        .child(preset.name.clone()),
-                )
-        }))
+                .w(px(64.0))
+                .flex_shrink_0()
+                .text_size(px(10.5))
+                .text_color(Colors::text_muted())
+                .child("Preset"),
+        )
+        .child(div().flex_1().min_w(px(0.0)).child(select_with_placement(
+            "soundfont-preset-select",
+            selected_id.as_deref(),
+            if has_presets {
+                "Select a preset"
+            } else {
+                "No SoundFont loaded"
+            },
+            options,
+            panel.preset_list_open,
+            !has_presets,
+            SelectMenuPlacement::Below,
+            Arc::new(move |_: &(), window, app| toggle(window, app)),
+            Arc::new(move |id: &String, window, app| {
+                if let Some(key) = parse_preset_option_id(id) {
+                    on_select(&key, window, app);
+                }
+            }),
+        )))
+        .child(if playing {
+            fb_button(
+                "soundfont-test-stop",
+                "Stop",
+                FbButtonKind::Default,
+                true,
+                move |_, w, cx| panic(w, cx),
+            )
+            .into_any_element()
+        } else {
+            fb_button(
+                "soundfont-test",
+                "Test",
+                FbButtonKind::Primary,
+                panel.is_playable(),
+                move |_, w, cx| test(w, cx),
+            )
+            .into_any_element()
+        })
         .into_any_element()
 }
 
