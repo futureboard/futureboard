@@ -31,6 +31,13 @@ pub(crate) struct InspectorNameEditState {
     pub clip_name_input: TextInputState,
     /// Clip id the `clip_name_input` is currently editing; `None` when none.
     pub clip_name_bound: Option<String>,
+    /// Host-owned state for the Inspector's track-colour picker (see
+    /// [`crate::components::color_picker`]). Lives beside the name fields
+    /// because it carries a text input with the same key-routing needs.
+    pub color_picker: crate::components::ColorPickerState,
+    /// Track id the open picker is editing, so a selection change while the
+    /// popover is open cannot recolour the wrong track.
+    pub color_bound: Option<String>,
 }
 
 impl InspectorNameEditState {
@@ -44,6 +51,14 @@ impl InspectorNameEditState {
                 .with_placeholder("Clip name")
                 .blur_on_outside_click(true),
             clip_name_bound: None,
+            color_picker: crate::components::ColorPickerState::new(
+                "inspector-color-hex",
+                cx.focus_handle(),
+                crate::components::ColorPickerValue::custom(crate::color::auto_color_for_index(0)),
+                crate::color::auto_color_for_index(0),
+                crate::color::load_recent_colors(),
+            ),
+            color_bound: None,
         }
     }
 }
@@ -690,7 +705,21 @@ impl StudioLayout {
             || (self.panels.inspector
                 && self.right_dock_tab == RightDockTab::Inspector
                 && (self.inspector_name_edit.name_input.is_focused(window)
-                    || self.inspector_name_edit.clip_name_input.is_focused(window)))
+                    || self.inspector_name_edit.clip_name_input.is_focused(window)
+                    || self.inspector_color_hex_focused(window)))
+    }
+
+    /// The Inspector colour picker's hex field only counts as a live text
+    /// target while its popover is actually open — a closed popover leaves the
+    /// focus handle behind, and treating that as text focus would swallow
+    /// transport keys forever.
+    pub(super) fn inspector_color_hex_focused(&self, window: &Window) -> bool {
+        self.inspector_name_edit.color_picker.open
+            && self
+                .inspector_name_edit
+                .color_picker
+                .hex_input
+                .is_focused(window)
     }
 
     /// Route a key to the Inspector's track-name field when it owns focus.
@@ -705,6 +734,9 @@ impl StudioLayout {
     ) -> bool {
         if !(self.panels.inspector && self.right_dock_tab == RightDockTab::Inspector) {
             return false;
+        }
+        if self.inspector_color_hex_focused(window) {
+            return self.handle_inspector_color_hex_key(event, window, cx);
         }
         let track_name_focused = self.inspector_name_edit.name_input.is_focused(window);
         let clip_name_focused = self.inspector_name_edit.clip_name_input.is_focused(window);
@@ -794,6 +826,129 @@ impl StudioLayout {
         }
     }
 
+    /// Route a key to the Inspector colour picker's hex field. Every accepted
+    /// keystroke re-parses the field for a live preview and pushes the parsed
+    /// colour straight to the bound track, so the header/mixer follow while the
+    /// user types. Enter commits (records the colour as recent and closes),
+    /// Escape closes without further change — the previewed colour has already
+    /// been applied, exactly like dragging the hue strip.
+    fn handle_inspector_color_hex_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.is_held && !is_repeatable_edit_key(event) {
+            return true;
+        }
+        let action = self
+            .inspector_name_edit
+            .color_picker
+            .hex_input
+            .handle_key_with_clipboard(event, Some(cx));
+        match action {
+            TextInputAction::Pass => false,
+            TextInputAction::Cancel => {
+                self.close_inspector_color_picker(window, cx);
+                true
+            }
+            TextInputAction::Submit => {
+                if let Some(color) = self.inspector_name_edit.color_picker.commit_hex() {
+                    self.apply_inspector_color(color, cx);
+                    self.inspector_name_edit.color_picker.remember_current();
+                    self.close_inspector_color_picker(window, cx);
+                } else {
+                    cx.notify();
+                }
+                true
+            }
+            TextInputAction::Consumed => {
+                self.inspector_name_edit.color_picker.on_hex_changed();
+                if self.inspector_name_edit.color_picker.hex_error.is_none() {
+                    let color = self.inspector_name_edit.color_picker.draft;
+                    self.apply_inspector_color(color, cx);
+                }
+                cx.notify();
+                true
+            }
+        }
+    }
+
+    /// Open the Inspector colour picker for `track_id`, seeded from that
+    /// track's current colour.
+    pub(crate) fn open_inspector_color_picker(&mut self, track_id: &str, cx: &mut Context<Self>) {
+        let current = self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(track_id)
+            .map(|track| track.color);
+        let fallback = crate::color::auto_color_for_index(0);
+        self.inspector_name_edit.color_picker.reset(
+            crate::components::ColorPickerValue::custom(current.unwrap_or(fallback)),
+            fallback,
+        );
+        self.inspector_name_edit.color_bound = Some(track_id.to_string());
+        self.inspector_name_edit.color_picker.open();
+        cx.notify();
+    }
+
+    /// Close the picker, returning focus to the studio surface so transport
+    /// keys work again immediately.
+    pub(crate) fn close_inspector_color_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.inspector_name_edit.color_picker.open {
+            return;
+        }
+        self.inspector_name_edit.color_picker.close();
+        self.inspector_name_edit.color_bound = None;
+        if self
+            .inspector_name_edit
+            .color_picker
+            .hex_input
+            .is_focused(window)
+        {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Commit a colour to the track the open picker is bound to, extending the
+    /// change across a multi-track selection the same way the preset swatches
+    /// do (see `build_inspector_callbacks`'s `on_set_color`).
+    pub(crate) fn apply_inspector_color(&mut self, color: gpui::Rgba, cx: &mut Context<Self>) {
+        let Some(track_id) = self.inspector_name_edit.color_bound.clone() else {
+            return;
+        };
+        let changed = self.timeline.update(cx, |t, cx| {
+            let mut changed = t.state.set_track_color(&track_id, color);
+            if t.state.is_track_selected(&track_id)
+                && t.state.selection.selected_track_ids.len() > 1
+            {
+                for other in t.state.selection.selected_track_ids.clone() {
+                    if other == track_id {
+                        continue;
+                    }
+                    changed |= t.state.set_track_color(&other, color);
+                }
+            }
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            crate::components::inspector_debug(&format!(
+                "edit track color track={track_id} via picker"
+            ));
+            self.mark_dirty();
+            self.push_mixer_snapshot_to_window(cx);
+        }
+    }
+
     /// Whether a *live* main-window text field currently owns the keyboard —
     /// i.e. its focus handle is focused AND its overlay is actually open.
     ///
@@ -819,7 +974,8 @@ impl StudioLayout {
             || (self.panels.inspector
                 && self.right_dock_tab == RightDockTab::Inspector
                 && (self.inspector_name_edit.name_input.is_focused(window)
-                    || self.inspector_name_edit.clip_name_input.is_focused(window)))
+                    || self.inspector_name_edit.clip_name_input.is_focused(window)
+                    || self.inspector_color_hex_focused(window)))
     }
 
     pub(super) fn is_text_editing_context(&self, window: &Window) -> bool {

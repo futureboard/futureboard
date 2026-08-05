@@ -19,6 +19,10 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::color_picker::{
+    color_picker_field, default_presets, ColorPickerCallbacks, ColorPickerPlacement,
+    ColorPickerState,
+};
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
@@ -49,7 +53,6 @@ type RoutingComboToggleCb =
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
-type ColorCb = Arc<dyn Fn(&(String, gpui::Rgba), &mut Window, &mut App) + 'static>;
 type InputRoutingCb = Arc<dyn Fn(&(String, TrackInputRouting), &mut Window, &mut App) + 'static>;
 type OutputRoutingCb = Arc<dyn Fn(&(String, TrackOutputRouting), &mut Window, &mut App) + 'static>;
 type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut App) + 'static>;
@@ -143,7 +146,6 @@ pub struct InspectorCallbacks {
     pub on_toggle_solo: StrCb,
     pub on_toggle_arm: StrCb,
     pub on_toggle_input: StrCb,
-    pub on_set_color: ColorCb,
     pub on_set_input_routing: InputRoutingCb,
     pub on_set_output_routing: OutputRoutingCb,
     pub on_set_audio_format: AudioFormatCb,
@@ -351,6 +353,7 @@ pub fn inspector_panel<'a>(
     clip_name_input: &TextInputState,
     clip_name_focused: bool,
     clip_name_callbacks: TextInputCallbacks,
+    color_picker: InspectorColorPicker<'a>,
     active: bool,
     callbacks: &InspectorCallbacks,
     i18n: I18n,
@@ -384,6 +387,7 @@ pub fn inspector_panel<'a>(
                     name_focused,
                     name_callbacks,
                     &instrument_targets,
+                    &color_picker,
                     callbacks,
                     i18n,
                 )
@@ -648,38 +652,35 @@ fn toggle_badge(
         .child(label)
 }
 
-/// Clickable track-color palette. Highlights the active swatch.
-fn color_palette(track_id: String, current: gpui::Rgba, on_set: ColorCb) -> impl IntoElement {
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(5.0))
-        .items_center();
-    for i in 0..Colors::TRACK_COLORS.len() {
-        let color = Colors::track_color_for_index(i);
-        let active = color == current;
-        let cb = on_set.clone();
-        let tid = track_id.clone();
-        row = row.child(
-            div()
-                .id(("inspector-color", i))
-                .w(px(15.0))
-                .h(px(15.0))
-                .rounded_full()
-                .border(px(2.0))
-                .border_color(color)
-                .bg(if active {
-                    color
-                } else {
-                    gpui::transparent_black().into()
-                })
-                .opacity(if active { 1.0 } else { 0.6 })
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_click(move |_, w, cx| cb(&(tid.clone(), color), w, cx)),
-        );
-    }
-    row
+/// The Inspector's track-colour control: the shared color picker, hosted by
+/// `StudioLayout`.
+///
+/// The field is a borrowed view over the host's [`ColorPickerState`] — the
+/// Inspector renders it, the host owns it — so the preset palette, arbitrary
+/// hex/HSV colours, and recent colours all come from one implementation shared
+/// with Add Track instead of a second, palette-only picker here.
+pub struct InspectorColorPicker<'a> {
+    pub state: &'a ColorPickerState,
+    /// Whether the picker's hex field currently owns the keyboard.
+    pub hex_focused: bool,
+    pub hex_callbacks: TextInputCallbacks,
+    pub callbacks: ColorPickerCallbacks,
+}
+
+fn color_field(picker: &InspectorColorPicker<'_>) -> impl IntoElement {
+    color_picker_field(
+        "inspector-color-picker",
+        picker.state,
+        &default_presets(),
+        // Auto Colour is an Add Track concern: an existing track always has a
+        // concrete stored colour, and offering "Auto" here would have to mean
+        // "recolour by index", which `set_track_color` does not do.
+        false,
+        ColorPickerPlacement::Below,
+        picker.hex_focused,
+        picker.hex_callbacks.clone(),
+        picker.callbacks.clone(),
+    )
 }
 
 fn format_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
@@ -1814,12 +1815,14 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn track_inspector(
     track: &TrackState,
     name_input: &TextInputState,
     name_focused: bool,
     name_callbacks: TextInputCallbacks,
     instrument_targets: &[(String, String)],
+    color_picker: &InspectorColorPicker<'_>,
     callbacks: &InspectorCallbacks,
     i18n: I18n,
 ) -> impl IntoElement {
@@ -2030,10 +2033,7 @@ fn track_inspector(
                 ))
                 .child(fb_form_row(i18n.tr("inspector.field.volume"), volume_row))
                 .child(fb_form_row(i18n.tr("inspector.field.pan"), pan_row))
-                .child(fb_form_row(
-                    "Color",
-                    color_palette(tid.clone(), track.color, callbacks.on_set_color.clone()),
-                ))
+                .child(fb_form_row("Color", color_field(color_picker)))
                 .child(fb_form_row(i18n.tr("inspector.section.state"), state_row)),
         )
         .child(routing_section(track, instrument_targets, callbacks))

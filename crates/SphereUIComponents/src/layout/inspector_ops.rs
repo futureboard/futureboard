@@ -42,7 +42,6 @@ fn vsti_output_bus_pair_for_channel(bus_counts: &[u8], channel: u8) -> (u8, u8) 
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
-type ColorCb = Arc<dyn Fn(&(String, gpui::Rgba), &mut Window, &mut App) + 'static>;
 type InputRoutingCb = Arc<dyn Fn(&(String, TrackInputRouting), &mut Window, &mut App) + 'static>;
 type OutputRoutingCb = Arc<dyn Fn(&(String, TrackOutputRouting), &mut Window, &mut App) + 'static>;
 type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut App) + 'static>;
@@ -88,6 +87,82 @@ fn stretch_commit_field(
 }
 
 impl StudioLayout {
+    /// Callbacks for the Inspector's shared colour picker.
+    ///
+    /// Every gesture — preset swatch, recent swatch, hue strip, saturation /
+    /// value area — commits through `apply_inspector_color`, so a drag is a live
+    /// edit of the real track colour rather than a preview that only lands on
+    /// close. `track_id` is the current selection; opening the picker binds it,
+    /// and the binding (not the live selection) is what later edits target.
+    pub(crate) fn build_inspector_color_picker_callbacks(
+        &self,
+        owner: Entity<Self>,
+        track_id: Option<String>,
+    ) -> crate::components::ColorPickerCallbacks {
+        /// Mutate the host picker, then push the resulting draft colour to the
+        /// bound track. Shared by every drag/click gesture below.
+        fn commit(
+            owner: &Entity<StudioLayout>,
+            cx: &mut App,
+            edit: impl FnOnce(&mut crate::components::ColorPickerState),
+        ) {
+            let _ = owner.update(cx, |this, cx| {
+                edit(&mut this.inspector_name_edit.color_picker);
+                let color = this.inspector_name_edit.color_picker.draft;
+                this.apply_inspector_color(color, cx);
+                cx.notify();
+            });
+        }
+
+        crate::components::ColorPickerCallbacks {
+            on_toggle: Arc::new({
+                let owner = owner.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let track_id = track_id.clone();
+                    let _ = owner.update(cx, |this, cx| {
+                        if this.inspector_name_edit.color_picker.open {
+                            this.close_inspector_color_picker(window, cx);
+                        } else if let Some(track_id) = track_id {
+                            this.open_inspector_color_picker(&track_id, cx);
+                        }
+                    });
+                }
+            }),
+            on_close: Arc::new({
+                let owner = owner.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    let _ = owner.update(cx, |this, cx| {
+                        this.close_inspector_color_picker(window, cx);
+                    });
+                }
+            }),
+            on_pick: Arc::new({
+                let owner = owner.clone();
+                move |color: gpui::Rgba, _w: &mut Window, cx: &mut App| {
+                    commit(&owner, cx, |picker| picker.set_color(color));
+                }
+            }),
+            on_hue: Arc::new({
+                let owner = owner.clone();
+                move |hue: f32, _w: &mut Window, cx: &mut App| {
+                    commit(&owner, cx, |picker| picker.set_hue(hue));
+                }
+            }),
+            on_sv: Arc::new({
+                let owner = owner.clone();
+                move |saturation: f32, value: f32, _w: &mut Window, cx: &mut App| {
+                    commit(&owner, cx, |picker| {
+                        picker.set_saturation_value(saturation, value)
+                    });
+                }
+            }),
+            // Auto Colour is not offered by the Inspector picker (an existing
+            // track always has a concrete stored colour), so this is unreachable
+            // from the UI; keep it inert rather than inventing a meaning.
+            on_auto: Arc::new(|_on: bool, _w: &mut Window, _cx: &mut App| {}),
+        }
+    }
+
     pub(crate) fn build_inspector_callbacks(&self, owner: Entity<Self>) -> InspectorCallbacks {
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline_vol = self.timeline.clone();
@@ -400,35 +475,9 @@ impl StudioLayout {
             },
         );
 
-        let timeline_color = self.timeline.clone();
-        let owner_color = owner.clone();
-        let on_set_color: ColorCb = Arc::new(move |(id, color): &(String, gpui::Rgba), _w, cx| {
-            let id = id.clone();
-            let color = *color;
-            let changed = timeline_color.update(cx, |t, cx| {
-                let mut changed = t.state.set_track_color(&id, color);
-                if t.state.is_track_selected(&id) && t.state.selection.selected_track_ids.len() > 1
-                {
-                    for other in t.state.selection.selected_track_ids.clone() {
-                        if other == id {
-                            continue;
-                        }
-                        changed |= t.state.set_track_color(&other, color);
-                    }
-                }
-                if changed {
-                    cx.notify();
-                }
-                changed
-            });
-            if changed {
-                inspector_debug(&format!("edit track color track={id}"));
-                StudioLayout::defer_update(&owner_color, cx, |this, cx| {
-                    this.mark_dirty();
-                    this.push_mixer_snapshot_to_window(cx);
-                });
-            }
-        });
+        // Track colour is committed by `StudioLayout::apply_inspector_color`,
+        // driven by the shared colour picker the Inspector renders — there is
+        // no separate palette callback here any more.
 
         InspectorCallbacks {
             on_volume,
@@ -444,7 +493,6 @@ impl StudioLayout {
             on_toggle_solo,
             on_toggle_arm,
             on_toggle_input,
-            on_set_color,
             on_set_input_routing,
             on_set_output_routing,
             on_set_audio_format,

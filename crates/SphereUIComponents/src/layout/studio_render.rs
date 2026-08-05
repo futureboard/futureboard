@@ -296,6 +296,18 @@ impl Render for StudioLayout {
             cx.entity().clone(),
             |layout: &mut StudioLayout| &mut layout.inspector_name_edit.clip_name_input,
         );
+        let inspector_color_hex_focused = self
+            .inspector_name_edit
+            .color_picker
+            .hex_input
+            .is_focused(window);
+        let inspector_color_hex_callbacks = crate::components::text_input::bind_mouse_selection(
+            cx.entity().clone(),
+            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.color_picker.hex_input,
+        );
+        let inspector_color_callbacks = self
+            .build_inspector_color_picker_callbacks(cx.entity().clone(), selected_track_id.clone());
+        let inspector_color_open = self.inspector_name_edit.color_picker.open;
 
         crate::perf::count("tracks", tracks.len() as u64);
 
@@ -1697,6 +1709,12 @@ impl Render for StudioLayout {
                                     &self.inspector_name_edit.clip_name_input,
                                     inspector_clip_name_focused,
                                     inspector_clip_name_callbacks,
+                                    crate::components::panel::InspectorColorPicker {
+                                        state: &self.inspector_name_edit.color_picker,
+                                        hex_focused: inspector_color_hex_focused,
+                                        hex_callbacks: inspector_color_hex_callbacks,
+                                        callbacks: inspector_color_callbacks,
+                                    },
                                     active_panel == WorkspaceActivePanel::Inspector,
                                     &inspector_callbacks,
                                     i18n,
@@ -1731,6 +1749,19 @@ impl Render for StudioLayout {
                 let _s = crate::perf::PerfScope::enter("StatusBar");
                 self.status_bar.clone()
             })
+            // Click-outside dismissal for the Inspector colour picker. The
+            // popover is deferred at a higher priority and occludes its own
+            // clicks, so only a genuine outside click reaches this layer.
+            .children(inspector_color_open.then(|| {
+                let owner = cx.entity().clone();
+                crate::components::form::select_dismiss_backdrop(std::sync::Arc::new(
+                    move |_: &(), window: &mut Window, cx: &mut gpui::App| {
+                        let _ = owner.update(cx, |this, cx| {
+                            this.close_inspector_color_picker(window, cx);
+                        });
+                    },
+                ))
+            }))
             // Dropdown overlay — rendered last so it sits above every other
             // panel. The dropdown's own backdrop captures click-outside.
             .children(dropdown_overlay)
