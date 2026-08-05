@@ -1,0 +1,172 @@
+name: Release Build
+
+# Builds the Windows installer, macOS DMG and Linux AppImage, then attaches
+# them to an existing GitHub release without touching its release notes.
+#
+# `build-desktop.yml` already publishes on `v*` tags with generated notes. This
+# workflow is the hand-written-notes path: it uploads assets onto a prepared
+# (usually draft) release and leaves the body alone, so a curated changelog
+# survives the build.
+#
+# The schedule below starts the build 45 minutes before the planned release
+# moment; `publish-scheduled-release.yml` flips the finished draft to public.
+
+on:
+  schedule:
+    - cron: "15 8 8 8 *" # 08:15 UTC on 8 August == 15:15 GMT+7, 45 min before release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the build to (e.g. 2026.8.8-beta1).
+        type: string
+        required: true
+      app-version:
+        description: Version to build. Empty uses version.json.
+        type: string
+        required: false
+        default: ""
+      visibility:
+        description: Leave the release as a draft, or publish it when the upload succeeds.
+        type: choice
+        required: true
+        default: draft
+        options:
+          - draft
+          - publish
+      prerelease:
+        description: Mark the release as a pre-release.
+        type: boolean
+        required: false
+        default: true
+      latest:
+        description: Set this release as "Latest" when publishing.
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: release-${{ inputs.tag || 'scheduled' }}
+  cancel-in-progress: false
+
+env:
+  # Target of the scheduled run. The cron fires every 8 August, so the date
+  # guard in `plan` keeps it a one-shot for this release.
+  SCHEDULED_TAG: 2026.8.8-beta1
+  SCHEDULED_DATE: 2026-08-08
+
+jobs:
+  plan:
+    name: Resolve Target
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      app-version: ${{ steps.resolve.outputs.app-version }}
+      proceed: ${{ steps.resolve.outputs.proceed }}
+    steps:
+      - name: Resolve tag and date guard
+        id: resolve
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          echo "tag=${TAG:-$SCHEDULED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "app-version=${{ inputs.app-version }}" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TODAY="$(date -u +%F)"
+          if [ "$TODAY" = "$SCHEDULED_DATE" ]; then
+            echo "Scheduled release day — building for ${TAG:-$SCHEDULED_TAG}."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Today is $TODAY, planned date is $SCHEDULED_DATE — nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build Native
+    needs: plan
+    if: needs.plan.outputs.proceed == 'true'
+    uses: ./.github/workflows/build-desktop.yml
+    with:
+      app-version: ${{ needs.plan.outputs.app-version }}
+
+  publish:
+    name: Attach Release Assets
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      APP_VERSION: ${{ needs.build.outputs.app-version }}
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist/
+
+      # The in-app updater (`apps/native/studio/src/updater.rs::platform_asset`)
+      # picks its download by filename: Windows needs `setup` + `.exe`, macOS
+      # needs `macos` + `.dmg`, Linux needs `x86_64` + `.appimage`. A renamed
+      # bundle silently makes the release un-updatable, so fail here instead.
+      - name: Verify updater can resolve every platform asset
+        run: |
+          set -euo pipefail
+          shopt -s nullglob nocaseglob
+          fail=0
+          check() {
+            local label="$1" pattern="$2"
+            local -a matches=(dist/$pattern)
+            if [ ${#matches[@]} -eq 0 ]; then
+              echo "::error::no $label asset matching '$pattern'"
+              fail=1
+            else
+              echo "$label: ${matches[*]}"
+            fi
+          }
+          check "windows" "*setup*.exe"
+          check "macos"   "*macos*.dmg"
+          check "linux"   "*x86_64*.AppImage"
+          exit $fail
+
+      - name: Attach assets to the release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Uploading onto existing release $TAG (notes left untouched)."
+            gh release upload "$TAG" dist/* --clobber
+          else
+            echo "No release tagged $TAG yet — creating it as a draft."
+            gh release create "$TAG" dist/* \
+              --draft \
+              --title "Futureboard Studio $APP_VERSION" \
+              --notes "Automated release build for \`$APP_VERSION\`. Release notes pending."
+          fi
+
+      # A scheduled run only stages the assets; `publish-scheduled-release.yml`
+      # publishes at the planned moment.
+      - name: Publish the release
+        if: inputs.visibility == 'publish'
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" \
+            --draft=false \
+            --prerelease=${{ inputs.prerelease }} \
+            --latest=${{ inputs.latest }}
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,publishedAt
+
+      - name: Report draft state
+        if: inputs.visibility != 'publish'
+        run: |
+          set -euo pipefail
+          echo "Assets attached. Release $TAG stays a draft until it is published."
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease

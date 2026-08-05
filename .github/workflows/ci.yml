@@ -20,6 +20,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version-format:
+    name: Version scheme
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Futureboard uses calendar versioning: YYYY.M.D, no zero padding on
+      # month or day, with an optional pre-release suffix (-beta1, -nightly).
+      # `version.json` is the single source; sync-version.mjs pushes it into
+      # apps/native/studio/Cargo.toml. A malformed version otherwise only
+      # surfaces after an hour-long release build, so check it up front.
+      - name: Validate version.json and Cargo sync
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./version.json').version")"
+          echo "version.json: $VERSION"
+
+          if ! [[ "$VERSION" =~ ^[0-9]{4}\.(0|[1-9][0-9]?)\.(0|[1-9][0-9]?)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not YYYY.M.D[-prerelease] (no zero padding, e.g. 2026.8.8-beta1)"
+            exit 1
+          fi
+
+          MONTH="${BASH_REMATCH[1]}"
+          DAY="${BASH_REMATCH[2]}"
+          if [ "$MONTH" -lt 1 ] || [ "$MONTH" -gt 12 ]; then
+            echo "::error::month '$MONTH' in '$VERSION' is out of range"
+            exit 1
+          fi
+          if [ "$DAY" -lt 1 ] || [ "$DAY" -gt 31 ]; then
+            echo "::error::day '$DAY' in '$VERSION' is out of range"
+            exit 1
+          fi
+
+          node scripts/sync-version.mjs --check
+
   rust-fmt:
     name: Rust format (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

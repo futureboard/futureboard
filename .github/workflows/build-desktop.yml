@@ -9,6 +9,20 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+  # Called by `release.yml` so the release build uses these exact steps instead
+  # of a third copy of them. The `release` job below stays skipped for callers
+  # because `github.ref` is then the caller's branch, not a tag.
+  workflow_call:
+    inputs:
+      app-version:
+        description: Version to build instead of the one in version.json.
+        type: string
+        required: false
+        default: ""
+    outputs:
+      app-version:
+        description: Version the artifacts were built with.
+        value: ${{ jobs.version.outputs.app-version }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,8 +40,15 @@ jobs:
 
       - name: Read app version
         id: read
+        env:
+          VERSION_OVERRIDE: ${{ inputs.app-version }}
         run: |
-          VERSION=$(node -p "require('./version.json').version")
+          set -euo pipefail
+          if [ -n "${VERSION_OVERRIDE}" ]; then
+            VERSION="${VERSION_OVERRIDE}"
+          else
+            VERSION=$(node -p "require('./version.json').version")
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "App version: $VERSION"
 
