@@ -614,8 +614,17 @@ enum PianoDrag {
     },
     /// Paint (left) or erase (right) on the active CC lane. The lane's pre-drag
     /// points are snapshotted in `cc_edit_prev`; one undo entry on release.
+    ///
+    /// `last` is the previous cursor position in lane-local pixels. A mouse move
+    /// can jump many pixels, so the stroke is interpolated from `last` to the
+    /// new position instead of stamping a single sample per event — that is what
+    /// makes a fast freehand drag read as a continuous curve rather than a row
+    /// of disconnected dots. `unsnap` mirrors the live Alt state so the grid can
+    /// be released mid-stroke.
     CcPaint {
         erase: bool,
+        last: Option<(f32, f32)>,
+        unsnap: bool,
     },
     /// Drag one or more selected CC points. `prev` snapshots `(id, beat, value)`
     /// at drag start; each point moves by the same Δbeat/Δvalue from the grabbed
@@ -1154,13 +1163,15 @@ impl PianoRoll {
                 dx_beats, dpitch, ..
             } => format!("Move Δ{:.2} beat Δ{} st", dx_beats, dpitch),
             PianoDrag::Resize { new_dur, .. } => format!("Length {:.2}", new_dur),
-            PianoDrag::CcPaint { erase } => self.drag_value_status.clone().unwrap_or_else(|| {
-                if *erase {
-                    "CC erase".to_string()
-                } else {
-                    "CC draw".to_string()
-                }
-            }),
+            PianoDrag::CcPaint { erase, .. } => {
+                self.drag_value_status.clone().unwrap_or_else(|| {
+                    if *erase {
+                        "CC erase".to_string()
+                    } else {
+                        "CC draw".to_string()
+                    }
+                })
+            }
             PianoDrag::CcMove { .. } => self
                 .drag_value_status
                 .clone()
@@ -3109,15 +3120,20 @@ impl PianoRoll {
                 }
                 return;
             }
-            PianoDrag::CcPaint { erase } => {
+            PianoDrag::CcPaint { erase, .. } => {
+                // Alt is the live "free" modifier: releasing the grid mid-stroke
+                // takes effect on the next segment rather than only at press.
+                if let PianoDrag::CcPaint { unsnap, .. } = &mut self.drag {
+                    *unsnap = event.modifiers.alt;
+                }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
-                    self.cc_paint_at(lx, ly, erase, cx);
+                    self.cc_paint_stroke_to(lx, ly, erase, cx);
                 }
                 return;
             }
             PianoDrag::CcMove { .. } => {
                 if let PianoDrag::CcMove { unsnap, .. } = &mut self.drag {
-                    *unsnap = event.modifiers.shift;
+                    *unsnap = event.modifiers.alt || event.modifiers.shift;
                 }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.cc_move_selection_to(lx, ly, cx);
@@ -3130,7 +3146,8 @@ impl PianoRoll {
                 ..
             } => {
                 if let PianoDrag::CcLine { unsnap, .. } = &mut self.drag {
-                    *unsnap = self.tool == PianoTool::Line && event.modifiers.shift;
+                    *unsnap = event.modifiers.alt
+                        || (self.tool == PianoTool::Line && event.modifiers.shift);
                 }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.cc_line_to(anchor_beat, anchor_value, lx, ly, cx);
@@ -4736,34 +4753,6 @@ fn controller_default_value(kind: MidiControllerKind) -> f32 {
         | MidiControllerKind::ChannelPressure
         | MidiControllerKind::PolyPressure => 0.0,
     }
-}
-
-fn evaluate_controller_points(
-    points: &[MidiControllerPoint],
-    beat: f32,
-    default_value: f32,
-) -> f32 {
-    if points.is_empty() {
-        return default_value.clamp(0.0, 1.0);
-    }
-    let beat = beat.max(0.0);
-    if beat <= points[0].beat {
-        return points[0].value;
-    }
-    let last = points.len() - 1;
-    if beat >= points[last].beat {
-        return points[last].value;
-    }
-    for pair in points.windows(2) {
-        let a = &pair[0];
-        let b = &pair[1];
-        if beat >= a.beat && beat <= b.beat {
-            let span = (b.beat - a.beat).max(1.0e-6);
-            let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-            return (a.value + (b.value - a.value) * t).clamp(0.0, 1.0);
-        }
-    }
-    default_value.clamp(0.0, 1.0)
 }
 
 fn value_chip(label: &str, left: f32, top: f32) -> impl IntoElement {

@@ -4,6 +4,17 @@
 
 use super::*;
 
+/// Spacing, in lane pixels, between samples written while freehand-drawing a CC
+/// stroke. Small enough that the written curve matches the pointer path at any
+/// drag speed, large enough that free (unsnapped) drawing does not mint a point
+/// per pixel.
+const CC_PAINT_SAMPLE_PX: f32 = 2.0;
+
+/// Radius of a CC point handle, in lane pixels. Kept just under the ~6 px
+/// hit-test radius in [`PianoRoll::cc_point_at`] so a handle is never smaller
+/// than the area that grabs it.
+const HANDLE_R: f32 = 4.0;
+
 impl PianoRoll {
     pub(super) fn cc_view_size(&self) -> (f32, f32) {
         match self.cc_bounds.get() {
@@ -30,6 +41,7 @@ impl PianoRoll {
     pub(super) fn begin_cc_paint(
         &mut self,
         erase: bool,
+        unsnap: bool,
         lx: f32,
         ly: f32,
         window: &mut Window,
@@ -50,35 +62,112 @@ impl PianoRoll {
                 .controller_points_snapshot(&clip_id, kind),
         );
         self.cc_edit_target = Some((clip_id.clone(), kind));
-        self.drag = PianoDrag::CcPaint { erase };
-        self.cc_paint_at(lx, ly, erase, cx);
+        self.drag = PianoDrag::CcPaint {
+            erase,
+            last: None,
+            unsnap,
+        };
+        self.cc_paint_stroke_to(lx, ly, erase, cx);
         cx.notify();
     }
 
-    /// Apply one CC edit at a local strip coordinate (live, not yet committed).
-    pub(super) fn cc_paint_at(&mut self, lx: f32, ly: f32, erase: bool, cx: &mut Context<Self>) {
+    /// Continue the freehand stroke to `(lx, ly)`, writing every sample between
+    /// the previous cursor position and this one.
+    ///
+    /// A mouse move can cover tens of pixels, so sampling only the event
+    /// position leaves holes: the drawn line jumps from dot to dot and reads as
+    /// stepped rather than drawn. Walking the segment at [`CC_PAINT_SAMPLE_PX`]
+    /// intervals produces a continuous curve at any drag speed, and the whole
+    /// segment is written inside **one** timeline update so a fast drag costs one
+    /// notify per mouse event rather than one per sample.
+    pub(super) fn cc_paint_stroke_to(
+        &mut self,
+        lx: f32,
+        ly: f32,
+        erase: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
         let kind = self.active_cc;
-        let beat = self.snap_beats(self.x_to_beat(lx));
+        let unsnap = match &self.drag {
+            PianoDrag::CcPaint { unsnap, .. } => *unsnap,
+            _ => false,
+        };
+        let last = match &self.drag {
+            PianoDrag::CcPaint { last, .. } => *last,
+            _ => None,
+        };
+        let (from_x, from_y) = last.unwrap_or((lx, ly));
+
         let (_, cc_h) = self.cc_view_size();
-        let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        let lane_h = cc_h.max(1.0);
+        let value_at = |y: f32| (1.0 - (y / lane_h)).clamp(0.0, 1.0);
+
+        // One sample per CC_PAINT_SAMPLE_PX of travel, always including both
+        // endpoints so the stroke starts and ends exactly under the cursor.
+        let dx = lx - from_x;
+        let dy = ly - from_y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let steps = (distance / CC_PAINT_SAMPLE_PX).ceil().max(1.0) as i32;
+
+        let step_beats = self.step_beats();
+        let tol = (step_beats * 0.5).max(1.0e-3);
+        // Free drawing has no grid to collapse samples onto, so thin by beat
+        // distance instead — otherwise a wide drag would mint one point per
+        // sample and bloat the lane far past any useful CC resolution.
+        let min_gap = if unsnap || step_beats <= 0.0 {
+            (self.x_to_beat(CC_PAINT_SAMPLE_PX) - self.x_to_beat(0.0)).abs()
+        } else {
+            0.0
+        };
+
+        let mut edits: Vec<(f32, f32)> = Vec::with_capacity(steps as usize + 1);
+        let mut last_beat: Option<f32> = None;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let x = from_x + dx * t;
+            let y = from_y + dy * t;
+            let beat = self.snap_beats_live(self.x_to_beat(x), unsnap).max(0.0);
+            // Collapse samples that resolve to the same target (snapped strokes
+            // land many pixels on one grid line).
+            if let Some(previous) = last_beat {
+                if (beat - previous).abs() <= min_gap {
+                    // Still let the newest value win at that position.
+                    if let Some(entry) = edits.last_mut() {
+                        entry.1 = value_at(y);
+                    }
+                    continue;
+                }
+            }
+            last_beat = Some(beat);
+            edits.push((beat, value_at(y)));
+        }
+
+        let cursor_value = value_at(ly);
         self.drag_value_status = Some(format!(
-            "{}: {}",
+            "{}: {}{}",
             cc_kind_label(kind),
-            controller_display_value(kind, value)
+            controller_display_value(kind, cursor_value),
+            if unsnap { " · free" } else { "" }
         ));
-        let tol = (self.step_beats() * 0.5).max(1.0e-3);
+
         self.timeline.update(cx, |tl, tcx| {
-            if erase {
-                tl.state
-                    .delete_controller_points_near(&clip_id, kind, beat, tol);
-            } else {
-                tl.state.put_controller_point(&clip_id, kind, beat, value);
+            for (beat, value) in &edits {
+                if erase {
+                    tl.state
+                        .delete_controller_points_near(&clip_id, kind, *beat, tol);
+                } else {
+                    tl.state.put_controller_point(&clip_id, kind, *beat, *value);
+                }
             }
             tcx.notify();
         });
+
+        if let PianoDrag::CcPaint { last, .. } = &mut self.drag {
+            *last = Some((lx, ly));
+        }
     }
 
     /// Hit-test the active lane's points; return the id of one within ~6 px of
@@ -606,32 +695,92 @@ impl PianoRoll {
         (1.0 - value.clamp(0.0, 1.0)) * (lane_h - 10.0) + 5.0
     }
 
-    pub(super) fn build_cc_line(&self, cx: &Context<Self>, clip_id: &str) -> gpui::AnyElement {
+    /// The controller curve **and** its point handles, painted by one canvas.
+    ///
+    /// This used to be a per-column canvas plus one interactive `div` per point.
+    /// Both scaled badly on a dense lane: each column re-scanned the whole point
+    /// list to interpolate its value, so the curve cost `O(width × points)` per
+    /// frame, and a few hundred points meant a few hundred styled, hoverable
+    /// elements laid out and painted every frame — which is what made drawing
+    /// feel heavy.
+    ///
+    /// Now the curve is sampled in a single merged walk over columns and points
+    /// (`O(width + points)`, since both are ordered by beat), and the handles are
+    /// quads in the same canvas. Nothing is lost by dropping the elements: the
+    /// handles never had a click handler — the lane's own `on_mouse_down`
+    /// hit-tests them geometrically via [`Self::cc_point_at`] — so they were
+    /// purely visual.
+    pub(super) fn build_cc_curve(&self, cx: &Context<Self>, clip_id: &str) -> gpui::AnyElement {
         let (view_w, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
-        let points = self
-            .timeline
-            .read(cx)
-            .state
-            .controller_lane_points(clip_id, kind)
-            .cloned()
-            .unwrap_or_default();
         let default_value = controller_default_value(kind);
         let baseline_y = Self::controller_y_for_value(default_value, cc_h);
         let num_cols = view_w.ceil().max(1.0) as usize;
+
         let mut samples = Vec::with_capacity(num_cols + 1);
-        for col in 0..=num_cols {
-            let beat = self.x_to_beat(col as f32);
-            let value = evaluate_controller_points(&points, beat, default_value);
-            samples.push(Self::controller_y_for_value(value, cc_h));
+        // Visible handles only — everything scrolled out of the strip is culled
+        // before it reaches the paint closure.
+        let mut handles: Vec<(f32, f32, bool)> = Vec::new();
+
+        {
+            let timeline = self.timeline.read(cx);
+            let points = timeline
+                .state
+                .controller_lane_points(clip_id, kind)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            // Columns advance left-to-right and points are kept sorted by beat,
+            // so one cursor over the points serves every column.
+            let mut cursor = 0usize;
+            for col in 0..=num_cols {
+                let beat = self.x_to_beat(col as f32).max(0.0);
+                let value = if points.is_empty() {
+                    default_value.clamp(0.0, 1.0)
+                } else {
+                    while cursor + 1 < points.len() && points[cursor + 1].beat <= beat {
+                        cursor += 1;
+                    }
+                    let a = &points[cursor];
+                    if beat <= a.beat {
+                        // Before the first point: hold its value.
+                        a.value
+                    } else if cursor + 1 >= points.len() {
+                        // After the last point: hold its value.
+                        a.value
+                    } else {
+                        let b = &points[cursor + 1];
+                        let span = (b.beat - a.beat).max(1.0e-6);
+                        let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+                        (a.value + (b.value - a.value) * t).clamp(0.0, 1.0)
+                    }
+                };
+                samples.push(Self::controller_y_for_value(value, cc_h));
+            }
+
+            for p in points {
+                let x = self.beat_to_x(p.beat);
+                if x < -HANDLE_R || x > view_w + HANDLE_R {
+                    continue;
+                }
+                handles.push((
+                    x,
+                    Self::controller_y_for_value(p.value, cc_h),
+                    self.cc_selection.contains(&p.id),
+                ));
+            }
         }
+
         let line_color = Colors::accent_primary();
         let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.10);
+        let handle_fill = Colors::accent_primary();
+        let handle_ring = Colors::text_primary();
         canvas(
             |_b, _w, _cx| {},
             move |bounds: Bounds<Pixels>, (), window, _cx| {
+                let origin = bounds.origin;
                 let baseline = Bounds::new(
-                    bounds.origin + point(px(0.0), px(baseline_y)),
+                    origin + point(px(0.0), px(baseline_y)),
                     size(px(view_w), px(1.0)),
                 );
                 window.paint_quad(fill(baseline, baseline_color));
@@ -641,84 +790,33 @@ impl PianoRoll {
                     let top = y0.min(y1);
                     let h = (y0 - y1).abs().max(1.6);
                     let rect = Bounds::new(
-                        bounds.origin + point(px(col as f32), px(top)),
+                        origin + point(px(col as f32), px(top)),
                         size(px(1.0), px(h)),
                     );
                     window.paint_quad(fill(rect, line_color));
+                }
+                for (x, y, selected) in &handles {
+                    // A selected handle reads as a ring around a filled dot; an
+                    // unselected one is the plain dot.
+                    if *selected {
+                        let ring = Bounds::new(
+                            origin + point(px(x - HANDLE_R), px(y - HANDLE_R)),
+                            size(px(HANDLE_R * 2.0), px(HANDLE_R * 2.0)),
+                        );
+                        window.paint_quad(fill(ring, handle_ring));
+                    }
+                    let dot_r = if *selected { HANDLE_R - 2.0 } else { HANDLE_R };
+                    let dot = Bounds::new(
+                        origin + point(px(x - dot_r), px(y - dot_r)),
+                        size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                    );
+                    window.paint_quad(fill(dot, handle_fill));
                 }
             },
         )
         .absolute()
         .inset_0()
         .into_any_element()
-    }
-
-    pub(super) fn build_cc_points(
-        &self,
-        cx: &Context<Self>,
-        clip_id: &str,
-    ) -> Vec<gpui::AnyElement> {
-        let (view_w, cc_h) = self.cc_view_size();
-        let kind = self.active_cc;
-        let pts: Vec<(u64, f32, f32)> = self
-            .timeline
-            .read(cx)
-            .state
-            .controller_lane_points(clip_id, kind)
-            .map(|ps| ps.iter().map(|p| (p.id, p.beat, p.value)).collect())
-            .unwrap_or_default();
-        let accent = Colors::accent_primary();
-        pts.into_iter()
-            .filter_map(|(id, beat, value)| {
-                let x = self.beat_to_x(beat);
-                if x < -6.0 || x > view_w + 6.0 {
-                    return None;
-                }
-                let y = Self::controller_y_for_value(value, cc_h);
-                let selected = self.cc_selection.contains(&id);
-                Some(
-                    div()
-                        .id(("pr-cc-point", id as usize))
-                        .absolute()
-                        .left(px(x - 5.0))
-                        .top(px(y - 5.0))
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|s| s.bg(Colors::with_alpha(Colors::accent_primary(), 0.08)))
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(1.0))
-                                .top(px(1.0))
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .rounded(px(4.0))
-                                .border(px(1.0))
-                                .border_color(if selected {
-                                    Colors::accent_primary()
-                                } else {
-                                    Colors::text_primary()
-                                })
-                                .bg(if selected {
-                                    Colors::with_alpha(accent, 1.0)
-                                } else {
-                                    accent
-                                })
-                                .when(selected, |el| {
-                                    el.shadow(vec![gpui::BoxShadow {
-                                        color: Colors::with_alpha(accent, 0.45).into(),
-                                        offset: gpui::point(px(0.0), px(0.0)),
-                                        blur_radius: px(6.0),
-                                        spread_radius: px(0.0),
-                                        inset: false,
-                                    }])
-                                }),
-                        )
-                        .into_any_element(),
-                )
-            })
-            .collect()
     }
 
     fn build_cc_selection_overlay(&self) -> Option<gpui::AnyElement> {
@@ -761,9 +859,13 @@ impl PianoRoll {
         bpb: f32,
     ) -> impl IntoElement {
         let grid = self.build_velocity_grid(start_beat, end_beat, bpb);
-        let line = self.build_cc_line(cx, clip_id);
-        let points = self.build_cc_points(cx, clip_id);
-        let is_empty = points.is_empty();
+        let is_empty = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_lane_points(clip_id, self.active_cc)
+            .is_none_or(|points| points.is_empty());
+        let curve = self.build_cc_curve(cx, clip_id);
         let value_chip_el = matches!(
             self.drag,
             PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. }
@@ -778,7 +880,7 @@ impl PianoRoll {
                 .justify_center()
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
-                .child("Click to draw · Shift-drag line · Right-click curves")
+                .child("Drag to draw · Alt free · Shift-drag line · Right-click curves")
         });
         let curve_menu = self.build_cc_curve_menu(cx);
         let selection_overlay = self.build_cc_selection_overlay();
@@ -801,8 +903,7 @@ impl PianoRoll {
             .cursor(gpui::CursorStyle::Crosshair)
             .child(canvas)
             .children(grid)
-            .child(line)
-            .children(points)
+            .child(curve)
             .children(selection_overlay)
             .children(empty_state)
             .children(value_chip_el)
@@ -813,12 +914,16 @@ impl PianoRoll {
                     cx.stop_propagation();
                     this.open_cc_curve_menu = None;
                     if let Some((lx, ly)) = this.cc_local(ev.position) {
+                        // Alt is the lane-wide "free" modifier: it releases the
+                        // grid for whichever gesture the click starts.
+                        let free = ev.modifiers.alt;
                         // The Line tool draws a ramp; Shift is retained as the
                         // established temporary line gesture from other tools.
                         if this.tool == PianoTool::Line
                             || (ev.modifiers.shift && this.tool != PianoTool::Select)
                         {
-                            let unsnap = this.tool == PianoTool::Line && ev.modifiers.shift;
+                            let unsnap =
+                                free || (this.tool == PianoTool::Line && ev.modifiers.shift);
                             this.begin_cc_line(lx, ly, unsnap, window, cx);
                             return;
                         }
@@ -841,7 +946,7 @@ impl PianoRoll {
                                     cx.notify();
                                     return;
                                 }
-                                this.begin_cc_move(id, ev.modifiers.shift, window, cx);
+                                this.begin_cc_move(id, free || ev.modifiers.shift, window, cx);
                                 return;
                             }
                         }
@@ -852,7 +957,7 @@ impl PianoRoll {
                             }
                         } else {
                             this.cc_selection.clear();
-                            this.begin_cc_paint(false, lx, ly, window, cx);
+                            this.begin_cc_paint(false, free, lx, ly, window, cx);
                         }
                     }
                 }),
@@ -866,7 +971,10 @@ impl PianoRoll {
                     // opens the CC curve context menu (controller lane only).
                     if ev.modifiers.alt {
                         if let Some((lx, ly)) = this.cc_local(ev.position) {
-                            this.begin_cc_paint(true, lx, ly, window, cx);
+                            // Alt already means "free" on this lane, so the
+                            // erase stroke follows the cursor rather than the
+                            // grid.
+                            this.begin_cc_paint(true, true, lx, ly, window, cx);
                         }
                         return;
                     }
