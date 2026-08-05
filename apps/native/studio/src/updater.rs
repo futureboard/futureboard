@@ -44,12 +44,6 @@ pub struct AvailableUpdate {
     asset: GithubAsset,
 }
 
-impl AvailableUpdate {
-    pub fn asset_name(&self) -> &str {
-        &self.asset.name
-    }
-}
-
 fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
     let response = ureq::get(url)
         .header("Accept", "application/vnd.github+json")
@@ -306,7 +300,7 @@ fn install_windows(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, S
 fn is_machine_wide(install_dir: &Path) -> bool {
     ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
         .iter()
-        .filter_map(|key| std::env::var_os(key))
+        .filter_map(std::env::var_os)
         .any(|root| install_dir.starts_with(PathBuf::from(root)))
 }
 
