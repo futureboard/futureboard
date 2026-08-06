@@ -188,6 +188,16 @@ when `FUTUREBOARD_REQUIRE_UNIVERSAL=1` (release CI sets it). The DMG filename
 carries the architecture: `…-macos-universal.dmg`, `…-macos-arm64.dmg`, or
 `…-macos-x86_64.dmg`.
 
+Releases ship **all three**: both single-architecture packages already exist as
+a by-product of the universal merge, so bundling them separately costs no extra
+compile. Point `bundle-macos.sh` at `macos-arm64` or `macos-x64` (with distinct
+output directories, since every bundle is named `Futureboard Studio.app`) to
+produce them locally.
+
+The in-app updater ranks these: it takes the image matching the running
+architecture first, falls back to the universal one, and never installs the
+other architecture's image.
+
 ### Platform notes
 
 | Platform | Audio backend                           | Setup                                                         |

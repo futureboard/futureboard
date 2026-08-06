@@ -94,22 +94,63 @@ fn release_matches_channel(release: &GithubRelease, channel: UpdateChannel) -> b
     }
 }
 
+/// How well an asset name fits this build, lower being better. `None` means the
+/// asset is not installable here at all.
+///
+/// Only macOS has more than one candidate: releases carry a universal DMG plus
+/// a per-architecture one. A plain `find` would hand whichever came first —
+/// possibly the Intel image to an Apple Silicon machine — so the match is
+/// ranked instead of taken greedily.
+fn asset_rank(name: &str) -> Option<u8> {
+    #[cfg(target_os = "windows")]
+    {
+        return (name.ends_with(".exe") && name.contains("setup")).then_some(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return (name.ends_with(".appimage") && name.contains("x86_64")).then_some(0);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !name.ends_with(".dmg") || !name.contains("macos") {
+            return None;
+        }
+        #[cfg(target_arch = "aarch64")]
+        let (native, foreign) = ("macos-arm64", "macos-x86_64");
+        #[cfg(target_arch = "x86_64")]
+        let (native, foreign) = ("macos-x86_64", "macos-arm64");
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let (native, foreign) = ("macos-universal", "\0");
+
+        if name.contains(native) {
+            return Some(0);
+        }
+        if name.contains("macos-universal") {
+            return Some(1);
+        }
+        if name.contains(foreign) {
+            // Running the other architecture's image would mean installing a
+            // Rosetta-only (or unrunnable) build over a native one.
+            return None;
+        }
+        // Releases published before the DMG name carried an architecture.
+        return Some(2);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = name;
+        None
+    }
+}
+
 fn platform_asset(release: &GithubRelease) -> Option<GithubAsset> {
     release
         .assets
         .iter()
-        .find(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            #[cfg(target_os = "windows")]
-            return name.ends_with(".exe") && name.contains("setup");
-            #[cfg(target_os = "macos")]
-            return name.ends_with(".dmg") && name.contains("macos");
-            #[cfg(target_os = "linux")]
-            return name.ends_with(".appimage") && name.contains("x86_64");
-            #[allow(unreachable_code)]
-            false
-        })
-        .cloned()
+        .filter_map(|asset| asset_rank(&asset.name.to_ascii_lowercase()).map(|rank| (rank, asset)))
+        // Ties keep the first asset, matching the previous `find` behaviour.
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, asset)| asset.clone())
 }
 
 fn choose_release(
@@ -574,6 +615,56 @@ mod tests {
                 digest: Some("sha256:test".to_string()),
             }],
         }
+    }
+
+    /// A release now carries a universal DMG *and* both single-architecture
+    /// ones. The native image must win, the universal image must be the
+    /// fallback, and the other architecture's image must never be chosen.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_prefers_native_then_universal_and_never_the_other_arch() {
+        let dmg = |name: &str| GithubAsset {
+            name: name.to_string(),
+            browser_download_url: "https://example.test/download".to_string(),
+            size: 1,
+            digest: None,
+        };
+        let with = |assets: Vec<GithubAsset>| GithubRelease {
+            tag_name: "2026.8.8".to_string(),
+            name: Some("Release".to_string()),
+            draft: false,
+            prerelease: false,
+            assets,
+        };
+
+        let native = if cfg!(target_arch = "aarch64") {
+            "Futureboard.Studio-2026.8.8-macos-arm64.dmg"
+        } else {
+            "Futureboard.Studio-2026.8.8-macos-x86_64.dmg"
+        };
+        let foreign = if cfg!(target_arch = "aarch64") {
+            "Futureboard.Studio-2026.8.8-macos-x86_64.dmg"
+        } else {
+            "Futureboard.Studio-2026.8.8-macos-arm64.dmg"
+        };
+        let universal = "Futureboard.Studio-2026.8.8-macos-universal.dmg";
+
+        // Asset order must not decide the outcome.
+        let all = with(vec![dmg(foreign), dmg(universal), dmg(native)]);
+        assert_eq!(platform_asset(&all).unwrap().name, native);
+
+        let no_native = with(vec![dmg(foreign), dmg(universal)]);
+        assert_eq!(platform_asset(&no_native).unwrap().name, universal);
+
+        // The wrong architecture alone is not an update.
+        assert!(platform_asset(&with(vec![dmg(foreign)])).is_none());
+
+        // Releases predating architecture-tagged names still resolve.
+        let legacy = with(vec![dmg("Futureboard.Studio-2026.8.3-macos.dmg")]);
+        assert_eq!(
+            platform_asset(&legacy).unwrap().name,
+            "Futureboard.Studio-2026.8.3-macos.dmg"
+        );
     }
 
     #[test]

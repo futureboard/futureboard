@@ -187,13 +187,27 @@ jobs:
           echo "FUTUREBOARD_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
           echo "xtask package: $package_dir"
 
-      - name: Bundle native app (macOS)
+      # Three images per release: the universal one most people want, plus a
+      # single-architecture build each for anyone who would rather not carry the
+      # other slice. All three come from packages that are already staged, so
+      # this costs bundling time only, not another compile. bundle-macos-dmg.sh
+      # names each image after the architectures it actually contains.
+      - name: Bundle native apps (macOS universal + per-architecture)
         if: matrix.os == 'macos-latest'
-        env:
-          FUTUREBOARD_REQUIRE_UNIVERSAL: "1"
         run: |
-          bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out "${{ needs.version.outputs.app-version }}"
-          bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.app-version }}"
+          bundle() {
+            local package_dir="$1" variant="$2" require_universal="$3"
+            local app_out="packaging/native/out/$variant"
+            local app="$app_out/Futureboard Studio.app"
+            FUTUREBOARD_REQUIRE_UNIVERSAL="$require_universal" bash packaging/native/bundle-macos.sh "$package_dir" "$app_out" "$VERSION"
+            bash packaging/native/bundle-macos-dmg.sh "$app" packaging/native/out "$VERSION"
+          }
+          bundle out/release/community/macos-universal universal 1
+          bundle out/release/community/macos-arm64     arm64     0
+          bundle out/release/community/macos-x64       x64       0
+          ls -lh packaging/native/out/*.dmg
 
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'
