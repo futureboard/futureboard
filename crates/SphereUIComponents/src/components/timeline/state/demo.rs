@@ -240,6 +240,7 @@ impl TimelineState {
                 last_engine_frame: 0,
             },
             tracks: vec![track1, track2, track3],
+            audio_connections: crate::audio_connections::AudioConnectionRegistry::new(),
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
                 inserts: Vec::new(),

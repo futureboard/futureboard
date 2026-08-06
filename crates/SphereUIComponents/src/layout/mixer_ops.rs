@@ -1395,12 +1395,15 @@ impl StudioLayout {
                 if !changed {
                     return;
                 }
+                let connections = timeline_arm.read(cx).state.audio_connections.clone();
                 let apply_error = audio_engine_arm.as_ref().and_then(|engine| {
                     timeline_arm
                         .read(cx)
                         .state
                         .find_track(&id)
-                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                        .and_then(|track| {
+                            apply_engine_track_input_state(engine, track, &connections).err()
+                        })
                 });
                 if let Some(error) = apply_error {
                     if let Some(previous) = previous {
@@ -1449,12 +1452,15 @@ impl StudioLayout {
             if !changed {
                 return;
             }
+            let connections = timeline_input.read(cx).state.audio_connections.clone();
             let apply_error = audio_engine_input.as_ref().and_then(|engine| {
                 timeline_input
                     .read(cx)
                     .state
                     .find_track(&id)
-                    .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                    .and_then(|track| {
+                        apply_engine_track_input_state(engine, track, &connections).err()
+                    })
             });
             if let Some(error) = apply_error {
                 if let Some(previous) = previous {

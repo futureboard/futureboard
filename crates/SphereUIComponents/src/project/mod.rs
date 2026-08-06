@@ -1025,7 +1025,13 @@ impl From<&TimelineState> for FutureboardProject {
                     record_arm: t.armed,
                     input_monitor: t.input_monitor,
                     routing: TrackRouting {
-                        input: timeline_input_to_project(&t.routing.input),
+                        input: runtime_to_v33_track_input_routing(
+                            t.routing.audio_input_connection_id.as_ref(),
+                            &t.routing.midi_input,
+                            &tl.audio_connections,
+                            t.track_type,
+                        )
+                        .routing,
                         output: timeline_output_to_project(&t.routing.output),
                         audio_format: timeline_audio_format_to_project(t.routing.audio_format),
                         midi_input: timeline_midi_input_to_project(&t.routing.midi_input),
@@ -1207,6 +1213,12 @@ impl From<&TimelineState> for FutureboardProject {
 
 /// Apply a loaded `FutureboardProject` back onto an existing `TimelineState`.
 pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
+    // Audio Connections generated while migrating v33 routing. Populated as
+    // tracks are converted below, then installed on the timeline state.
+    let migration_ports = crate::audio_connections::current_available_ports();
+    let mut migrated_connections = tl.audio_connections.clone();
+    let mut migration_warnings: Vec<crate::project::routing_migration::RoutingMigrationWarning> =
+        Vec::new();
     use crate::components::timeline::timeline_state::{
         AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiChannel,
         MidiControllerLane as TlControllerLane, MidiControllerPoint as TlControllerPoint,
@@ -1608,7 +1620,25 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 selected_automation_target: None,
                 inserts,
                 sends,
-                routing: project_routing_to_timeline(&pt.routing, track_type),
+                routing: {
+                    // v33 stores one combined input field. Run the migration
+                    // adapter here, where the project registry is in scope, so
+                    // the runtime track ends up with the split fields.
+                    let mut routing = project_routing_to_timeline(&pt.routing, track_type);
+                    let (connection_id, midi_input) = legacy_routing_to_runtime(
+                        &pt.routing.input,
+                        routing.midi_input.clone(),
+                        track_type,
+                        &pt.id,
+                        &pt.name,
+                        &mut migrated_connections,
+                        &migration_ports,
+                        &mut migration_warnings,
+                    );
+                    routing.audio_input_connection_id = connection_id;
+                    routing.midi_input = midi_input;
+                    routing
+                },
                 instrument_plugin_instance_id,
                 builtin_soundfont_player: pt.soundfont.is_some(),
                 soundfont_path: pt
@@ -1681,32 +1711,215 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
         );
         tl.track_view_layout.set_height(pt.id.clone(), clamped);
     }
+
+    // Install the Audio Connections generated while converting v33 routing,
+    // then validate them against the current hardware. A device that is not
+    // present yields DeviceMissing — the connection and every track reference
+    // survive, so reconnecting restores the route.
+    migrated_connections.revalidate(&migration_ports);
+    tl.audio_connections = migrated_connections;
+    for warning in &migration_warnings {
+        eprintln!("[project] {}", warning.message());
+    }
 }
 
-fn timeline_input_to_project(
-    input: &crate::components::timeline::timeline_state::TrackInputRouting,
-) -> ProjectTrackInputRouting {
-    use crate::components::timeline::timeline_state::TrackInputRouting as T;
-    match input {
-        T::None => ProjectTrackInputRouting::None,
-        T::AllInputs => ProjectTrackInputRouting::AllInputs,
-        T::AudioDeviceChannel { device_id, channel } => {
+// ── v33 persistence boundary adapter ────────────────────────────────────────
+//
+// Turn A keeps the on-disk format at v33, which stores ONE combined
+// `ProjectTrackInputRouting` covering both audio device/channel routing and a
+// MIDI device. The runtime model is split into two independent fields, so this
+// boundary is the only place the two representations meet.
+//
+// These helpers are deliberately private to the persistence layer: nothing in
+// the runtime may reach for the combined union.
+
+/// What a v33 encode decided to write, plus whether anything could not be
+/// represented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct V33TrackInputRoutingEncodeResult {
+    pub(crate) routing: ProjectTrackInputRouting,
+    /// `Some` when the runtime held both an audio connection and a meaningful
+    /// MIDI device but v33 can only store one. The runtime keeps both; the
+    /// caller surfaces this so the save is never claimed to be lossless.
+    pub(crate) dropped: Option<String>,
+}
+
+/// Encode split runtime routing into the single v33 field.
+///
+/// Track type decides which route is primary, because that is what the old
+/// format and the old UI actually supported:
+///
+/// * **Audio** tracks: the audio connection wins; a MIDI device is only
+///   written when there is no audio connection.
+/// * **MIDI / Instrument** tracks: the MIDI route wins; an audio connection is
+///   never folded into the legacy field for these types.
+///
+/// Nothing is cleared from the runtime state either way.
+pub(crate) fn runtime_to_v33_track_input_routing(
+    audio_input_connection_id: Option<&crate::audio_connections::AudioConnectionId>,
+    midi_input: &crate::components::timeline::timeline_state::TrackMidiInputRouting,
+    registry: &crate::audio_connections::AudioConnectionRegistry,
+    track_type: TlTrackType,
+) -> V33TrackInputRoutingEncodeResult {
+    use crate::components::timeline::timeline_state::TrackMidiInputRouting as M;
+
+    // The audio side, expressed the way v33 stored it. `None` when there is no
+    // assignment or the connection no longer resolves to concrete ports.
+    let audio = audio_input_connection_id.and_then(|id| {
+        let connection = registry.get(id)?;
+        let device_id = connection.device_id.clone()?;
+        let channels: Vec<u32> = (0..connection.channel_layout.channel_count())
+            .filter_map(|logical| {
+                connection
+                    .binding(logical)
+                    .map(|binding| binding.physical_port_id.port_index)
+            })
+            .collect();
+        if channels.is_empty() {
+            return None;
+        }
+        Some(if channels.len() == 1 {
             ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id,
+                channel: channels[0],
+            }
+        } else {
+            ProjectTrackInputRouting::AudioDeviceChannels {
+                device_id,
+                channels,
+            }
+        })
+    });
+
+    let midi = match midi_input {
+        M::MidiDevice { device_id } => Some(ProjectTrackInputRouting::MidiDevice {
+            device_id: device_id.clone(),
+        }),
+        // `None` / `AllInputs` carry no device identity that v33's combined
+        // field could hold, and the dedicated `midi_input` field stores them
+        // losslessly anyway.
+        M::None | M::AllInputs => None,
+    };
+
+    let audio_is_primary = matches!(track_type, TlTrackType::Audio);
+    let (routing, dropped) = match (audio_is_primary, audio, midi) {
+        // Audio track holding both: audio wins, MIDI device is reported.
+        (true, Some(audio), Some(_)) => (
+            audio,
+            Some(format!("MIDI input \"{}\"", midi_input.label())),
+        ),
+        (true, Some(audio), None) => (audio, None),
+        (true, None, Some(midi)) => (midi, None),
+        // MIDI / instrument track holding both: MIDI wins, audio is reported.
+        (false, Some(_), Some(midi)) => (midi, Some("audio input connection".to_string())),
+        (false, Some(_), None) => (
+            ProjectTrackInputRouting::None,
+            Some("audio input connection".to_string()),
+        ),
+        (false, None, Some(midi)) => (midi, None),
+        (_, None, None) => (ProjectTrackInputRouting::None, None),
+    };
+    V33TrackInputRoutingEncodeResult { routing, dropped }
+}
+
+/// Decode the v33 combined field into the split runtime fields.
+///
+/// Audio routing becomes a project-local `AudioConnection` in `registry`,
+/// reusing one connection per distinct `(device_id, ordered channel list)`.
+/// MIDI routing follows the confirmed Case A/B/C rules from
+/// [`crate::project::routing_migration`].
+pub(crate) fn legacy_routing_to_runtime(
+    legacy: &ProjectTrackInputRouting,
+    existing_midi_input: crate::components::timeline::timeline_state::TrackMidiInputRouting,
+    track_type: TlTrackType,
+    track_id: &str,
+    track_name: &str,
+    registry: &mut crate::audio_connections::AudioConnectionRegistry,
+    ports: &crate::audio_connections::AvailablePorts,
+    warnings: &mut Vec<crate::project::routing_migration::RoutingMigrationWarning>,
+) -> (
+    Option<crate::audio_connections::AudioConnectionId>,
+    crate::components::timeline::timeline_state::TrackMidiInputRouting,
+) {
+    use crate::project::routing_migration::{
+        migrate_track_routing, LegacyTrackInputRouting, LegacyTrackRouting,
+    };
+
+    let legacy_input = match legacy {
+        ProjectTrackInputRouting::None => LegacyTrackInputRouting::None,
+        ProjectTrackInputRouting::AllInputs => LegacyTrackInputRouting::AllInputs,
+        ProjectTrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+            LegacyTrackInputRouting::AudioDeviceChannel {
                 device_id: device_id.clone(),
                 channel: *channel,
             }
         }
-        T::AudioDeviceChannels {
+        ProjectTrackInputRouting::AudioDeviceChannels {
             device_id,
             channels,
-        } => ProjectTrackInputRouting::AudioDeviceChannels {
+        } => LegacyTrackInputRouting::AudioDeviceChannels {
             device_id: device_id.clone(),
             channels: channels.clone(),
         },
-        T::MidiDevice { device_id } => ProjectTrackInputRouting::MidiDevice {
+        ProjectTrackInputRouting::MidiDevice { device_id } => LegacyTrackInputRouting::MidiDevice {
             device_id: device_id.clone(),
         },
-    }
+    };
+
+    // The Case A test must compare against the default for *this* track type.
+    let midi_input_default =
+        crate::components::timeline::timeline_state::TrackRoutingState::for_track_type(track_type)
+            .midi_input;
+
+    let mut result = migrate_track_routing(
+        &[LegacyTrackRouting {
+            track_id: track_id.to_string(),
+            track_name: track_name.to_string(),
+            legacy_input,
+            midi_input: existing_midi_input.clone(),
+            midi_input_default,
+        }],
+        ports,
+        PROJECT_VERSION,
+    );
+    warnings.append(&mut result.warnings);
+
+    // Reuse an equivalent connection already in the registry (several tracks
+    // sharing one legacy source must share one bus) before adding a new one.
+    let migrated = result.tracks.pop();
+    let generated = result.generated_connections.pop();
+    let connection_id = match (
+        migrated
+            .as_ref()
+            .and_then(|t| t.audio_input_connection_id.clone()),
+        generated,
+    ) {
+        (Some(_), Some(connection)) => {
+            let channels: Vec<u32> = (0..connection.channel_layout.channel_count())
+                .filter_map(|logical| {
+                    connection
+                        .binding(logical)
+                        .map(|binding| binding.physical_port_id.port_index)
+                })
+                .collect();
+            let device_id = connection.device_id.clone().unwrap_or_default();
+            registry.get_or_create_audio_connection_for_physical_input(
+                &crate::audio_connections::PhysicalInputChoice::Ports {
+                    device_id,
+                    channels,
+                },
+                ports,
+            )
+        }
+        // The source resolved to an existing connection during this load.
+        (Some(id), None) => Some(id),
+        _ => None,
+    };
+
+    let midi_input = migrated
+        .map(|t| t.midi_input)
+        .unwrap_or(existing_midi_input);
+    (connection_id, midi_input)
 }
 
 fn timeline_output_to_project(
@@ -1760,30 +1973,12 @@ fn project_routing_to_timeline(
     track_type: TlTrackType,
 ) -> crate::components::timeline::timeline_state::TrackRoutingState {
     use crate::components::timeline::timeline_state::{
-        TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting,
-        TrackRoutingState,
+        TrackAudioFormat, TrackMidiInputRouting, TrackOutputRouting, TrackRoutingState,
     };
     let mut state = TrackRoutingState::for_track_type(track_type);
-    state.input = match &routing.input {
-        ProjectTrackInputRouting::None => TrackInputRouting::None,
-        ProjectTrackInputRouting::AllInputs => TrackInputRouting::AllInputs,
-        ProjectTrackInputRouting::AudioDeviceChannel { device_id, channel } => {
-            TrackInputRouting::AudioDeviceChannel {
-                device_id: device_id.clone(),
-                channel: *channel,
-            }
-        }
-        ProjectTrackInputRouting::AudioDeviceChannels {
-            device_id,
-            channels,
-        } => TrackInputRouting::AudioDeviceChannels {
-            device_id: device_id.clone(),
-            channels: channels.clone(),
-        },
-        ProjectTrackInputRouting::MidiDevice { device_id } => TrackInputRouting::MidiDevice {
-            device_id: device_id.clone(),
-        },
-    };
+    // v33 stores one combined field. The caller runs the migration adapter and
+    // assigns `audio_input_connection_id` afterwards, because that needs the
+    // project registry which this pure conversion does not own.
     state.output = match &routing.output {
         ProjectTrackOutputRouting::Main => TrackOutputRouting::Main,
         ProjectTrackOutputRouting::Bus { bus_id } => TrackOutputRouting::Bus {
@@ -1804,12 +1999,6 @@ fn project_routing_to_timeline(
         ProjectTrackAudioFormat::Mono => TrackAudioFormat::Mono,
         ProjectTrackAudioFormat::Stereo => TrackAudioFormat::Stereo,
     };
-    if !state
-        .input
-        .is_compatible_with_audio_format(state.audio_format)
-    {
-        state.input = TrackInputRouting::None;
-    }
     state.midi_input = match &routing.midi_input {
         ProjectTrackMidiInputRouting::None => TrackMidiInputRouting::None,
         ProjectTrackMidiInputRouting::AllInputs => TrackMidiInputRouting::AllInputs,
@@ -1884,46 +2073,305 @@ fn desc_to_target(
 }
 
 #[cfg(test)]
-mod audio_routing_persistence_tests {
+mod v33_routing_adapter_tests {
     use super::*;
-    use crate::components::timeline::timeline_state::{TrackAudioFormat, TrackInputRouting};
+    use crate::audio_connections::{
+        AudioConnectionRegistry, AudioConnectionStatus, AvailablePorts, ChannelLayout,
+    };
+    use crate::components::timeline::timeline_state::TrackMidiInputRouting;
+
+    fn ports() -> AvailablePorts {
+        AvailablePorts::for_device("input-device", "Interface", 4, 2)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn load(
+        legacy: ProjectTrackInputRouting,
+        midi: TrackMidiInputRouting,
+        track_type: TlTrackType,
+        registry: &mut AudioConnectionRegistry,
+    ) -> (
+        Option<crate::audio_connections::AudioConnectionId>,
+        TrackMidiInputRouting,
+        Vec<crate::project::routing_migration::RoutingMigrationWarning>,
+    ) {
+        let mut warnings = Vec::new();
+        let (id, midi_input) = legacy_routing_to_runtime(
+            &legacy,
+            midi,
+            track_type,
+            "track-1",
+            "Track 1",
+            registry,
+            &ports(),
+            &mut warnings,
+        );
+        (id, midi_input, warnings)
+    }
+
+    // ── v33 load ────────────────────────────────────────────────────────────
 
     #[test]
-    fn loaded_mono_track_clears_stereo_pair_route() {
-        let routing = TrackRouting {
-            input: ProjectTrackInputRouting::AudioDeviceChannels {
+    fn v33_mono_audio_route_becomes_a_mono_connection() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (id, _, warnings) = load(
+            ProjectTrackInputRouting::AudioDeviceChannel {
                 device_id: "input-device".to_string(),
-                channels: vec![0, 1],
+                channel: 2,
             },
-            audio_format: ProjectTrackAudioFormat::Mono,
-            ..TrackRouting::default()
-        };
-
-        let state = project_routing_to_timeline(&routing, TlTrackType::Audio);
-        assert_eq!(state.audio_format, TrackAudioFormat::Mono);
-        assert_eq!(state.input, TrackInputRouting::None);
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        let id = id.expect("audio route migrates");
+        let connection = registry.get(&id).unwrap();
+        assert_eq!(connection.channel_layout, ChannelLayout::Mono);
+        assert_eq!(
+            connection.binding(0).unwrap().physical_port_id.port_index,
+            2
+        );
+        assert!(warnings.is_empty());
     }
 
     #[test]
-    fn loaded_stereo_track_preserves_mono_route() {
-        let routing = TrackRouting {
-            input: ProjectTrackInputRouting::AudioDeviceChannel {
+    fn v33_stereo_route_preserves_left_right_ordering() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (id, _, _) = load(
+            ProjectTrackInputRouting::AudioDeviceChannels {
                 device_id: "input-device".to_string(),
-                channel: 1,
+                channels: vec![2, 3],
             },
-            audio_format: ProjectTrackAudioFormat::Stereo,
-            ..TrackRouting::default()
-        };
-
-        let state = project_routing_to_timeline(&routing, TlTrackType::Audio);
-        assert_eq!(state.audio_format, TrackAudioFormat::Stereo);
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        let connection = registry.get(&id.unwrap()).unwrap();
+        assert_eq!(connection.channel_layout, ChannelLayout::Stereo);
         assert_eq!(
-            state.input,
-            TrackInputRouting::AudioDeviceChannel {
-                device_id: "input-device".to_string(),
-                channel: 1,
+            connection.binding(0).unwrap().physical_port_id.port_index,
+            2
+        );
+        assert_eq!(
+            connection.binding(1).unwrap().physical_port_id.port_index,
+            3
+        );
+    }
+
+    #[test]
+    fn two_tracks_with_the_same_legacy_source_share_one_connection() {
+        let mut registry = AudioConnectionRegistry::new();
+        let source = ProjectTrackInputRouting::AudioDeviceChannel {
+            device_id: "input-device".to_string(),
+            channel: 1,
+        };
+        let (a, _, _) = load(
+            source.clone(),
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        let (b, _, _) = load(
+            source,
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        assert_eq!(a, b);
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn a_missing_legacy_device_survives_as_device_missing() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (id, _, _) = load(
+            ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id: "unplugged".to_string(),
+                channel: 0,
+            },
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        let id = id.expect("assignment preserved");
+        registry.revalidate(&ports());
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::DeviceMissing
+        );
+    }
+
+    #[test]
+    fn v33_none_leaves_the_track_unassigned_and_midi_untouched() {
+        let mut registry = AudioConnectionRegistry::new();
+        let dedicated = TrackMidiInputRouting::MidiDevice {
+            device_id: "Keystation".to_string(),
+        };
+        let (id, midi, warnings) = load(
+            ProjectTrackInputRouting::None,
+            dedicated.clone(),
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        assert!(id.is_none());
+        assert_eq!(midi, dedicated);
+        assert!(warnings.is_empty());
+    }
+
+    /// Case C: two explicit MIDI assignments — the dedicated field wins and a
+    /// structured warning is emitted.
+    #[test]
+    fn conflicting_midi_assignments_retain_the_dedicated_field_and_warn() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (_, midi, warnings) = load(
+            ProjectTrackInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string(),
+            },
+            TrackMidiInputRouting::MidiDevice {
+                device_id: "Keystation".to_string(),
+            },
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        assert_eq!(
+            midi,
+            TrackMidiInputRouting::MidiDevice {
+                device_id: "Keystation".to_string()
             }
         );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message().contains("dedicated MIDI input"));
+    }
+
+    /// Case A against the per-track-type default: an untouched MIDI track sits
+    /// at AllInputs, so the legacy device is taken with no warning.
+    #[test]
+    fn an_untouched_midi_track_takes_the_legacy_device() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (_, midi, warnings) = load(
+            ProjectTrackInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string(),
+            },
+            TrackMidiInputRouting::AllInputs,
+            TlTrackType::Midi,
+            &mut registry,
+        );
+        assert_eq!(
+            midi,
+            TrackMidiInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string()
+            }
+        );
+        assert!(warnings.is_empty());
+    }
+
+    // ── v33 save ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn v33_save_round_trips_an_audio_connection() {
+        let mut registry = AudioConnectionRegistry::new();
+        let legacy = ProjectTrackInputRouting::AudioDeviceChannels {
+            device_id: "input-device".to_string(),
+            channels: vec![0, 1],
+        };
+        let (id, _, _) = load(
+            legacy.clone(),
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        registry.revalidate(&ports());
+
+        let encoded = runtime_to_v33_track_input_routing(
+            id.as_ref(),
+            &TrackMidiInputRouting::None,
+            &registry,
+            TlTrackType::Audio,
+        );
+        assert_eq!(encoded.routing, legacy, "the v33 shape round-trips");
+        assert!(encoded.dropped.is_none());
+    }
+
+    /// The lossy boundary: v33 has one field, the runtime has two. The
+    /// track-type-primary route is written and the loss is reported — nothing
+    /// is cleared from the runtime.
+    #[test]
+    fn v33_save_reports_what_it_cannot_represent_on_an_audio_track() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (id, _, _) = load(
+            ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id: "input-device".to_string(),
+                channel: 0,
+            },
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        registry.revalidate(&ports());
+
+        let encoded = runtime_to_v33_track_input_routing(
+            id.as_ref(),
+            &TrackMidiInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string(),
+            },
+            &registry,
+            TlTrackType::Audio,
+        );
+        assert!(
+            matches!(
+                encoded.routing,
+                ProjectTrackInputRouting::AudioDeviceChannel { .. }
+            ),
+            "audio is primary for an audio track"
+        );
+        let dropped = encoded.dropped.expect("the MIDI side must be reported");
+        assert!(dropped.contains("MIDI"));
+    }
+
+    #[test]
+    fn v33_save_keeps_midi_primary_on_a_midi_track() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (id, _, _) = load(
+            ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id: "input-device".to_string(),
+                channel: 0,
+            },
+            TrackMidiInputRouting::None,
+            TlTrackType::Audio,
+            &mut registry,
+        );
+        registry.revalidate(&ports());
+
+        let encoded = runtime_to_v33_track_input_routing(
+            id.as_ref(),
+            &TrackMidiInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string(),
+            },
+            &registry,
+            TlTrackType::Midi,
+        );
+        assert_eq!(
+            encoded.routing,
+            ProjectTrackInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string()
+            }
+        );
+        assert!(encoded
+            .dropped
+            .expect("the audio side must be reported")
+            .contains("audio"));
+    }
+
+    #[test]
+    fn v33_save_of_an_unassigned_track_is_none_without_a_warning() {
+        let registry = AudioConnectionRegistry::new();
+        let encoded = runtime_to_v33_track_input_routing(
+            None,
+            &TrackMidiInputRouting::None,
+            &registry,
+            TlTrackType::Audio,
+        );
+        assert_eq!(encoded.routing, ProjectTrackInputRouting::None);
+        assert!(encoded.dropped.is_none());
     }
 }
 

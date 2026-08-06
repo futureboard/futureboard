@@ -143,6 +143,10 @@ pub struct TimelineState {
     pub transport: TransportState,
     pub tracks: Vec<TrackState>,
     pub master: MasterBusState,
+    /// Project Audio Connections — the single source of truth for logical
+    /// audio input/output buses. Tracks reference entries by stable id; nothing
+    /// outside this registry maps a bus to physical ports.
+    pub audio_connections: crate::audio_connections::AudioConnectionRegistry,
     /// Input-monitoring bus rendered as the pinned Monitor strip. Session
     /// state — see [`MonitorBusState`].
     pub monitor: MonitorBusState,
@@ -238,6 +242,7 @@ impl Default for TimelineState {
                 last_engine_frame: 0,
             },
             tracks: Vec::new(),
+            audio_connections: crate::audio_connections::AudioConnectionRegistry::new(),
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
                 inserts: Vec::new(),

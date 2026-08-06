@@ -1367,3 +1367,132 @@ mod tests {
         assert_eq!(registry.len(), 4);
     }
 }
+
+/// A physical input choice offered by the Inspector / Add Track *during the
+/// migration transition only*.
+///
+/// These surfaces still enumerate hardware ports. Rather than let them write
+/// raw device/channel routing into `TrackState`, they hand one of these to
+/// [`AudioConnectionRegistry::get_or_create_audio_connection_for_physical_input`],
+/// which returns a stable [`AudioConnectionId`] — the only thing a track stores.
+///
+/// Removed once the centralized Audio Connections selector UI lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhysicalInputChoice {
+    /// No Input.
+    None,
+    /// A concrete device + ordered channel list. Order is semantic
+    /// (Left, Right) and is never sorted or normalized.
+    Ports {
+        device_id: String,
+        channels: Vec<u32>,
+    },
+}
+
+impl AudioConnectionRegistry {
+    /// Resolve a raw physical input selection to a logical connection id,
+    /// creating a project-local connection when none matches.
+    ///
+    /// Matching is exact on `(device_id, ordered channel list)` — the same
+    /// reuse key the v33 migration uses — so selecting the same ports twice
+    /// yields the same connection instead of accumulating duplicates.
+    pub fn get_or_create_audio_connection_for_physical_input(
+        &mut self,
+        choice: &PhysicalInputChoice,
+        ports: &AvailablePorts,
+    ) -> Option<AudioConnectionId> {
+        let (device_id, channels) = match choice {
+            PhysicalInputChoice::None => return None,
+            PhysicalInputChoice::Ports {
+                device_id,
+                channels,
+            } if !channels.is_empty() => (device_id, channels),
+            PhysicalInputChoice::Ports { .. } => return None,
+        };
+        let layout = match channels.len() {
+            1 => ChannelLayout::Mono,
+            2 => ChannelLayout::Stereo,
+            n => ChannelLayout::Custom { channels: n },
+        };
+        if let Some(existing) = self.connections.iter().find(|connection| {
+            connection.direction == AudioConnectionDirection::Input
+                && connection.device_id.as_deref() == Some(device_id.as_str())
+                && connection.channel_layout == layout
+                && connection.port_bindings.len() == channels.len()
+                && channels.iter().enumerate().all(|(logical, physical)| {
+                    connection
+                        .binding(logical)
+                        .is_some_and(|binding| binding.physical_port_id.port_index == *physical)
+                })
+        }) {
+            return Some(existing.id.clone());
+        }
+        let name = generated_input_name(channels, ports.device_name(device_id));
+        let mut connection = AudioConnection::new(name, AudioConnectionDirection::Input, layout);
+        connection.device_id = Some(device_id.clone());
+        connection.port_bindings = channels
+            .iter()
+            .enumerate()
+            .map(|(logical_channel, physical)| {
+                let port_name = ports
+                    .ports_for(device_id, AudioConnectionDirection::Input)
+                    .into_iter()
+                    .find(|port| port.port_index == *physical)
+                    .map(|port| port.port_name.clone())
+                    .unwrap_or_else(|| format!("Input {}", physical + 1));
+                AudioPortBinding {
+                    logical_channel,
+                    physical_port_id: AudioPortId::new(device_id, port_name, *physical),
+                }
+            })
+            .collect();
+        let id = self.add(connection);
+        self.revalidate(ports);
+        Some(id)
+    }
+}
+
+/// Shared naming for generated input connections, used by both the v33
+/// migration and the Inspector/Add Track bridge so they cannot drift.
+pub fn generated_input_name(channels: &[u32], device_name: Option<&str>) -> String {
+    let ports: Vec<_> = channels.iter().map(|c| c + 1).collect();
+    let base = match ports.as_slice() {
+        [single] => format!("Input {single}"),
+        [left, right] if *right == left + 1 => format!("Stereo Input {left}-{right}"),
+        many => format!(
+            "Input {}",
+            many.iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join("+")
+        ),
+    };
+    match device_name {
+        Some(name) if !name.is_empty() => format!("{name} {base}"),
+        _ => base,
+    }
+}
+
+/// Build [`AvailablePorts`] from the process-wide device registry cache, so
+/// every caller validates against the same view of the hardware.
+pub fn current_available_ports() -> AvailablePorts {
+    let snapshot = crate::device_registry::audio_snapshot();
+    let mut ports = AvailablePorts::default();
+    for device in &snapshot.inputs {
+        ports = ports.merge(AvailablePorts::for_device(
+            &device.id,
+            &device.name,
+            device.channels,
+            0,
+        ));
+    }
+    for device in &snapshot.outputs {
+        ports = ports.merge(AvailablePorts::for_device(
+            &device.id,
+            &device.name,
+            0,
+            device.channels,
+        ));
+    }
+    ports
+}

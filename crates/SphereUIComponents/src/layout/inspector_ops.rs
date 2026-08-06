@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, Window};
 
+use crate::audio_connections::PhysicalInputChoice;
 use crate::components::edit::EditCommand;
 use crate::components::inspector_debug;
 use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
@@ -18,7 +19,7 @@ use crate::components::plugin_picker::PluginInsertKind;
 use crate::components::timeline::timeline_state::{
     clip_output_local_to_source_sample, vsti_output_bus_strip_indices,
     vsti_output_child_channels_for_bus_layout, AudioClipStretchState, TimelineState,
-    TrackAudioFormat, TrackInputRouting, TrackMidiInputRouting, TrackOutputRouting, WarpMarker,
+    TrackAudioFormat, TrackMidiInputRouting, TrackOutputRouting, WarpMarker,
 };
 use crate::overlay::OverlayAnchor;
 
@@ -42,7 +43,7 @@ fn vsti_output_bus_pair_for_channel(bus_counts: &[u8], channel: u8) -> (u8, u8) 
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
-type InputRoutingCb = Arc<dyn Fn(&(String, TrackInputRouting), &mut Window, &mut App) + 'static>;
+type InputRoutingCb = Arc<dyn Fn(&(String, PhysicalInputChoice), &mut Window, &mut App) + 'static>;
 type OutputRoutingCb = Arc<dyn Fn(&(String, TrackOutputRouting), &mut Window, &mut App) + 'static>;
 type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut App) + 'static>;
 type MidiInputCb = Arc<dyn Fn(&(String, TrackMidiInputRouting), &mut Window, &mut App) + 'static>;
@@ -1307,56 +1308,62 @@ impl StudioLayout {
     fn input_routing_cb(&self, owner: Entity<Self>) -> InputRoutingCb {
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
-        Arc::new(move |(id, input): &(String, TrackInputRouting), _w, cx| {
-            let id = id.clone();
-            let input = input.clone();
-            let old = timeline
-                .read(cx)
-                .state
-                .find_track(&id)
-                .map(|track| track.routing.input.clone());
-            let changed = timeline.update(cx, |t, cx| {
-                let changed = t.state.set_track_input_routing(&id, input.clone());
-                if changed {
-                    cx.notify();
-                }
-                changed
-            });
-            if !changed {
-                return;
-            }
-
-            inspector_debug(&format!(
-                "routing input track={id} old={:?} new={:?}",
-                old, input
-            ));
-            let apply_error = audio_engine.as_ref().and_then(|engine| {
-                timeline
+        Arc::new(
+            move |(id, choice): &(String, PhysicalInputChoice), _w, cx| {
+                let id = id.clone();
+                let choice = choice.clone();
+                let old = timeline
                     .read(cx)
                     .state
                     .find_track(&id)
-                    .and_then(|track| apply_engine_track_input_state(engine, track).err())
-            });
-            if let Some(error) = apply_error {
-                if let Some(old) = old.clone() {
+                    .and_then(|track| track.routing.audio_input_connection_id.clone());
+                // Resolve the physical selection to a logical connection first, so
+                // only an AudioConnectionId is ever written to the track.
+                let changed = timeline.update(cx, |t, cx| {
+                    let ports = crate::audio_connections::current_available_ports();
+                    let connection_id = t
+                        .state
+                        .audio_connections
+                        .get_or_create_audio_connection_for_physical_input(&choice, &ports);
+                    let changed = t.state.set_track_audio_input_connection(&id, connection_id);
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
+                });
+                if !changed {
+                    return;
+                }
+
+                inspector_debug(&format!(
+                    "routing audio input track={id} old={:?} new={:?}",
+                    old, choice
+                ));
+                let connections = timeline.read(cx).state.audio_connections.clone();
+                let apply_error = audio_engine.as_ref().and_then(|engine| {
+                    timeline.read(cx).state.find_track(&id).and_then(|track| {
+                        apply_engine_track_input_state(engine, track, &connections).err()
+                    })
+                });
+                if let Some(error) = apply_error {
                     timeline.update(cx, |t, cx| {
-                        t.state.set_track_input_routing(&id, old);
+                        t.state.set_track_audio_input_connection(&id, old.clone());
                         cx.notify();
                     });
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.audio_bridge.last_error =
+                            Some(format!("Input routing update failed: {error}"));
+                        cx.notify();
+                    });
+                    return;
                 }
-                StudioLayout::defer_update(&owner, cx, move |this, cx| {
-                    this.audio_bridge.last_error =
-                        Some(format!("Input routing update failed: {error}"));
+
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty_view_only();
                     cx.notify();
                 });
-                return;
-            }
-
-            StudioLayout::defer_update(&owner, cx, |this, cx| {
-                this.mark_dirty_view_only();
-                cx.notify();
-            });
-        })
+            },
+        )
     }
 
     fn output_routing_cb(&self, owner: Entity<Self>) -> OutputRoutingCb {
@@ -1396,11 +1403,12 @@ impl StudioLayout {
             move |(id, audio_format): &(String, TrackAudioFormat), _w, cx| {
                 let id = id.clone();
                 let audio_format = *audio_format;
-                let previous = timeline
-                    .read(cx)
-                    .state
-                    .find_track(&id)
-                    .map(|track| (track.routing.audio_format, track.routing.input.clone()));
+                let previous = timeline.read(cx).state.find_track(&id).map(|track| {
+                    (
+                        track.routing.audio_format,
+                        track.routing.audio_input_connection_id.clone(),
+                    )
+                });
                 let changed = timeline.update(cx, |t, cx| {
                     let changed = t.state.set_track_audio_format(&id, audio_format);
                     if changed {
@@ -1417,18 +1425,17 @@ impl StudioLayout {
                     previous.as_ref().map(|(format, _)| *format),
                     audio_format
                 ));
+                let connections = timeline.read(cx).state.audio_connections.clone();
                 let apply_error = audio_engine.as_ref().and_then(|engine| {
-                    timeline
-                        .read(cx)
-                        .state
-                        .find_track(&id)
-                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                    timeline.read(cx).state.find_track(&id).and_then(|track| {
+                        apply_engine_track_input_state(engine, track, &connections).err()
+                    })
                 });
                 if let Some(error) = apply_error {
                     if let Some((old_format, old_input)) = previous {
                         timeline.update(cx, |t, cx| {
                             t.state.set_track_audio_format(&id, old_format);
-                            t.state.set_track_input_routing(&id, old_input);
+                            t.state.set_track_audio_input_connection(&id, old_input);
                             cx.notify();
                         });
                     }
@@ -1555,12 +1562,11 @@ impl StudioLayout {
             ));
 
             if matches!(kind, TrackToggle::Arm | TrackToggle::Input) {
+                let connections = timeline.read(cx).state.audio_connections.clone();
                 let apply_error = audio_engine.as_ref().and_then(|engine| {
-                    timeline
-                        .read(cx)
-                        .state
-                        .find_track(&id)
-                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                    timeline.read(cx).state.find_track(&id).and_then(|track| {
+                        apply_engine_track_input_state(engine, track, &connections).err()
+                    })
                 });
                 if let Some(error) = apply_error {
                     if let Some((armed, input_monitor)) = previous_input_state {
