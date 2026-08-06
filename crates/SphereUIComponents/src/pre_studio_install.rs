@@ -59,7 +59,8 @@ pub fn run_pre_studio_session_install(
     let (engine, stats) = crate::layout::build_and_warm_audio_engine(schema)?;
 
     let mut timeline_state = TimelineState::default();
-    apply_to_timeline(&package.project, &mut timeline_state);
+    // See session_load: warning surfacing is deferred.
+    let _load_warnings = apply_to_timeline(&package.project, &mut timeline_state);
 
     let mut bridge_slot: Option<SharedPluginBridgeRuntime> = None;
     if !plugin_bridge_runtime::bridge_enabled() {

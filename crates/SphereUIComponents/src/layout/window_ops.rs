@@ -250,7 +250,11 @@ pub(crate) struct ExternalWindows {
     /// Video Player — reference/preview monitor for the Video track.
     pub video_player:
         Option<gpui::WindowHandle<crate::components::video_player_window::VideoPlayerWindow>>,
-    /// Audio Routing Matrix ("Audio Connections") window.
+    /// Audio Connections editor — the logical bus registry.
+    pub audio_connections: Option<
+        gpui::WindowHandle<crate::components::audio_connections_window::AudioConnectionsWindow>,
+    >,
+    /// Audio Routing Matrix (track send/return matrix) window.
     pub routing_matrix:
         Option<gpui::WindowHandle<crate::components::routing_matrix_window::RoutingMatrixWindow>>,
     pub chord_display:
@@ -262,6 +266,241 @@ pub(crate) struct ExternalWindows {
 }
 
 impl StudioLayout {
+    /// Build the view-model the Audio Connections window renders from.
+    pub(crate) fn build_audio_connections_snapshot(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::components::audio_connections_window::AudioConnectionsSnapshot {
+        let timeline = self.timeline.read(cx);
+        let registry = timeline.state.audio_connections.clone();
+
+        // Which tracks reference each connection, so a removal can describe
+        // its consequences before it happens. Keyed by connection id string so
+        // more reference kinds (Master/Monitor outputs) can be added later
+        // without changing the shape.
+        let mut references: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for track in &timeline.state.tracks {
+            if let Some(id) = track.routing.audio_input_connection_id.as_ref() {
+                references
+                    .entry(id.as_str().to_string())
+                    .or_default()
+                    .push(track.name.clone());
+            }
+        }
+
+        let device_summary = {
+            let settings = self.settings.read(cx);
+            let input = settings.current.hardware.audio.device_in.trim().to_string();
+            let output = settings
+                .current
+                .hardware
+                .audio
+                .device_out
+                .trim()
+                .to_string();
+            match (input.is_empty(), output.is_empty()) {
+                (true, true) => "No compatible audio device is currently available.".to_string(),
+                (true, false) => format!("Out: {output}"),
+                (false, true) => format!("In: {input}"),
+                (false, false) => format!("In: {input}   Out: {output}"),
+            }
+        };
+
+        crate::components::audio_connections_window::AudioConnectionsSnapshot {
+            registry,
+            device_summary,
+            has_project: true,
+            references,
+        }
+    }
+
+    /// Apply one panel edit to the project registry.
+    ///
+    /// Every mutation goes through the registry's structured API, which reports
+    /// whether runtime routing must be recompiled — a rename does not, a
+    /// mapping change does.
+    pub(crate) fn apply_audio_connection_edit(
+        &mut self,
+        edit: &crate::components::audio_connections_window::ConnectionEdit,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::audio_connections_window::ConnectionEdit;
+
+        let ports = crate::audio_connections::current_available_ports();
+        let device_id = {
+            let settings = self.settings.read(cx);
+            settings.current.hardware.audio.device_in.trim().to_string()
+        };
+
+        let mutation = self.timeline.update(cx, |timeline, cx| {
+            let registry = &mut timeline.state.audio_connections;
+            let mutation = match edit {
+                ConnectionEdit::Add { direction, layout } => {
+                    registry.add_connection(*direction, *layout, &ports).1
+                }
+                ConnectionEdit::SetEnabled { id, enabled } => {
+                    registry.update_enabled(id, *enabled, &ports)
+                }
+                ConnectionEdit::Duplicate { id } => registry.duplicate_connection(id, &ports).1,
+                ConnectionEdit::Remove { id } => {
+                    let affected: Vec<String> = timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            track.routing.audio_input_connection_id.as_ref() == Some(id)
+                        })
+                        .map(|track| track.id.clone())
+                        .collect();
+                    let mutation = timeline
+                        .state
+                        .audio_connections
+                        .remove_connection(id, &affected, &ports);
+                    // Affected tracks become No Input — never re-pointed at
+                    // some other bus. MIDI routing is untouched.
+                    timeline.state.unassign_audio_connection(id);
+                    mutation
+                }
+                ConnectionEdit::ResetDefaults { direction } => {
+                    let removed: Vec<crate::audio_connections::AudioConnectionId> = timeline
+                        .state
+                        .audio_connections
+                        .by_direction(*direction)
+                        .into_iter()
+                        .map(|connection| connection.id.clone())
+                        .collect();
+                    let affected: Vec<String> = timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            track
+                                .routing
+                                .audio_input_connection_id
+                                .as_ref()
+                                .is_some_and(|id| removed.contains(id))
+                        })
+                        .map(|track| track.id.clone())
+                        .collect();
+                    let mutation = timeline
+                        .state
+                        .audio_connections
+                        .reset_defaults_for(*direction, &ports, &device_id, &affected);
+                    for id in &removed {
+                        timeline.state.unassign_audio_connection(id);
+                    }
+                    mutation
+                }
+            };
+            cx.notify();
+            mutation
+        });
+
+        if mutation.needs_routing_rebuild {
+            self.publish_audio_connection_routing(cx);
+        }
+        if mutation.did_change() {
+            self.mark_dirty_view_only();
+        }
+        self.refresh_audio_connections_window(cx);
+    }
+
+    /// Recompile and publish the runtime routing snapshot.
+    ///
+    /// Compilation happens here, on the control thread — never in the audio
+    /// callback, which only ever reads the published snapshot.
+    pub(crate) fn publish_audio_connection_routing(&mut self, cx: &mut Context<Self>) {
+        use crate::audio_routing_compile::{compile_routing, RoutingCompileRequest};
+
+        let ports = crate::audio_connections::current_available_ports();
+        let (registry, track_inputs) = {
+            let timeline = self.timeline.read(cx);
+            (
+                timeline.state.audio_connections.clone(),
+                timeline
+                    .state
+                    .tracks
+                    .iter()
+                    .map(|track| track.routing.audio_input_connection_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let request = RoutingCompileRequest {
+            track_inputs,
+            master_output: None,
+            monitor_output: None,
+        };
+        let publisher = crate::audio_routing_compile::global_routing_publisher();
+        let generation = publisher.next_generation();
+        let result = compile_routing(&registry, &ports, &request, generation);
+        publisher.publish(result.snapshot);
+    }
+
+    /// Push fresh project data into the open window, if any.
+    pub(crate) fn refresh_audio_connections_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.external_windows.audio_connections.clone() else {
+            return;
+        };
+        let snapshot = self.build_audio_connections_snapshot(cx);
+        let _ = handle.update(cx, |window, _w, cx| {
+            window.sync(snapshot, cx);
+        });
+    }
+
+    pub(super) fn open_audio_connections_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        // Focus the existing window rather than opening a second one.
+        if let Some(handle) = self.external_windows.audio_connections.clone() {
+            if handle
+                .update(cx, |_window, w, _cx| w.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.audio_connections = None;
+        }
+
+        let snapshot = self.build_audio_connections_snapshot(cx);
+        let studio = cx.entity().clone();
+        let on_edit: crate::components::audio_connections_window::ConnectionEditCb = {
+            let studio = studio.clone();
+            std::sync::Arc::new(move |edit, _w, cx| {
+                let edit = edit.clone();
+                StudioLayout::defer_update(&studio, cx, move |this, cx| {
+                    this.apply_audio_connection_edit(&edit, cx);
+                });
+            })
+        };
+        let on_close: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static> = {
+            let studio = studio.clone();
+            std::sync::Arc::new(move |_w, cx| {
+                StudioLayout::defer_update(&studio, cx, |this, _cx| {
+                    this.external_windows.audio_connections = None;
+                });
+            })
+        };
+
+        match crate::components::audio_connections_window::open_audio_connections_window(
+            owner_bounds,
+            snapshot,
+            on_edit,
+            on_close,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.external_windows.audio_connections = Some(handle);
+            }
+            Err(error) => {
+                self.audio_bridge.last_error =
+                    Some(format!("Audio Connections window failed to open: {error}"));
+            }
+        }
+    }
+
     pub(crate) fn open_song_text_external_window(
         &mut self,
         kind: crate::components::SongTextPanelKind,

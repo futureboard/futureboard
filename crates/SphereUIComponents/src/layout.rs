@@ -2026,7 +2026,12 @@ impl StudioLayout {
             "panel:mixer-float" | "floatingwindow:mixer" => {
                 self.open_mixer_external_window(owner_bounds, cx);
             }
-            "floatingwindow:routing-matrix" | "window:audio-connections" => {
+            // The logical bus editor. `window:audio-connections` previously
+            // aliased the send/return matrix; the matrix keeps its own id.
+            "window:audio-connections" | "audio:connections" => {
+                self.open_audio_connections_window(owner_bounds, cx);
+            }
+            "floatingwindow:routing-matrix" => {
                 self.open_routing_matrix_window(owner_bounds, cx);
             }
             "window:video-player" | "floatingwindow:video-player" => {

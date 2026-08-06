@@ -1496,3 +1496,822 @@ pub fn current_available_ports() -> AvailablePorts {
     }
     ports
 }
+
+// ── Structured mutation API ─────────────────────────────────────────────────
+//
+// Panel code never reaches into the registry's internals. Every edit goes
+// through one of these methods and reports what changed, so the caller knows
+// whether to republish runtime routing and which tracks were touched.
+
+/// Outcome of one registry edit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnectionMutation {
+    /// Connections whose stored data changed.
+    pub changed: Vec<AudioConnectionId>,
+    /// Tracks whose input assignment was cleared as a consequence.
+    pub affected_track_ids: Vec<String>,
+    /// Human-readable notes for the panel's warning area.
+    pub warnings: Vec<String>,
+    /// Whether the runtime routing snapshot must be recompiled. A name-only
+    /// edit leaves this false — routing identity is the id, not the name.
+    pub needs_routing_rebuild: bool,
+}
+
+impl ConnectionMutation {
+    fn nothing() -> Self {
+        Self::default()
+    }
+
+    fn routing(id: AudioConnectionId) -> Self {
+        Self {
+            changed: vec![id],
+            needs_routing_rebuild: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn did_change(&self) -> bool {
+        !self.changed.is_empty() || !self.affected_track_ids.is_empty()
+    }
+}
+
+/// Channel layouts the panel offers. Surround is deliberately absent from the
+/// UI while [`ChannelLayout::Custom`] stays in the model.
+pub const PANEL_LAYOUTS: [ChannelLayout; 2] = [ChannelLayout::Mono, ChannelLayout::Stereo];
+
+impl AudioConnectionRegistry {
+    /// Create a bus with a unique default name and no port assignment.
+    ///
+    /// A new bus is never auto-bound to hardware: it starts `Disconnected` so
+    /// the user chooses its ports deliberately, and a new output can never
+    /// silently collide with an existing one.
+    pub fn add_connection(
+        &mut self,
+        direction: AudioConnectionDirection,
+        layout: ChannelLayout,
+        ports: &AvailablePorts,
+    ) -> (AudioConnectionId, ConnectionMutation) {
+        let base = match (direction, layout) {
+            (AudioConnectionDirection::Input, ChannelLayout::Mono) => "Mono Input",
+            (AudioConnectionDirection::Input, _) => "Stereo Input",
+            (AudioConnectionDirection::Output, ChannelLayout::Mono) => "Mono Output",
+            (AudioConnectionDirection::Output, _) => "Stereo Output",
+        };
+        let id = self.add(AudioConnection::new(base, direction, layout));
+        self.revalidate(ports);
+        (id.clone(), ConnectionMutation::routing(id))
+    }
+
+    /// Rename a bus. Whitespace is trimmed; an empty name is rejected so a row
+    /// can never become unlabelled.
+    ///
+    /// Never sets `needs_routing_rebuild`: routing identity is the id.
+    pub fn update_name(&mut self, id: &AudioConnectionId, name: &str) -> ConnectionMutation {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return ConnectionMutation {
+                warnings: vec!["A connection name cannot be empty.".to_string()],
+                ..ConnectionMutation::nothing()
+            };
+        }
+        if self.get(id).is_none() {
+            return ConnectionMutation::nothing();
+        }
+        if self.get(id).map(|c| c.name.as_str()) == Some(trimmed) {
+            return ConnectionMutation::nothing();
+        }
+        self.rename(id, trimmed);
+        ConnectionMutation {
+            changed: vec![id.clone()],
+            needs_routing_rebuild: false,
+            ..ConnectionMutation::nothing()
+        }
+    }
+
+    /// Change the channel layout.
+    ///
+    /// Mono to Stereo keeps the existing mono binding as Left and leaves Right
+    /// unassigned; Stereo to Mono keeps Left and drops Right. Neither direction
+    /// invents a port.
+    pub fn update_layout(
+        &mut self,
+        id: &AudioConnectionId,
+        layout: ChannelLayout,
+        ports: &AvailablePorts,
+    ) -> ConnectionMutation {
+        let Some(connection) = self.get(id) else {
+            return ConnectionMutation::nothing();
+        };
+        if connection.channel_layout == layout {
+            return ConnectionMutation::nothing();
+        }
+        let dropped_right = connection.channel_layout.channel_count() > layout.channel_count()
+            && connection.binding(1).is_some();
+        self.set_channel_layout(id, layout);
+        self.revalidate(ports);
+        let mut mutation = ConnectionMutation::routing(id.clone());
+        if dropped_right {
+            mutation
+                .warnings
+                .push("The Right channel assignment was removed.".to_string());
+        }
+        mutation
+    }
+
+    /// Point a bus at a different device.
+    ///
+    /// Bindings the new device cannot satisfy are dropped rather than
+    /// reinterpreted — a numeric index means nothing across unrelated devices.
+    pub fn update_device(
+        &mut self,
+        id: &AudioConnectionId,
+        device_id: Option<&str>,
+        ports: &AvailablePorts,
+    ) -> ConnectionMutation {
+        let Some(connection) = self.get(id) else {
+            return ConnectionMutation::nothing();
+        };
+        if connection.device_id.as_deref() == device_id {
+            return ConnectionMutation::nothing();
+        }
+        match device_id {
+            Some(device_id) => {
+                self.set_device(id, device_id, ports);
+            }
+            None => {
+                if let Some(connection) = self.get_mut(id) {
+                    connection.device_id = None;
+                    connection.port_bindings.clear();
+                }
+            }
+        }
+        self.revalidate(ports);
+        ConnectionMutation::routing(id.clone())
+    }
+
+    /// Assign one logical channel to a physical port, or clear it.
+    pub fn update_port_binding(
+        &mut self,
+        id: &AudioConnectionId,
+        logical_channel: usize,
+        port: Option<AudioPortId>,
+        ports: &AvailablePorts,
+    ) -> ConnectionMutation {
+        let Some(connection) = self.get(id) else {
+            return ConnectionMutation::nothing();
+        };
+        let direction = connection.direction;
+        let changed = match port {
+            Some(port) => self.bind_port(id, logical_channel, port, direction),
+            None => self.clear_binding(id, logical_channel),
+        };
+        if !changed {
+            return ConnectionMutation::nothing();
+        }
+        self.revalidate(ports);
+        let mut mutation = ConnectionMutation::routing(id.clone());
+        if self.get(id).map(|c| c.status) == Some(AudioConnectionStatus::Conflict) {
+            mutation
+                .warnings
+                .push("This mapping conflicts with another assignment.".to_string());
+        }
+        mutation
+    }
+
+    /// Enable or disable a bus. Bindings are preserved either way — a disabled
+    /// bus keeps every mapping and simply compiles to silence.
+    pub fn update_enabled(
+        &mut self,
+        id: &AudioConnectionId,
+        enabled: bool,
+        ports: &AvailablePorts,
+    ) -> ConnectionMutation {
+        if self.get(id).map(|c| c.enabled) == Some(enabled) {
+            return ConnectionMutation::nothing();
+        }
+        if !self.set_enabled(id, enabled) {
+            return ConnectionMutation::nothing();
+        }
+        self.revalidate(ports);
+        ConnectionMutation::routing(id.clone())
+    }
+
+    /// Copy a bus, including its ordered bindings, under a new id and name.
+    ///
+    /// A duplicated output that now collides keeps its mapping and reports
+    /// `Conflict` rather than being silently moved.
+    pub fn duplicate_connection(
+        &mut self,
+        id: &AudioConnectionId,
+        ports: &AvailablePorts,
+    ) -> (Option<AudioConnectionId>, ConnectionMutation) {
+        let Some(new_id) = self.duplicate(id) else {
+            return (None, ConnectionMutation::nothing());
+        };
+        self.revalidate(ports);
+        let mut mutation = ConnectionMutation::routing(new_id.clone());
+        if self.get(&new_id).map(|c| c.status) == Some(AudioConnectionStatus::Conflict) {
+            mutation.warnings.push(
+                "The duplicate writes the same hardware ports as another output.".to_string(),
+            );
+        }
+        (Some(new_id), mutation)
+    }
+
+    /// Remove a bus. `referencing_tracks` is what the caller found via
+    /// [`AudioConnectionRegistry::device_choices`]-adjacent lookup on the
+    /// project; those ids are reported back so the caller can unassign them.
+    /// This method never touches tracks itself.
+    pub fn remove_connection(
+        &mut self,
+        id: &AudioConnectionId,
+        referencing_tracks: &[String],
+        ports: &AvailablePorts,
+    ) -> ConnectionMutation {
+        if self.remove(id).is_none() {
+            return ConnectionMutation::nothing();
+        }
+        self.revalidate(ports);
+        ConnectionMutation {
+            changed: vec![id.clone()],
+            affected_track_ids: referencing_tracks.to_vec(),
+            warnings: Vec::new(),
+            needs_routing_rebuild: true,
+        }
+    }
+
+    /// Replace one direction's buses with the defaults derivable from
+    /// `device_id`. The other direction is untouched, so resetting Inputs
+    /// cannot disturb Outputs.
+    pub fn reset_defaults_for(
+        &mut self,
+        direction: AudioConnectionDirection,
+        ports: &AvailablePorts,
+        device_id: &str,
+        referencing_tracks: &[String],
+    ) -> ConnectionMutation {
+        let removed: Vec<AudioConnectionId> = self
+            .by_direction(direction)
+            .into_iter()
+            .map(|connection| connection.id.clone())
+            .collect();
+        for id in &removed {
+            self.remove(id);
+        }
+        let template = Self::default_template(ports, device_id);
+        let added: Vec<AudioConnection> = template
+            .all()
+            .iter()
+            .filter(|connection| connection.direction == direction)
+            .cloned()
+            .collect();
+        let mut changed = removed;
+        for connection in added {
+            changed.push(self.add(connection));
+        }
+        self.revalidate(ports);
+        ConnectionMutation {
+            changed,
+            affected_track_ids: referencing_tracks.to_vec(),
+            warnings: Vec::new(),
+            needs_routing_rebuild: true,
+        }
+    }
+
+    /// Recompute every status. Exposed so a device-inventory change can refresh
+    /// the panel without going through an edit.
+    pub fn validate_all(&mut self, ports: &AvailablePorts) -> ConnectionMutation {
+        let before: Vec<_> = self
+            .all()
+            .iter()
+            .map(|c| (c.id.clone(), c.status))
+            .collect();
+        self.revalidate(ports);
+        let changed: Vec<_> = self
+            .all()
+            .iter()
+            .filter(|c| {
+                before
+                    .iter()
+                    .find(|(id, _)| *id == c.id)
+                    .map(|(_, status)| *status != c.status)
+                    .unwrap_or(true)
+            })
+            .map(|c| c.id.clone())
+            .collect();
+        let needs_routing_rebuild = !changed.is_empty();
+        ConnectionMutation {
+            changed,
+            needs_routing_rebuild,
+            ..ConnectionMutation::nothing()
+        }
+    }
+
+    /// Devices the panel may offer for this bus, as `(device_id, label,
+    /// available)`. The currently assigned device is included even when it is
+    /// missing, so a disconnected assignment stays visible in the dropdown
+    /// rather than silently vanishing.
+    pub fn device_choices(
+        &self,
+        id: &AudioConnectionId,
+        ports: &AvailablePorts,
+    ) -> Vec<(String, String, bool)> {
+        let direction = match self.get(id) {
+            Some(connection) => connection.direction,
+            None => return Vec::new(),
+        };
+        let mut seen: Vec<(String, String, bool)> = Vec::new();
+        for port in &ports.ports {
+            if port.direction != direction {
+                continue;
+            }
+            if !seen
+                .iter()
+                .any(|(existing, _, _)| *existing == port.device_id)
+            {
+                seen.push((port.device_id.clone(), port.device_name.clone(), true));
+            }
+        }
+        if let Some(assigned) = self.get(id).and_then(|c| c.device_id.clone()) {
+            if !seen.iter().any(|(existing, _, _)| *existing == assigned) {
+                let label = format!("{assigned} (unavailable)");
+                seen.push((assigned, label, false));
+            }
+        }
+        seen
+    }
+
+    /// Ports the panel may offer for one logical channel of this bus, as
+    /// `(port_id, label, available)`. Includes the currently bound port even
+    /// when it is missing.
+    pub fn port_choices(
+        &self,
+        id: &AudioConnectionId,
+        logical_channel: usize,
+        ports: &AvailablePorts,
+    ) -> Vec<(AudioPortId, String, bool)> {
+        let Some(connection) = self.get(id) else {
+            return Vec::new();
+        };
+        let Some(device_id) = connection.device_id.as_deref() else {
+            return Vec::new();
+        };
+        let mut choices: Vec<(AudioPortId, String, bool)> = ports
+            .ports_for(device_id, connection.direction)
+            .into_iter()
+            .map(|port| {
+                (
+                    AudioPortId::new(&port.device_id, &port.port_name, port.port_index),
+                    port.port_name.clone(),
+                    true,
+                )
+            })
+            .collect();
+        if let Some(bound) = connection.binding(logical_channel) {
+            let port = &bound.physical_port_id;
+            if !choices.iter().any(|(existing, _, _)| existing == port) {
+                let label = format!("{} (unavailable)", port.port_name);
+                choices.push((port.clone(), label, false));
+            }
+        }
+        choices
+    }
+}
+
+#[cfg(test)]
+mod mutation_api_tests {
+    use super::*;
+
+    fn ports() -> AvailablePorts {
+        AvailablePorts::for_device("dev-1", "Interface", 4, 4)
+    }
+
+    fn registry() -> AudioConnectionRegistry {
+        AudioConnectionRegistry::default_template(&ports(), "dev-1")
+    }
+
+    fn input_id(registry: &AudioConnectionRegistry, name: &str) -> AudioConnectionId {
+        registry
+            .by_direction(AudioConnectionDirection::Input)
+            .into_iter()
+            .find(|c| c.name == name)
+            .expect("connection")
+            .id
+            .clone()
+    }
+
+    // ── Add ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn adding_buses_mints_unique_ids_and_disambiguated_names() {
+        let mut registry = AudioConnectionRegistry::new();
+        let (a, _) = registry.add_connection(
+            AudioConnectionDirection::Input,
+            ChannelLayout::Mono,
+            &ports(),
+        );
+        let (b, _) = registry.add_connection(
+            AudioConnectionDirection::Input,
+            ChannelLayout::Mono,
+            &ports(),
+        );
+        assert_ne!(a, b);
+        assert_eq!(registry.name_of(&a), Some("Mono Input"));
+        assert_eq!(registry.name_of(&b), Some("Mono Input 2"));
+    }
+
+    #[test]
+    fn each_direction_and_layout_can_be_added() {
+        let mut registry = AudioConnectionRegistry::new();
+        for (direction, layout, expected) in [
+            (
+                AudioConnectionDirection::Input,
+                ChannelLayout::Mono,
+                "Mono Input",
+            ),
+            (
+                AudioConnectionDirection::Input,
+                ChannelLayout::Stereo,
+                "Stereo Input",
+            ),
+            (
+                AudioConnectionDirection::Output,
+                ChannelLayout::Mono,
+                "Mono Output",
+            ),
+            (
+                AudioConnectionDirection::Output,
+                ChannelLayout::Stereo,
+                "Stereo Output",
+            ),
+        ] {
+            let (id, mutation) = registry.add_connection(direction, layout, &ports());
+            let connection = registry.get(&id).unwrap();
+            assert_eq!(connection.name, expected);
+            assert_eq!(connection.direction, direction);
+            assert_eq!(connection.channel_layout, layout);
+            assert!(connection.enabled);
+            assert!(mutation.needs_routing_rebuild);
+        }
+    }
+
+    /// A new bus must not grab hardware on its own — that is how two outputs
+    /// would silently end up on one port.
+    #[test]
+    fn a_new_bus_starts_unassigned_and_disconnected() {
+        let mut registry = registry();
+        let (id, _) = registry.add_connection(
+            AudioConnectionDirection::Output,
+            ChannelLayout::Stereo,
+            &ports(),
+        );
+        let connection = registry.get(&id).unwrap();
+        assert!(connection.device_id.is_none());
+        assert!(connection.port_bindings.is_empty());
+        assert_eq!(connection.status, AudioConnectionStatus::Disconnected);
+    }
+
+    // ── Rename ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn renaming_trims_and_never_rebuilds_routing() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+        let mutation = registry.update_name(&id, "   Microphone  ");
+        assert_eq!(registry.name_of(&id), Some("Microphone"));
+        assert!(!mutation.needs_routing_rebuild);
+        assert_eq!(mutation.changed, vec![id]);
+    }
+
+    #[test]
+    fn an_empty_rename_is_rejected_with_a_warning() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+        let mutation = registry.update_name(&id, "   ");
+        assert_eq!(registry.name_of(&id), Some("Mono Input 1"));
+        assert!(!mutation.did_change());
+        assert_eq!(mutation.warnings.len(), 1);
+    }
+
+    // ── Layout ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mono_to_stereo_keeps_left_and_leaves_right_unassigned() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+        let mutation = registry.update_layout(&id, ChannelLayout::Stereo, &ports());
+
+        let connection = registry.get(&id).unwrap();
+        assert_eq!(
+            connection.binding(0).unwrap().physical_port_id.port_index,
+            0
+        );
+        assert!(
+            connection.binding(1).is_none(),
+            "Right must not be guessed from an adjacent channel"
+        );
+        assert_eq!(connection.status, AudioConnectionStatus::PortMissing);
+        assert!(mutation.needs_routing_rebuild);
+    }
+
+    #[test]
+    fn stereo_to_mono_keeps_left_drops_right_and_says_so() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        let mutation = registry.update_layout(&id, ChannelLayout::Mono, &ports());
+
+        let connection = registry.get(&id).unwrap();
+        assert_eq!(
+            connection.binding(0).unwrap().physical_port_id.port_index,
+            0
+        );
+        assert!(connection.binding(1).is_none());
+        assert_eq!(connection.status, AudioConnectionStatus::Active);
+        assert_eq!(mutation.warnings.len(), 1);
+    }
+
+    // ── Device / ports ──────────────────────────────────────────────────────
+
+    #[test]
+    fn changing_device_drops_bindings_the_new_device_cannot_satisfy() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        let small = AvailablePorts::for_device("dev-2", "Tiny", 1, 2);
+
+        let mutation = registry.update_device(&id, Some("dev-2"), &small);
+        let connection = registry.get(&id).unwrap();
+        assert_eq!(connection.device_id.as_deref(), Some("dev-2"));
+        assert_eq!(connection.port_bindings.len(), 1);
+        assert_eq!(connection.status, AudioConnectionStatus::PortMissing);
+        assert!(mutation.needs_routing_rebuild);
+    }
+
+    #[test]
+    fn clearing_the_device_clears_the_bindings() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        registry.update_device(&id, None, &ports());
+        let connection = registry.get(&id).unwrap();
+        assert!(connection.device_id.is_none());
+        assert!(connection.port_bindings.is_empty());
+        assert_eq!(connection.status, AudioConnectionStatus::Disconnected);
+    }
+
+    #[test]
+    fn stereo_left_and_right_keep_their_order_and_stay_distinct() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        registry.update_port_binding(
+            &id,
+            0,
+            Some(AudioPortId::new("dev-1", "Input 3", 2)),
+            &ports(),
+        );
+        registry.update_port_binding(
+            &id,
+            1,
+            Some(AudioPortId::new("dev-1", "Input 2", 1)),
+            &ports(),
+        );
+        assert_eq!(registry.resolved_ports(&id, &ports()), Some(vec![2, 1]));
+    }
+
+    #[test]
+    fn binding_left_and_right_to_one_port_reports_a_conflict() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        let mutation = registry.update_port_binding(
+            &id,
+            1,
+            Some(AudioPortId::new("dev-1", "Input 1", 0)),
+            &ports(),
+        );
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::Conflict
+        );
+        assert_eq!(mutation.warnings.len(), 1);
+    }
+
+    #[test]
+    fn port_and_device_choices_keep_a_missing_assignment_visible() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+        registry.revalidate(&AvailablePorts::default());
+
+        let devices = registry.device_choices(&id, &AvailablePorts::default());
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].0, "dev-1");
+        assert!(!devices[0].2, "the missing device is flagged unavailable");
+
+        let choices = registry.port_choices(&id, 0, &AvailablePorts::default());
+        assert_eq!(choices.len(), 1);
+        assert!(!choices[0].2);
+        assert!(choices[0].1.contains("unavailable"));
+    }
+
+    // ── Enable / disable ────────────────────────────────────────────────────
+
+    #[test]
+    fn disabling_preserves_mappings_and_reenabling_restores_validation() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        let before = registry.get(&id).unwrap().port_bindings.clone();
+
+        let mutation = registry.update_enabled(&id, false, &ports());
+        assert!(mutation.needs_routing_rebuild);
+        let connection = registry.get(&id).unwrap();
+        assert_eq!(connection.status, AudioConnectionStatus::Disabled);
+        assert_eq!(connection.port_bindings, before, "mappings are kept");
+        assert_eq!(
+            registry.resolved_ports(&id, &ports()),
+            None,
+            "a disabled bus compiles to silence"
+        );
+
+        registry.update_enabled(&id, true, &ports());
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::Active
+        );
+        assert_eq!(registry.resolved_ports(&id, &ports()), Some(vec![0, 1]));
+    }
+
+    // ── Duplicate ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn duplicating_copies_mappings_under_a_new_id_and_name() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Stereo Input 1-2");
+        let (copy, _) = registry.duplicate_connection(&id, &ports());
+        let copy = copy.expect("duplicate");
+
+        assert_ne!(copy, id);
+        let original = registry.get(&id).unwrap().clone();
+        let duplicate = registry.get(&copy).unwrap();
+        assert_eq!(duplicate.port_bindings, original.port_bindings);
+        assert_eq!(duplicate.direction, original.direction);
+        assert_eq!(duplicate.enabled, original.enabled);
+        assert_ne!(duplicate.name, original.name);
+    }
+
+    /// A duplicated output collides by definition — it must say so rather than
+    /// being quietly moved to free ports.
+    #[test]
+    fn a_duplicated_output_reports_the_conflict_and_keeps_its_mapping() {
+        let mut registry = registry();
+        let id = registry.by_direction(AudioConnectionDirection::Output)[0]
+            .id
+            .clone();
+        let (copy, mutation) = registry.duplicate_connection(&id, &ports());
+        let copy = copy.unwrap();
+
+        assert_eq!(
+            registry.get(&copy).unwrap().status,
+            AudioConnectionStatus::Conflict
+        );
+        assert_eq!(registry.resolved_ports(&copy, &ports()), None);
+        assert_eq!(mutation.warnings.len(), 1);
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::Active,
+            "the original is untouched"
+        );
+    }
+
+    // ── Remove ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn removing_reports_the_referencing_tracks_it_was_given() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+        let mutation = registry.remove_connection(
+            &id,
+            &["track-1".to_string(), "track-2".to_string()],
+            &ports(),
+        );
+        assert!(registry.get(&id).is_none());
+        assert_eq!(mutation.affected_track_ids, vec!["track-1", "track-2"]);
+        assert!(mutation.needs_routing_rebuild);
+    }
+
+    #[test]
+    fn removing_an_unknown_connection_changes_nothing() {
+        let mut registry = registry();
+        let before = registry.len();
+        let mutation =
+            registry.remove_connection(&AudioConnectionId::from_stored("ghost"), &[], &ports());
+        assert_eq!(registry.len(), before);
+        assert!(!mutation.did_change());
+        assert!(!mutation.needs_routing_rebuild);
+    }
+
+    // ── Reset ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resetting_one_direction_leaves_the_other_untouched() {
+        let mut registry = registry();
+        let output_before = registry.by_direction(AudioConnectionDirection::Output)[0]
+            .id
+            .clone();
+        registry.add_connection(
+            AudioConnectionDirection::Input,
+            ChannelLayout::Mono,
+            &ports(),
+        );
+
+        let mutation = registry.reset_defaults_for(
+            AudioConnectionDirection::Input,
+            &ports(),
+            "dev-1",
+            &["track-1".to_string()],
+        );
+
+        let inputs: Vec<_> = registry
+            .by_direction(AudioConnectionDirection::Input)
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        assert_eq!(
+            inputs,
+            vec!["Mono Input 1", "Mono Input 2", "Stereo Input 1-2"]
+        );
+        assert!(
+            registry.get(&output_before).is_some(),
+            "resetting Inputs must not disturb Outputs"
+        );
+        assert_eq!(mutation.affected_track_ids, vec!["track-1"]);
+        assert!(mutation.needs_routing_rebuild);
+    }
+
+    #[test]
+    fn resetting_only_creates_rows_for_ports_that_exist() {
+        let tiny = AvailablePorts::for_device("dev-1", "Tiny", 1, 2);
+        let mut registry = registry();
+        registry.reset_defaults_for(AudioConnectionDirection::Input, &tiny, "dev-1", &[]);
+        let inputs = registry.by_direction(AudioConnectionDirection::Input);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "Mono Input 1");
+    }
+
+    #[test]
+    fn resetting_with_no_device_produces_no_rows_and_does_not_panic() {
+        let mut registry = registry();
+        registry.reset_defaults_for(
+            AudioConnectionDirection::Input,
+            &AvailablePorts::default(),
+            "nothing",
+            &[],
+        );
+        assert!(registry
+            .by_direction(AudioConnectionDirection::Input)
+            .is_empty());
+    }
+
+    // ── Device inventory changes ────────────────────────────────────────────
+
+    #[test]
+    fn validate_all_reports_status_changes_when_a_device_disappears_and_returns() {
+        let mut registry = registry();
+        let id = input_id(&registry, "Mono Input 1");
+
+        let lost = registry.validate_all(&AvailablePorts::default());
+        assert!(lost.needs_routing_rebuild);
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::DeviceMissing
+        );
+
+        let restored = registry.validate_all(&ports());
+        assert!(restored.needs_routing_rebuild);
+        assert_eq!(
+            registry.get(&id).unwrap().status,
+            AudioConnectionStatus::Active
+        );
+        assert_eq!(registry.resolved_ports(&id, &ports()), Some(vec![0]));
+
+        // A second pass with no change reports nothing to rebuild.
+        let idle = registry.validate_all(&ports());
+        assert!(!idle.needs_routing_rebuild);
+    }
+
+    #[test]
+    fn mutations_on_an_unknown_id_are_inert() {
+        let mut registry = registry();
+        let ghost = AudioConnectionId::from_stored("ghost");
+        assert!(!registry.update_name(&ghost, "x").did_change());
+        assert!(!registry
+            .update_layout(&ghost, ChannelLayout::Mono, &ports())
+            .did_change());
+        assert!(!registry
+            .update_device(&ghost, Some("dev-1"), &ports())
+            .did_change());
+        assert!(!registry
+            .update_port_binding(&ghost, 0, None, &ports())
+            .did_change());
+        assert!(!registry
+            .update_enabled(&ghost, false, &ports())
+            .did_change());
+        assert!(registry.duplicate_connection(&ghost, &ports()).0.is_none());
+    }
+}

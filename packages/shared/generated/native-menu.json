@@ -942,13 +942,13 @@
           "label": "Audio Connections...",
           "icon": "route",
           "shortcut": null,
-          "command": "floatingwindow:routing-matrix",
+          "command": "window:audio-connections",
           "role": null,
           "enabled": true,
           "visible": true,
           "checked": false,
           "danger": false,
-          "description": "Open the audio routing matrix in a window",
+          "description": "Edit the project's logical audio input and output buses",
           "children": []
         }
       ]
