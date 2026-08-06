@@ -2,6 +2,33 @@ use super::*;
 
 pub use sphere_soundfont_player::{SoundfontEnvelope, SoundfontRenderQuality};
 
+/// Per-channel Listen state. Mirrors the engine's `ListenMode`; the engine
+/// stays authoritative for where each tap sits relative to the fader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListenMode {
+    #[default]
+    Off,
+    /// Pre-Fader Listen — level independent of the channel fader.
+    Pfl,
+    /// After-Fader Listen — follows the channel fader.
+    Afl,
+}
+
+impl ListenMode {
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Engine-side equivalent, so the UI never re-derives the mapping.
+    pub fn to_engine(self) -> DirectAudio::monitor::ListenMode {
+        match self {
+            Self::Off => DirectAudio::monitor::ListenMode::Off,
+            Self::Pfl => DirectAudio::monitor::ListenMode::Pfl,
+            Self::Afl => DirectAudio::monitor::ListenMode::Afl,
+        }
+    }
+}
+
 /// One complete set of built-in Soundfont Player settings for a track, as
 /// published by the player window. Grouped rather than passed positionally so
 /// adding a control to the panel cannot silently transpose two arguments at the
@@ -134,6 +161,12 @@ pub struct TrackState {
     pub armed: bool,
     /// Input monitoring mode (Off / Auto / Input).
     pub input_monitor: InputMonitorMode,
+    /// Pre/After-Fader Listen state, routed to the Control Room's listen bus.
+    ///
+    /// Monitoring only: engaging Listen never changes what this channel
+    /// contributes to the master mix, so it cannot affect an export or a
+    /// recording. Session state — not persisted with the project.
+    pub listen: ListenMode,
     /// Latest peak meter levels in `0.0..=1.0`. Currently a static placeholder
     /// per track; will be driven by the audio engine when that lands.
     pub meter_level_l: f32,
@@ -397,6 +430,7 @@ impl TimelineState {
         let id = self.next_track_id();
         let track_type = options.track_type;
         self.tracks.push(TrackState {
+            listen: ListenMode::Off,
             id: id.clone(),
             name: options.name,
             track_type,

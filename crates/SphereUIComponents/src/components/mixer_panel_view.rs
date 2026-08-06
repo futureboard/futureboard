@@ -61,7 +61,7 @@ impl MixerPanelView {
                 );
             let hidden = &timeline.state.mixer_tree.hidden_channel_ids;
             (
-                mixer_master_meter_signature(&timeline.state.master),
+                mixer_master_meter_signature(&timeline.state.master, &timeline.state.monitor),
                 channel_meter_signature(&timeline.state.tracks),
                 mixer_render_item_count(&timeline.state.tracks, &collapsed, hidden),
             )

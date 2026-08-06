@@ -6,6 +6,7 @@ impl TimelineState {
     /// app entry point; never used by the real runtime default.
     pub fn demo_project() -> Self {
         let track1 = TrackState {
+            listen: ListenMode::Off,
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
             track_type: TrackType::Audio,
@@ -88,6 +89,7 @@ impl TimelineState {
         };
 
         let track2 = TrackState {
+            listen: ListenMode::Off,
             id: "track-2".to_string(),
             name: "Audio 2".to_string(),
             track_type: TrackType::Audio,
@@ -141,6 +143,7 @@ impl TimelineState {
         };
 
         let track3 = TrackState {
+            listen: ListenMode::Off,
             id: "track-3".to_string(),
             name: "Synth 3".to_string(),
             track_type: TrackType::Midi,
@@ -224,6 +227,7 @@ impl TimelineState {
                 viewport_width: 0.0,
                 viewport_height: 500.0,
                 track_area_height: 500.0,
+                panel_origin_x: 0.0,
             },
             transport: TransportState {
                 playing: false,
@@ -244,6 +248,23 @@ impl TimelineState {
                 meter_peak_hold_l: 0.0,
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
+            },
+            monitor: MonitorBusState {
+                source: MonitorSourceKind::MasterBus,
+                source_display: "Master Bus".to_string(),
+                output_name: "Out 1-2".to_string(),
+                output_left_channel: 0,
+                available_outputs: vec![("Out 1-2".to_string(), 0)],
+                volume: volume::db_to_norm(0.0),
+                mute: false,
+                dim: false,
+                mono: false,
+                meter_level_l: 0.0,
+                meter_level_r: 0.0,
+                meter_peak_hold_l: 0.0,
+                meter_peak_hold_r: 0.0,
+                meter_clip: false,
+                listen_active: false,
             },
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),

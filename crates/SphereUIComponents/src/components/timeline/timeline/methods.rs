@@ -33,9 +33,12 @@ impl Timeline {
     }
 
     pub(super) fn arrangement_coordinate_context(&self) -> ArrangementCoordinateContext {
-        let panel_origin_px = gpui::point(px(SIDEBAR_WIDTH), px(APP_CHROME_HEIGHT));
+        let panel_origin_px = gpui::point(
+            px(self.state.viewport.panel_origin_x),
+            px(APP_CHROME_HEIGHT),
+        );
         let viewport_origin_px = gpui::point(
-            px(SIDEBAR_WIDTH + HEADER_WIDTH),
+            px(self.state.lane_origin_x()),
             px(APP_CHROME_HEIGHT + self.state.arrangement_content_top()),
         );
         ArrangementCoordinateContext {
@@ -377,8 +380,7 @@ impl Timeline {
     }
 
     pub(super) fn beat_from_window_x(&self, x: f32) -> f32 {
-        let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
-        self.state.x_to_beats(click_x)
+        self.state.beats_from_window_x(x)
     }
 
     pub(super) fn snap_beat(&self, beat: f32) -> f32 {
@@ -394,6 +396,11 @@ impl Timeline {
     /// by `StudioLayout` each render — cheap, no notify.
     pub fn set_chrome_metrics(&mut self, metrics: TimelineChromeMetrics) {
         self.chrome_metrics = metrics;
+        // The browser panel is collapsible, so the timeline's own window-space
+        // origin moves with it. Publishing it into the viewport keeps pointer
+        // gestures (clip move/resize, ruler, lane tools) on the same transform
+        // used to draw, instead of assuming the panel is always open.
+        self.state.viewport.panel_origin_x = metrics.browser_width;
     }
 
     /// Push the current project's root folder (or `None` when Untitled). Called
@@ -1850,7 +1857,7 @@ impl Timeline {
             Some(p) if !force_new_track => {
                 let x: f32 = p.x.into();
                 let y: f32 = p.y.into();
-                let lane_x = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+                let lane_x = self.state.lane_x_from_window_x(x).max(0.0);
                 let lane_y =
                     (y - APP_CHROME_HEIGHT - self.state.arrangement_content_top()).max(0.0);
                 (lane_x, lane_y)

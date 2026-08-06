@@ -1169,6 +1169,7 @@ impl TimelineState {
             self.tracks.insert(
                 insert_at,
                 TrackState {
+                    listen: ListenMode::Off,
                     id: child_id,
                     name,
                     track_type: TrackType::Bus,

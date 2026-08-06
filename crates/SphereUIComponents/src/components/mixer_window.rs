@@ -17,7 +17,7 @@ use crate::components::mixer_panel::{
 };
 use crate::components::mixer_tree_sidebar::MIXER_TREE_COLLAPSED_RAIL_WIDTH;
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
-use crate::components::timeline::timeline_state::{MasterBusState, TrackState};
+use crate::components::timeline::timeline_state::{MasterBusState, MonitorBusState, TrackState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::i18n::I18n;
 use crate::theme::Colors;
@@ -79,6 +79,8 @@ fn mixer_menu_bar(i18n: I18n) -> impl IntoElement {
 pub struct MixerSnapshot {
     pub tracks: Vec<TrackState>,
     pub master: MasterBusState,
+    /// Input-monitoring bus for the pinned Monitor strip.
+    pub monitor: MonitorBusState,
     pub selected_track_id: Option<String>,
     /// Multi-select set (Ctrl/Cmd additive, Shift range). Highlight uses this.
     pub selected_track_ids: Vec<String>,
@@ -159,6 +161,7 @@ impl Render for MixerWindow {
         let MixerSnapshot {
             tracks,
             master,
+            monitor,
             selected_track_id,
             selected_track_ids,
             mixer_scroll_x,
@@ -244,6 +247,7 @@ impl Render for MixerWindow {
                     .child(mixer_panel(
                         &tracks,
                         &master,
+                        &monitor,
                         selected_track_id.as_deref(),
                         &selected_track_ids,
                         mixer_callbacks,

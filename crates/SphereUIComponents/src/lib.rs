@@ -35,7 +35,9 @@
 pub mod account;
 pub mod app_state;
 pub mod assets;
+pub mod audio_connections;
 pub mod audio_routing;
+pub mod audio_routing_compile;
 pub mod boot;
 pub mod color;
 pub mod components;

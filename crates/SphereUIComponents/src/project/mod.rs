@@ -2,6 +2,7 @@ pub mod format;
 pub mod import;
 pub mod io;
 pub mod recent;
+pub mod routing_migration;
 pub mod session;
 pub mod template;
 
@@ -1578,6 +1579,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 _ => None,
             };
             TrackState {
+                listen: crate::components::timeline::timeline_state::ListenMode::Off,
                 id: pt.id.clone(),
                 name: pt.name.clone(),
                 track_type,

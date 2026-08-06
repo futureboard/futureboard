@@ -68,6 +68,28 @@ impl TimelineState {
         x_to_beat(x, &self.viewport)
     }
 
+    /// Window-space x of the arrangement lane origin — the left edge of the
+    /// scrollable clip area, i.e. past the browser panel and the track headers.
+    ///
+    /// The browser panel is collapsible, so its width comes from the measured
+    /// shell metrics rather than a constant. Every gesture that resolves a
+    /// window-space pointer x (clip move, clip edge-resize, ruler scrub, lane
+    /// tools, automation, tempo, song text) must map through this so pointer
+    /// coordinates and drawing share one transform.
+    pub fn lane_origin_x(&self) -> f32 {
+        self.viewport.panel_origin_x + HEADER_WIDTH
+    }
+
+    /// Convert a window-space x into arrangement-lane content x.
+    pub fn lane_x_from_window_x(&self, window_x: f32) -> f32 {
+        window_x - self.lane_origin_x()
+    }
+
+    /// Convert a window-space x straight to timeline beats.
+    pub fn beats_from_window_x(&self, window_x: f32) -> f32 {
+        self.x_to_beats(self.lane_x_from_window_x(window_x))
+    }
+
     pub fn arrangement_track_layout(&self) -> TrackLayout {
         TrackLayout::from_state(self)
     }

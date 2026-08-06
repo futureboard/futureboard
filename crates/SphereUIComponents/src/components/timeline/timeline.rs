@@ -6,7 +6,7 @@ use crate::assets;
 use crate::components::edit::{
     normalize_range, ClipSnapshot, EditCommand, EditHistory, TrackSnapshot,
 };
-use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
+use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::song_text_track::{
     song_text_drag_positions, song_text_track_lane, SongTextDragPreview, SongTextDragSession,

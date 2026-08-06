@@ -27,6 +27,95 @@ pub struct MasterBusState {
     pub meter_clip: bool,
 }
 
+/// Which signal the Control Room monitors. Mirrors the engine's
+/// `MonitorSource`; the engine remains authoritative for routing.
+///
+/// The default is [`MonitorSourceKind::MasterBus`] — the complete internal mix
+/// (audio tracks, instruments, aux/returns, group buses, master processing).
+/// A hardware input is selectable but never the default, and selecting it is
+/// what makes the engine read a capture device at all.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MonitorSourceKind {
+    #[default]
+    MasterBus,
+    Bus(String),
+    TrackPreFader(String),
+    TrackAfterFader(String),
+    HardwareInput(String),
+}
+
+impl MonitorSourceKind {
+    /// Stable tag shared with the engine.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::MasterBus => "master",
+            Self::Bus(_) => "bus",
+            Self::TrackPreFader(_) => "track-pfl",
+            Self::TrackAfterFader(_) => "track-afl",
+            Self::HardwareInput(_) => "hardware-input",
+        }
+    }
+
+    pub fn target_id(&self) -> Option<&str> {
+        match self {
+            Self::MasterBus => None,
+            Self::Bus(id)
+            | Self::TrackPreFader(id)
+            | Self::TrackAfterFader(id)
+            | Self::HardwareInput(id) => Some(id.as_str()),
+        }
+    }
+}
+
+/// Control Room bus — the monitoring path fed from the master bus, shown as its
+/// own pinned mixer strip.
+///
+/// Everything here affects playback monitoring only. None of it reaches the
+/// master mix, an offline export, a stem export, or recorded audio: the engine
+/// applies the Control Room inside the device callback, which export never
+/// enters. This is session/hardware state, so it is deliberately not persisted
+/// with the project and never marks it dirty.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorBusState {
+    /// What the Control Room listens to when no channel PFL/AFL is engaged.
+    pub source: MonitorSourceKind,
+    /// Human-readable name of [`Self::source`], resolved against the project
+    /// when the selection changes.
+    pub source_display: String,
+    /// Name of the hardware output pair the Control Room feeds.
+    pub output_name: String,
+    /// 0-based left channel of that pair on the active output device.
+    pub output_left_channel: u16,
+    /// Output pairs the active device can offer.
+    pub available_outputs: Vec<(String, u16)>,
+    /// Monitor level as a normalized fader position.
+    pub volume: f32,
+    pub mute: bool,
+    /// -20 dB monitoring reference cut.
+    pub dim: bool,
+    /// Fold to mono for mono-compatibility checks.
+    pub mono: bool,
+    /// Post-monitor-processing level actually leaving for the monitoring
+    /// output — after monitor inserts and the control processor. UI-only.
+    pub meter_level_l: f32,
+    pub meter_level_r: f32,
+    pub meter_peak_hold_l: f32,
+    pub meter_peak_hold_r: f32,
+    pub meter_clip: bool,
+    /// True while any channel has PFL/AFL engaged, so the strip can show that
+    /// the Control Room is on a Listen tap rather than its selected source.
+    pub listen_active: bool,
+}
+
+impl MonitorBusState {
+    /// Short label for the current source, shown in the Source selector.
+    /// Resolved from the project when the source is set, so the chip shows a
+    /// bus name rather than an internal track id.
+    pub fn source_label(&self) -> String {
+        self.source_display.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineState {
     pub bpm: f32,
@@ -54,6 +143,9 @@ pub struct TimelineState {
     pub transport: TransportState,
     pub tracks: Vec<TrackState>,
     pub master: MasterBusState,
+    /// Input-monitoring bus rendered as the pinned Monitor strip. Session
+    /// state — see [`MonitorBusState`].
+    pub monitor: MonitorBusState,
     pub selection: TimelineSelection,
     pub active_tool: TimelineTool,
     pub snap_to_grid: bool,
@@ -133,6 +225,7 @@ impl Default for TimelineState {
                 viewport_width: 0.0,
                 viewport_height: 500.0,
                 track_area_height: 500.0,
+                panel_origin_x: 0.0,
             },
             transport: TransportState {
                 playing: false,
@@ -153,6 +246,23 @@ impl Default for TimelineState {
                 meter_peak_hold_l: 0.0,
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
+            },
+            monitor: MonitorBusState {
+                source: MonitorSourceKind::MasterBus,
+                source_display: "Master Bus".to_string(),
+                output_name: "Out 1-2".to_string(),
+                output_left_channel: 0,
+                available_outputs: vec![("Out 1-2".to_string(), 0)],
+                volume: volume::db_to_norm(0.0),
+                mute: false,
+                dim: false,
+                mono: false,
+                meter_level_l: 0.0,
+                meter_level_r: 0.0,
+                meter_peak_hold_l: 0.0,
+                meter_peak_hold_r: 0.0,
+                meter_clip: false,
+                listen_active: false,
             },
             selection: TimelineSelection {
                 selected_track_id: None,

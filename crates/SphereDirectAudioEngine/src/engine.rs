@@ -440,6 +440,11 @@ pub struct SharedState {
     pub monitor_enabled_any: AtomicBool,
     /// Linear monitor gain applied to the input bus before it reaches master.
     pub monitor_gain: AtomicU32,
+    /// Control Room output peaks, post monitor inserts and post monitor
+    /// control processor. This is the level of the signal actually sent to the
+    /// monitoring hardware output — not the master bus level.
+    pub monitor_peak_l: AtomicU32,
+    pub monitor_peak_r: AtomicU32,
     /// Peak of the input bus *after* the render callback reads it from the ring
     /// (Layer 4 verification — distinct from the raw `live_input_peak_*`).
     pub input_bus_peak_l: AtomicU32,
@@ -578,6 +583,8 @@ impl Default for SharedState {
             input_ring: crate::input_ring::InputRing::default(),
             monitor_enabled_any: AtomicBool::new(false),
             monitor_gain: AtomicU32::new(f32_store(1.0)),
+            monitor_peak_l: AtomicU32::new(f32_store(0.0)),
+            monitor_peak_r: AtomicU32::new(f32_store(0.0)),
             input_bus_peak_l: AtomicU32::new(f32_store(0.0)),
             input_bus_peak_r: AtomicU32::new(f32_store(0.0)),
             input_cb_count: AtomicU64::new(0),
@@ -1560,6 +1567,9 @@ impl EngineInner {
             master_rms_r: f32_load(self.shared.rms_r.load(Ordering::Relaxed)) as f64,
             input_peak_l: f32_load(self.shared.live_input_peak_l.swap(0, Ordering::Relaxed)) as f64,
             input_peak_r: f32_load(self.shared.live_input_peak_r.swap(0, Ordering::Relaxed)) as f64,
+            monitor_active: self.shared.monitor_enabled_any.load(Ordering::Relaxed),
+            monitor_peak_l: f32_load(self.shared.monitor_peak_l.load(Ordering::Relaxed)) as f64,
+            monitor_peak_r: f32_load(self.shared.monitor_peak_r.load(Ordering::Relaxed)) as f64,
         }
     }
 
@@ -1785,6 +1795,78 @@ impl EngineInner {
             .master_volume
             .store(f32_store(value.clamp(0.0, 2.0)), Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Set the linear monitor gain applied to the input bus before it reaches
+    /// master. A relaxed atomic store from the control thread; the realtime
+    /// monitor path reads it once per block (see `backend::render`), so this is
+    /// allocation- and lock-free on both sides.
+    pub fn set_monitor_gain(&self, value: f32) -> Result<(), SphereAudioError> {
+        self.shared
+            .monitor_gain
+            .store(f32_store(value.clamp(0.0, 2.0)), Ordering::Relaxed);
+        Ok(())
+    }
+
+    // ── Control Room / Listen Bus ──────────────────────────────────────────
+    //
+    // Every setter here affects monitoring only. None of them touch the master
+    // mix state, and none are reachable from the offline exporter, which
+    // renders the graph directly instead of going through the device callback.
+
+    /// Select what the Control Room monitors when no Listen is engaged.
+    /// Defaults to [`crate::monitor::MonitorSource::MasterBus`]; a hardware
+    /// input is only ever used when explicitly selected here.
+    pub fn set_monitor_source(
+        &self,
+        source: crate::monitor::MonitorSource,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetMonitorSource { source })
+    }
+
+    /// Set monitor gain, mute, dim, and mono in one atomic update so a mono
+    /// toggle can never land a block apart from its level change.
+    pub fn set_monitor_control(
+        &self,
+        control: crate::monitor::MonitorControl,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetMonitorControl { control })
+    }
+
+    /// Select the hardware output pair the Control Room feeds.
+    pub fn set_monitor_output(
+        &self,
+        target: crate::monitor::MonitorOutputTarget,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetMonitorOutput { target })
+    }
+
+    /// Set one channel's Listen (PFL/AFL) state. The stable track id is
+    /// resolved to an index here, off the audio thread.
+    pub fn set_track_listen(
+        &self,
+        track_id: &str,
+        listen: crate::monitor::ListenMode,
+    ) -> Result<(), SphereAudioError> {
+        let track_index = {
+            let project = self.project.lock();
+            project
+                .as_ref()
+                .and_then(|p| p.tracks.iter().position(|t| t.id == track_id))
+        };
+        let Some(track_index) = track_index else {
+            return Ok(());
+        };
+        self.send_command(EngineCommand::SetTrackListen {
+            track_index,
+            listen,
+        })
+    }
+
+    /// Clear Listen on every channel — the Control Room returns to its
+    /// selected source, normally the master bus.
+    pub fn clear_all_listen(&self) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::ClearAllListen)
     }
 
     pub fn update_track_input_state(
@@ -3738,6 +3820,11 @@ impl EngineInner {
                 EngineCommand::SetTrackInputState { .. } => "SetTrackInputState",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
+                EngineCommand::SetMonitorSource { .. } => "SetMonitorSource",
+                EngineCommand::SetMonitorControl { .. } => "SetMonitorControl",
+                EngineCommand::SetMonitorOutput { .. } => "SetMonitorOutput",
+                EngineCommand::SetTrackListen { .. } => "SetTrackListen",
+                EngineCommand::ClearAllListen => "ClearAllListen",
                 EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
                 EngineCommand::MidiPreviewNoteOff { .. } => "MidiPreviewNoteOff",
                 EngineCommand::MidiPreviewControlChange { .. } => "MidiPreviewControlChange",
@@ -4303,6 +4390,33 @@ where
                             shared
                                 .master_volume
                                 .store(f32_store(value), Ordering::Relaxed);
+                        }
+                        EngineCommand::SetMonitorSource { source } => {
+                            runtime.monitor.source = source;
+                            runtime.resolve_indices();
+                        }
+                        EngineCommand::SetMonitorControl { control } => {
+                            runtime.monitor.control = control;
+                            shared.monitor_gain.store(
+                                f32_store(control.effective_gain()),
+                                Ordering::Relaxed,
+                            );
+                        }
+                        EngineCommand::SetMonitorOutput { target } => {
+                            runtime.monitor.output = target;
+                        }
+                        EngineCommand::SetTrackListen {
+                            track_index,
+                            listen,
+                        } => {
+                            if let Some(track) = runtime.tracks.get_mut(track_index) {
+                                track.listen = listen;
+                            }
+                        }
+                        EngineCommand::ClearAllListen => {
+                            for track in runtime.tracks.iter_mut() {
+                                track.listen = crate::monitor::ListenMode::Off;
+                            }
                         }
                         EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
                             match sink {
@@ -5252,6 +5366,7 @@ mod bridge_insert_tests {
         let mut params = HashMap::new();
         params.insert("role".to_string(), serde_json::json!("effect"));
         RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
             volume: 1.0,
@@ -5572,6 +5687,7 @@ mod bridge_insert_tests {
         }
 
         let mut track = RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
             volume: 1.0,
@@ -5705,6 +5821,7 @@ mod bridge_insert_tests {
         }
 
         let mut track = RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
             volume: 1.0,
@@ -5792,6 +5909,7 @@ mod routing_tests {
     fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>) -> RuntimeTrack {
         let cap = 8;
         RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: ty.to_string(),
             volume: 1.0,

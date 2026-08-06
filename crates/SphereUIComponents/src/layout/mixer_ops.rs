@@ -160,6 +160,7 @@ impl StudioLayout {
         let timeline = self.timeline.read(cx);
         let master_sig = crate::components::mixer_master_strip_view::mixer_master_meter_signature(
             &timeline.state.master,
+            &timeline.state.monitor,
         );
         let channel_sig = mixer_channel_meter_signature(&timeline.state.tracks);
         let sig = master_sig ^ channel_sig.rotate_left(17);
@@ -205,6 +206,7 @@ impl StudioLayout {
         MixerSnapshot {
             tracks,
             master,
+            monitor: timeline.state.monitor.clone(),
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             selected_track_ids: timeline.state.selection.selected_track_ids.clone(),
             mixer_scroll_x: self.mixer_view.scroll_x,
@@ -1580,6 +1582,191 @@ impl StudioLayout {
                 );
             }
         });
+        // Pre/After-Fader Listen. Monitoring only: this never changes what the
+        // channel sends to master, so it is safe to engage during a take and
+        // can never reach an export or a recording.
+        let timeline_listen = self.timeline.clone();
+        let owner_listen = owner.clone();
+        let audio_engine_listen = audio_engine.clone();
+        let on_toggle_listen: std::sync::Arc<
+            dyn Fn(
+                    &(
+                        String,
+                        crate::components::timeline::timeline_state::ListenMode,
+                    ),
+                    &mut Window,
+                    &mut gpui::App,
+                ) + 'static,
+        > = std::sync::Arc::new(move |(track_id, mode), _w, cx| {
+            let track_id = track_id.clone();
+            let mode = *mode;
+            let changed = timeline_listen.update(cx, |t, cx| {
+                let changed = t.state.set_track_listen(&track_id, mode);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            StudioLayout::defer_update(&owner_listen, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            // Listen is exclusive, so push the whole resolved state: clear
+            // everything, then engage the one active tap. Two commands rather
+            // than one per track keeps the queue bounded regardless of project
+            // size.
+            if let Some(engine) = audio_engine_listen.as_ref() {
+                let _ = engine.clear_all_listen();
+                let active = {
+                    let state = &timeline_listen.read(cx).state;
+                    state
+                        .active_listen_track()
+                        .map(|(id, mode)| (id.to_string(), mode))
+                };
+                if let Some((id, mode)) = active {
+                    let _ = engine.set_track_listen(&id, mode.to_engine());
+                }
+            }
+        });
+
+        // ── Control Room ───────────────────────────────────────────────────
+        //
+        // Session state: none of these mark the project dirty or enter undo,
+        // and none can reach an export — the engine applies the Control Room
+        // inside the device callback, which offline render never enters.
+        let timeline_monitor = self.timeline.clone();
+        let owner_monitor = owner.clone();
+        let audio_engine_monitor = audio_engine.clone();
+        let on_monitor_volume_change: std::sync::Arc<
+            dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |v: &f32, _w, cx| {
+            let v = *v;
+            let changed = timeline_monitor.update(cx, |t, cx| {
+                let changed = t.state.set_monitor_volume(v);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            StudioLayout::defer_update(&owner_monitor, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            push_monitor_control(&audio_engine_monitor, &timeline_monitor, cx);
+        });
+
+        let mut make_monitor_toggle =
+            |mutate: fn(&mut crate::components::timeline::timeline_state::TimelineState)| {
+                let timeline = self.timeline.clone();
+                let owner = owner.clone();
+                let engine = audio_engine.clone();
+                let cb: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> =
+                    std::sync::Arc::new(move |_: &(), _w, cx| {
+                        timeline.update(cx, |t, cx| {
+                            mutate(&mut t.state);
+                            cx.notify();
+                        });
+                        StudioLayout::defer_update(&owner, cx, |this, cx| {
+                            this.push_mixer_snapshot_to_window(cx);
+                            let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+                        });
+                        push_monitor_control(&engine, &timeline, cx);
+                    });
+                cb
+            };
+        let on_monitor_toggle_mute = make_monitor_toggle(
+            crate::components::timeline::timeline_state::TimelineState::toggle_monitor_mute,
+        );
+        let on_monitor_toggle_dim = make_monitor_toggle(
+            crate::components::timeline::timeline_state::TimelineState::toggle_monitor_dim,
+        );
+        let on_monitor_toggle_mono = make_monitor_toggle(
+            crate::components::timeline::timeline_state::TimelineState::toggle_monitor_mono,
+        );
+
+        // Source chip: step through Master Bus and the project's routing buses.
+        // Master Bus is always first, so the default is never a hardware input.
+        let timeline_source = self.timeline.clone();
+        let owner_source = owner.clone();
+        let engine_source = audio_engine.clone();
+        let on_monitor_source_picker: Option<
+            std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static>,
+        > = Some(std::sync::Arc::new(move |_: &(f32, f32), _w, cx| {
+            let changed = timeline_source.update(cx, |t, cx| {
+                let options = t.state.monitor_source_options();
+                let current = options
+                    .iter()
+                    .position(|option| *option == t.state.monitor.source)
+                    .unwrap_or(0);
+                let next = options[(current + 1) % options.len()].clone();
+                let changed = t.state.set_monitor_source(next);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            StudioLayout::defer_update(&owner_source, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            let source = timeline_source.read(cx).state.monitor.source.clone();
+            if let Some(engine) = engine_source.as_ref() {
+                let _ = engine.set_monitor_source(DirectAudio::monitor::MonitorSource::from_parts(
+                    source.tag(),
+                    source.target_id(),
+                ));
+            }
+        }));
+
+        // Output chip: step through the stereo pairs the active device offers.
+        let timeline_output = self.timeline.clone();
+        let owner_output = owner.clone();
+        let engine_output = audio_engine.clone();
+        let on_monitor_output_picker: Option<
+            std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static>,
+        > = Some(std::sync::Arc::new(move |_: &(f32, f32), _w, cx| {
+            let changed = timeline_output.update(cx, |t, cx| {
+                let options = t.state.monitor.available_outputs.clone();
+                if options.is_empty() {
+                    return false;
+                }
+                let current = options
+                    .iter()
+                    .position(|(_, left)| *left == t.state.monitor.output_left_channel)
+                    .unwrap_or(0);
+                let (name, left) = options[(current + 1) % options.len()].clone();
+                let changed = t.state.set_monitor_output(name, left);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            StudioLayout::defer_update(&owner_output, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            let (name, left) = {
+                let state = &timeline_output.read(cx).state.monitor;
+                (state.output_name.clone(), state.output_left_channel)
+            };
+            if let Some(engine) = engine_output.as_ref() {
+                let _ = engine
+                    .set_monitor_output(DirectAudio::monitor::MonitorOutputTarget::new(name, left));
+            }
+        }));
+
         let on_context_menu: std::sync::Arc<
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -1935,10 +2122,17 @@ impl StudioLayout {
             on_toggle_solo,
             on_toggle_arm,
             on_toggle_input,
+            on_toggle_listen,
             on_master_volume_change,
             on_master_volume_drag_start,
             on_master_volume_drag_preview,
             on_master_volume_drag_commit,
+            on_monitor_volume_change,
+            on_monitor_toggle_mute,
+            on_monitor_toggle_dim,
+            on_monitor_toggle_mono,
+            on_monitor_source_picker,
+            on_monitor_output_picker,
             on_context_menu: Some(on_context_menu),
             on_add_insert,
             on_remove_insert,
@@ -2087,6 +2281,7 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         solo,
         armed,
         input_monitor,
+        listen,
         meter_level_l,
         meter_level_r,
         meter_peak_hold_l,
@@ -2110,6 +2305,9 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         routing,
     } = track;
     TrackState {
+        // Preserved, not reset: the mixer strip renders its PFL/AFL buttons
+        // from this clone.
+        listen: *listen,
         id: id.clone(),
         name: name.clone(),
         track_type: *track_type,
@@ -2290,4 +2488,25 @@ mod external_mixer_throttle_tests {
         assert_eq!(avg_build_micros(0, 0), 0.0);
         assert_eq!(avg_build_micros(1_000, 0), 0.0);
     }
+}
+
+/// Push the Control Room's level/shape controls to the engine as one atomic
+/// update, so a mono toggle can never land a block apart from its level change.
+///
+/// Monitoring only: this never touches master volume, project state, or undo.
+fn push_monitor_control(
+    engine: &Option<DirectAudio::native::AudioEngine>,
+    timeline: &Entity<crate::components::timeline::timeline::Timeline>,
+    cx: &mut gpui::App,
+) {
+    let Some(engine) = engine.as_ref() else {
+        return;
+    };
+    let monitor = &timeline.read(cx).state.monitor;
+    let _ = engine.set_monitor_control(DirectAudio::monitor::MonitorControl {
+        gain: volume_norm_to_linear(monitor.volume),
+        mute: monitor.mute,
+        dim: monitor.dim,
+        mono: monitor.mono,
+    });
 }

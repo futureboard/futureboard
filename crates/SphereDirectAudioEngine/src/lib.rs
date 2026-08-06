@@ -36,6 +36,7 @@ mod graph;
 mod graveyard;
 pub mod input_ring;
 mod latency_graph;
+pub mod monitor;
 pub mod native;
 pub mod plugin_bridge;
 pub mod recording;
