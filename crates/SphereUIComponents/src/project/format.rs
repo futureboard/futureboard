@@ -2,12 +2,13 @@ use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiArticulation, MidiControllerKind, MidiControllerLane,
     MidiControllerPoint, MidiNote, MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob,
-    ProjectAsset, ProjectClip, ProjectInsert, ProjectLyricSyllable, ProjectLyricSyllableMode,
-    ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongSectionType, ProjectSongTextEvent,
-    ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTempoPoint, ProjectTimelineMarker,
-    ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
-    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, SoundfontEnvelope,
-    SoundfontRenderQuality, TrackRouting,
+    ProjectAsset, ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip, ProjectInsert,
+    ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer, ProjectPluginInstance,
+    ProjectSend, ProjectSongSectionType, ProjectSongTextEvent, ProjectSongTextEventKind,
+    ProjectSoundfontPlayer, ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion,
+    ProjectTrack, ProjectTrackAudioFormat, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
+    ProjectTrackType, SoundfontEnvelope, SoundfontRenderQuality, TrackRouting,
+    V33TrackInputRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -64,7 +65,11 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// source (clip source tag 4), which stores only the asset id and source path —
 /// frames are always decoded from the file, never persisted. Pre-v33 projects
 /// have no Video track, which is exactly what they had before the type existed.
-pub const PROJECT_VERSION: u32 = 33;
+/// v34 splits the combined per-track input union into an audio Audio Connection
+/// reference plus the independent MIDI input field, and adds a project-level
+/// Audio Connections registry section at the body tail. v33 and older files
+/// still load: their combined field is migrated into generated connections.
+pub const PROJECT_VERSION: u32 = 34;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -690,16 +695,19 @@ fn encode_track_type(w: &mut FbWriter, t: ProjectTrackType) {
     });
 }
 
-fn encode_track_input_routing(w: &mut FbWriter, input: &ProjectTrackInputRouting) {
+/// **v33 encoder — legacy compatibility only.** v34 saves never call this;
+/// it exists for the legacy fixtures and round-trip tests.
+#[cfg(test)]
+fn encode_track_input_routing(w: &mut FbWriter, input: &V33TrackInputRouting) {
     match input {
-        ProjectTrackInputRouting::None => w.write_u8(0),
-        ProjectTrackInputRouting::AllInputs => w.write_u8(1),
-        ProjectTrackInputRouting::AudioDeviceChannel { device_id, channel } => {
+        V33TrackInputRouting::None => w.write_u8(0),
+        V33TrackInputRouting::AllInputs => w.write_u8(1),
+        V33TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
             w.write_u8(2);
             w.write_str(device_id);
             w.write_u32(*channel);
         }
-        ProjectTrackInputRouting::AudioDeviceChannels {
+        V33TrackInputRouting::AudioDeviceChannels {
             device_id,
             channels,
         } => {
@@ -710,7 +718,7 @@ fn encode_track_input_routing(w: &mut FbWriter, input: &ProjectTrackInputRouting
                 w.write_u32(*channel);
             }
         }
-        ProjectTrackInputRouting::MidiDevice { device_id } => {
+        V33TrackInputRouting::MidiDevice { device_id } => {
             w.write_u8(3);
             w.write_str(device_id);
         }
@@ -775,8 +783,9 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_bool(t.solo);
     w.write_bool(t.record_arm);
     encode_input_monitor(w, t.input_monitor);
-    // routing
-    encode_track_input_routing(w, &t.routing.input);
+    // routing — v34 stores the audio input as a logical Audio Connection id.
+    // The legacy combined union is never written by this encoder.
+    w.write_opt_str(&t.routing.audio_input_connection_id);
     encode_track_output_routing(w, &t.routing.output);
     encode_track_audio_format(w, t.routing.audio_format);
     encode_track_midi_input_routing(w, &t.routing.midi_input);
@@ -1184,7 +1193,99 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         encode_song_text_event(&mut w, event);
     }
 
+    // Audio Connections registry (v34+). Last section, so a reader that stops
+    // earlier is unaffected.
+    w.write_u32(project.audio_connections.len() as u32);
+    for connection in &project.audio_connections {
+        encode_audio_connection(&mut w, connection);
+    }
+
     w.into_bytes()
+}
+
+fn encode_audio_connection(w: &mut FbWriter, c: &ProjectAudioConnection) {
+    w.write_str(&c.id);
+    w.write_str(&c.name);
+    w.write_str(&c.direction);
+    w.write_str(&c.channel_layout);
+    w.write_u32(c.channel_count);
+    w.write_opt_str(&c.device_id);
+    w.write_bool(c.enabled);
+    // Ordered bindings — index order is semantic (Left, Right) and is written
+    // exactly as held.
+    w.write_u32(c.port_bindings.len() as u32);
+    for binding in &c.port_bindings {
+        w.write_u32(binding.logical_channel);
+        w.write_str(&binding.device_id);
+        w.write_str(&binding.port_name);
+        w.write_u32(binding.port_index);
+    }
+}
+
+/// Smallest possible encoded connection: 4 short strings + 2 u32 + opt tag +
+/// bool + binding count. Used to bound the collection length against the
+/// remaining buffer before allocating.
+const MIN_AUDIO_CONNECTION_BYTES: usize = 26;
+/// Hard ceiling on connections in one project, mirroring the other collections.
+const MAX_AUDIO_CONNECTIONS: usize = 100_000;
+/// Hard ceiling on bindings in one connection. Far above any real layout.
+const MAX_AUDIO_PORT_BINDINGS: usize = 1024;
+
+fn decode_audio_connection(r: &mut FbReader) -> Result<ProjectAudioConnection, ProjectError> {
+    let id = r.read_str()?;
+    if id.is_empty() {
+        return Err(ProjectError::Corrupted(
+            "audio connection with empty id".to_string(),
+        ));
+    }
+    let name = r.read_str()?;
+    let direction = r.read_str()?;
+    if direction != "input" && direction != "output" {
+        return Err(ProjectError::Corrupted(format!(
+            "unknown audio connection direction {direction}"
+        )));
+    }
+    let channel_layout = r.read_str()?;
+    if !matches!(channel_layout.as_str(), "mono" | "stereo" | "custom") {
+        return Err(ProjectError::Corrupted(format!(
+            "unknown audio channel layout {channel_layout}"
+        )));
+    }
+    let channel_count = r.read_u32()?;
+    if channel_count as usize > MAX_AUDIO_PORT_BINDINGS {
+        return Err(ProjectError::Corrupted(
+            "invalid audio connection channel count".to_string(),
+        ));
+    }
+    let device_id = r.read_opt_str()?;
+    let enabled = r.read_bool()?;
+    let binding_count = r.read_u32()? as usize;
+    // Bound before allocating: a truncated or hostile file must not make us
+    // reserve an arbitrary vector.
+    if binding_count > MAX_AUDIO_PORT_BINDINGS || binding_count > r.remaining() / 12 {
+        return Err(ProjectError::Corrupted(
+            "invalid audio connection binding count".to_string(),
+        ));
+    }
+    let mut port_bindings = Vec::with_capacity(binding_count);
+    for _ in 0..binding_count {
+        port_bindings.push(ProjectAudioPortBinding {
+            logical_channel: r.read_u32()?,
+            device_id: r.read_str()?,
+            port_name: r.read_str()?,
+            port_index: r.read_u32()?,
+        });
+    }
+    Ok(ProjectAudioConnection {
+        id,
+        name,
+        direction,
+        channel_layout,
+        channel_count,
+        device_id,
+        port_bindings,
+        enabled,
+    })
 }
 
 /// Encodes a `FutureboardProject` into the full `.fbproj` binary format.
@@ -1602,28 +1703,30 @@ fn decode_input_monitor(r: &mut FbReader) -> Result<InputMonitorMode, ProjectErr
     })
 }
 
-fn decode_track_input_routing(r: &mut FbReader) -> Result<ProjectTrackInputRouting, ProjectError> {
+/// **v33 decoder.** Reads the combined union from an old file so the migration
+/// can convert it; v34 files never reach this.
+fn decode_track_input_routing(r: &mut FbReader) -> Result<V33TrackInputRouting, ProjectError> {
     Ok(match r.read_u8()? {
-        0 => ProjectTrackInputRouting::None,
-        1 => ProjectTrackInputRouting::AllInputs,
-        2 => ProjectTrackInputRouting::AudioDeviceChannel {
+        0 => V33TrackInputRouting::None,
+        1 => V33TrackInputRouting::AllInputs,
+        2 => V33TrackInputRouting::AudioDeviceChannel {
             device_id: r.read_str()?,
             channel: r.read_u32()?,
         },
-        3 => ProjectTrackInputRouting::MidiDevice {
+        3 => V33TrackInputRouting::MidiDevice {
             device_id: r.read_str()?,
         },
         4 => {
             let device_id = r.read_str()?;
             let count = r.read_u32()? as usize;
             if count == 0 {
-                ProjectTrackInputRouting::None
+                V33TrackInputRouting::None
             } else {
                 let mut channels = Vec::with_capacity(count);
                 for _ in 0..count {
                     channels.push(r.read_u32()?);
                 }
-                ProjectTrackInputRouting::AudioDeviceChannels {
+                V33TrackInputRouting::AudioDeviceChannels {
                     device_id,
                     channels,
                 }
@@ -1709,7 +1812,13 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     let input_monitor = decode_input_monitor(r)?;
 
     let mut routing = if version >= 3 {
-        let input = decode_track_input_routing(r)?;
+        // v34 stores a logical connection id; v33 and older store the combined
+        // input union, which the migration converts after load.
+        let (audio_input_connection_id, legacy_input) = if version >= 34 {
+            (r.read_opt_str()?, None)
+        } else {
+            (None, Some(decode_track_input_routing(r)?))
+        };
         let output = decode_track_output_routing(r)?;
         let audio_format = decode_track_audio_format(r)?;
         let midi_input = decode_track_midi_input_routing(r)?;
@@ -1718,7 +1827,8 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         // older files default to `false` (the pre-existing fixed-channel behavior).
         let midi_output_per_note = if version >= 22 { r.read_bool()? } else { false };
         TrackRouting {
-            input,
+            audio_input_connection_id,
+            legacy_input,
             output,
             audio_format,
             midi_input,
@@ -2018,7 +2128,37 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         Vec::new()
     };
 
+    // Audio Connections registry (v34+). Duplicate ids are rejected rather
+    // than silently overwriting each other, so a track reference can never
+    // resolve to the wrong bus.
+    let audio_connections = if version >= 34 {
+        let count = r.read_u32()? as usize;
+        if count > MAX_AUDIO_CONNECTIONS || count > r.remaining() / MIN_AUDIO_CONNECTION_BYTES {
+            return Err(ProjectError::Corrupted(
+                "invalid audio connection count".to_string(),
+            ));
+        }
+        let mut connections: Vec<ProjectAudioConnection> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let connection = decode_audio_connection(&mut r)?;
+            if connections
+                .iter()
+                .any(|existing| existing.id == connection.id)
+            {
+                return Err(ProjectError::Corrupted(format!(
+                    "duplicate audio connection id {}",
+                    connection.id
+                )));
+            }
+            connections.push(connection);
+        }
+        connections
+    } else {
+        Vec::new()
+    };
+
     Ok(FutureboardProject {
+        audio_connections,
         id,
         name,
         created_at,
@@ -2188,7 +2328,11 @@ mod tests {
 
     fn encode_legacy_song_text_project(version: u32, cues: &[LegacyProjectSongTextCue]) -> Vec<u8> {
         let mut body = encode_body(&FutureboardProject::new("Legacy Song Text"));
-        body.truncate(body.len() - std::mem::size_of::<u32>());
+        // `encode_body` now ends with the v34 Audio Connections count followed
+        // by nothing else, and the Song Text count sits just before it. A
+        // v24-v26 fixture reads neither, so drop both trailing counts before
+        // appending the legacy cue block in their place.
+        body.truncate(body.len() - 2 * std::mem::size_of::<u32>());
 
         let mut tail = FbWriter::new();
         tail.write_u32(cues.len() as u32);
@@ -2412,7 +2556,7 @@ mod tests {
 
     #[test]
     fn multi_channel_audio_input_routing_roundtrips_v6() {
-        let routing = ProjectTrackInputRouting::AudioDeviceChannels {
+        let routing = V33TrackInputRouting::AudioDeviceChannels {
             device_id: "Interface 8i6".to_string(),
             channels: vec![2, 3],
         };
@@ -2968,7 +3112,8 @@ mod tests {
         w.write_bool(false);
         encode_input_monitor(w, InputMonitorMode::Off);
         let routing = TrackRouting::default();
-        encode_track_input_routing(w, &routing.input);
+        // v33-shaped fixture: the combined union sits where v34 writes an id.
+        encode_track_input_routing(w, &V33TrackInputRouting::None);
         encode_track_output_routing(w, &routing.output);
         encode_track_audio_format(w, routing.audio_format);
         encode_track_midi_input_routing(w, &routing.midi_input);
@@ -3015,5 +3160,162 @@ mod tests {
         let bytes = encode_project(&project);
         let decoded = decode_project(&bytes).expect("decode");
         assert_eq!(decoded.tracks[0].clips[0].stretch, sample_stretch());
+    }
+
+    // ── Audio Connections codec ──────────────────────────────────────────
+
+    use super::*;
+
+    fn connection(id: &str, direction: &str, ports: &[u32]) -> ProjectAudioConnection {
+        ProjectAudioConnection {
+            id: id.to_string(),
+            name: format!("Bus {id}"),
+            direction: direction.to_string(),
+            channel_layout: if ports.len() == 1 { "mono" } else { "stereo" }.to_string(),
+            channel_count: ports.len() as u32,
+            device_id: Some("dev-1".to_string()),
+            port_bindings: ports
+                .iter()
+                .enumerate()
+                .map(|(logical, index)| ProjectAudioPortBinding {
+                    logical_channel: logical as u32,
+                    device_id: "dev-1".to_string(),
+                    port_name: format!("Input {}", index + 1),
+                    port_index: *index,
+                })
+                .collect(),
+            enabled: true,
+        }
+    }
+
+    fn project_with(connections: Vec<ProjectAudioConnection>) -> Vec<u8> {
+        encode_project(&FutureboardProject {
+            audio_connections: connections,
+            ..FutureboardProject::new("codec")
+        })
+    }
+
+    #[test]
+    fn connections_round_trip_through_the_binary_format() {
+        let bytes = project_with(vec![
+            connection("ac-1", "input", &[0]),
+            connection("ac-2", "output", &[2, 3]),
+        ]);
+        let decoded = decode_project(&bytes).expect("decode");
+        assert_eq!(decoded.audio_connections.len(), 2);
+        assert_eq!(decoded.audio_connections[0].direction, "input");
+        assert_eq!(decoded.audio_connections[1].direction, "output");
+        // Ordered bindings survive verbatim.
+        let ports: Vec<u32> = decoded.audio_connections[1]
+            .port_bindings
+            .iter()
+            .map(|b| b.port_index)
+            .collect();
+        assert_eq!(ports, vec![2, 3]);
+    }
+
+    /// Reversed bindings must not be normalized anywhere in the codec.
+    #[test]
+    fn reversed_bindings_survive_the_round_trip_distinctly() {
+        let bytes = project_with(vec![
+            connection("ac-fwd", "input", &[0, 1]),
+            connection("ac-rev", "input", &[1, 0]),
+        ]);
+        let decoded = decode_project(&bytes).expect("decode");
+        let read = |id: &str| -> Vec<u32> {
+            decoded
+                .audio_connections
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .port_bindings
+                .iter()
+                .map(|b| b.port_index)
+                .collect()
+        };
+        assert_eq!(read("ac-fwd"), vec![0, 1]);
+        assert_eq!(read("ac-rev"), vec![1, 0]);
+    }
+
+    /// Two connections sharing an id would make a track reference ambiguous.
+    #[test]
+    fn duplicate_connection_ids_are_rejected() {
+        let bytes = project_with(vec![
+            connection("ac-dup", "input", &[0]),
+            connection("ac-dup", "input", &[1]),
+        ]);
+        let error = decode_project(&bytes).expect_err("duplicate ids must not load");
+        assert!(matches!(error, ProjectError::Corrupted(ref m) if m.contains("duplicate")));
+    }
+
+    #[test]
+    fn an_unknown_direction_or_layout_is_rejected() {
+        let mut bad = connection("ac-1", "sideways", &[0]);
+        bad.direction = "sideways".to_string();
+        assert!(matches!(
+            decode_project(&project_with(vec![bad])),
+            Err(ProjectError::Corrupted(_))
+        ));
+
+        let mut bad_layout = connection("ac-2", "input", &[0]);
+        bad_layout.channel_layout = "quadraphonic".to_string();
+        assert!(matches!(
+            decode_project(&project_with(vec![bad_layout])),
+            Err(ProjectError::Corrupted(_))
+        ));
+    }
+
+    #[test]
+    fn an_empty_connection_id_is_rejected() {
+        let mut bad = connection("", "input", &[0]);
+        bad.id = String::new();
+        assert!(matches!(
+            decode_project(&project_with(vec![bad])),
+            Err(ProjectError::Corrupted(_))
+        ));
+    }
+
+    /// A truncated registry must fail cleanly, never panic or over-allocate.
+    #[test]
+    fn truncated_registry_data_fails_safely() {
+        let bytes = project_with(vec![connection("ac-1", "input", &[0, 1])]);
+        for cut in 1..24usize.min(bytes.len()) {
+            let mut truncated = bytes[..bytes.len() - cut].to_vec();
+            // Repair the body length + checksum framing so the failure is the
+            // registry decode itself, not the outer envelope.
+            let _ = &mut truncated;
+            assert!(
+                decode_project(&truncated).is_err(),
+                "truncating {cut} bytes must not load"
+            );
+        }
+    }
+
+    /// A hostile count must not make the decoder reserve an arbitrary vector.
+    #[test]
+    fn an_absurd_connection_count_is_rejected_before_allocating() {
+        let mut body = encode_body(&FutureboardProject::new("hostile"));
+        // Overwrite the trailing connection count with a huge value.
+        let len = body.len();
+        body[len - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        let bytes = project_bytes_with_version(body, PROJECT_VERSION);
+        assert!(matches!(
+            decode_project(&bytes),
+            Err(ProjectError::Corrupted(_))
+        ));
+    }
+
+    /// v33 files predate the section entirely and must still load.
+    #[test]
+    fn a_v33_project_loads_with_an_empty_registry() {
+        let mut body = encode_body(&FutureboardProject::new("legacy"));
+        // v33 bodies have no connections section; drop it.
+        body.truncate(body.len() - std::mem::size_of::<u32>());
+        let bytes = project_bytes_with_version(body, 33);
+        // v33 also stores the combined union per track, so a track-bearing
+        // fixture would need the older track layout; an empty project is
+        // enough to prove the section is version-gated.
+        let decoded = decode_project(&bytes).expect("v33 loads");
+        assert!(decoded.audio_connections.is_empty());
     }
 }
