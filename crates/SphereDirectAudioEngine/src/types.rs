@@ -151,6 +151,14 @@ pub struct JsMeterSnapshot {
     pub master_rms_r: f64,
     pub input_peak_l: f64,
     pub input_peak_r: f64,
+    /// True while at least one track has input monitoring engaged. Lets the
+    /// Monitor strip distinguish "no input signal" from "monitoring is off".
+    pub monitor_active: bool,
+    /// Control Room output level — measured after the monitor insert chain and
+    /// the monitor control processor, i.e. the signal actually leaving for the
+    /// monitoring hardware output. Not the master bus level.
+    pub monitor_peak_l: f64,
+    pub monitor_peak_r: f64,
 }
 
 /// Per-track plugin latency (sum of enabled native-plugin insert latencies).

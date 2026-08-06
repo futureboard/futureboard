@@ -10,6 +10,7 @@
 //! steady state. `use super::*;` pulls in the shared engine vocabulary
 //! (`SharedState`, runtime types, consts, debug-flag helpers).
 use super::*;
+use crate::monitor::{ListenMode, TapStage};
 use SphereAudioProcessor::StretchBackend;
 
 #[inline]
@@ -448,6 +449,57 @@ pub(crate) fn route_main_output(
     }
 }
 
+/// Capture this channel's contribution to the Control Room at `stage`.
+///
+/// Two independent taps share this call:
+///
+/// * **Listen** — a channel with PFL/AFL engaged sums into the listen bus.
+///   PFL is captured pre-fader so its level is independent of the fader; AFL is
+///   captured post-fader so it follows the fader.
+/// * **Source** — when the Control Room's selected source names this channel
+///   (a bus, or a track tapped pre/post fader), its block is copied into the
+///   monitor source scratch.
+///
+/// This only *reads* `block_*`; it never modifies the channel, so monitoring
+/// cannot alter the master mix, an export, or a recording. Allocation-free, and
+/// an early-out on the overwhelmingly common case (no Listen engaged, master
+/// bus source) keeps it off the hot path.
+#[inline]
+fn capture_monitor_taps(
+    runtime: &mut RuntimeProject,
+    track_index: usize,
+    frames: usize,
+    stage: TapStage,
+) {
+    let wants_listen = runtime.tracks[track_index].listen.is_active()
+        && match runtime.tracks[track_index].listen {
+            ListenMode::Pfl => stage == TapStage::PreFader,
+            ListenMode::Afl => stage == TapStage::PostFader,
+            ListenMode::Off => false,
+        };
+    let wants_source = runtime.monitor.source_track_index == Some(track_index)
+        && runtime.monitor.source_stage == Some(stage);
+    if !wants_listen && !wants_source {
+        return;
+    }
+    if !runtime.monitor.has_block_capacity(frames) {
+        return;
+    }
+    let (track, monitor) = (&runtime.tracks[track_index], &mut runtime.monitor);
+    if wants_listen {
+        for i in 0..frames {
+            monitor.listen_l[i] += track.block_l[i];
+            monitor.listen_r[i] += track.block_r[i];
+        }
+        monitor.listen_active = true;
+    }
+    if wants_source {
+        monitor.source_l[..frames].copy_from_slice(&track.block_l[..frames]);
+        monitor.source_r[..frames].copy_from_slice(&track.block_r[..frames]);
+        monitor.source_captured = true;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_track_block(
     runtime: &mut RuntimeProject,
@@ -466,9 +518,16 @@ fn process_track_block(
     scatter_vsti_output_children(runtime, track_index, frames, output, channels);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
+    // PFL and a TrackPreFader monitor source tap the same point the pre-fader
+    // sends do: after this channel's inserts, before its fader.
+    capture_monitor_taps(runtime, track_index, frames, TapStage::PreFader);
     let smooth = runtime.fader_smoothing;
     apply_fader(&mut runtime.tracks[track_index], frames, beat, smooth);
     accumulate_block_meter(&mut runtime.tracks[track_index], frames);
+    // AFL, a TrackAfterFader source, and a Bus source tap after the fader and
+    // channel processing, before PDC — matching the post-fader send tap so
+    // every monitoring path stays time-aligned with the sends.
+    capture_monitor_taps(runtime, track_index, frames, TapStage::PostFader);
     // Post-fader sends tap *before* PDC so return FX latency can be compensated
     // on the dry/main path without also delaying the send feed (which would
     // push wet further behind dry).
@@ -819,6 +878,10 @@ fn render_project_block_interleaved_core(
             tap.fill(0.0);
         }
     }
+    // Reset the Control Room taps for this block. Cheap and unconditional: the
+    // offline exporter runs the same graph but never consumes these buffers, so
+    // clearing them costs a memset over an empty (unallocated) scratch there.
+    runtime.monitor.begin_block(frames);
     runtime.refresh_runtime_latency_graph(frames as u32);
     let block_beat = sample_to_beat(runtime, base_sample);
     // Real transport ProcessContext for every plugin processed this block —
@@ -3163,3 +3226,7 @@ mod bridge_bypass_tests {
         assert_eq!(block_r, vec![1.25, 1.25, 1.0, 1.0]);
     }
 }
+
+#[cfg(test)]
+#[path = "control_room_tests.rs"]
+mod control_room_tests;

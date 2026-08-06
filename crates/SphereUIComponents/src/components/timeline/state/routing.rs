@@ -1,4 +1,5 @@
 use super::*;
+use crate::audio_connections::AudioConnectionId;
 
 pub use crate::project::InputMonitorMode;
 
@@ -33,60 +34,6 @@ impl SendSlotState {
     /// Linear send gain from `gain_db` (clamped to a sane range).
     pub fn gain_linear(&self) -> f32 {
         10f32.powf(self.gain_db.clamp(-60.0, 6.0) / 20.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrackInputRouting {
-    None,
-    AllInputs,
-    AudioDeviceChannel {
-        device_id: String,
-        channel: u32,
-    },
-    AudioDeviceChannels {
-        device_id: String,
-        channels: Vec<u32>,
-    },
-    MidiDevice {
-        device_id: String,
-    },
-}
-
-impl TrackInputRouting {
-    pub fn label(&self) -> String {
-        match self {
-            Self::None => "None".to_string(),
-            Self::AllInputs => "All Inputs".to_string(),
-            Self::AudioDeviceChannel { device_id, channel } => {
-                format!("{device_id} ch {}", channel + 1)
-            }
-            Self::AudioDeviceChannels {
-                device_id,
-                channels,
-            } => {
-                let labels = channels
-                    .iter()
-                    .map(|channel| (channel + 1).to_string())
-                    .collect::<Vec<_>>()
-                    .join("+");
-                format!("{device_id} ch {labels}")
-            }
-            Self::MidiDevice { device_id } => device_id.clone(),
-        }
-    }
-
-    pub fn is_compatible_with_audio_format(&self, audio_format: TrackAudioFormat) -> bool {
-        match self {
-            Self::None | Self::AllInputs | Self::MidiDevice { .. } => true,
-            Self::AudioDeviceChannel { .. } => true,
-            Self::AudioDeviceChannels { channels, .. } => match audio_format {
-                TrackAudioFormat::Mono => channels.len() == 1,
-                TrackAudioFormat::Stereo => {
-                    channels.len() == 1 || (channels.len() == 2 && channels[0] != channels[1])
-                }
-            },
-        }
     }
 }
 
@@ -161,7 +108,13 @@ impl TrackMidiInputRouting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackRoutingState {
-    pub input: TrackInputRouting,
+    /// Logical audio input bus from the project Audio Connections registry.
+    /// `None` is No Input. Never a raw device id or channel index — the
+    /// registry is the only layer mapping a bus to physical ports.
+    ///
+    /// Independent from [`Self::midi_input`]: a track may legitimately hold
+    /// both an audio input connection and a MIDI input assignment.
+    pub audio_input_connection_id: Option<AudioConnectionId>,
     pub output: TrackOutputRouting,
     pub audio_format: TrackAudioFormat,
     pub midi_input: TrackMidiInputRouting,
@@ -200,7 +153,7 @@ impl TrackRoutingState {
     pub fn for_track_type(track_type: TrackType) -> Self {
         match track_type {
             TrackType::Audio => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::Main,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
@@ -209,7 +162,7 @@ impl TrackRoutingState {
                 midi_output_per_note: false,
             },
             TrackType::Instrument => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::Main,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::AllInputs,
@@ -218,7 +171,7 @@ impl TrackRoutingState {
                 midi_output_per_note: false,
             },
             TrackType::Midi => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::None,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::AllInputs,
@@ -227,7 +180,7 @@ impl TrackRoutingState {
                 midi_output_per_note: false,
             },
             TrackType::Bus | TrackType::Return | TrackType::Group => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::Main,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
@@ -236,7 +189,7 @@ impl TrackRoutingState {
                 midi_output_per_note: false,
             },
             TrackType::Master => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::Main,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
@@ -246,7 +199,7 @@ impl TrackRoutingState {
             },
             // A Video track is picture-only: no input, no output, no MIDI.
             TrackType::Video => Self {
-                input: TrackInputRouting::None,
+                audio_input_connection_id: None,
                 output: TrackOutputRouting::None,
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
@@ -259,23 +212,52 @@ impl TrackRoutingState {
 }
 
 impl TimelineState {
-    pub fn set_track_input_routing(&mut self, track_id: &str, input: TrackInputRouting) -> bool {
+    /// Assign a track's audio input to a logical Audio Connection.
+    ///
+    /// Stores only the stable id, so a later rename or device change on that
+    /// connection flows through without touching the track.
+    pub fn set_track_audio_input_connection(
+        &mut self,
+        track_id: &str,
+        connection_id: Option<AudioConnectionId>,
+    ) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
-            if !input.is_compatible_with_audio_format(t.routing.audio_format) {
-                return false;
-            }
-            if t.routing.input != input {
+            if t.routing.audio_input_connection_id != connection_id {
                 if routing_debug_enabled() {
                     eprintln!(
-                        "[routing] input track={} old={:?} new={:?}",
-                        track_id, t.routing.input, input
+                        "[routing] audio input track={} old={:?} new={:?}",
+                        track_id, t.routing.audio_input_connection_id, connection_id
                     );
                 }
-                t.routing.input = input;
+                t.routing.audio_input_connection_id = connection_id;
                 return true;
             }
         }
         false
+    }
+
+    /// Clear every track assignment pointing at `connection_id`.
+    ///
+    /// Affected tracks become No Input rather than being silently pointed at
+    /// another bus. Returns the changed track ids.
+    pub fn unassign_audio_connection(&mut self, connection_id: &AudioConnectionId) -> Vec<String> {
+        let mut affected = Vec::new();
+        for track in &mut self.tracks {
+            if track.routing.audio_input_connection_id.as_ref() == Some(connection_id) {
+                track.routing.audio_input_connection_id = None;
+                affected.push(track.id.clone());
+            }
+        }
+        affected
+    }
+
+    /// Tracks whose audio input references `connection_id`.
+    pub fn tracks_using_audio_connection(&self, connection_id: &AudioConnectionId) -> Vec<&str> {
+        self.tracks
+            .iter()
+            .filter(|track| track.routing.audio_input_connection_id.as_ref() == Some(connection_id))
+            .map(|track| track.id.as_str())
+            .collect()
     }
 
     /// Resolve which track's plugin instance should actually receive a
@@ -333,13 +315,6 @@ impl TimelineState {
                     );
                 }
                 t.routing.audio_format = audio_format;
-                if !t
-                    .routing
-                    .input
-                    .is_compatible_with_audio_format(audio_format)
-                {
-                    t.routing.input = TrackInputRouting::None;
-                }
                 return true;
             }
         }
@@ -620,44 +595,90 @@ mod tests {
     }
 
     #[test]
-    fn audio_input_routes_follow_track_format_compatibility() {
+    fn audio_input_assignment_stores_only_the_connection_id() {
+        use crate::audio_connections::AudioConnectionId;
+
         let mut state = TimelineState::default();
         state.tracks.clear();
         let track_id = create_track(&mut state, TrackType::Audio, "Audio");
-        let mono_route = TrackInputRouting::AudioDeviceChannel {
-            device_id: "input-device".to_string(),
-            channel: 1,
-        };
-        let stereo_route = TrackInputRouting::AudioDeviceChannels {
-            device_id: "input-device".to_string(),
-            channels: vec![0, 1],
-        };
+        let connection = AudioConnectionId::from_stored("ac-test-mic");
 
-        assert!(state.set_track_input_routing(&track_id, mono_route.clone()));
+        assert!(state.set_track_audio_input_connection(&track_id, Some(connection.clone())));
+        assert_eq!(
+            state
+                .find_track(&track_id)
+                .unwrap()
+                .routing
+                .audio_input_connection_id
+                .as_ref(),
+            Some(&connection)
+        );
+        // Re-assigning the same connection is not a change.
+        assert!(!state.set_track_audio_input_connection(&track_id, Some(connection.clone())));
+
+        // Changing the track format no longer clears the assignment: channel
+        // compatibility is the registry's concern, not the track's. (Audio
+        // tracks already default to Stereo, so move to Mono to force a real
+        // change.)
         assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Mono));
         assert_eq!(
-            state.find_track(&track_id).unwrap().routing.input,
-            mono_route
+            state
+                .find_track(&track_id)
+                .unwrap()
+                .routing
+                .audio_input_connection_id
+                .as_ref(),
+            Some(&connection)
         );
 
-        assert!(!state.set_track_input_routing(&track_id, stereo_route.clone()));
-        assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Stereo));
-        assert!(state.set_track_input_routing(&track_id, stereo_route));
-        assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Mono));
-        assert_eq!(
-            state.find_track(&track_id).unwrap().routing.input,
-            TrackInputRouting::None
-        );
+        assert!(state.set_track_audio_input_connection(&track_id, None));
+        assert!(state
+            .find_track(&track_id)
+            .unwrap()
+            .routing
+            .audio_input_connection_id
+            .is_none());
     }
 
     #[test]
-    fn stereo_routes_reject_duplicate_channel_pairs() {
-        let route = TrackInputRouting::AudioDeviceChannels {
-            device_id: "input-device".to_string(),
-            channels: vec![1, 1],
-        };
+    fn removing_a_connection_unassigns_exactly_the_tracks_that_used_it() {
+        use crate::audio_connections::AudioConnectionId;
 
-        assert!(!route.is_compatible_with_audio_format(TrackAudioFormat::Stereo));
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let a = create_track(&mut state, TrackType::Audio, "A");
+        let b = create_track(&mut state, TrackType::Audio, "B");
+        let c = create_track(&mut state, TrackType::Audio, "C");
+        let mic = AudioConnectionId::from_stored("ac-mic");
+        let guitar = AudioConnectionId::from_stored("ac-guitar");
+
+        state.set_track_audio_input_connection(&a, Some(mic.clone()));
+        state.set_track_audio_input_connection(&b, Some(mic.clone()));
+        state.set_track_audio_input_connection(&c, Some(guitar.clone()));
+
+        let mut users = state.tracks_using_audio_connection(&mic);
+        users.sort();
+        assert_eq!(users, vec![a.as_str(), b.as_str()]);
+
+        let mut affected = state.unassign_audio_connection(&mic);
+        affected.sort();
+        assert_eq!(affected, vec![a.clone(), b.clone()]);
+        assert!(state
+            .find_track(&a)
+            .unwrap()
+            .routing
+            .audio_input_connection_id
+            .is_none());
+        assert_eq!(
+            state
+                .find_track(&c)
+                .unwrap()
+                .routing
+                .audio_input_connection_id
+                .as_ref(),
+            Some(&guitar),
+            "an unrelated track keeps its assignment"
+        );
     }
 
     #[test]

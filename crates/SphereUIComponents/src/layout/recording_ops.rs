@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::components::panel::{InspectorAudioInputChannel, InspectorAudioInputDevice};
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, AudioImportState, ClipState, ClipType, MidiControllerLane,
-    MidiNoteState, TrackAudioFormat, TrackInputRouting, TrackState, TrackType, MIN_NOTE_BEATS,
+    MidiNoteState, TrackAudioFormat, TrackState, TrackType, MIN_NOTE_BEATS,
 };
 use crate::components::timeline::waveform_cache::{self, WaveformPeak};
 use sphere_midi_service::MidiInputEvent;
@@ -352,6 +352,7 @@ impl StudioLayout {
             Vec<u32>,
         ) = {
             let timeline = self.timeline.read(cx);
+            let connections_for_recording = timeline.state.audio_connections.clone();
             let mut explicit_device_id: Option<String> = None;
             let mut monitor_channels = Vec::new();
             let mut configs = Vec::new();
@@ -363,6 +364,7 @@ impl StudioLayout {
             {
                 let route = match recording_input_channels_checked(
                     track,
+                    &connections_for_recording,
                     &input_devices,
                     selected_input_device,
                 ) {
@@ -1214,76 +1216,97 @@ struct RecordingInputRoute {
 
 fn recording_input_channels_checked(
     track: &TrackState,
+    connections: &crate::audio_connections::AudioConnectionRegistry,
     devices: &[RecordingInputDevice],
     selected_device: Option<&RecordingInputDevice>,
 ) -> Result<RecordingInputRoute, String> {
-    match &track.routing.input {
+    // A track stores only a logical connection id; the registry is the only
+    // layer that knows physical ports. MIDI never reaches here — it stays on
+    // `routing.midi_input`.
+    let Some(connection_id) = track.routing.audio_input_connection_id.as_ref() else {
         // A fresh audio track intentionally starts with no *explicit* input
-        // route. The live-input engine already resolves that state to the
+        // connection. The live-input engine already resolves that state to the
         // selected/default device while a track is armed; recording must use
         // the same effective route or the normal Arm -> Record workflow fails
         // before the input stream is ever opened.
-        TrackInputRouting::None | TrackInputRouting::AllInputs => {
-            let Some(device) = selected_device else {
-                return Err("no input device selected or available".to_string());
-            };
-            let channels = match track.routing.audio_format {
-                TrackAudioFormat::Mono => vec![0],
-                TrackAudioFormat::Stereo => vec![0, 1],
-            };
-            validate_channels(&track.name, device, &channels)?;
-            Ok(RecordingInputRoute {
-                device_id: Some(device.id.clone()),
-                channels,
-            })
-        }
-        TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
-            let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
-                format!("{} input device is unavailable: {}", track.name, device_id)
-            })?;
-            let channels = vec![*channel];
-            validate_channels(&track.name, device, &channels)?;
-            Ok(RecordingInputRoute {
-                device_id: Some(device.id.clone()),
-                channels,
-            })
-        }
-        TrackInputRouting::AudioDeviceChannels {
-            device_id,
+        let Some(device) = selected_device else {
+            return Err("no input device selected or available".to_string());
+        };
+        let channels = match track.routing.audio_format {
+            TrackAudioFormat::Mono => vec![0],
+            TrackAudioFormat::Stereo => vec![0, 1],
+        };
+        validate_channels(&track.name, device, &channels)?;
+        return Ok(RecordingInputRoute {
+            device_id: Some(device.id.clone()),
             channels,
-        } => {
-            if channels.is_empty() {
-                return Err(format!("{} has no input channels selected.", track.name));
-            }
-            match track.routing.audio_format {
-                TrackAudioFormat::Mono if channels.len() != 1 => {
-                    return Err(format!(
-                        "{} is mono but has a stereo/multi input route. Choose one input channel.",
-                        track.name
-                    ));
-                }
-                TrackAudioFormat::Stereo if !(1..=2).contains(&channels.len()) => {
-                    return Err(format!(
-                        "{} is stereo but has an incompatible input route. Choose one input channel or a stereo input pair.",
-                        track.name
-                    ));
-                }
-                _ => {}
-            }
-            let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
-                format!("{} input device is unavailable: {}", track.name, device_id)
-            })?;
-            validate_channels(&track.name, device, channels)?;
-            Ok(RecordingInputRoute {
-                device_id: Some(device.id.clone()),
-                channels: channels.clone(),
-            })
-        }
-        TrackInputRouting::MidiDevice { .. } => Err(format!(
-            "{} has a MIDI input route; choose an audio input channel before recording.",
+        });
+    };
+
+    let Some(connection) = connections.get(connection_id) else {
+        return Err(format!(
+            "{} references an audio input connection that no longer exists.",
             track.name
-        )),
+        ));
+    };
+    if !connection.status.is_usable() {
+        return Err(format!(
+            "{} input connection \"{}\" is unavailable ({}).",
+            track.name,
+            connection.name,
+            connection.status.label()
+        ));
     }
+    let Some(device_id) = connection.device_id.as_deref() else {
+        return Err(format!(
+            "{} input connection \"{}\" has no audio device assigned.",
+            track.name, connection.name
+        ));
+    };
+
+    // Ordered channel list — index 0 is Left. Never sorted.
+    let channels: Vec<u32> = (0..connection.channel_layout.channel_count())
+        .map(|logical| {
+            connection
+                .binding(logical)
+                .map(|binding| binding.physical_port_id.port_index)
+                .ok_or_else(|| {
+                    format!(
+                        "{} input connection \"{}\" is missing a port for {}.",
+                        track.name,
+                        connection.name,
+                        connection.channel_layout.channel_label(logical)
+                    )
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
+    if channels.is_empty() {
+        return Err(format!("{} has no input channels selected.", track.name));
+    }
+    match track.routing.audio_format {
+        TrackAudioFormat::Mono if channels.len() != 1 => {
+            return Err(format!(
+                "{} is mono but \"{}\" is a stereo/multi input bus. Choose a mono connection.",
+                track.name, connection.name
+            ));
+        }
+        TrackAudioFormat::Stereo if !(1..=2).contains(&channels.len()) => {
+            return Err(format!(
+                "{} is stereo but \"{}\" has an incompatible channel count.",
+                track.name, connection.name
+            ));
+        }
+        _ => {}
+    }
+
+    let device = find_recording_input_device(devices, device_id)
+        .ok_or_else(|| format!("{} input device is unavailable: {}", track.name, device_id))?;
+    validate_channels(&track.name, device, &channels)?;
+    Ok(RecordingInputRoute {
+        device_id: Some(device.id.clone()),
+        channels,
+    })
 }
 
 fn validate_channels(
@@ -1343,6 +1366,7 @@ fn resolve_input_device_id(engine: &DirectAudio::AudioEngine, device_name: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts, PhysicalInputChoice};
     use crate::components::timeline::timeline_state::TimelineState;
 
     fn input_device(channels: u32) -> RecordingInputDevice {
@@ -1354,6 +1378,32 @@ mod tests {
         }
     }
 
+    fn ports(channels: u32) -> AvailablePorts {
+        AvailablePorts::for_device("default-input", "Default Input", channels, 2)
+    }
+
+    /// Assign a track an audio input connection covering `channels`, going
+    /// through the same bridge the Inspector uses.
+    fn assign(
+        timeline: &mut TimelineState,
+        track_id: &str,
+        channels: Vec<u32>,
+        device_channels: u32,
+    ) {
+        let ports = ports(device_channels);
+        let id = timeline
+            .audio_connections
+            .get_or_create_audio_connection_for_physical_input(
+                &PhysicalInputChoice::Ports {
+                    device_id: "default-input".to_string(),
+                    channels,
+                },
+                &ports,
+            );
+        assert!(id.is_some());
+        timeline.set_track_audio_input_connection(track_id, id);
+    }
+
     #[test]
     fn fresh_armed_stereo_track_records_from_the_default_input() {
         let mut timeline = TimelineState::default();
@@ -1361,49 +1411,139 @@ mod tests {
         let track = timeline
             .find_track(&track_id)
             .expect("new audio track should exist");
-        assert_eq!(track.routing.input, TrackInputRouting::None);
+        assert!(
+            track.routing.audio_input_connection_id.is_none(),
+            "a fresh track starts with no explicit connection"
+        );
         assert_eq!(track.routing.audio_format, TrackAudioFormat::Stereo);
 
         let device = input_device(2);
-        let route =
-            recording_input_channels_checked(track, std::slice::from_ref(&device), Some(&device))
-                .expect("fresh armed-track route should resolve to the default input");
+        let route = recording_input_channels_checked(
+            track,
+            &AudioConnectionRegistry::new(),
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .expect("fresh armed-track route should resolve to the default input");
 
         assert_eq!(route.device_id.as_deref(), Some("default-input"));
         assert_eq!(route.channels, vec![0, 1]);
     }
 
     #[test]
-    fn recording_channel_count_follows_track_audio_format() {
+    fn recording_resolves_a_mono_connection_to_one_physical_channel() {
         let mut timeline = TimelineState::default();
         let track_id = timeline.create_audio_track();
-        let mut track = timeline.find_track(&track_id).unwrap().clone();
+        assign(&mut timeline, &track_id, vec![2], 4);
+
         let device = input_device(4);
+        let track = timeline.find_track(&track_id).unwrap();
+        let route = recording_input_channels_checked(
+            track,
+            &timeline.audio_connections,
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .expect("stereo tracks may record one input channel");
+        assert_eq!(route.channels, vec![2]);
+    }
 
-        track.routing.input = TrackInputRouting::AudioDeviceChannel {
-            device_id: device.id.clone(),
-            channel: 2,
-        };
-        let mono_route =
-            recording_input_channels_checked(&track, std::slice::from_ref(&device), Some(&device))
-                .expect("stereo tracks may record one input channel");
-        assert_eq!(mono_route.channels, vec![2]);
+    /// Ordered Left/Right must survive into the recorded route.
+    #[test]
+    fn recording_preserves_ordered_stereo_channels() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        assign(&mut timeline, &track_id, vec![1, 2], 4);
 
-        track.routing.input = TrackInputRouting::AudioDeviceChannels {
-            device_id: device.id.clone(),
-            channels: vec![1, 2],
-        };
-        let stereo_route =
-            recording_input_channels_checked(&track, std::slice::from_ref(&device), Some(&device))
-                .expect("stereo tracks may record two input channels");
-        assert_eq!(stereo_route.channels, vec![1, 2]);
+        let device = input_device(4);
+        let track = timeline.find_track(&track_id).unwrap();
+        let route = recording_input_channels_checked(
+            track,
+            &timeline.audio_connections,
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .expect("stereo tracks may record two input channels");
+        assert_eq!(route.channels, vec![1, 2]);
 
-        track.routing.audio_format = TrackAudioFormat::Mono;
+        // And the reversed pair is a genuinely different route, not the same
+        // connection with sorted channels.
+        assign(&mut timeline, &track_id, vec![2, 1], 4);
+        let track = timeline.find_track(&track_id).unwrap();
+        let reversed = recording_input_channels_checked(
+            track,
+            &timeline.audio_connections,
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .expect("reversed pair still resolves");
+        assert_eq!(reversed.channels, vec![2, 1]);
+    }
+
+    #[test]
+    fn a_mono_track_rejects_a_stereo_connection() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        assign(&mut timeline, &track_id, vec![1, 2], 4);
+        timeline.set_track_audio_format(&track_id, TrackAudioFormat::Mono);
+
+        let device = input_device(4);
+        let track = timeline.find_track(&track_id).unwrap();
         assert!(recording_input_channels_checked(
-            &track,
+            track,
+            &timeline.audio_connections,
             std::slice::from_ref(&device),
             Some(&device),
         )
         .is_err());
+    }
+
+    /// A connection whose device vanished must fail clearly rather than record
+    /// from an unrelated input.
+    #[test]
+    fn a_disconnected_connection_fails_instead_of_recording_the_wrong_input() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        assign(&mut timeline, &track_id, vec![0, 1], 4);
+        // Device disappears.
+        timeline
+            .audio_connections
+            .revalidate(&AvailablePorts::default());
+
+        let device = input_device(4);
+        let track = timeline.find_track(&track_id).unwrap();
+        let error = recording_input_channels_checked(
+            track,
+            &timeline.audio_connections,
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .expect_err("an unavailable connection must not silently fall back");
+        assert!(error.contains("unavailable"));
+    }
+
+    /// MIDI routing is a separate field and is untouched by audio assignment.
+    #[test]
+    fn audio_and_midi_input_assignments_coexist_on_one_track() {
+        use crate::components::timeline::timeline_state::TrackMidiInputRouting;
+
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        assign(&mut timeline, &track_id, vec![0], 4);
+        timeline.set_track_midi_input(
+            &track_id,
+            TrackMidiInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string(),
+            },
+        );
+
+        let track = timeline.find_track(&track_id).unwrap();
+        assert!(track.routing.audio_input_connection_id.is_some());
+        assert_eq!(
+            track.routing.midi_input,
+            TrackMidiInputRouting::MidiDevice {
+                device_id: "MPK Mini".to_string()
+            }
+        );
     }
 }

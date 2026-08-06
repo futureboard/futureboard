@@ -1,4 +1,3 @@
-use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
     automation_value_to_y, automation_y_to_value, evaluate_automation, AutomationHover,
     AutomationLaneState, AutomationMarquee, AutomationTarget, TimelineState, HEADER_WIDTH,
@@ -316,7 +315,7 @@ pub fn automation_lane(
                     cx.stop_propagation();
                     let wx: f32 = event.position.x.into();
                     let wy: f32 = event.position.y.into();
-                    let lane_x = wx - SIDEBAR_WIDTH - HEADER_WIDTH;
+                    let lane_x = state_for.lane_x_from_window_x(wx);
                     let raw_beat = state_for.x_to_beats(lane_x);
                     let snapped_sec = state_for.snap_time(raw_beat * state_for.seconds_per_beat());
                     let beat = (snapped_sec / state_for.seconds_per_beat()).max(0.0);
@@ -362,7 +361,7 @@ pub fn automation_lane(
                 }
                 let wx: f32 = event.position.x.into();
                 let wy: f32 = event.position.y.into();
-                let lane_x = wx - SIDEBAR_WIDTH - HEADER_WIDTH;
+                let lane_x = state_for.lane_x_from_window_x(wx);
                 let raw_beat = state_for.x_to_beats(lane_x);
                 let snapped_sec = state_for.snap_time(raw_beat * state_for.seconds_per_beat());
                 let beat = (snapped_sec / state_for.seconds_per_beat()).max(0.0);

@@ -52,7 +52,15 @@ pub fn waveform_canvas(
     // synthetic placeholder.
     if let Some(preview) = waveform_cache::recording_preview(&clip.id) {
         // Live take: peaks change every poll, so never cache (identity = None).
-        return draw_preview_waveform(preview.as_ref(), color, state, clip_left, clip_width, None);
+        return draw_preview_waveform(
+            preview.as_ref(),
+            color,
+            state,
+            clip_left,
+            clip_width,
+            None,
+            clip.gain,
+        );
     }
     match clip.audio_asset_key() {
         Some(asset_key) => waveform_cache::with_file_entry(asset_key, |entry| {
@@ -103,6 +111,7 @@ pub fn waveform_canvas(
                 clip_left,
                 clip_width,
                 Some(identity),
+                clip.gain,
             )
         }
     }
@@ -296,11 +305,12 @@ fn draw_chunk_waveform_locked(
     };
 
     let waveform_color = Colors::timeline_audio_clip_waveform(color);
+    let clip_gain = clip.gain;
 
     let element = canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            paint_waveform_bars(bounds, &bars, waveform_color, window);
+            paint_waveform_bars(bounds, &bars, waveform_color, clip_gain, window);
         },
     )
     .absolute()
@@ -320,6 +330,7 @@ fn sample_to_peak_index(sample: f64, samples_per_peak: usize) -> usize {
 /// `identity` is a stable id for the underlying preview (e.g. its `Arc` ptr) or
 /// `None` for fast-changing sources (a live recording take) that should never
 /// be cached. When `Some`, the bar geometry is reused via the shared cache.
+#[allow(clippy::too_many_arguments)]
 fn draw_preview_waveform(
     preview: &waveform_cache::WaveformPreview,
     color: gpui::Rgba,
@@ -327,6 +338,7 @@ fn draw_preview_waveform(
     clip_left: f32,
     clip_width: f32,
     identity: Option<u64>,
+    clip_gain: f32,
 ) -> gpui::Div {
     let viewport_w = state.viewport.viewport_width.max(1.0);
     let visible_start = (-clip_left).max(0.0);
@@ -387,7 +399,7 @@ fn draw_preview_waveform(
     let element = canvas(
         |_b, _w, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            paint_waveform_bars(bounds, &bars, waveform_color, window);
+            paint_waveform_bars(bounds, &bars, waveform_color, clip_gain, window);
         },
     )
     .absolute()
@@ -400,26 +412,40 @@ fn draw_preview_waveform(
         .child(element)
 }
 
+/// Paint the cached bars scaled by the clip's current gain.
+///
+/// Gain is applied here, at paint time, rather than baked into `bars`: the bar
+/// geometry cache is keyed on the horizontal mapping only, so scrubbing the
+/// clip gain redraws at the new amplitude every frame without invalidating or
+/// re-aggregating peaks. Samples driven past full scale are drawn in the
+/// overload color so the waveform reports real clipping instead of silently
+/// flat-topping.
 fn paint_waveform_bars(
     bounds: Bounds<Pixels>,
     bars: &WaveformBars,
     color: gpui::Rgba,
+    gain: f32,
     window: &mut gpui::Window,
 ) {
     let h: f32 = bounds.size.height.into();
     if h < 1.0 {
         return;
     }
+    let gain = gain.max(0.0);
     let center = h / 2.0;
+    let overload_color = Colors::meter_high();
     for (x, mn, mx) in bars {
-        let top = center - mx * center;
-        let bottom = center - mn * center;
+        let scaled_mx = mx * gain;
+        let scaled_mn = mn * gain;
+        let clipped = scaled_mx > 1.0 || scaled_mn < -1.0;
+        let top = center - scaled_mx.clamp(-1.0, 1.0) * center;
+        let bottom = center - scaled_mn.clamp(-1.0, 1.0) * center;
         let bar_h = (bottom - top).max(1.0);
         let r = Bounds::new(
             bounds.origin + point(px(*x), px(top)),
             size(px(1.0), px(bar_h)),
         );
-        window.paint_quad(fill(r, color));
+        window.paint_quad(fill(r, if clipped { overload_color } else { color }));
     }
 }
 

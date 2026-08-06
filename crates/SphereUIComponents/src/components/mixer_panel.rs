@@ -42,8 +42,8 @@ use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
     is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
     vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
-    vsti_output_child_insert_id, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState,
-    TrackOutputRouting, TrackState, TrackType, MASTER_TRACK_ID,
+    vsti_output_child_insert_id, InsertLoadStatus, InsertSlotState, ListenMode, MasterBusState,
+    MonitorBusState, SendSlotState, TrackOutputRouting, TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::i18n::I18n;
@@ -288,6 +288,22 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         let cb = callbacks.on_toggle_input.clone();
         move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| cb(&id, w, cx)
     };
+    // Listen taps feed the Control Room only; they never change what this
+    // channel sends to master, so they are safe to engage mid-take.
+    let on_pfl = {
+        let id = track_id.clone();
+        let cb = callbacks.on_toggle_listen.clone();
+        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&(id.clone(), ListenMode::Pfl), w, cx)
+        }
+    };
+    let on_afl = {
+        let id = track_id.clone();
+        let cb = callbacks.on_toggle_listen.clone();
+        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&(id.clone(), ListenMode::Afl), w, cx)
+        }
+    };
 
     div()
         .flex()
@@ -327,6 +343,22 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_input,
+        ))
+        .child(msri_button(
+            ("mix-pfl-btn", id_num).into(),
+            "PFL",
+            track.listen == ListenMode::Pfl,
+            Colors::accent_primary(),
+            Colors::text_inverse(),
+            on_pfl,
+        ))
+        .child(msri_button(
+            ("mix-afl-btn", id_num).into(),
+            "AFL",
+            track.listen == ListenMode::Afl,
+            Colors::accent_primary(),
+            Colors::text_inverse(),
+            on_afl,
         ))
 }
 
@@ -2080,6 +2112,370 @@ pub(crate) fn master_strip(
         .child(strip_footer(&i18n.tr("mixer.master.label")))
 }
 
+/// One Control Room selector row: a quiet label and a value chip that opens a
+/// picker. Used for both Source and Output so they read as one control group.
+fn control_room_selector(
+    id: &str,
+    label: String,
+    value: String,
+    accent_value: bool,
+    on_click: Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App)>>,
+) -> impl IntoElement {
+    let clickable = on_click.is_some();
+    div()
+        .id(gpui::ElementId::Name(id.to_string().into()))
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(px(1.0))
+        .child(
+            div()
+                .text_size(px(7.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_secondary())
+                .child(label),
+        )
+        .child(
+            div()
+                .w_full()
+                .px(px(4.0))
+                .py(px(2.0))
+                .rounded_sm()
+                .bg(Colors::button_bg())
+                .border(px(1.0))
+                .border_color(if accent_value {
+                    Colors::accent_primary()
+                } else {
+                    Colors::border_default()
+                })
+                .text_size(px(8.5))
+                .truncate()
+                .text_color(Colors::text_primary())
+                .when(clickable, |chip| {
+                    chip.cursor(gpui::CursorStyle::PointingHand)
+                })
+                .child(value),
+        )
+        .when_some(on_click, |row, cb| {
+            row.on_mouse_down(
+                gpui::MouseButton::Left,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    cb(&(x, y), window, cx);
+                },
+            )
+        })
+}
+
+/// A Control Room toggle (Mute / Dim / Mono).
+fn control_room_toggle(
+    id: &str,
+    label: &str,
+    active: bool,
+    active_color: gpui::Rgba,
+    on_toggle: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App)>,
+) -> impl IntoElement {
+    div()
+        .id(gpui::ElementId::Name(id.to_string().into()))
+        .flex()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .h(px(15.0))
+        .rounded_sm()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .bg(if active {
+            Colors::with_alpha(active_color, 0.22)
+        } else {
+            Colors::button_bg()
+        })
+        .border(px(1.0))
+        .border_color(if active {
+            active_color
+        } else {
+            Colors::border_default()
+        })
+        .text_size(px(8.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if active {
+            active_color
+        } else {
+            Colors::text_muted()
+        })
+        .child(label.to_string())
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |_event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                on_toggle(&(), window, cx);
+            },
+        )
+}
+
+/// Pinned Control Room strip — the monitoring bus fed from the master bus,
+/// shown beside Master as its own channel instrument.
+///
+/// Signal flow, all of it owned by the engine:
+///
+/// ```txt
+/// Master Bus -> Monitor Source Router -> Listen (PFL/AFL) override
+///     -> Monitor Inserts -> Gain/Dim/Mono/Mute -> selected hardware output
+/// ```
+///
+/// Everything on this strip affects **playback monitoring only**. The engine
+/// applies the Control Room inside the device callback, which offline export,
+/// stem export, and recording never enter — so nothing here can change the
+/// master mix or any rendered file.
+///
+/// The meter shows the post-monitor-processing signal actually leaving for the
+/// monitoring output, so it reflects monitor gain, dim, mono, and monitor
+/// inserts — not the master bus level.
+pub(crate) fn monitor_strip(
+    accent: gpui::Rgba,
+    monitor: &MonitorBusState,
+    callbacks: &MixerCallbacks,
+    split: &MixerSplit,
+    strip_available_px: f32,
+    i18n: I18n,
+) -> impl IntoElement {
+    let db_str = volume::format_db(monitor.volume);
+    let on_volume = callbacks.on_monitor_volume_change.clone();
+    let on_preview = on_volume.clone();
+    let on_monitor_preview = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_preview(v, w, cx);
+    };
+    let on_start = on_volume.clone();
+    let on_monitor_start = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_start(v, w, cx);
+    };
+    // Every pointer sample is already the committed value (session state, no
+    // undo entry to coalesce), so release has nothing left to do.
+    let on_monitor_commit = move |_w: &mut gpui::Window, _cx: &mut gpui::App| {};
+    let on_reset = on_volume;
+    let on_monitor_reset = move |w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_reset(&volume::db_to_norm(0.0), w, cx);
+    };
+
+    // Same section split as `master_strip`, so both pinned strips align.
+    let (section_h, _send_h) = clamp_mixer_section_heights_for_strip(
+        split.insert_px,
+        split.send_px,
+        strip_available_px.max(STRIP_MIN_HEIGHT),
+    );
+
+    // A Listen tap overrides the selected source; say so rather than showing a
+    // Source the user is not actually hearing.
+    let source_value = if monitor.listen_active {
+        i18n.tr("mixer.monitor.listening")
+    } else {
+        monitor.source_label()
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(px(STRIP_WIDTH))
+        .min_h(px(STRIP_MIN_HEIGHT))
+        .h_full()
+        .overflow_hidden()
+        .bg(Colors::surface_panel_alt())
+        .border_l(px(1.0))
+        .border_color(Colors::border_default())
+        .child(div().w_full().h(px(2.0)).bg(accent))
+        // Header
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .h(px(SEC_HEADER_H))
+                .px(px(5.0))
+                .border_b(px(1.0))
+                .border_color(Colors::border_default())
+                .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_primary())
+                                .child(i18n.tr("mixer.monitor.label")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(7.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .truncate()
+                                .text_color(Colors::text_secondary())
+                                .child(i18n.tr("mixer.monitor.bus-label")),
+                        ),
+                ),
+        )
+        // Routing section — Source and Output. Occupies Master's insert slot so
+        // the two pinned strips stay on matching baselines.
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .h(px(section_h))
+                .overflow_hidden()
+                .px(px(5.0))
+                .py(px(4.0))
+                .gap(px(5.0))
+                .border_b(px(1.0))
+                .border_color(Colors::border_default())
+                .child(control_room_selector(
+                    "monitor-source",
+                    i18n.tr("mixer.monitor.source"),
+                    source_value,
+                    monitor.listen_active,
+                    callbacks.on_monitor_source_picker.clone(),
+                ))
+                .child(control_room_selector(
+                    "monitor-output",
+                    i18n.tr("mixer.monitor.output"),
+                    monitor.output_name.clone(),
+                    false,
+                    callbacks.on_monitor_output_picker.clone(),
+                )),
+        )
+        // Lower control: Mute/Dim/Mono, fader cluster, output label.
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(LOWER_CONTROL_MIN_H))
+                .overflow_hidden()
+                .w_full()
+                // Monitor has no pan; the control toggles take that row so the
+                // vertical rhythm matches Master.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(3.0))
+                        .h(px(SEC_PAN_H))
+                        .px(px(4.0))
+                        .border_b(px(1.0))
+                        .border_color(Colors::border_default())
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .w_full()
+                                .gap(px(3.0))
+                                .child(control_room_toggle(
+                                    "monitor-mute",
+                                    &i18n.tr("mixer.monitor.mute"),
+                                    monitor.mute,
+                                    Colors::status_error(),
+                                    callbacks.on_monitor_toggle_mute.clone(),
+                                ))
+                                .child(control_room_toggle(
+                                    "monitor-dim",
+                                    &i18n.tr("mixer.monitor.dim"),
+                                    monitor.dim,
+                                    Colors::accent_primary(),
+                                    callbacks.on_monitor_toggle_dim.clone(),
+                                )),
+                        )
+                        .child(div().flex().flex_row().w_full().child(control_room_toggle(
+                            "monitor-mono",
+                            &i18n.tr("mixer.monitor.mono"),
+                            monitor.mono,
+                            Colors::accent_primary(),
+                            callbacks.on_monitor_toggle_mono.clone(),
+                        ))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(SEC_FADER_MIN_H))
+                        .items_center()
+                        .w_full()
+                        .px(px(4.0))
+                        .pt(px(5.0))
+                        .pb(px(6.0))
+                        .gap(px(5.0))
+                        .child(db_value_pill(db_str.clone(), monitor.dim || monitor.mute))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(2.0))
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .justify_center()
+                                .child(db_scale_column())
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .h_full()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(fader_with_drag_callbacks(
+                                            "mix-fader-monitor",
+                                            monitor.volume,
+                                            accent,
+                                            Some(on_monitor_start),
+                                            Some(on_monitor_preview),
+                                            Some(on_monitor_commit),
+                                            Some(on_monitor_reset),
+                                        )),
+                                )
+                                .child(meter_surface(
+                                    monitor.meter_level_l,
+                                    monitor.meter_level_r,
+                                    monitor.meter_peak_hold_l,
+                                    monitor.meter_peak_hold_r,
+                                    monitor.meter_clip,
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .h(px(SEC_BUTTONS_H))
+                        .px(px(4.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(16.0))
+                                .px(px(6.0))
+                                .rounded_sm()
+                                .bg(Colors::button_bg())
+                                .border(px(1.0))
+                                .border_color(Colors::border_default())
+                                .text_size(px(8.5))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .truncate()
+                                .text_color(Colors::text_muted())
+                                .child(monitor.output_name.clone()),
+                        ),
+                ),
+        )
+        .child(strip_footer(&i18n.tr("mixer.monitor.label")))
+}
+
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
 
 /// Strip columns above/below the visible viewport that are kept rendered to
@@ -2424,9 +2820,11 @@ pub(crate) fn build_mixer_render_snapshot(
     MixerRenderSnapshot::new(viewport, strips, None, 2.0, 1.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn mixer_panel(
     tracks: &[TrackState],
     master: &MasterBusState,
+    monitor: &MonitorBusState,
     selected_track_id: Option<&str>,
     selected_track_ids: &[String],
     callbacks: MixerCallbacks,
@@ -2472,6 +2870,7 @@ pub fn mixer_panel(
             .child(mixer_master_strip_pinned(
                 accent,
                 master,
+                monitor,
                 on_master,
                 &callbacks,
                 &split,
@@ -2527,6 +2926,7 @@ pub fn mixer_panel(
     let master_block = mixer_master_strip_pinned(
         accent,
         master,
+        monitor,
         on_master,
         &callbacks,
         &split,
@@ -2784,9 +3184,15 @@ pub(crate) fn mixer_strip_scroller(
         )
 }
 
-fn mixer_master_strip_pinned(
+/// The pinned right-hand pair: Master then Monitor, sharing one divider.
+///
+/// Single composer for both mixer surfaces — the docked panel's
+/// `MixerMasterStripView` entity and the detached Mixer Window both route
+/// here, so the two strips can never drift apart between them.
+pub(crate) fn mixer_master_strip_pinned(
     accent: gpui::Rgba,
     master: &MasterBusState,
+    monitor: &MonitorBusState,
     on_master: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
@@ -2794,15 +3200,29 @@ fn mixer_master_strip_pinned(
     i18n: I18n,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("MixerMasterStrip");
-    master_strip(
-        accent,
-        master,
-        on_master,
-        callbacks,
-        split,
-        strip_available_px,
-        i18n,
-    )
+    div()
+        .flex()
+        .flex_row()
+        .flex_none()
+        .h_full()
+        .child(master_strip(
+            accent,
+            master,
+            on_master,
+            callbacks,
+            split,
+            strip_available_px,
+            i18n,
+        ))
+        .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
+        .child(monitor_strip(
+            accent,
+            monitor,
+            callbacks,
+            split,
+            strip_available_px,
+            i18n,
+        ))
 }
 
 #[cfg(test)]

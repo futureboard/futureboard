@@ -921,6 +921,12 @@ impl StudioLayout {
         let plugin_output_meters = meters.plugin_outputs;
         let master_peak_l = meters.master_peak_l;
         let master_peak_r = meters.master_peak_r;
+        // Control Room output peaks — measured after the monitor insert chain
+        // and the monitor control processor, i.e. the signal actually leaving
+        // for the monitoring hardware output. Deliberately not the live input
+        // peak: the Control Room monitors the master bus, not a microphone.
+        let monitor_peak_l = meters.monitor_peak_l;
+        let monitor_peak_r = meters.monitor_peak_r;
         if crate::forensic_trace::forensic_trace_enabled() {
             for track_meter in &meter_tracks {
                 let peak = track_meter.peak_l.max(track_meter.peak_r);
@@ -1005,6 +1011,25 @@ impl StudioLayout {
                 master_peak_l,
                 master_peak_r,
                 master.meter_peak_hold_l.max(master.meter_peak_hold_r),
+            );
+            let monitor = &mut timeline.state.monitor;
+            changed |= smooth_meter_value(
+                &mut monitor.meter_level_l,
+                monitor_peak_l.clamp(0.0, 1.0) as f32,
+                meter_dt,
+            );
+            changed |= smooth_meter_value(
+                &mut monitor.meter_level_r,
+                monitor_peak_r.clamp(0.0, 1.0) as f32,
+                meter_dt,
+            );
+            update_meter_hold(&mut monitor.meter_peak_hold_l, monitor.meter_level_l, meter_dt);
+            update_meter_hold(&mut monitor.meter_peak_hold_r, monitor.meter_level_r, meter_dt);
+            update_meter_clip(
+                &mut monitor.meter_clip,
+                monitor_peak_l,
+                monitor_peak_r,
+                monitor.meter_peak_hold_l.max(monitor.meter_peak_hold_r),
             );
             changed
         });

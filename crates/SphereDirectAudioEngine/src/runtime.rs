@@ -184,10 +184,86 @@ impl Clone for RuntimeSoundfontPlayer {
     }
 }
 
+/// Control Room state carried by the render graph.
+///
+/// Lives on [`RuntimeProject`] so the audio callback reads a resolved,
+/// index-based configuration with no id lookups, but it is only *consumed* by
+/// the realtime device callback. The offline exporter renders the same graph
+/// and simply never runs the Control Room stage, which is what keeps monitor
+/// gain, dim, mono, and monitor inserts out of exported and recorded audio.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeMonitor {
+    /// Selected source when no Listen is engaged. Defaults to the master bus.
+    pub source: crate::monitor::MonitorSource,
+    /// [`Self::source`] resolved to a track index for `Bus` / `TrackPreFader` /
+    /// `TrackAfterFader`. `None` for `MasterBus` and `HardwareInput`.
+    pub source_track_index: Option<usize>,
+    /// Which stage of `source_track_index` to tap.
+    pub source_stage: Option<crate::monitor::TapStage>,
+    pub control: crate::monitor::MonitorControl,
+    pub output: crate::monitor::MonitorOutputTarget,
+    /// Monitor-only insert chain. Never reached by export.
+    pub inserts: Vec<RuntimeInsert>,
+    /// Scratch holding the routed non-master source for this block.
+    pub source_l: Vec<f32>,
+    pub source_r: Vec<f32>,
+    /// Scratch accumulating every engaged PFL/AFL tap for this block.
+    pub listen_l: Vec<f32>,
+    pub listen_r: Vec<f32>,
+    /// Set by the graph pass when at least one channel contributed a Listen
+    /// tap this block. When false the Control Room plays `source` — which for
+    /// the default configuration is the master bus.
+    pub listen_active: bool,
+    /// Set by the graph pass when the routed source tap actually captured.
+    /// Distinguishes "the selected bus produced silence" from "the selected
+    /// bus no longer exists", which must fall back to the master bus.
+    pub source_captured: bool,
+}
+
+impl RuntimeMonitor {
+    /// Grow the Control Room scratch buffers to hold `frames`. Control-thread
+    /// only — the callback never resizes and instead degrades to plain master
+    /// output if capacity is short.
+    pub fn ensure_block_capacity(&mut self, frames: usize) {
+        if self.source_l.len() >= frames {
+            return;
+        }
+        self.source_l.resize(frames, 0.0);
+        self.source_r.resize(frames, 0.0);
+        self.listen_l.resize(frames, 0.0);
+        self.listen_r.resize(frames, 0.0);
+    }
+
+    /// Whether the callback can run the Control Room for a block of `frames`.
+    pub fn has_block_capacity(&self, frames: usize) -> bool {
+        self.source_l.len() >= frames
+            && self.source_r.len() >= frames
+            && self.listen_l.len() >= frames
+            && self.listen_r.len() >= frames
+    }
+
+    /// Zero the per-block scratch and clear the capture flags. Called once at
+    /// the top of every render block.
+    pub fn begin_block(&mut self, frames: usize) {
+        self.listen_active = false;
+        self.source_captured = false;
+        for i in 0..frames.min(self.listen_l.len()) {
+            self.listen_l[i] = 0.0;
+            self.listen_r[i] = 0.0;
+            self.source_l[i] = 0.0;
+            self.source_r[i] = 0.0;
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeTrack {
     pub id: String,
     pub track_type: String,
+    /// Pre/After-Fader Listen state for this channel. Affects the Control Room
+    /// only — it never changes what this track contributes to the master mix,
+    /// so engaging Listen cannot alter an export or a recording.
+    pub listen: crate::monitor::ListenMode,
     pub volume: f32,
     pub pan: f32,
     pub muted: bool,
@@ -1058,6 +1134,9 @@ pub struct RuntimeProject {
     /// the next play. Counted down by the callback while the transport is
     /// stopped; transient, never persisted.
     pub bridge_panic_flush_samples: u64,
+    /// Control Room / Listen Bus configuration and per-block scratch. Read
+    /// only by the realtime device callback — see [`RuntimeMonitor`].
+    pub monitor: RuntimeMonitor,
     /// Samples of post-preview release-tail processing still owed to bridged
     /// plugin hosts after a note-off / sustain-off while transport is stopped.
     /// Unlike `bridge_editor_active`, this is armed by MIDI itself, so closing
@@ -1084,6 +1163,28 @@ impl RuntimeProject {
         for i in 0..self.midi_tracks.len() {
             let ix = track_indices.get(&self.midi_tracks[i].track_id).copied();
             self.midi_tracks[i].track_index = ix;
+        }
+        // Control Room source: resolve the selected bus/track to an index once,
+        // here, so the audio callback branches on `Option<usize>` instead of
+        // hashing a string every block. An id that no longer exists resolves to
+        // `None`, which the callback treats as "fall back to the master bus"
+        // rather than as silence.
+        {
+            use crate::monitor::{MonitorSource, TapStage};
+            let (index, stage) = match &self.monitor.source {
+                MonitorSource::MasterBus | MonitorSource::HardwareInput(_) => (None, None),
+                MonitorSource::Bus(id) => {
+                    (track_indices.get(id).copied(), Some(TapStage::PostFader))
+                }
+                MonitorSource::TrackAfterFader(id) => {
+                    (track_indices.get(id).copied(), Some(TapStage::PostFader))
+                }
+                MonitorSource::TrackPreFader(id) => {
+                    (track_indices.get(id).copied(), Some(TapStage::PreFader))
+                }
+            };
+            self.monitor.source_track_index = index;
+            self.monitor.source_stage = stage.filter(|_| index.is_some());
         }
         for i in 0..self.tracks.len() {
             let out_ix = self.tracks[i]
@@ -1678,6 +1779,7 @@ impl RuntimeProject {
                 (1.0 - init_pan, 1.0)
             };
             tracks.push(RuntimeTrack {
+                listen: crate::monitor::ListenMode::Off,
                 id: t.id.clone(),
                 track_type: t.track_type.clone(),
                 volume: init_volume,
@@ -1953,6 +2055,13 @@ impl RuntimeProject {
         }
 
         let mut project = Self {
+            monitor: {
+                // Preallocate the Control Room scratch alongside the per-track
+                // block buffers so the device callback never resizes it.
+                let mut monitor = RuntimeMonitor::default();
+                monitor.ensure_block_capacity(DEFAULT_AUDIO_BLOCK_CAPACITY);
+                monitor
+            },
             sample_rate: output_sample_rate,
             tracks,
             clips,
@@ -4661,6 +4770,7 @@ mod midi_tests {
 
     fn bridged_instrument_track(id: &str) -> RuntimeTrack {
         RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: "midi".to_string(),
             volume: 1.0,

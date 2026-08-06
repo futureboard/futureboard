@@ -51,6 +51,14 @@ pub struct TimelineViewport {
     pub viewport_width: f32,
     pub viewport_height: f32,
     pub track_area_height: f32,
+    /// Window-space x of the timeline panel's left edge, i.e. the width of the
+    /// chrome to its left (the collapsible browser panel). Pushed by the shell
+    /// through `Timeline::set_chrome_metrics`; never a fixed constant, because
+    /// hiding the browser panel slides the whole timeline left. Every
+    /// window-x → beat mapping must go through
+    /// [`TimelineState::lane_origin_x`] so gestures and drawing stay on one
+    /// coordinate space.
+    pub panel_origin_x: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

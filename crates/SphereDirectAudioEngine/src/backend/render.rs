@@ -94,6 +94,11 @@ pub struct LocalAudioState {
     /// Smoothed input-bus peaks for diagnostics (Layer 4 verification).
     pub prev_input_bus_l: f32,
     pub prev_input_bus_r: f32,
+    /// Smoothed Control Room peaks, taken after the monitor insert chain and
+    /// control processor — i.e. the signal actually leaving for the monitoring
+    /// output, not the master bus feed.
+    pub prev_monitor_peak_l: f32,
+    pub prev_monitor_peak_r: f32,
     /// Preallocated live-input block injected into monitored track buffers before
     /// the normal graph pass. Never resized from the callback.
     pub monitor_input_l: Vec<f32>,
@@ -144,6 +149,8 @@ impl LocalAudioState {
             playing_local: false,
             prev_peak_l: 0.0,
             prev_peak_r: 0.0,
+            prev_monitor_peak_l: 0.0,
+            prev_monitor_peak_r: 0.0,
             input_read_frames: 0,
             prev_input_bus_l: 0.0,
             prev_input_bus_r: 0.0,
@@ -646,6 +653,36 @@ pub fn drain_commands(
                 shared
                     .master_volume
                     .store(f32_store(value), Ordering::Relaxed);
+            }
+            EngineCommand::SetMonitorSource { source } => {
+                runtime.monitor.source = source;
+                // Re-resolve the id -> index mapping for the new selection.
+                runtime.resolve_indices();
+            }
+            EngineCommand::SetMonitorControl { control } => {
+                runtime.monitor.control = control;
+                // Keep the legacy input-monitor gain atomic in step so the
+                // software input-monitor path and the Control Room cannot
+                // disagree about level.
+                shared
+                    .monitor_gain
+                    .store(f32_store(control.effective_gain()), Ordering::Relaxed);
+            }
+            EngineCommand::SetMonitorOutput { target } => {
+                runtime.monitor.output = target;
+            }
+            EngineCommand::SetTrackListen {
+                track_index,
+                listen,
+            } => {
+                if let Some(track) = runtime.tracks.get_mut(track_index) {
+                    track.listen = listen;
+                }
+            }
+            EngineCommand::ClearAllListen => {
+                for track in runtime.tracks.iter_mut() {
+                    track.listen = crate::monitor::ListenMode::Off;
+                }
             }
             EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
                 match sink {
@@ -1252,6 +1289,13 @@ fn fill_output_f32_inner(
         let _ = mix_plugin_bridge(data, channels, runtime, master_vol);
     }
 
+    // ── Control Room ────────────────────────────────────────────────────────
+    // Everything above produced the master bus feed in `data`. The Control Room
+    // now routes/processes it and writes the result to the monitoring output
+    // pair. Because this lives in the device callback and export renders the
+    // graph directly, no stage below can reach exported or recorded audio.
+    apply_control_room(data, channels, runtime, shared, local);
+
     // Meter the final output after playback, software monitoring, and bridge
     // contributions have all been summed. This avoids under-reporting monitor
     // gain and catches clipping caused by the actual final mix.
@@ -1320,6 +1364,193 @@ fn fill_output_f32_inner(
     }
 
     frames
+}
+
+/// Control Room stage: route → listen override → monitor inserts → monitor
+/// control → monitoring output pair, then publish the post-processing meter.
+///
+/// On entry `data` holds the master bus feed on channels 0/1. On exit the
+/// monitoring output pair holds the monitored signal.
+///
+/// Requirement mapping:
+///
+/// * *No duplicate output path* — the result **replaces** the samples on the
+///   monitoring pair rather than summing into them. When the Control Room
+///   monitors the main pair (the default) the raw master feed is overwritten,
+///   so the same hardware output never carries both.
+/// * *Playback only* — this function is reachable only from the device
+///   callback. `export::offline_renderer` calls the graph directly.
+/// * *No implicit microphone* — a hardware-input source is read from the input
+///   ring only when the user selected `HardwareInput`, and it replaces (never
+///   sums with) the mix, so it cannot loop back into the master bus.
+/// * *Meter shows the monitored signal* — peaks are taken from the final block
+///   after inserts and the control processor.
+///
+/// Realtime-safe: no allocation, no locking. If the scratch buffers are too
+/// small for this block (a device block larger than the prepared capacity) the
+/// stage degrades to leaving the master feed on the main outs untouched.
+fn apply_control_room(
+    data: &mut [f32],
+    channels: usize,
+    runtime: &mut RuntimeProject,
+    shared: &Arc<SharedState>,
+    local: &mut LocalAudioState,
+) {
+    if channels < 2 {
+        return;
+    }
+    let frames = data.len() / channels;
+    if frames == 0 {
+        return;
+    }
+    // A hardware-input source is the only case that touches the capture ring,
+    // and only when the user explicitly selected it. Everything else never
+    // asks the input device for anything.
+    let hardware_ready = runtime.monitor.source.needs_hardware_input()
+        && !runtime.monitor.listen_active
+        && local.monitor_input_l.len() >= frames
+        && local.monitor_input_r.len() >= frames
+        && read_monitor_input(frames, shared, local);
+
+    let transport = crate::vst3_processor::RuntimeTransportContext {
+        tempo_bpm: runtime.tempo_map.bpm_at_beat(0.0),
+        time_sig_num: local.metronome_ts_num,
+        time_sig_den: local.metronome_ts_den,
+        project_time_samples: shared.position_samples.load(Ordering::Relaxed) as i64,
+        ppq_position: 0.0,
+        bar_position_ppq: 0.0,
+        playing: local.playing_local,
+        recording: false,
+    };
+
+    let hardware_input = if hardware_ready {
+        Some((
+            &local.monitor_input_l[..frames],
+            &local.monitor_input_r[..frames],
+        ))
+    } else {
+        None
+    };
+    let Some((monitor_peak_l, monitor_peak_r)) =
+        run_control_room(data, channels, runtime, hardware_input, transport)
+    else {
+        return;
+    };
+
+    // Publish the post-processing monitor meter.
+    local.prev_monitor_peak_l = smooth_peak(local.prev_monitor_peak_l, monitor_peak_l, PEAK_DECAY);
+    local.prev_monitor_peak_r = smooth_peak(local.prev_monitor_peak_r, monitor_peak_r, PEAK_DECAY);
+    shared
+        .monitor_peak_l
+        .store(f32_store(local.prev_monitor_peak_l), Ordering::Relaxed);
+    shared
+        .monitor_peak_r
+        .store(f32_store(local.prev_monitor_peak_r), Ordering::Relaxed);
+}
+
+/// Device-independent Control Room core: router → listen override → monitor
+/// inserts → monitor control → monitoring output pair.
+///
+/// Split out of [`apply_control_room`] so the whole monitoring path is testable
+/// without a device, a `SharedState`, or an input ring. `hardware_input` is
+/// `Some` only when the selected source is a hardware input *and* the ring
+/// actually produced a block — passing `Some` while the source is not
+/// `HardwareInput` is ignored, which is what keeps a capture device out of the
+/// monitor path unless it was explicitly selected.
+///
+/// Returns the post-processing `(peak_l, peak_r)` of the monitored signal, or
+/// `None` when the Control Room could not run and the master feed was left
+/// untouched.
+pub(crate) fn run_control_room(
+    data: &mut [f32],
+    channels: usize,
+    runtime: &mut RuntimeProject,
+    hardware_input: Option<(&[f32], &[f32])>,
+    transport: crate::vst3_processor::RuntimeTransportContext,
+) -> Option<(f32, f32)> {
+    if channels < 2 {
+        return None;
+    }
+    let frames = data.len() / channels;
+    if frames == 0 {
+        return None;
+    }
+    let (out_l, out_r) = runtime.monitor.output.resolved_pair(channels)?;
+    if !runtime.monitor.has_block_capacity(frames) {
+        return None;
+    }
+
+    // ── 1. Source router ────────────────────────────────────────────────────
+    // Listen overrides the selected source whenever any channel is engaged;
+    // with every Listen off we fall back to the selected source, which for the
+    // default configuration is the master bus.
+    let listen_active = runtime.monitor.listen_active;
+    let hardware =
+        hardware_input.filter(|_| runtime.monitor.source.needs_hardware_input() && !listen_active);
+    {
+        let monitor = &mut runtime.monitor;
+        if listen_active {
+            // Listen bus wins; its taps are already summed in listen_*.
+            for i in 0..frames {
+                monitor.source_l[i] = monitor.listen_l[i];
+                monitor.source_r[i] = monitor.listen_r[i];
+            }
+        } else if let Some((in_l, in_r)) = hardware {
+            monitor.source_l[..frames].copy_from_slice(&in_l[..frames]);
+            monitor.source_r[..frames].copy_from_slice(&in_r[..frames]);
+        } else if !monitor.source_captured {
+            // MasterBus, or a bus/track selection whose id no longer resolves —
+            // take the complete master feed off the device buffer. This is the
+            // path that carries audio tracks, instruments, aux/returns, group
+            // buses, and master processing into the Control Room.
+            for i in 0..frames {
+                let frame = &data[i * channels..i * channels + channels];
+                monitor.source_l[i] = frame[0];
+                monitor.source_r[i] = frame[1];
+            }
+        }
+        // else: the graph pass already filled source_* from the selected tap.
+    }
+
+    // ── 2. Monitor insert chain ─────────────────────────────────────────────
+    for insert_ix in 0..runtime.monitor.inserts.len() {
+        if !runtime.monitor.inserts[insert_ix].enabled {
+            continue;
+        }
+        let monitor = &mut runtime.monitor;
+        let (block_l, block_r) = (&mut monitor.source_l, &mut monitor.source_r);
+        crate::engine::apply_insert_block(
+            &mut block_l[..frames],
+            &mut block_r[..frames],
+            &mut monitor.inserts[insert_ix],
+            None,
+            transport,
+        );
+    }
+
+    // ── 3. Monitor control processor (mono → dim → gain → mute) ─────────────
+    let control = runtime.monitor.control;
+    crate::monitor::apply_monitor_control(
+        &mut runtime.monitor.source_l[..frames],
+        &mut runtime.monitor.source_r[..frames],
+        &control,
+    );
+
+    // ── 4. Write to the monitoring output pair ──────────────────────────────
+    let mut monitor_peak_l = 0.0f32;
+    let mut monitor_peak_r = 0.0f32;
+    for i in 0..frames {
+        let l = runtime.monitor.source_l[i].clamp(-1.0, 1.0);
+        let r = runtime.monitor.source_r[i].clamp(-1.0, 1.0);
+        monitor_peak_l = monitor_peak_l.max(l.abs());
+        monitor_peak_r = monitor_peak_r.max(r.abs());
+        let frame = &mut data[i * channels..i * channels + channels];
+        // Replace, never sum — this is what prevents a duplicate feed of the
+        // master bus on the monitoring output.
+        frame[out_l] = l;
+        frame[out_r] = r;
+    }
+    Some((monitor_peak_l, monitor_peak_r))
 }
 
 /// Largest block the bridge mix reads in one callback (stack scratch bound).

@@ -11,6 +11,31 @@ pub enum EngineCommand {
     SetTestTone { enabled: bool, frequency: f32 },
     /// Set master output gain (linear, 0..2).
     SetMasterVolume { value: f32 },
+    /// Replace the Control Room's monitor source. The control thread resolves
+    /// nothing here — `RuntimeProject::resolve_indices` maps the id to an
+    /// index when the command is applied, so the callback never hashes a
+    /// string per block.
+    SetMonitorSource {
+        source: crate::monitor::MonitorSource,
+    },
+    /// Set the Control Room's level/shape controls (gain, mute, dim, mono).
+    /// Playback-only: never reaches export or recording.
+    SetMonitorControl {
+        control: crate::monitor::MonitorControl,
+    },
+    /// Select the hardware output pair the Control Room feeds.
+    SetMonitorOutput {
+        target: crate::monitor::MonitorOutputTarget,
+    },
+    /// Set one channel's Pre/After-Fader Listen state. `track_index` is
+    /// resolved by the control thread so the payload owns no allocation.
+    SetTrackListen {
+        track_index: usize,
+        listen: crate::monitor::ListenMode,
+    },
+    /// Clear Listen on every channel, returning the Control Room to its
+    /// selected source (normally the master bus).
+    ClearAllListen,
     /// Set a track's gain (linear, 0..2).
     SetTrackVolume { track_id: String, value: f32 },
     /// Set a track's pan (-1..1).

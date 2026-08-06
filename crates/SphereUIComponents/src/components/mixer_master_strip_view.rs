@@ -1,8 +1,10 @@
-//! Pinned master strip — isolated invalidation from channel scroller / tree.
+//! Pinned right-hand strips — Master and Monitor. Isolated invalidation from
+//! the channel scroller / tree: this entity repaints on the master+monitor
+//! meter signature alone, never dragging the rest of the mixer with it.
 
 use gpui::{Context, IntoElement, Render, Window};
 
-use crate::components::mixer_panel::{master_strip, MixerCallbacks, MixerSplit};
+use crate::components::mixer_panel::{mixer_master_strip_pinned, MixerCallbacks, MixerSplit};
 use crate::components::timeline::timeline::Timeline;
 use crate::i18n::I18n;
 use crate::theme::Colors;
@@ -75,15 +77,17 @@ impl Render for MixerMasterStripView {
         if let Some(v) = timeline.state.master_volume_preview {
             master.volume = v;
         }
-        let meter_sig = master_meter_signature(&master);
+        let monitor = timeline.state.monitor.clone();
+        let meter_sig = strip_meter_signature(&master, &monitor);
         self.last_meter_sig = meter_sig;
 
         let accent = Colors::accent_primary();
         let on_master = self.callbacks.on_master_volume_change.clone();
         let i18n = I18n::from_app(cx);
-        master_strip(
+        mixer_master_strip_pinned(
             accent,
             &master,
+            &monitor,
             on_master,
             &self.callbacks,
             &self.split,
@@ -104,8 +108,11 @@ fn structure_key(split: &MixerSplit, strip_available_px: f32) -> u64 {
     hasher.finish()
 }
 
-fn master_meter_signature(
+/// Quantised meter signature for both pinned strips. Any change here repaints
+/// the Master+Monitor entity and nothing else.
+fn strip_meter_signature(
     master: &crate::components::timeline::timeline_state::MasterBusState,
+    monitor: &crate::components::timeline::timeline_state::MonitorBusState,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -115,11 +122,22 @@ fn master_meter_signature(
     q(master.meter_peak_hold_l).hash(&mut hasher);
     q(master.meter_peak_hold_r).hash(&mut hasher);
     master.meter_clip.hash(&mut hasher);
+    q(monitor.meter_level_l).hash(&mut hasher);
+    q(monitor.meter_level_r).hash(&mut hasher);
+    q(monitor.meter_peak_hold_l).hash(&mut hasher);
+    q(monitor.meter_peak_hold_r).hash(&mut hasher);
+    monitor.meter_clip.hash(&mut hasher);
+    monitor.listen_active.hash(&mut hasher);
+    monitor.mute.hash(&mut hasher);
+    monitor.dim.hash(&mut hasher);
+    monitor.mono.hash(&mut hasher);
+    q(monitor.volume).hash(&mut hasher);
     hasher.finish()
 }
 
 pub fn mixer_master_meter_signature(
     master: &crate::components::timeline::timeline_state::MasterBusState,
+    monitor: &crate::components::timeline::timeline_state::MonitorBusState,
 ) -> u64 {
-    master_meter_signature(master)
+    strip_meter_signature(master, monitor)
 }

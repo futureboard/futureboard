@@ -1774,3 +1774,61 @@ mod audio_clip_split_tests {
         assert_eq!(state.next_clip_id_after("weird"), "weird-split");
     }
 }
+
+#[cfg(test)]
+mod lane_origin_tests {
+    use super::*;
+
+    /// The browser panel is collapsible, so the timeline's window-space origin
+    /// moves with it. A hardcoded panel width made every window-x → beat
+    /// mapping (clip edge-resize, clip move, ruler scrub, lane tools) land a
+    /// full panel width away once the browser was hidden.
+    #[test]
+    fn window_x_to_beats_follows_the_collapsible_browser_panel() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.viewport.pixels_per_second = 150.0;
+        state.sync_pixels_per_beat();
+        let ppb = state.viewport.pixels_per_beat;
+
+        // Browser panel open: the lane starts past the panel and the headers.
+        state.viewport.panel_origin_x = 272.0;
+        assert_eq!(state.lane_origin_x(), 272.0 + HEADER_WIDTH);
+        let open_x = 272.0 + HEADER_WIDTH + 4.0 * ppb;
+        assert!((state.beats_from_window_x(open_x) - 4.0).abs() < 0.001);
+
+        // Browser panel hidden: the same beat now sits a panel width left.
+        state.viewport.panel_origin_x = 0.0;
+        assert_eq!(state.lane_origin_x(), HEADER_WIDTH);
+        let hidden_x = HEADER_WIDTH + 4.0 * ppb;
+        assert!((state.beats_from_window_x(hidden_x) - 4.0).abs() < 0.001);
+    }
+
+    /// A right-edge trim driven from a window-space pointer must land on the
+    /// pointer's beat with the browser panel collapsed, not a panel width past
+    /// it.
+    #[test]
+    fn audio_right_edge_trim_lands_on_pointer_beat_with_browser_hidden() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.snap_to_grid = false;
+        state.viewport.pixels_per_second = 150.0;
+        state.sync_pixels_per_beat();
+        state.viewport.panel_origin_x = 0.0;
+
+        let clip_id =
+            state.import_audio_at("C:/a/loop.wav".to_string(), "loop".to_string(), 0.0, 1.0e9);
+        state.update_audio_clip_metadata("C:/a/loop.wav", "wav", 48_000, 2, 48_000, 1.0);
+
+        let pointer_x = state.lane_origin_x() + 0.75 * state.viewport.pixels_per_beat;
+        let beat = state.beats_from_window_x(pointer_x);
+        assert!(state.resize_clip(&clip_id, ClipEdge::Right, beat));
+
+        let clip = state.find_clip(&clip_id).map(|(_, clip)| clip).unwrap();
+        assert!(
+            (clip.duration_beats - 0.75).abs() < 0.001,
+            "trim followed the wrong coordinate space: {}",
+            clip.duration_beats
+        );
+    }
+}

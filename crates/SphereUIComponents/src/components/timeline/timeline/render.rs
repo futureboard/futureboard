@@ -761,14 +761,14 @@ impl Render for Timeline {
         // visually stable when driven from the buttons.
         let on_zoom_in = cx.listener(|this, _: &(), window, cx| {
             let viewport_w: f32 = window.bounds().size.width.into();
-            let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
+            let anchor = ((viewport_w - this.state.lane_origin_x()) * 0.5).max(0.0);
             this.state.zoom_by(1.35, anchor);
             cx.notify();
         });
 
         let on_zoom_out = cx.listener(|this, _: &(), window, cx| {
             let viewport_w: f32 = window.bounds().size.width.into();
-            let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
+            let anchor = ((viewport_w - this.state.lane_origin_x()) * 0.5).max(0.0);
             this.state.zoom_by(1.0 / 1.35, anchor);
             cx.notify();
         });
@@ -1803,7 +1803,7 @@ impl Render for Timeline {
             }
 
             let x: f32 = event.position.x.into();
-            let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+            let anchor = this.state.lane_x_from_window_x(x).max(0.0);
             let factor = wheel_zoom_factor(delta.1);
             this.state.zoom_by(factor, anchor);
             let (max_x, max_y) = this.max_scroll_offsets(window);
@@ -1822,7 +1822,7 @@ impl Render for Timeline {
             window.prevent_default();
             cx.stop_propagation();
             let x: f32 = event.position.x.into();
-            let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+            let anchor = this.state.lane_x_from_window_x(x).max(0.0);
             this.state.zoom_by(factor, anchor);
             let (max_x, max_y) = this.max_scroll_offsets(window);
             this.state.clamp_scroll(max_x, max_y);
@@ -2303,7 +2303,7 @@ pub(crate) fn horizontal_scrollbar(
 
     let on_track_click = cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
         let click_x: f32 = event.position.x.into();
-        let local = (click_x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+        let local = this.state.lane_x_from_window_x(click_x).max(0.0);
         let frac = (local / track_w.max(1.0)).clamp(0.0, 1.0);
         this.state.set_scroll_immediate(
             (frac * max_scroll).clamp(0.0, max_scroll),
@@ -2493,7 +2493,7 @@ fn file_drop_hint_label(paths: &[std::path::PathBuf]) -> &'static str {
 fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<gpui::AnyElement> {
     let window_x: f32 = hint.position.x.into();
     let window_y: f32 = hint.position.y.into();
-    let lane_x = (window_x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+    let lane_x = state.lane_x_from_window_x(window_x).max(0.0);
     let lane_y = (window_y - APP_CHROME_HEIGHT - state.arrangement_content_top()).max(0.0);
     let beat = state.snap_beats(state.x_to_beats(lane_x)).max(0.0);
     let track_index = state.track_index_at_y(lane_y);

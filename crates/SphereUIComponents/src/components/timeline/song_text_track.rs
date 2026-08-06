@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use crate::components::timeline::global_lane_header::{
     global_lane_header, GlobalLaneHeaderActions,
 };
-use crate::components::timeline::timeline_state::{SongTextEventType, TimelineState, HEADER_WIDTH};
+use crate::components::timeline::timeline_state::{SongTextEventType, TimelineState};
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -270,6 +270,9 @@ pub fn song_text_track_lane(
         );
     }
 
+    // Measured lane origin (the browser panel is collapsible), captured once so
+    // the click handler shares the transform used to place the markers above.
+    let lane_origin_x = state.lane_origin_x();
     let empty_seek = div()
         .absolute()
         .inset_0()
@@ -278,7 +281,7 @@ pub fn song_text_track_lane(
             gpui::MouseButton::Left,
             move |mouse: &gpui::MouseDownEvent, window, cx| {
                 let window_x: f32 = mouse.position.x.into();
-                let lane_x = window_x - crate::components::sidebar::SIDEBAR_WIDTH - HEADER_WIDTH;
+                let lane_x = window_x - lane_origin_x;
                 on_empty_seek(&lane_x, window, cx);
             },
         );

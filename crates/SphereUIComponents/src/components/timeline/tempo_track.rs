@@ -201,9 +201,7 @@ pub fn tempo_track_lane(
                     cx.stop_propagation();
                     let wx: f32 = event.position.x.into();
                     let wy: f32 = event.position.y.into();
-                    let lane_x = wx
-                        - crate::components::sidebar::SIDEBAR_WIDTH
-                        - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                    let lane_x = state_left.lane_x_from_window_x(wx);
                     let beat = state_left.x_to_beat(lane_x).max(0.0);
                     let snapped = state_left.snap_beats(beat as f32) as f64;
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
@@ -233,9 +231,7 @@ pub fn tempo_track_lane(
                     let wy: f32 = event.position.y.into();
                     let sx: f32 = event.position.x.into();
                     let sy: f32 = event.position.y.into();
-                    let lane_x = wx
-                        - crate::components::sidebar::SIDEBAR_WIDTH
-                        - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                    let lane_x = state_right.lane_x_from_window_x(wx);
                     let beat = state_right.x_to_beat(lane_x).max(0.0);
                     let local_y = wy - content_top - TEMPO_LANE_PAD;
                     let bpm = crate::components::timeline::timeline_state::y_to_bpm(

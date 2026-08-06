@@ -195,6 +195,8 @@ impl Render for StudioLayout {
             ) {
                 selected_track_id.as_deref().and_then(|tid| {
                     tracks.iter().find(|t| t.id == tid).map(|track| {
+                        let combo_audio_connections =
+                            self.timeline.read(cx).state.audio_connections.clone();
                         let close = Arc::new({
                             let this = cx.entity().clone();
                             move |cx: &mut gpui::App| {
@@ -207,6 +209,7 @@ impl Render for StudioLayout {
                         });
                         crate::components::panel::inspector_routing_combo_overlay(
                             track,
+                            &combo_audio_connections,
                             combo,
                             anchor,
                             window,
@@ -1684,6 +1687,8 @@ impl Render for StudioLayout {
                         let owner = cx.entity().clone();
                         let content = match right_tab {
                             RightDockTab::Inspector => {
+                                let inspector_audio_connections =
+                                    self.timeline.read(cx).state.audio_connections.clone();
                                 let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
                                     let (start, end) = range.as_f32_range();
                                     let duration = (end - start).abs();
@@ -1694,6 +1699,7 @@ impl Render for StudioLayout {
                                 });
                                 crate::components::panel::inspector_panel(
                                     &tracks,
+                                    &inspector_audio_connections,
                                     selected_track_id.as_deref(),
                                     selected_clip_id.as_deref(),
                                     find_clip_summary(

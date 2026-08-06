@@ -18,11 +18,40 @@ pub struct MixerCallbacks {
     pub on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
+    /// Engage/clear a channel's Pre- or After-Fader Listen. Exclusive: the
+    /// state layer clears Listen on every other channel, and clicking the
+    /// engaged mode again returns the Control Room to its selected source.
+    pub on_toggle_listen: std::sync::Arc<
+        dyn Fn(
+                &(
+                    String,
+                    crate::components::timeline::timeline_state::ListenMode,
+                ),
+                &mut Window,
+                &mut App,
+            ) + 'static,
+    >,
     pub on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
     pub on_master_volume_drag_start: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
     pub on_master_volume_drag_preview:
         std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
     pub on_master_volume_drag_commit: std::sync::Arc<dyn Fn(&mut Window, &mut App) + 'static>,
+    /// Control Room level (normalized fader position). Session state, so this
+    /// single callback serves drag-start, drag-move, and double-click reset —
+    /// there is no preview/commit pair because there is no undo entry to
+    /// coalesce and no project dirty flag to defer.
+    pub on_monitor_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
+    /// Control Room mute / dim / mono. Monitoring only — never the master mix.
+    pub on_monitor_toggle_mute: std::sync::Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    pub on_monitor_toggle_dim: std::sync::Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    pub on_monitor_toggle_mono: std::sync::Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    /// Open the monitor source picker at `(x, y)`. `None` disables the chip
+    /// rather than showing a control that does nothing.
+    pub on_monitor_source_picker:
+        Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>>,
+    /// Open the monitor output picker at `(x, y)`.
+    pub on_monitor_output_picker:
+        Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>>,
     pub on_context_menu:
         Option<std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>>,
     /// Open the insert plugin picker overlay for the track (Phase 2b). The
@@ -80,6 +109,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_vol_commit = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
+    let noop_unit = Arc::new(|_: &(), _: &mut Window, _: &mut App| {});
     let noop_master_commit = Arc::new(|_: &mut Window, _: &mut App| {});
     let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
     let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
@@ -101,7 +131,21 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_toggle_solo: noop_track.clone(),
         on_toggle_arm: noop_track.clone(),
         on_toggle_input: noop_track.clone(),
+        on_toggle_listen: Arc::new(
+            |_: &(
+                String,
+                crate::components::timeline::timeline_state::ListenMode,
+            ),
+             _: &mut Window,
+             _: &mut App| {},
+        ),
         on_master_volume_change: noop_master.clone(),
+        on_monitor_volume_change: noop_master.clone(),
+        on_monitor_toggle_mute: noop_unit.clone(),
+        on_monitor_toggle_dim: noop_unit.clone(),
+        on_monitor_toggle_mono: noop_unit,
+        on_monitor_source_picker: None,
+        on_monitor_output_picker: None,
         on_master_volume_drag_start: noop_master.clone(),
         on_master_volume_drag_preview: noop_master,
         on_master_volume_drag_commit: noop_master_commit,

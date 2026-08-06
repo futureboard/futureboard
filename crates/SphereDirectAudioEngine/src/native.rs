@@ -1003,6 +1003,50 @@ impl AudioEngine {
         self.inner.update_track_param(track_id, param_id, value)
     }
 
+    /// Set the linear monitor gain applied to the input bus before it reaches
+    /// master. Drives the pinned Monitor strip's fader.
+    pub fn set_monitor_gain(&self, value: f32) -> Result<(), SphereAudioError> {
+        self.inner.set_monitor_gain(value)
+    }
+
+    /// Select what the Control Room monitors when no Listen is engaged.
+    pub fn set_monitor_source(
+        &self,
+        source: crate::monitor::MonitorSource,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_monitor_source(source)
+    }
+
+    /// Set Control Room gain, mute, dim, and mono in one atomic update.
+    pub fn set_monitor_control(
+        &self,
+        control: crate::monitor::MonitorControl,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_monitor_control(control)
+    }
+
+    /// Select the hardware output pair the Control Room feeds.
+    pub fn set_monitor_output(
+        &self,
+        target: crate::monitor::MonitorOutputTarget,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_monitor_output(target)
+    }
+
+    /// Set one channel's Pre/After-Fader Listen state.
+    pub fn set_track_listen(
+        &self,
+        track_id: &str,
+        listen: crate::monitor::ListenMode,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_track_listen(track_id, listen)
+    }
+
+    /// Clear Listen on every channel.
+    pub fn clear_all_listen(&self) -> Result<(), SphereAudioError> {
+        self.inner.clear_all_listen()
+    }
+
     /// Apply only record-arm and effective monitor state while preserving the
     /// track's existing input route. Used by timeline controls that do not own
     /// the full route model.

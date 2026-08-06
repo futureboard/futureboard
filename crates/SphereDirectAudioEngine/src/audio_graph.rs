@@ -424,6 +424,7 @@ mod tests {
 
     fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>, output: Option<&str>) -> RuntimeTrack {
         RuntimeTrack {
+            listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: ty.to_string(),
             volume: 1.0,

@@ -209,56 +209,52 @@ fn vst3_controller_number(kind: MidiControllerKind) -> Option<u16> {
     }
 }
 
-pub(crate) fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapshot {
-    use timeline_state::{TrackAudioFormat, TrackInputRouting};
-
-    let format_channels = || match track.routing.audio_format {
-        TrackAudioFormat::Mono => vec![0],
-        TrackAudioFormat::Stereo => vec![0, 1],
+/// Resolve a track's audio input to concrete device + channels for the engine.
+///
+/// The track stores only an `AudioConnectionId`; the registry is the single
+/// layer that knows physical ports. A connection that is missing, disabled, or
+/// unresolvable yields an empty source — recording silence — rather than a
+/// fallback to an unrelated input.
+///
+/// MIDI never passes through here: it stays on `routing.midi_input`.
+pub(crate) fn build_engine_input_source(
+    track: &TrackState,
+    connections: &crate::audio_connections::AudioConnectionRegistry,
+    ports: &crate::audio_connections::AvailablePorts,
+) -> EngineTrackInputSourceSnapshot {
+    let empty = || EngineTrackInputSourceSnapshot {
+        device_id: None,
+        channels: Vec::new(),
     };
-
-    match &track.routing.input {
-        TrackInputRouting::MidiDevice { .. } => EngineTrackInputSourceSnapshot {
-            device_id: None,
-            channels: Vec::new(),
-        },
-        // Record-arm and monitoring are independent from route selection.
-        // Never reinterpret "No Input" as hardware channels 1-2: recording
-        // must fail clearly instead of capturing an unintended source.
-        TrackInputRouting::None => EngineTrackInputSourceSnapshot {
-            device_id: None,
-            channels: Vec::new(),
-        },
-        TrackInputRouting::AllInputs => EngineTrackInputSourceSnapshot {
-            device_id: None,
-            channels: format_channels(),
-        },
-        TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
-            EngineTrackInputSourceSnapshot {
-                device_id: Some(device_id.clone()),
-                channels: vec![*channel],
-            }
-        }
-        TrackInputRouting::AudioDeviceChannels {
-            device_id,
+    // No Input is never reinterpreted as hardware channels 1-2: recording must
+    // fail clearly instead of capturing an unintended source.
+    let Some(connection_id) = track.routing.audio_input_connection_id.as_ref() else {
+        return empty();
+    };
+    let Some(connection) = connections.get(connection_id) else {
+        return empty();
+    };
+    match connections.resolved_ports(connection_id, ports) {
+        Some(channels) => EngineTrackInputSourceSnapshot {
+            device_id: connection.device_id.clone(),
             channels,
-        } => EngineTrackInputSourceSnapshot {
-            device_id: Some(device_id.clone()),
-            channels: channels.iter().copied().take(2).collect(),
         },
+        None => empty(),
     }
 }
 
 pub(crate) fn apply_engine_track_input_state(
     engine: &DirectAudio::native::AudioEngine,
     track: &TrackState,
+    connections: &crate::audio_connections::AudioConnectionRegistry,
 ) -> Result<(), String> {
+    let ports = crate::audio_connections::current_available_ports();
     engine
         .update_track_input_state(
             &track.id,
             track.armed,
             track.input_monitor.is_active(track.armed),
-            build_engine_input_source(track),
+            build_engine_input_source(track, connections, &ports),
         )
         .map_err(|error| error.to_string())
 }
@@ -647,6 +643,7 @@ fn build_engine_project_snapshot_inner(
     pdc_enabled: bool,
     latency_graph_version: u64,
 ) -> EngineProjectSnapshot {
+    let engine_ports = crate::audio_connections::current_available_ports();
     let mut tracks: Vec<EngineTrackSnapshot> = state
         .tracks
         .iter()
@@ -659,7 +656,7 @@ fn build_engine_project_snapshot_inner(
             solo: track.solo,
             armed: track.armed,
             input_monitor: track.input_monitor.is_active(track.armed),
-            input_source: build_engine_input_source(track),
+            input_source: build_engine_input_source(track, &state.audio_connections, &engine_ports),
             // Track audio format controls input/recording channel selection.
             // Engine output remains stereo so mono-input tracks still route to
             // the stereo master/bus instead of collapsing the playback graph.
@@ -1199,6 +1196,8 @@ mod tests {
 
     #[test]
     fn armed_track_with_no_input_keeps_an_empty_engine_route() {
+        use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts};
+
         let (mut state, _) = audio_state_with_clip();
         let track = state
             .tracks
@@ -1207,9 +1206,13 @@ mod tests {
             .expect("audio track");
         track.armed = true;
         track.input_monitor = timeline_state::InputMonitorMode::Always;
-        track.routing.input = timeline_state::TrackInputRouting::None;
+        track.routing.audio_input_connection_id = None;
 
-        let source = build_engine_input_source(track);
+        let source = build_engine_input_source(
+            track,
+            &AudioConnectionRegistry::new(),
+            &AvailablePorts::for_device("dev-1", "Interface", 4, 2),
+        );
         assert!(source.device_id.is_none());
         assert!(
             source.channels.is_empty(),
@@ -1218,21 +1221,72 @@ mod tests {
     }
 
     #[test]
-    fn explicit_stereo_input_route_preserves_device_and_channel_identity() {
+    fn explicit_stereo_connection_preserves_device_and_ordered_channels() {
+        use crate::audio_connections::{
+            AudioConnectionRegistry, AvailablePorts, PhysicalInputChoice,
+        };
+
         let (mut state, _) = audio_state_with_clip();
+        let ports = AvailablePorts::for_device("asio:{driver-clsid}", "Interface", 4, 2);
+        let mut registry = AudioConnectionRegistry::new();
+        let id = registry
+            .get_or_create_audio_connection_for_physical_input(
+                &PhysicalInputChoice::Ports {
+                    device_id: "asio:{driver-clsid}".to_string(),
+                    channels: vec![2, 3],
+                },
+                &ports,
+            )
+            .expect("connection created");
+
         let track = state
             .tracks
             .iter_mut()
             .find(|track| track.track_type == TrackType::Audio)
             .expect("audio track");
-        track.routing.input = timeline_state::TrackInputRouting::AudioDeviceChannels {
-            device_id: "asio:{driver-clsid}".to_string(),
-            channels: vec![2, 3],
+        track.routing.audio_input_connection_id = Some(id);
+
+        let source = build_engine_input_source(track, &registry, &ports);
+        assert_eq!(source.device_id.as_deref(), Some("asio:{driver-clsid}"));
+        assert_eq!(
+            source.channels,
+            vec![2, 3],
+            "Left then Right order survives"
+        );
+    }
+
+    /// A connection whose device vanished resolves to silence, never to
+    /// another channel on a device that happens to still be present.
+    #[test]
+    fn a_missing_device_resolves_to_silence_not_a_fallback_channel() {
+        use crate::audio_connections::{
+            AudioConnectionRegistry, AvailablePorts, PhysicalInputChoice,
         };
 
-        let source = build_engine_input_source(track);
-        assert_eq!(source.device_id.as_deref(), Some("asio:{driver-clsid}"));
-        assert_eq!(source.channels, vec![2, 3]);
+        let (mut state, _) = audio_state_with_clip();
+        let ports = AvailablePorts::for_device("unplugged", "Gone", 4, 2);
+        let mut registry = AudioConnectionRegistry::new();
+        let id = registry
+            .get_or_create_audio_connection_for_physical_input(
+                &PhysicalInputChoice::Ports {
+                    device_id: "unplugged".to_string(),
+                    channels: vec![0],
+                },
+                &ports,
+            )
+            .expect("connection created");
+        registry.revalidate(&AvailablePorts::default());
+
+        let track = state
+            .tracks
+            .iter_mut()
+            .find(|track| track.track_type == TrackType::Audio)
+            .expect("audio track");
+        track.routing.audio_input_connection_id = Some(id);
+
+        let source = build_engine_input_source(track, &registry, &AvailablePorts::default());
+        assert!(source.device_id.is_none());
+        assert!(source.channels.is_empty());
     }
 
     #[test]

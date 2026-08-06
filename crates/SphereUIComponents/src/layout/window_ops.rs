@@ -3,6 +3,7 @@ use gpui::{App, Bounds, Context, Window};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::audio_connections::PhysicalInputChoice;
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat, InstrumentMode,
     FIRST_STEREO_PAIR_INPUT_LABEL,
@@ -14,7 +15,7 @@ use crate::components::settings_dialog::{
     open_settings_window, AudioDeviceListsProvider, OnSettingUpdate, SettingsAudioDeviceLists,
 };
 use crate::components::timeline::timeline_state::{
-    self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackAudioFormat, TrackInputRouting,
+    self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackAudioFormat,
     TrackMidiInputRouting, TrackOutputRouting, TrackType,
 };
 use crate::components::{external_mixer_debug, open_mixer_window};
@@ -55,39 +56,48 @@ fn dialog_audio_format(format: AudioFormat) -> TrackAudioFormat {
     }
 }
 
-fn dialog_audio_input_routing(
+/// Resolve an Add Track input label to a physical selection.
+///
+/// Returns a `PhysicalInputChoice`, which the caller converts to a logical
+/// `AudioConnectionId` via the registry bridge. The dialog never writes raw
+/// device/channel routing into the track.
+///
+/// `None` and any unsatisfiable selection (missing device, channel beyond the
+/// device) both yield `PhysicalInputChoice::None` — No Input — rather than
+/// guessing a different port.
+fn dialog_audio_input_choice(
     label: &str,
     format: AudioFormat,
     input_device: Option<&(String, u32)>,
-) -> TrackInputRouting {
+) -> PhysicalInputChoice {
     match label {
-        "None" => TrackInputRouting::None,
         "Input 1" | "Input 2" => {
             let Some((device_id, channels)) = input_device else {
-                return TrackInputRouting::AllInputs;
+                return PhysicalInputChoice::None;
             };
             let channel = if label == "Input 2" { 1 } else { 0 };
             if channel >= *channels {
-                return TrackInputRouting::AllInputs;
+                return PhysicalInputChoice::None;
             }
-            TrackInputRouting::AudioDeviceChannel {
+            PhysicalInputChoice::Ports {
                 device_id: device_id.clone(),
-                channel,
+                channels: vec![channel],
             }
         }
         FIRST_STEREO_PAIR_INPUT_LABEL if format == AudioFormat::Stereo => {
             let Some((device_id, channels)) = input_device else {
-                return TrackInputRouting::AllInputs;
+                return PhysicalInputChoice::None;
             };
             if *channels < 2 {
-                return TrackInputRouting::AllInputs;
+                return PhysicalInputChoice::None;
             }
-            TrackInputRouting::AudioDeviceChannels {
+            PhysicalInputChoice::Ports {
                 device_id: device_id.clone(),
+                // Ordered: index 0 is Left.
                 channels: vec![0, 1],
             }
         }
-        _ => TrackInputRouting::AllInputs,
+        _ => PhysicalInputChoice::None,
     }
 }
 
@@ -500,13 +510,24 @@ impl StudioLayout {
                             }
                             if dialog.selected_kind == AddTrackKind::Audio {
                                 let audio_format = dialog_audio_format(dialog.audio_format);
-                                let input = dialog_audio_input_routing(
+                                let choice = dialog_audio_input_choice(
                                     &dialog.input_label,
                                     dialog.audio_format,
                                     selected_input_device.as_ref(),
                                 );
                                 timeline.state.set_track_audio_format(&id, audio_format);
-                                timeline.state.set_track_input_routing(&id, input);
+                                // Store only a logical connection id, creating
+                                // or reusing a project-local bus as needed.
+                                let ports = crate::audio_connections::current_available_ports();
+                                let connection_id = timeline
+                                    .state
+                                    .audio_connections
+                                    .get_or_create_audio_connection_for_physical_input(
+                                        &choice, &ports,
+                                    );
+                                timeline
+                                    .state
+                                    .set_track_audio_input_connection(&id, connection_id);
                             }
                             if dialog.selected_kind == AddTrackKind::Instrument
                                 && dialog.instrument_mode == InstrumentMode::Vsti
@@ -1647,14 +1668,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dialog_input_number_always_maps_to_one_channel() {
+    fn dialog_input_number_always_maps_to_one_ordered_channel() {
         let device = ("input-device".to_string(), 4);
         for format in [AudioFormat::Mono, AudioFormat::Stereo] {
             assert_eq!(
-                dialog_audio_input_routing("Input 2", format, Some(&device)),
-                TrackInputRouting::AudioDeviceChannel {
+                dialog_audio_input_choice("Input 2", format, Some(&device)),
+                PhysicalInputChoice::Ports {
                     device_id: device.0.clone(),
-                    channel: 1,
+                    channels: vec![1],
                 }
             );
         }
@@ -1664,23 +1685,70 @@ mod tests {
     fn dialog_stereo_pair_label_maps_to_first_pair_only_for_stereo() {
         let device = ("input-device".to_string(), 4);
         assert_eq!(
-            dialog_audio_input_routing(
+            dialog_audio_input_choice(
                 FIRST_STEREO_PAIR_INPUT_LABEL,
                 AudioFormat::Stereo,
                 Some(&device),
             ),
-            TrackInputRouting::AudioDeviceChannels {
+            PhysicalInputChoice::Ports {
                 device_id: device.0.clone(),
                 channels: vec![0, 1],
             }
         );
         assert_eq!(
-            dialog_audio_input_routing(
+            dialog_audio_input_choice(
                 FIRST_STEREO_PAIR_INPUT_LABEL,
                 AudioFormat::Mono,
                 Some(&device),
             ),
-            TrackInputRouting::AllInputs
+            PhysicalInputChoice::None,
+            "a stereo pair on a mono track is No Input, never a guessed channel"
         );
+    }
+
+    #[test]
+    fn dialog_none_and_missing_device_both_mean_no_input() {
+        assert_eq!(
+            dialog_audio_input_choice("None", AudioFormat::Mono, None),
+            PhysicalInputChoice::None
+        );
+        assert_eq!(
+            dialog_audio_input_choice("Input 1", AudioFormat::Mono, None),
+            PhysicalInputChoice::None
+        );
+        let tiny = ("input-device".to_string(), 1);
+        assert_eq!(
+            dialog_audio_input_choice("Input 2", AudioFormat::Mono, Some(&tiny)),
+            PhysicalInputChoice::None
+        );
+    }
+
+    /// The dialog choice must become a logical connection, and selecting the
+    /// same ports twice must reuse one connection rather than accumulating.
+    #[test]
+    fn add_track_choice_resolves_to_a_reused_logical_connection() {
+        use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts};
+
+        let ports = AvailablePorts::for_device("input-device", "Interface", 4, 2);
+        let mut registry = AudioConnectionRegistry::new();
+        let device = ("input-device".to_string(), 4);
+        let choice = dialog_audio_input_choice(
+            FIRST_STEREO_PAIR_INPUT_LABEL,
+            AudioFormat::Stereo,
+            Some(&device),
+        );
+
+        let first = registry
+            .get_or_create_audio_connection_for_physical_input(&choice, &ports)
+            .expect("a real selection creates a connection");
+        let second = registry
+            .get_or_create_audio_connection_for_physical_input(&choice, &ports)
+            .expect("the same selection resolves again");
+        assert_eq!(first, second, "identical ordered mappings reuse one bus");
+        assert_eq!(registry.len(), 1);
+
+        assert!(registry
+            .get_or_create_audio_connection_for_physical_input(&PhysicalInputChoice::None, &ports)
+            .is_none());
     }
 }

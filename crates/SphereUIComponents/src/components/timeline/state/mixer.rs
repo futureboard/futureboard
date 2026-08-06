@@ -65,6 +65,184 @@ impl TimelineState {
         self.master.volume = norm.clamp(0.0, 1.0);
     }
 
+    /// Set the Control Room level. Unlike the master fader this needs no
+    /// preview/commit pair: monitor level is session state, so there is no
+    /// undo entry to coalesce and no project dirty flag to defer — every
+    /// pointer sample is simply the new value.
+    ///
+    /// Returns `true` when the value actually moved, so the caller can skip a
+    /// redundant engine store and repaint during a drag.
+    pub fn set_monitor_volume(&mut self, norm: f32) -> bool {
+        let v = norm.clamp(0.0, 1.0);
+        let changed = (self.monitor.volume - v).abs() > 1.0e-5;
+        if changed {
+            self.monitor.volume = v;
+        }
+        changed
+    }
+
+    /// Toggle Control Room mute. Monitoring only — the master mix, exports,
+    /// and recordings are unaffected.
+    pub fn toggle_monitor_mute(&mut self) {
+        self.monitor.mute = !self.monitor.mute;
+    }
+
+    /// Toggle the -20 dB Dim reference cut.
+    pub fn toggle_monitor_dim(&mut self) {
+        self.monitor.dim = !self.monitor.dim;
+    }
+
+    /// Toggle mono folding for mono-compatibility checking.
+    pub fn toggle_monitor_mono(&mut self) {
+        self.monitor.mono = !self.monitor.mono;
+    }
+
+    /// Select what the Control Room monitors. Returns `true` when it changed.
+    ///
+    /// Resolves the display name here, where the project is in scope, so the
+    /// strip shows a bus's real name instead of its internal id.
+    pub fn set_monitor_source(&mut self, source: MonitorSourceKind) -> bool {
+        if self.monitor.source == source {
+            return false;
+        }
+        self.monitor.source_display = match &source {
+            MonitorSourceKind::MasterBus => "Master Bus".to_string(),
+            MonitorSourceKind::Bus(id)
+            | MonitorSourceKind::TrackPreFader(id)
+            | MonitorSourceKind::TrackAfterFader(id) => self
+                .find_track(id)
+                .map(|track| track.name.clone())
+                .unwrap_or_else(|| id.clone()),
+            MonitorSourceKind::HardwareInput(id) => id.clone(),
+        };
+        self.monitor.source = source;
+        true
+    }
+
+    /// Set one channel's Listen state, exclusively.
+    ///
+    /// Engaging PFL or AFL on a channel clears Listen everywhere else, so the
+    /// Control Room is always on a single unambiguous tap — the console
+    /// convention, and it keeps the listen bus from summing tracks the user did
+    /// not intend to compare. Clicking the engaged mode again clears it and
+    /// returns monitoring to the selected source.
+    ///
+    /// Returns `true` when anything changed.
+    pub fn set_track_listen(&mut self, track_id: &str, mode: ListenMode) -> bool {
+        let current = self
+            .find_track(track_id)
+            .map(|track| track.listen)
+            .unwrap_or_default();
+        let next = if current == mode {
+            ListenMode::Off
+        } else {
+            mode
+        };
+        let mut changed = false;
+        for track in &mut self.tracks {
+            let want = if track.id == track_id {
+                next
+            } else {
+                ListenMode::Off
+            };
+            if track.listen != want {
+                track.listen = want;
+                changed = true;
+            }
+        }
+        if changed {
+            self.monitor.listen_active = next.is_active();
+        }
+        changed
+    }
+
+    /// Clear Listen on every channel — monitoring returns to the Control
+    /// Room's selected source.
+    pub fn clear_all_listen(&mut self) -> bool {
+        let mut changed = false;
+        for track in &mut self.tracks {
+            if track.listen != ListenMode::Off {
+                track.listen = ListenMode::Off;
+                changed = true;
+            }
+        }
+        if self.monitor.listen_active {
+            self.monitor.listen_active = false;
+            changed = true;
+        }
+        changed
+    }
+
+    /// The channel currently soloed into the Control Room's listen bus, if any.
+    pub fn active_listen_track(&self) -> Option<(&str, ListenMode)> {
+        self.tracks
+            .iter()
+            .find(|track| track.listen.is_active())
+            .map(|track| (track.id.as_str(), track.listen))
+    }
+
+    /// Sources the Control Room can be switched to, in cycle order.
+    ///
+    /// Master Bus is always first, so the default and the first step of the
+    /// cycle are the complete internal mix — never a hardware input. Project
+    /// routing buses (group / aux / return) follow, tapped post-fader.
+    pub fn monitor_source_options(&self) -> Vec<MonitorSourceKind> {
+        let mut options = vec![MonitorSourceKind::MasterBus];
+        options.extend(
+            self.tracks
+                .iter()
+                .filter(|track| {
+                    matches!(
+                        track.track_type,
+                        TrackType::Group | TrackType::Bus | TrackType::Return
+                    )
+                })
+                .map(|track| MonitorSourceKind::Bus(track.id.clone())),
+        );
+        options
+    }
+
+    /// Publish the stereo output pairs the active device can offer.
+    ///
+    /// Called with the real channel count of the configured output device, so
+    /// the Output selector never offers a pair the hardware does not have. A
+    /// stored selection that no longer fits (after switching to a smaller
+    /// interface) falls back to the main pair — the engine clamps the same way,
+    /// so monitoring cannot go silent because of a stale selection.
+    pub fn set_monitor_output_devices(&mut self, output_channels: u32) -> bool {
+        let mut options = vec![("Out 1-2".to_string(), 0u16)];
+        let mut left = 2u16;
+        while (left as u32 + 1) < output_channels {
+            options.push((format!("Out {}-{}", left + 1, left + 2), left));
+            left += 2;
+        }
+        if options == self.monitor.available_outputs {
+            return false;
+        }
+        self.monitor.available_outputs = options;
+        if !self
+            .monitor
+            .available_outputs
+            .iter()
+            .any(|(_, left)| *left == self.monitor.output_left_channel)
+        {
+            self.monitor.output_left_channel = 0;
+            self.monitor.output_name = "Out 1-2".to_string();
+        }
+        true
+    }
+
+    /// Select the Control Room's hardware output pair.
+    pub fn set_monitor_output(&mut self, name: String, left_channel: u16) -> bool {
+        let changed =
+            self.monitor.output_name != name || self.monitor.output_left_channel != left_channel;
+        if changed {
+            self.monitor.output_name = name;
+            self.monitor.output_left_channel = left_channel;
+        }
+        changed
+    }
+
     pub fn begin_master_volume_preview(&mut self, norm: f32) {
         self.master_volume_preview = Some(norm.clamp(0.0, 1.0));
         if Self::fader_debug_enabled() {
@@ -344,5 +522,235 @@ impl TimelineState {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod control_room_state_tests {
+    use super::*;
+
+    /// The Control Room must come up monitoring the whole mix, never a
+    /// capture device.
+    #[test]
+    fn default_monitor_source_is_the_master_bus() {
+        let state = TimelineState::default();
+        assert_eq!(state.monitor.source, MonitorSourceKind::MasterBus);
+        assert_eq!(state.monitor.source_label(), "Master Bus");
+        assert_eq!(state.monitor.output_name, "Out 1-2");
+        assert_eq!(state.monitor.output_left_channel, 0);
+        assert!(!state.monitor.mute);
+        assert!(!state.monitor.dim);
+        assert!(!state.monitor.mono);
+    }
+
+    /// A hardware input is never offered as the *first* option, so cycling the
+    /// Source chip can never land on a microphone before the master bus.
+    #[test]
+    fn source_options_start_at_master_and_offer_project_buses() {
+        let mut state = TimelineState::default();
+        let group = state.create_bus_track(&[]);
+        let options = state.monitor_source_options();
+        assert_eq!(options[0], MonitorSourceKind::MasterBus);
+        assert!(
+            options
+                .iter()
+                .any(|option| *option == MonitorSourceKind::Bus(group.clone())),
+            "a project group bus should be selectable as a monitor source"
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| matches!(option, MonitorSourceKind::HardwareInput(_))),
+            "hardware inputs must not appear in the default source cycle"
+        );
+    }
+
+    /// The Source chip shows the bus's real name, not its internal id.
+    #[test]
+    fn selecting_a_bus_source_resolves_its_display_name() {
+        let mut state = TimelineState::default();
+        let group = state.create_bus_track(&[]);
+        let name = state
+            .find_track(&group)
+            .map(|track| track.name.clone())
+            .expect("group track");
+
+        assert!(state.set_monitor_source(MonitorSourceKind::Bus(group.clone())));
+        assert_eq!(state.monitor.source_label(), name);
+        // Re-selecting the same source is a no-op.
+        assert!(!state.set_monitor_source(MonitorSourceKind::Bus(group)));
+    }
+
+    #[test]
+    fn monitor_toggles_are_independent_and_do_not_touch_the_master_bus() {
+        let mut state = TimelineState::default();
+        let master_before = state.master.clone();
+
+        state.toggle_monitor_mute();
+        state.toggle_monitor_dim();
+        state.toggle_monitor_mono();
+        assert!(state.monitor.mute);
+        assert!(state.monitor.dim);
+        assert!(state.monitor.mono);
+
+        state.toggle_monitor_dim();
+        assert!(state.monitor.mute, "dim must not clear mute");
+        assert!(!state.monitor.dim);
+
+        assert_eq!(
+            state.master, master_before,
+            "Control Room controls must never mutate master bus state"
+        );
+    }
+
+    #[test]
+    fn output_pairs_follow_the_device_channel_count() {
+        let mut state = TimelineState::default();
+
+        assert!(state.set_monitor_output_devices(8));
+        let names: Vec<_> = state
+            .monitor
+            .available_outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Out 1-2", "Out 3-4", "Out 5-6", "Out 7-8"]);
+
+        assert!(state.set_monitor_output("Out 5-6".to_string(), 4));
+        assert_eq!(state.monitor.output_left_channel, 4);
+
+        // Switching to a plain stereo interface must not leave the Control Room
+        // pointed at a pair that no longer exists.
+        assert!(state.set_monitor_output_devices(2));
+        assert_eq!(state.monitor.available_outputs.len(), 1);
+        assert_eq!(state.monitor.output_left_channel, 0);
+        assert_eq!(state.monitor.output_name, "Out 1-2");
+    }
+
+    #[test]
+    fn monitor_volume_reports_only_real_changes() {
+        let mut state = TimelineState::default();
+        let start = state.monitor.volume;
+        assert!(!state.set_monitor_volume(start));
+        assert!(state.set_monitor_volume(0.25));
+        assert!((state.monitor.volume - 0.25).abs() < 1.0e-6);
+    }
+}
+
+#[cfg(test)]
+mod listen_state_tests {
+    use super::*;
+
+    fn two_tracks() -> (TimelineState, String, String) {
+        let mut state = TimelineState::default();
+        let a = state.create_audio_track();
+        let b = state.create_audio_track();
+        (state, a, b)
+    }
+
+    #[test]
+    fn tracks_start_with_listen_off() {
+        let (state, a, b) = two_tracks();
+        assert_eq!(state.find_track(&a).unwrap().listen, ListenMode::Off);
+        assert_eq!(state.find_track(&b).unwrap().listen, ListenMode::Off);
+        assert!(state.active_listen_track().is_none());
+        assert!(!state.monitor.listen_active);
+    }
+
+    /// Listen is exclusive: the Control Room must always be on one
+    /// unambiguous tap, never a sum of channels the user did not compare.
+    #[test]
+    fn engaging_listen_clears_it_on_every_other_channel() {
+        let (mut state, a, b) = two_tracks();
+
+        assert!(state.set_track_listen(&a, ListenMode::Pfl));
+        assert_eq!(state.find_track(&a).unwrap().listen, ListenMode::Pfl);
+        assert_eq!(state.find_track(&b).unwrap().listen, ListenMode::Off);
+        assert_eq!(
+            state.active_listen_track(),
+            Some((a.as_str(), ListenMode::Pfl))
+        );
+        assert!(state.monitor.listen_active);
+
+        assert!(state.set_track_listen(&b, ListenMode::Afl));
+        assert_eq!(state.find_track(&a).unwrap().listen, ListenMode::Off);
+        assert_eq!(state.find_track(&b).unwrap().listen, ListenMode::Afl);
+        assert_eq!(
+            state.active_listen_track(),
+            Some((b.as_str(), ListenMode::Afl))
+        );
+    }
+
+    /// PFL and AFL on the same channel replace each other rather than stacking.
+    #[test]
+    fn switching_between_pfl_and_afl_on_one_channel_replaces_the_mode() {
+        let (mut state, a, _) = two_tracks();
+        assert!(state.set_track_listen(&a, ListenMode::Pfl));
+        assert!(state.set_track_listen(&a, ListenMode::Afl));
+        assert_eq!(state.find_track(&a).unwrap().listen, ListenMode::Afl);
+        assert!(state.monitor.listen_active);
+    }
+
+    /// Clicking the engaged mode again clears it and hands monitoring back to
+    /// the Control Room's selected source.
+    #[test]
+    fn re_clicking_the_engaged_mode_returns_to_the_selected_source() {
+        let (mut state, a, _) = two_tracks();
+        state.set_track_listen(&a, ListenMode::Pfl);
+
+        assert!(state.set_track_listen(&a, ListenMode::Pfl));
+        assert_eq!(state.find_track(&a).unwrap().listen, ListenMode::Off);
+        assert!(state.active_listen_track().is_none());
+        assert!(
+            !state.monitor.listen_active,
+            "with no Listen engaged the Control Room falls back to its source"
+        );
+    }
+
+    #[test]
+    fn clear_all_listen_resets_every_channel_and_reports_change() {
+        let (mut state, a, _) = two_tracks();
+        state.set_track_listen(&a, ListenMode::Afl);
+
+        assert!(state.clear_all_listen());
+        assert!(state.active_listen_track().is_none());
+        assert!(!state.monitor.listen_active);
+        // Idempotent — nothing left to clear.
+        assert!(!state.clear_all_listen());
+    }
+
+    /// Listen must never alter what the channel sends to the master mix,
+    /// otherwise it could change an export or a recording.
+    #[test]
+    fn listen_does_not_touch_mix_affecting_track_state() {
+        let (mut state, a, _) = two_tracks();
+        let before = state.find_track(&a).cloned().unwrap();
+
+        state.set_track_listen(&a, ListenMode::Pfl);
+        let after = state.find_track(&a).cloned().unwrap();
+
+        assert_eq!(after.volume, before.volume);
+        assert_eq!(after.pan, before.pan);
+        assert_eq!(after.muted, before.muted);
+        assert_eq!(after.solo, before.solo);
+        assert_eq!(after.routing, before.routing);
+        assert_eq!(after.sends, before.sends);
+        assert_ne!(after.listen, before.listen);
+    }
+
+    #[test]
+    fn listen_mode_maps_to_the_engine_equivalent() {
+        assert_eq!(
+            ListenMode::Off.to_engine(),
+            DirectAudio::monitor::ListenMode::Off
+        );
+        assert_eq!(
+            ListenMode::Pfl.to_engine(),
+            DirectAudio::monitor::ListenMode::Pfl
+        );
+        assert_eq!(
+            ListenMode::Afl.to_engine(),
+            DirectAudio::monitor::ListenMode::Afl
+        );
     }
 }
