@@ -8,12 +8,13 @@ name: Release Build
 # (usually draft) release and leaves the body alone, so a curated changelog
 # survives the build.
 #
-# The schedule below starts the build 45 minutes before the planned release
+# The schedule below starts the build 90 minutes before the planned release
 # moment; `publish-scheduled-release.yml` flips the finished draft to public.
+# The macOS leg builds and merges two architectures, so it needs the wider gap.
 
 on:
   schedule:
-    - cron: "15 8 8 8 *" # 08:15 UTC on 8 August == 15:15 GMT+7, 45 min before release
+    - cron: "30 7 8 8 *" # 07:30 UTC on 8 August == 14:30 GMT+7, 90 min before release
   workflow_dispatch:
     inputs:
       tag:
@@ -114,10 +115,12 @@ jobs:
       - name: List release assets
         run: ls -lh dist/
 
-      # The in-app updater (`apps/native/studio/src/updater.rs::platform_asset`)
-      # picks its download by filename: Windows needs `setup` + `.exe`, macOS
-      # needs `macos` + `.dmg`, Linux needs `x86_64` + `.appimage`. A renamed
-      # bundle silently makes the release un-updatable, so fail here instead.
+      # The in-app updater (`apps/native/studio/src/updater.rs::asset_rank`)
+      # picks its download by filename: Windows needs `setup` + `.exe`, Linux
+      # needs `x86_64` + `.appimage`, and macOS ranks `macos-<arch>` above
+      # `macos-universal` and refuses the other architecture outright. A renamed
+      # or missing bundle silently makes the release un-updatable for a whole
+      # platform, so fail here instead.
       - name: Verify updater can resolve every platform asset
         run: |
           set -euo pipefail
@@ -133,9 +136,11 @@ jobs:
               echo "$label: ${matches[*]}"
             fi
           }
-          check "windows" "*setup*.exe"
-          check "macos"   "*macos*.dmg"
-          check "linux"   "*x86_64*.AppImage"
+          check "windows"         "*setup*.exe"
+          check "macos-universal" "*macos-universal*.dmg"
+          check "macos-arm64"     "*macos-arm64*.dmg"
+          check "macos-x86_64"    "*macos-x86_64*.dmg"
+          check "linux"           "*x86_64*.AppImage"
           exit $fail
 
       - name: Attach assets to the release

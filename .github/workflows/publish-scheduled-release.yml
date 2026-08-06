@@ -6,8 +6,8 @@ name: Publish Scheduled Release
 # draft to public at 2026-08-08 16:00 Asia/Bangkok (09:00 UTC).
 #
 # It only ever changes the draft flag. Assets and release notes must already be
-# on the release — `release.yml` stages them on its own schedule 45 minutes
-# earlier, or run it manually with visibility `draft`.
+# on the release — `release.yml` stages them on its own schedule 90 minutes
+# earlier (07:30 UTC), or run it manually with visibility `draft`.
 
 on:
   schedule:
