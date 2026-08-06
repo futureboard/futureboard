@@ -6,13 +6,23 @@ use crate::{
     CefDistributionError, CefTarget, validate_cef_path, workspace_cef_path, workspace_root,
 };
 
-/// Downloads and installs the pinned minimal CEF distribution into
-/// `<workspace>/build/cef/<version>/<platform>`.
+/// Downloads and installs the pinned minimal CEF distribution for the host
+/// into `<workspace>/build/cef/<version>/<platform>`.
 ///
 /// This is an explicit tooling operation, never a Cargo build-script side
 /// effect. Existing SDKs are preserved unless `force` is true.
 pub fn install_cef(force: bool) -> Result<PathBuf, CefDistributionError> {
-    let target = CefTarget::current()?;
+    install_cef_target(CefTarget::current()?, force)
+}
+
+/// Same as [`install_cef`], for an explicitly chosen distribution.
+///
+/// Every step — index lookup, archive selection, extraction and validation — is
+/// keyed off `target`, so this installs a foreign architecture just as well as
+/// the host one. macOS universal packaging needs both `MacOsX86_64` and
+/// `MacOsAarch64` present on one machine, and each lands in its own
+/// `build/cef/<version>/<platform>` directory.
+pub fn install_cef_target(target: CefTarget, force: bool) -> Result<PathBuf, CefDistributionError> {
     let destination = workspace_cef_path(target);
     if destination.exists() && !force {
         validate_cef_path(&destination, target)?;

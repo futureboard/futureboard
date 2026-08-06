@@ -146,6 +146,19 @@ runtime) into the application root:
 built-in plugin editors cannot open. Use `--no-cef` only for an intentional
 CEF-free developer package.
 
+The distribution is always selected by the *target* triple, never by the host, so
+`--target x86_64-apple-darwin` on an Apple Silicon machine stages the `macosx64`
+runtime and passes that same path to Cargo as `CEF_PATH`. A stale `CEF_PATH` in
+the shell cannot leak into the build. Install a non-host distribution with:
+
+```bash
+cargo run -p SphereWebView --example install_cef --features installer -- --target x86_64-apple-darwin
+```
+
+`--target universal-macos` installs both Apple distributions, which is what
+`packaging/native/merge-universal-macos.sh` needs to lipo one universal package
+out of two single-architecture ones.
+
 ## Built-in Plugin embedded UI (BuildInHelper)
 
 Each Built-in Plugin embeds its compiled React/Vite UI (`editorui/dist`) as

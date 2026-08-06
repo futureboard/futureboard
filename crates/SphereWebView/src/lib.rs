@@ -205,7 +205,7 @@ pub enum CefDistributionError {
 #[cfg(feature = "installer")]
 mod installer;
 #[cfg(feature = "installer")]
-pub use installer::install_cef;
+pub use installer::{install_cef, install_cef_target};
 
 #[cfg(feature = "cef-runtime")]
 pub mod client;
