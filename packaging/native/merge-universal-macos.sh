@@ -10,12 +10,15 @@
 #
 #   * Mach-O files (app, sidecars, CEF framework, plugin dylibs) are `lipo`d
 #     into one binary carrying both slices.
+#   * Files whose name carries an architecture — Chromium's
+#     `v8_context_snapshot.arm64.bin` / `.x86_64.bin` — are taken from whichever
+#     package has them. A universal framework is expected to hold both, and the
+#     running slice picks its own at startup.
 #   * Everything else (.pak, icudtl.dat, JSON) is architecture-independent and
 #     is copied from the arm64 tree.
 #
-# On macOS the V8 context snapshot lives inside the CEF framework's Mach-O, so
-# lipo carries the right snapshot for each slice; there is no separate
-# per-architecture snapshot file to reconcile.
+# Anything else present in only one package is an error: it would mean shipping
+# a universal app that is silently incomplete for one architecture.
 #
 # The result is the same layout bundle-macos.sh already consumes.
 set -euo pipefail
@@ -57,12 +60,23 @@ is_macho() {
   lipo -archs "$1" >/dev/null 2>&1
 }
 
+# Chromium names its per-architecture resources `<name>.<arch>.<ext>`, so a
+# single-architecture package legitimately holds only its own. These are
+# unioned into the universal package rather than required on both sides.
+is_arch_specific() {
+  case "${1##*/}" in
+    *.arm64.* | *.x86_64.* | *-arm64.* | *-x86_64.* | *_arm64.* | *_x86_64.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
 merged=0
 copied=0
 differing=()
+arch_only=()
 
 # Mirror the directory tree first: xtask creates layout directories such as
 # `Resources/` that can legitimately be empty, and a file-only walk would drop
@@ -87,6 +101,12 @@ while IFS= read -r -d '' source; do
   fi
 
   if [[ ! -f "$counterpart" ]]; then
+    if is_arch_specific "$relative"; then
+      cp -a "$source" "$destination"
+      copied=$((copied + 1))
+      arch_only+=("$relative (arm64)")
+      continue
+    fi
     echo "error: $relative exists in the arm64 package but not the x86_64 one" >&2
     exit 1
   fi
@@ -110,11 +130,24 @@ done < <(find "$ARM64_DIR" -mindepth 1 \( -type f -o -type l \) -print0)
 # Files present only in the x86_64 tree would be dropped by the walk above.
 while IFS= read -r -d '' source; do
   relative="${source#"$X64_DIR"/}"
-  if [[ ! -e "$ARM64_DIR/$relative" ]]; then
-    echo "error: $relative exists in the x86_64 package but not the arm64 one" >&2
-    exit 1
+  if [[ -e "$ARM64_DIR/$relative" ]]; then
+    continue
   fi
+  if is_arch_specific "$relative"; then
+    mkdir -p "$(dirname "$OUT_DIR/$relative")"
+    cp -a "$source" "$OUT_DIR/$relative"
+    copied=$((copied + 1))
+    arch_only+=("$relative (x86_64)")
+    continue
+  fi
+  echo "error: $relative exists in the x86_64 package but not the arm64 one" >&2
+  exit 1
 done < <(find "$X64_DIR" -mindepth 1 \( -type f -o -type l \) -print0)
+
+if [[ ${#arch_only[@]} -gt 0 ]]; then
+  echo "per-architecture resources carried through from one package only:"
+  printf '  %s\n' "${arch_only[@]}"
+fi
 
 if [[ ${#differing[@]} -gt 0 ]]; then
   echo "warning: architecture-independent files differ between the two packages:" >&2
