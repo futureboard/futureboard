@@ -58,6 +58,44 @@ jobs:
 
           node scripts/sync-version.mjs --check
 
+  packaging-scripts:
+    name: Packaging scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # These scripts only ever run on a release runner, where a syntax error
+      # costs a full build before it surfaces.
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          for script in .github/workflows/*.sh packaging/native/*.sh packaging/linux/*.sh; do
+            bash -n "$script"
+            echo "ok: $script"
+          done
+
+      # The CEF version pinned in the CI helper must track the Rust constant, or
+      # the workflow installs one distribution and the build looks for another.
+      - name: CEF version pin matches SphereWebView
+        run: |
+          set -euo pipefail
+          rust_version="$(sed -n 's/.*CEF_SHORT_VERSION: &str = "\([^"]*\)".*/\1/p' crates/SphereWebView/src/lib.rs)"
+          script_version="$(sed -n 's/^cef_version="\([^"]*\)".*/\1/p' .github/workflows/set-cef-path.sh)"
+          echo "lib.rs: $rust_version, set-cef-path.sh: $script_version"
+          test -n "$rust_version" && test "$rust_version" = "$script_version"
+
+          # The build workflows probe the same versioned directory to decide
+          # whether the cache already holds a distribution.
+          for workflow in .github/workflows/build-desktop.yml .github/workflows/daily-build.yml .github/workflows/ci.yml; do
+            grep -q "build/cef/${rust_version}/" "$workflow" || {
+              echo "::error::$workflow does not reference build/cef/${rust_version}/"
+              exit 1
+            }
+          done
+
   rust-fmt:
     name: Rust format (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -161,3 +199,66 @@ jobs:
 
       - name: cargo test (Community Edition)
         run: cargo test-ce
+
+  # The macOS runner is arm64, so the Intel half of the universal build is
+  # cross-compiled and never exercised by the job above. Without this gate an
+  # x86_64-only break surfaces only during a release build.
+  macos-intel-cross:
+    name: macOS Intel slice (cross-compile)
+    runs-on: macos-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Initialize submodules (audio SDKs + shared icons)
+        shell: bash
+        run: bash .github/workflows/submodules-init.sh
+
+      - name: Install macOS libclang (bindgen)
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache Rust dependencies and CEF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            build/cef
+          key: ci-macos-intel-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ci-macos-intel-v1-
+
+      - name: Configure versioned CEF path (x86_64)
+        shell: bash
+        run: bash .github/workflows/set-cef-path.sh x86_64-apple-darwin
+
+      - name: Install pinned CEF SDK (macOS x86_64)
+        run: cargo run -p SphereWebView --example install_cef --features installer -- --target x86_64-apple-darwin
+
+      - name: Install and build built-in plugin editors
+        run: bun run build:plugin-editors
+
+      - name: cargo check (x86_64-apple-darwin)
+        run: |
+          cargo check --target x86_64-apple-darwin \
+            -p futureboard_native \
+            -p sphere-plugin-host \
+            -p futureboard_cef_helper \
+            --features sphere-plugin-host/plugin-host-bin,sphere-plugin-host/plugin-scanner-bin

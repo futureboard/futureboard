@@ -9,7 +9,17 @@ OUT="${2:-$ROOT/packaging/native/out}"
 APP_VERSION="${3:-}"
 
 if [[ -z "$PACKAGE_DIR" ]]; then
-  PACKAGE_DIR="$(find "$ROOT/out/release/community" -mindepth 1 -maxdepth 1 -type d -name 'macos-*' -print -quit 2>/dev/null || true)"
+  # A universal package (see merge-universal-macos.sh) is preferred over a
+  # single-architecture one when both are present.
+  for candidate in macos-universal macos-arm64 macos-x64; do
+    if [[ -d "$ROOT/out/release/community/$candidate" ]]; then
+      PACKAGE_DIR="$ROOT/out/release/community/$candidate"
+      break
+    fi
+  done
+  if [[ -z "$PACKAGE_DIR" ]]; then
+    PACKAGE_DIR="$(find "$ROOT/out/release/community" -mindepth 1 -maxdepth 1 -type d -name 'macos-*' -print -quit 2>/dev/null || true)"
+  fi
 fi
 
 APP_NAME="Futureboard Studio"
@@ -154,6 +164,29 @@ done
 codesign --force --sign - "$CEF_FRAMEWORK"
 codesign --force --sign - --entitlements "$ENTITLEMENTS_SRC" "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
+
+# Report the architectures actually shipped. Set FUTUREBOARD_REQUIRE_UNIVERSAL=1
+# (release/nightly CI does) to make a single-architecture bundle a hard failure
+# instead of a silent one nobody notices until an Intel Mac refuses to launch.
+REQUIRE_UNIVERSAL="${FUTUREBOARD_REQUIRE_UNIVERSAL:-0}"
+NOT_UNIVERSAL=()
+while IFS= read -r -d '' BINARY; do
+  ARCHS="$(lipo -archs "$BINARY" 2>/dev/null || true)"
+  [[ -z "$ARCHS" ]] && continue
+  echo "arch: ${BINARY#"$APP_DIR"/} -> $ARCHS"
+  if [[ "$ARCHS" != *x86_64* || "$ARCHS" != *arm64* ]]; then
+    NOT_UNIVERSAL+=("${BINARY#"$APP_DIR"/} [$ARCHS]")
+  fi
+done < <(find "$APP_DIR" -type f -perm -u+x -print0)
+
+if [[ ${#NOT_UNIVERSAL[@]} -gt 0 ]]; then
+  if [[ "$REQUIRE_UNIVERSAL" == "1" ]]; then
+    echo "error: FUTUREBOARD_REQUIRE_UNIVERSAL=1 but these are single-architecture:" >&2
+    printf '  %s\n' "${NOT_UNIVERSAL[@]}" >&2
+    exit 1
+  fi
+  echo "note: bundle is not universal (${#NOT_UNIVERSAL[@]} single-architecture binaries)"
+fi
 
 echo "Bundled macOS app: $APP_DIR"
 echo

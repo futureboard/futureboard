@@ -31,8 +31,23 @@ if [[ ! -d "$APP_DIR" ]]; then
 fi
 
 mkdir -p "$OUT_DIR"
-DMG="$OUT_DIR/Futureboard.Studio-${APP_VERSION}-macos.dmg"
-TMP_DMG="$OUT_DIR/Futureboard.Studio-${APP_VERSION}-macos.tmp.dmg"
+
+# Name the image after what it actually contains. The in-app updater matches on
+# `macos` + `.dmg` (apps/native/studio/src/updater.rs::platform_asset), so every
+# suffix below stays resolvable.
+APP_EXECUTABLE="$APP_DIR/Contents/MacOS/FutureboardNative"
+ARCH_SUFFIX="macos"
+if [[ -f "$APP_EXECUTABLE" ]]; then
+  ARCHS="$(lipo -archs "$APP_EXECUTABLE" 2>/dev/null || true)"
+  case "$ARCHS" in
+    *x86_64*arm64* | *arm64*x86_64*) ARCH_SUFFIX="macos-universal" ;;
+    *arm64*) ARCH_SUFFIX="macos-arm64" ;;
+    *x86_64*) ARCH_SUFFIX="macos-x86_64" ;;
+  esac
+fi
+
+DMG="$OUT_DIR/Futureboard.Studio-${APP_VERSION}-${ARCH_SUFFIX}.dmg"
+TMP_DMG="$OUT_DIR/Futureboard.Studio-${APP_VERSION}-${ARCH_SUFFIX}.tmp.dmg"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/futureboard-dmg.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR" "$TMP_DMG"' EXIT
 

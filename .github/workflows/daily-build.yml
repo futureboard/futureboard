@@ -91,6 +91,12 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # macOS ships as one universal app. The runner is arm64, so the Intel
+      # slice is cross-compiled and both toolchain targets must be present.
+      - name: Add macOS universal Rust targets
+        if: matrix.os == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
@@ -112,8 +118,15 @@ jobs:
         run: bash .github/workflows/set-cef-path.sh
 
       - name: Install pinned CEF SDK and runtime
-        if: hashFiles('build/cef/150.0.11/**/archive.json') == ''
+        if: matrix.os != 'macos-latest' && hashFiles('build/cef/150.0.11/**/archive.json') == ''
         run: cargo run -p SphereWebView --example install_cef --features installer
+
+      # CEF publishes macosx64 and macosarm64 as separate distributions — there
+      # is no universal one — so a universal app needs both staged here. The
+      # installer keeps an already-valid distribution, so the cache still wins.
+      - name: Install pinned CEF SDKs (macOS x86_64 + arm64)
+        if: matrix.os == 'macos-latest'
+        run: cargo run -p SphereWebView --example install_cef --features installer -- --target universal-macos
 
       - name: Verify shared app assets
         shell: bash
@@ -130,13 +143,36 @@ jobs:
           echo "Shared app assets OK"
 
       - name: Package native runtime with xtask
+        if: matrix.os != 'macos-latest'
         run: cargo run -p xtask -- package --profile release --edition community --plugin all
+
+      # One package per architecture, then a lipo merge. xtask passes the
+      # target-matched CEF distribution to Cargo itself, so no per-pass CEF_PATH
+      # is needed here.
+      - name: Package native runtime with xtask (macOS universal)
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo run -p xtask -- package --profile release --edition community \
+              --plugin all --target "$triple"
+          done
+          bash packaging/native/merge-universal-macos.sh \
+            out/release/community/macos-x64 \
+            out/release/community/macos-arm64 \
+            out/release/community/macos-universal
 
       - name: Resolve xtask package directory
         shell: bash
         run: |
           set -euo pipefail
-          package_dir="$(find out/release/community -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          if [ -d out/release/community/macos-universal ]; then
+            package_dir="out/release/community/macos-universal"
+          else
+            package_dir="$(find out/release/community -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          fi
           test -n "$package_dir" || { echo "xtask package directory not found"; exit 1; }
           test -f "$package_dir/build-info.json" || { echo "missing $package_dir/build-info.json"; exit 1; }
           echo "FUTUREBOARD_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
@@ -144,6 +180,8 @@ jobs:
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
+        env:
+          FUTUREBOARD_REQUIRE_UNIVERSAL: "1"
         run: |
           bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out "${{ needs.version.outputs.app-version }}"
           bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"

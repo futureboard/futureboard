@@ -160,6 +160,34 @@ bun run bundle:native:win       # Windows portable / installer
 bun run build:all               # all surfaces (WASM + native)
 ```
 
+#### macOS universal (Apple Silicon + Intel)
+
+CEF publishes `macosx64` and `macosarm64` as separate distributions — there is no
+universal one — so a universal app is produced by packaging each architecture and
+merging the two trees with `lipo`:
+
+```bash
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+cargo run -p SphereWebView --example install_cef --features installer -- --target universal-macos
+
+for triple in x86_64-apple-darwin aarch64-apple-darwin; do
+  cargo run -p xtask -- package --profile release --edition community --plugin all --target "$triple"
+done
+
+bash packaging/native/merge-universal-macos.sh \
+  out/release/community/macos-x64 out/release/community/macos-arm64 \
+  out/release/community/macos-universal
+
+bash packaging/native/bundle-macos.sh out/release/community/macos-universal
+bash packaging/native/bundle-macos-dmg.sh
+```
+
+`bundle-macos.sh` prefers `macos-universal` when no package directory is passed,
+reports the architectures it shipped, and fails on a single-architecture bundle
+when `FUTUREBOARD_REQUIRE_UNIVERSAL=1` (release CI sets it). The DMG filename
+carries the architecture: `…-macos-universal.dmg`, `…-macos-arm64.dmg`, or
+`…-macos-x86_64.dmg`.
+
 ### Platform notes
 
 | Platform | Audio backend                           | Setup                                                         |
