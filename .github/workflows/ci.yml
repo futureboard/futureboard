@@ -156,11 +156,20 @@ jobs:
             libssl-dev
 
       # coreaudio-sys / bindgen need a discoverable libclang on macOS runners.
-      - name: Install macOS libclang (bindgen)
+      - name: Configure macOS libclang (bindgen)
         if: runner.os == 'macOS'
         run: |
-          brew install llvm
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          set -euo pipefail
+          # bindgen parses headers with the libclang at LIBCLANG_PATH, but
+          # detects the system include paths by running the `clang` in PATH —
+          # Xcode's. A Homebrew LLVM of a different version then parses Xcode's
+          # intrinsics headers, which explodes on `__m128` as soon as the target
+          # is x86_64 (the Intel half of the universal build). Take libclang
+          # from the toolchain that owns those headers.
+          LIBCLANG_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          test -f "$LIBCLANG_PATH/libclang.dylib"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+          echo "libclang: $LIBCLANG_PATH"
 
       - name: Setup Rust (clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -220,10 +229,19 @@ jobs:
         shell: bash
         run: bash .github/workflows/submodules-init.sh
 
-      - name: Install macOS libclang (bindgen)
+      - name: Configure macOS libclang (bindgen)
         run: |
-          brew install llvm
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          set -euo pipefail
+          # bindgen parses headers with the libclang at LIBCLANG_PATH, but
+          # detects the system include paths by running the `clang` in PATH —
+          # Xcode's. A Homebrew LLVM of a different version then parses Xcode's
+          # intrinsics headers, which explodes on `__m128` as soon as the target
+          # is x86_64 (the Intel half of the universal build). Take libclang
+          # from the toolchain that owns those headers.
+          LIBCLANG_PATH="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib"
+          test -f "$LIBCLANG_PATH/libclang.dylib"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+          echo "libclang: $LIBCLANG_PATH"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
