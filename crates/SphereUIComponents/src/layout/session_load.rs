@@ -707,7 +707,10 @@ impl StudioLayout {
 
         let restored_tracks = self.timeline.update(cx, |timeline, cx| {
             timeline.reset_input_state();
-            apply_to_timeline(project, &mut timeline.state);
+            // Load warnings are returned but not yet surfaced — the toast
+            // path is Turn D work. Bound explicitly so the debt is visible
+            // rather than hidden behind an ignored return value.
+            let _load_warnings = apply_to_timeline(project, &mut timeline.state);
             cx.notify();
             persisted_track_count(&timeline.state.tracks)
         });

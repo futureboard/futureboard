@@ -1,6 +1,8 @@
 pub mod about_window;
 pub mod add_track_dialog;
 pub(crate) mod app_chrome;
+pub mod audio_connections_panel;
+pub mod audio_connections_window;
 mod audio_editor_adapter;
 mod audio_editor_host;
 pub mod background_tasks;

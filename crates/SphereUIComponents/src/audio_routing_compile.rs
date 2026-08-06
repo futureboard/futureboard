@@ -380,6 +380,17 @@ impl RoutingSnapshotPublisher {
     }
 }
 
+/// Process-wide publisher holding the snapshot the engine reads.
+///
+/// One instance so the control thread and the audio path agree on which
+/// snapshot is current; the `Arc` swap inside is what keeps an in-flight
+/// snapshot alive across a publish.
+pub fn global_routing_publisher() -> &'static RoutingSnapshotPublisher {
+    use std::sync::OnceLock;
+    static PUBLISHER: OnceLock<RoutingSnapshotPublisher> = OnceLock::new();
+    PUBLISHER.get_or_init(RoutingSnapshotPublisher::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

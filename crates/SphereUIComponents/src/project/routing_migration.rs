@@ -122,25 +122,14 @@ impl LegacyAudioSourceKey {
         }
     }
 
-    /// Understandable generated name, e.g. `"Input 1"`, `"Stereo Input 1-2"`,
-    /// or `"Focusrite Input 3"` when the device name is known.
+    /// Understandable generated name, e.g. `"Input 1"` or `"Stereo Input 1-2"`.
+    ///
+    /// Delegates to the shared helper so migration and the Inspector/Add Track
+    /// bridge cannot drift — and so a migrated bus gets a *logical* name. The
+    /// hardware endpoint is shown in the Audio Device column, never folded
+    /// into the bus name.
     fn generated_name(&self, device_name: Option<&str>) -> String {
-        let ports: Vec<_> = self.channels.iter().map(|c| c + 1).collect();
-        let base = match ports.as_slice() {
-            [single] => format!("Input {single}"),
-            [left, right] if *right == left + 1 => format!("Stereo Input {left}-{right}"),
-            many => format!(
-                "Input {}",
-                many.iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join("+")
-            ),
-        };
-        match device_name {
-            Some(name) if !name.is_empty() => format!("{name} {base}"),
-            _ => base,
-        }
+        crate::audio_connections::generated_input_name(&self.channels, device_name)
     }
 }
 
@@ -391,7 +380,8 @@ mod tests {
         assert_eq!(result.generated_connections.len(), 1);
         let connection = &result.generated_connections[0];
         assert_eq!(connection.channel_layout, ChannelLayout::Mono);
-        assert_eq!(connection.name, "System Audio Device Input 1");
+        // Logical name; the endpoint stays in the Audio Device column.
+        assert_eq!(connection.name, "Input 1");
         assert_eq!(connection.port_bindings.len(), 1);
         assert_eq!(connection.port_bindings[0].physical_port_id.port_index, 0);
         assert_eq!(
@@ -422,7 +412,8 @@ mod tests {
             connection.binding(1).unwrap().physical_port_id.port_index,
             3
         );
-        assert_eq!(connection.name, "System Audio Device Stereo Input 3-4");
+        // A logical name — the endpoint description stays in the device column.
+        assert_eq!(connection.name, "Stereo Input 3-4");
     }
 
     /// A reversed channel list is a *different* source, not the same one —
@@ -768,7 +759,7 @@ mod tests {
     fn a_name_collision_between_generated_connections_keeps_both_ids_valid() {
         let mut registry = AudioConnectionRegistry::new();
         let existing = AudioConnection::new(
-            "System Audio Device Input 1",
+            "Input 1",
             AudioConnectionDirection::Input,
             ChannelLayout::Mono,
         );
@@ -788,7 +779,7 @@ mod tests {
 
         let migrated = registry.get(&assigned).expect("id still resolves");
         assert_eq!(
-            migrated.name, "System Audio Device Input 1 2",
+            migrated.name, "Input 1 2",
             "the name is disambiguated but the id is untouched"
         );
     }

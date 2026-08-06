@@ -2690,6 +2690,127 @@ mod v33_routing_adapter_tests {
             }
         );
     }
+
+    /// Full panel-path round-trip: build a connection exactly the way the panel
+    /// does (mutation API only), save as v34, reopen, and assert the id and the
+    /// ordered mappings survive.
+    #[test]
+    fn a_panel_created_and_edited_connection_survives_v34_save_and_reopen() {
+        use crate::audio_connections::{
+            AudioConnectionDirection, AudioConnectionStatus, AudioPortId, AvailablePorts,
+            ChannelLayout,
+        };
+        use crate::components::timeline::timeline_state::TimelineState;
+
+        let ports = AvailablePorts::for_device("dev-1", "Interface", 4, 4);
+        let mut tl = TimelineState::default();
+
+        // 1. Create through the panel's Add path.
+        let (id, add) = tl.audio_connections.add_connection(
+            AudioConnectionDirection::Input,
+            ChannelLayout::Mono,
+            &ports,
+        );
+        assert!(add.needs_routing_rebuild);
+
+        // 2. Rename.
+        let rename = tl.audio_connections.update_name(&id, "  Vocal Mic  ");
+        assert!(!rename.needs_routing_rebuild, "a rename is not routing");
+        assert_eq!(tl.audio_connections.name_of(&id), Some("Vocal Mic"));
+
+        // 3. Mono -> Stereo.
+        tl.audio_connections
+            .update_layout(&id, ChannelLayout::Stereo, &ports);
+
+        // 4. Device + ordered Left/Right. Deliberately reversed so the test
+        //    would fail if anything normalized the pair.
+        tl.audio_connections
+            .update_device(&id, Some("dev-1"), &ports);
+        tl.audio_connections.update_port_binding(
+            &id,
+            0,
+            Some(AudioPortId::new("dev-1", "Input 3", 2)),
+            &ports,
+        );
+        tl.audio_connections.update_port_binding(
+            &id,
+            1,
+            Some(AudioPortId::new("dev-1", "Input 2", 1)),
+            &ports,
+        );
+        assert_eq!(
+            tl.audio_connections.resolved_ports(&id, &ports),
+            Some(vec![2, 1])
+        );
+
+        // 5. Disable, so the enabled flag is exercised too.
+        tl.audio_connections.update_enabled(&id, false, &ports);
+
+        // 6/7. Save as v34 and reopen.
+        let project = FutureboardProject::from(&tl);
+        let bytes = crate::project::format::encode_project(&project);
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            34,
+            "panel edits save as v34"
+        );
+        let reopened = crate::project::format::decode_project(&bytes).expect("decode");
+        let mut loaded = TimelineState::default();
+        let warnings = apply_to_timeline(&reopened, &mut loaded);
+        assert!(warnings.is_empty(), "clean reopen: {warnings:?}");
+
+        // 8. Same id, same ordered mappings, same enabled state.
+        let restored = loaded
+            .audio_connections
+            .get(&id)
+            .expect("the panel-created id survives");
+        assert_eq!(restored.name, "Vocal Mic");
+        assert_eq!(restored.channel_layout, ChannelLayout::Stereo);
+        assert_eq!(restored.device_id.as_deref(), Some("dev-1"));
+        assert_eq!(restored.binding(0).unwrap().physical_port_id.port_index, 2);
+        assert_eq!(restored.binding(1).unwrap().physical_port_id.port_index, 1);
+        assert!(!restored.enabled);
+
+        // Re-enabling after the reopen resolves to the same ordered pair.
+        loaded.audio_connections.update_enabled(&id, true, &ports);
+        assert_eq!(
+            loaded.audio_connections.get(&id).unwrap().status,
+            AudioConnectionStatus::Active
+        );
+        assert_eq!(
+            loaded.audio_connections.resolved_ports(&id, &ports),
+            Some(vec![2, 1])
+        );
+    }
+
+    /// A track assigned through the panel path keeps only a connection id —
+    /// no raw device or channel data reaches TrackRoutingState.
+    #[test]
+    fn panel_edits_never_write_raw_device_routing_into_a_track() {
+        use crate::audio_connections::{AudioConnectionDirection, AvailablePorts, ChannelLayout};
+        use crate::components::timeline::timeline_state::TimelineState;
+
+        let ports = AvailablePorts::for_device("dev-1", "Interface", 4, 4);
+        let mut tl = TimelineState::default();
+        let track_id = tl.create_audio_track();
+        let (id, _) = tl.audio_connections.add_connection(
+            AudioConnectionDirection::Input,
+            ChannelLayout::Stereo,
+            &ports,
+        );
+        tl.set_track_audio_input_connection(&track_id, Some(id.clone()));
+
+        let project = FutureboardProject::from(&tl);
+        let track = &project.tracks[0];
+        assert_eq!(
+            track.routing.audio_input_connection_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(
+            track.routing.legacy_input.is_none(),
+            "v34 never reconstructs the legacy combined union"
+        );
+    }
 }
 
 #[cfg(test)]
