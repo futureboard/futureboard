@@ -187,12 +187,13 @@ jobs:
           echo "FUTUREBOARD_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
           echo "xtask package: $package_dir"
 
-      # Three images per release: the universal one most people want, plus a
-      # single-architecture build each for anyone who would rather not carry the
-      # other slice. All three come from packages that are already staged, so
-      # this costs bundling time only, not another compile. bundle-macos-dmg.sh
+      # Three images per release: macos-arm64, macos-x86_64, and macos-universal.
+      # Per-arch packages are already staged by the xtask passes above; the
+      # universal tree is their lipo merge. Bundling costs no extra compile.
+      # Ship the single-architecture DMGs first so a universal-only codesign
+      # regression cannot block Apple Silicon / Intel images. bundle-macos-dmg.sh
       # names each image after the architectures it actually contains.
-      - name: Bundle native apps (macOS universal + per-architecture)
+      - name: Bundle native apps (macOS arm64 + x64 + universal)
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
@@ -204,9 +205,13 @@ jobs:
             FUTUREBOARD_REQUIRE_UNIVERSAL="$require_universal" bash packaging/native/bundle-macos.sh "$package_dir" "$app_out" "$VERSION"
             bash packaging/native/bundle-macos-dmg.sh "$app" packaging/native/out "$VERSION"
           }
-          bundle out/release/community/macos-universal universal 1
           bundle out/release/community/macos-arm64     arm64     0
           bundle out/release/community/macos-x64       x64       0
+          bundle out/release/community/macos-universal universal 1
+          for expected in macos-arm64 macos-x86_64 macos-universal; do
+            ls packaging/native/out/*-${expected}.dmg >/dev/null \
+              || { echo "error: missing ${expected} DMG"; exit 1; }
+          done
           ls -lh packaging/native/out/*.dmg
 
       - name: Install Inno Setup

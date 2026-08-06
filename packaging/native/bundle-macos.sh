@@ -157,6 +157,19 @@ fi
 # replace this ad-hoc signature later; local/debug bundles still need a proper
 # bundle signature so TCC grants microphone access to Futureboard Studio rather
 # than to an unstable linker-generated executable identity.
+#
+# Nested Mach-O under Contents/MacOS (Plugins/*.dylib, onnxruntime, sidecar
+# hosts) must be signed before the outer app. codesign treats those as nested
+# code objects; leaving them unsigned fails the app signature with
+# "code object is not signed at all". The main executable is signed with the
+# bundle below.
+while IFS= read -r -d '' BINARY; do
+  [[ "$(basename "$BINARY")" == "$APP_EXECUTABLE_NAME" ]] && continue
+  if lipo -archs "$BINARY" >/dev/null 2>&1; then
+    codesign --force --sign - "$BINARY"
+  fi
+done < <(find "$MACOS" -type f -print0)
+
 for VARIANT in "${CEF_HELPER_VARIANTS[@]}"; do
   HELPER_NAME="$APP_NAME $VARIANT"
   codesign --force --sign - "$FRAMEWORKS/$HELPER_NAME.app"
@@ -168,6 +181,7 @@ codesign --verify --deep --strict "$APP_DIR"
 # Report the architectures actually shipped. Set FUTUREBOARD_REQUIRE_UNIVERSAL=1
 # (release/nightly CI does) to make a single-architecture bundle a hard failure
 # instead of a silent one nobody notices until an Intel Mac refuses to launch.
+# Walk every file (not only +x): plugin dylibs are often mode 0644 after copy.
 REQUIRE_UNIVERSAL="${FUTUREBOARD_REQUIRE_UNIVERSAL:-0}"
 NOT_UNIVERSAL=()
 while IFS= read -r -d '' BINARY; do
@@ -177,7 +191,7 @@ while IFS= read -r -d '' BINARY; do
   if [[ "$ARCHS" != *x86_64* || "$ARCHS" != *arm64* ]]; then
     NOT_UNIVERSAL+=("${BINARY#"$APP_DIR"/} [$ARCHS]")
   fi
-done < <(find "$APP_DIR" -type f -perm -u+x -print0)
+done < <(find "$APP_DIR" -type f -print0)
 
 if [[ ${#NOT_UNIVERSAL[@]} -gt 0 ]]; then
   if [[ "$REQUIRE_UNIVERSAL" == "1" ]]; then
