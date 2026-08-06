@@ -3621,10 +3621,8 @@ mod input_routing_tests {
 
         let mut track = audio_track(TrackAudioFormat::Mono);
         track.routing.audio_input_connection_id = Some(id.clone());
-        assert_eq!(
-            audio_input_combo_label(&track, &registry),
-            "Interface Input 1"
-        );
+        // A logical bus name; the endpoint lives in the Audio Device column.
+        assert_eq!(audio_input_combo_label(&track, &registry), "Input 1");
 
         assert!(registry.rename(&id, "Microphone"));
         assert_eq!(audio_input_combo_label(&track, &registry), "Microphone");

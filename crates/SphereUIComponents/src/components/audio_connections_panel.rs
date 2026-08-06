@@ -3,8 +3,9 @@
 //! The panel owns **no** routing data. Every row is read from the project's
 //! [`AudioConnectionRegistry`] each render, and every edit goes through the
 //! registry's structured mutation API. The only state here is transient view
-//! state: which tab is showing, which rows are selected, whether an inline
-//! editor or a dropdown is open, and any pending destructive confirmation.
+//! state: which tab is showing, which rows are selected, and whether an inline
+//! editor or a dropdown is open. Destructive actions are confirmed by the
+//! shared message-box window, so no confirmation state lives here.
 //!
 //! That split is what keeps a stale connection id from surviving a project
 //! switch — [`AudioConnectionsPanelState::on_project_changed`] clears the
@@ -39,8 +40,8 @@ impl ConnectionsTab {
     }
 }
 
-/// An open inline cell editor. Only the name column is inline-editable in
-/// Turn C; the rest are dropdowns.
+/// An open inline cell editor. Only the name column is inline-editable; the
+/// rest are dropdowns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineNameEdit {
     pub connection_id: AudioConnectionId,
@@ -56,6 +57,147 @@ pub struct CellAnchor {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+/// Height of one table row, in logical GPUI units. Every geometry helper here
+/// works in logical units — never device pixels — so the same numbers are
+/// correct under Windows display scaling, Retina, and fractional scaling.
+pub const ROW_HEIGHT: f32 = 24.0;
+
+/// Resolved width of every table column, in logical units.
+///
+/// Produced by [`column_widths`] from the width actually available, so the
+/// table adapts to the window instead of being sized around one screenshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColumnWidths {
+    pub enabled: f32,
+    pub name: f32,
+    pub configuration: f32,
+    pub device: f32,
+    pub left_port: f32,
+    pub right_port: f32,
+    pub status: f32,
+}
+
+impl ColumnWidths {
+    /// Fixed, content-sized columns. These never grow — a checkbox and a
+    /// short status word gain nothing from extra width.
+    pub const ENABLED: f32 = 34.0;
+    pub const CONFIGURATION: f32 = 92.0;
+    pub const STATUS: f32 = 104.0;
+
+    /// Floors for the flexible columns. Below these the table scrolls
+    /// horizontally rather than letting cells collapse into each other.
+    pub const MIN_NAME: f32 = 120.0;
+    pub const MIN_DEVICE: f32 = 150.0;
+    pub const MIN_PORT: f32 = 110.0;
+
+    /// Narrowest table that still shows Device, Left, Right, and Status
+    /// legibly. Drives the window's minimum width.
+    pub fn min_total() -> f32 {
+        Self::ENABLED
+            + Self::CONFIGURATION
+            + Self::STATUS
+            + Self::MIN_NAME
+            + Self::MIN_DEVICE
+            + 2.0 * Self::MIN_PORT
+    }
+
+    pub fn total(&self) -> f32 {
+        self.enabled
+            + self.name
+            + self.configuration
+            + self.device
+            + self.left_port
+            + self.right_port
+            + self.status
+    }
+
+    /// Left edge of each column, so a popover can be anchored to a cell
+    /// without measuring laid-out geometry.
+    pub fn offset_of(&self, cell: EditableCell) -> f32 {
+        let name = self.enabled;
+        let configuration = name + self.name;
+        let device = configuration + self.configuration;
+        let left = device + self.device;
+        match cell {
+            EditableCell::Name => name,
+            EditableCell::Configuration => configuration,
+            EditableCell::Device => device,
+            EditableCell::LeftPort => left,
+            EditableCell::RightPort => left + self.left_port,
+        }
+    }
+
+    pub fn width_of(&self, cell: EditableCell) -> f32 {
+        match cell {
+            EditableCell::Name => self.name,
+            EditableCell::Configuration => self.configuration,
+            EditableCell::Device => self.device,
+            EditableCell::LeftPort => self.left_port,
+            EditableCell::RightPort => self.right_port,
+        }
+    }
+}
+
+/// Distribute `available` width across the columns.
+///
+/// Fixed columns keep their size; the surplus goes to the flexible ones by
+/// weight, with Audio Device weighted highest because endpoint names are the
+/// longest labels in the table. Below [`ColumnWidths::min_total`] every
+/// flexible column sits on its floor and the caller scrolls horizontally.
+pub fn column_widths(available: f32) -> ColumnWidths {
+    let min_total = ColumnWidths::min_total();
+    let surplus = (available - min_total).max(0.0);
+
+    // Device gets the largest share; Left and Right stay equal so the two
+    // channel columns remain independently readable.
+    const NAME_WEIGHT: f32 = 0.30;
+    const DEVICE_WEIGHT: f32 = 0.40;
+    const PORT_WEIGHT: f32 = 0.15;
+
+    ColumnWidths {
+        enabled: ColumnWidths::ENABLED,
+        name: ColumnWidths::MIN_NAME + surplus * NAME_WEIGHT,
+        configuration: ColumnWidths::CONFIGURATION,
+        device: ColumnWidths::MIN_DEVICE + surplus * DEVICE_WEIGHT,
+        left_port: ColumnWidths::MIN_PORT + surplus * PORT_WEIGHT,
+        right_port: ColumnWidths::MIN_PORT + surplus * PORT_WEIGHT,
+        status: ColumnWidths::STATUS,
+    }
+}
+
+/// Snap a pointer position to the top of the row it falls in.
+///
+/// Using the pointer's y (which already accounts for the row list's scroll
+/// offset) and quantising it to the row grid gives an exact anchor without
+/// measuring laid-out elements. `table_top` is the y of the first row.
+pub fn snap_row_top(pointer_y: f32, table_top: f32) -> f32 {
+    if pointer_y <= table_top {
+        return table_top;
+    }
+    table_top + ((pointer_y - table_top) / ROW_HEIGHT).floor() * ROW_HEIGHT
+}
+
+/// Anchor rectangle for a cell's popover, in the Audio Connections window's
+/// own coordinate space.
+///
+/// Everything here is relative to that window: the x comes from the column
+/// layout and the y from the row grid, so the popover stays correct when the
+/// utility window is moved, resized, or dragged to another monitor. No value
+/// is ever derived from the main project window.
+pub fn cell_anchor(
+    columns: &ColumnWidths,
+    cell: EditableCell,
+    pointer_y: f32,
+    table_top: f32,
+) -> CellAnchor {
+    CellAnchor {
+        x: columns.offset_of(cell),
+        y: snap_row_top(pointer_y, table_top),
+        width: columns.width_of(cell),
+        height: ROW_HEIGHT,
+    }
 }
 
 /// Which side a popover ended up on.
@@ -127,34 +269,20 @@ pub enum OpenDropdown {
     AddBus,
 }
 
-/// A destructive action awaiting confirmation, with everything the dialog
-/// needs to describe the consequences.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingConfirmation {
-    Remove {
-        connection_id: AudioConnectionId,
-        connection_name: String,
-        /// Tracks whose input would become unassigned.
-        affected_tracks: Vec<String>,
-    },
-    ResetDefaults {
-        direction: AudioConnectionDirection,
-        /// Tracks that reference any bus in this direction.
-        affected_tracks: Vec<String>,
-    },
+/// Whether removing a bus needs confirmation.
+///
+/// Only a referenced bus does — removing an unused one is as reversible as
+/// adding it back, and a dialog there is noise. The confirmation itself is the
+/// shared message-box window, not an overlay drawn inside this panel, so the
+/// rest of Studio stays usable while it is up.
+pub fn removal_needs_confirmation(affected_tracks: &[String]) -> bool {
+    !affected_tracks.is_empty()
 }
 
-impl PendingConfirmation {
-    /// Whether this action would unassign anything, so the caller can skip the
-    /// dialog for a harmless removal.
-    pub fn is_destructive(&self) -> bool {
-        match self {
-            Self::Remove {
-                affected_tracks, ..
-            } => !affected_tracks.is_empty(),
-            Self::ResetDefaults { .. } => true,
-        }
-    }
+/// Reset Defaults always confirms: it replaces every bus in the direction,
+/// including ones the user created by hand.
+pub fn reset_defaults_needs_confirmation() -> bool {
+    true
 }
 
 /// One rendered table row, derived from the registry.
@@ -164,6 +292,8 @@ pub struct ConnectionRow {
     pub name: String,
     pub enabled: bool,
     pub layout: ChannelLayout,
+    /// Human-readable endpoint name — never the bus name, and never folded
+    /// into it. The Bus Name column stays the user's logical label.
     pub device_label: String,
     /// Left / Mono cell text.
     pub left_port: String,
@@ -173,6 +303,33 @@ pub struct ConnectionRow {
     pub status: AudioConnectionStatus,
     pub status_detail: Option<String>,
     pub selected: bool,
+}
+
+impl ConnectionRow {
+    /// The untruncated label for a cell.
+    ///
+    /// Narrow columns ellipsize visually, but the complete text stays
+    /// available here for the cell tooltip, so nothing a user needs to read is
+    /// only reachable by widening the window.
+    pub fn full_label(&self, cell: EditableCell) -> String {
+        match cell {
+            EditableCell::Name => self.name.clone(),
+            EditableCell::Configuration => layout_label(self.layout),
+            EditableCell::Device => self.device_label.clone(),
+            EditableCell::LeftPort => self.left_port.clone(),
+            EditableCell::RightPort => self.right_port.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// Shared text for a channel layout, so the cell, the dropdown, and its
+/// tooltip cannot drift apart.
+pub fn layout_label(layout: ChannelLayout) -> String {
+    match layout {
+        ChannelLayout::Mono => "Mono".to_string(),
+        ChannelLayout::Stereo => "Stereo".to_string(),
+        ChannelLayout::Custom { channels } => format!("{channels} ch"),
+    }
 }
 
 /// Transient panel state.
@@ -186,7 +343,6 @@ pub struct AudioConnectionsPanelState {
     pub dropdown_anchor: Option<CellAnchor>,
     /// Focused editable cell for Tab traversal.
     pub focused_cell: Option<EditableCell>,
-    pub pending: Option<PendingConfirmation>,
     /// Warnings from the most recent mutation, shown in the footer.
     pub warnings: Vec<String>,
 }
@@ -210,17 +366,16 @@ impl AudioConnectionsPanelState {
         self.close_transient();
     }
 
-    /// Close every editor, dropdown, and pending dialog.
+    /// Close every open editor and dropdown.
     pub fn close_transient(&mut self) {
         self.inline_edit = None;
         self.open_dropdown = None;
         self.dropdown_anchor = None;
-        self.pending = None;
     }
 
-    /// Escape: close the innermost thing first — dropdown, then inline editor,
-    /// then any pending confirmation. Returns `true` when something closed, so
-    /// the caller knows the key was consumed.
+    /// Escape: close the innermost thing first — dropdown, then inline editor.
+    /// Returns `true` when something closed, so the caller knows the key was
+    /// consumed. Confirmations are separate windows and dismiss themselves.
     pub fn dismiss_topmost(&mut self) -> bool {
         if self.open_dropdown.is_some() {
             self.open_dropdown = None;
@@ -229,10 +384,6 @@ impl AudioConnectionsPanelState {
         }
         if self.inline_edit.is_some() {
             self.inline_edit = None;
-            return true;
-        }
-        if self.pending.is_some() {
-            self.pending = None;
             return true;
         }
         false
@@ -394,7 +545,14 @@ impl AudioConnectionsPanelState {
     // ── Rows ────────────────────────────────────────────────────────────────
 
     /// Build the rows for the active tab.
-    pub fn rows(&self, registry: &AudioConnectionRegistry) -> Vec<ConnectionRow> {
+    ///
+    /// `ports` supplies the human-readable device name; without it the table
+    /// would fall back to showing an opaque device id.
+    pub fn rows(
+        &self,
+        registry: &AudioConnectionRegistry,
+        ports: &crate::audio_connections::AvailablePorts,
+    ) -> Vec<ConnectionRow> {
         registry
             .by_direction(self.tab.direction())
             .into_iter()
@@ -412,9 +570,8 @@ impl AudioConnectionsPanelState {
                     name: connection.name.clone(),
                     enabled: connection.enabled,
                     layout: connection.channel_layout,
-                    device_label: connection
-                        .device_id
-                        .clone()
+                    device_label: registry
+                        .device_display_name(&connection.id, ports)
                         .unwrap_or_else(|| "Unassigned".to_string()),
                     left_port: port_text(0),
                     right_port: is_stereo.then(|| port_text(1)),
@@ -487,7 +644,7 @@ mod tests {
         let registry = registry();
         let panel = AudioConnectionsPanelState::new();
         assert_eq!(panel.tab, ConnectionsTab::Inputs);
-        let rows = panel.rows(&registry);
+        let rows = panel.rows(&registry, &ports());
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.name.contains("Input")));
     }
@@ -497,7 +654,7 @@ mod tests {
         let registry = registry();
         let mut panel = AudioConnectionsPanelState::new();
         panel.set_tab(ConnectionsTab::Outputs);
-        let rows = panel.rows(&registry);
+        let rows = panel.rows(&registry, &ports());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Main Output 1-2");
     }
@@ -525,7 +682,7 @@ mod tests {
     fn a_mono_row_has_no_right_port_cell_and_a_stereo_row_does() {
         let registry = registry();
         let panel = AudioConnectionsPanelState::new();
-        let rows = panel.rows(&registry);
+        let rows = panel.rows(&registry, &ports());
 
         let mono = rows
             .iter()
@@ -689,17 +846,11 @@ mod tests {
             .clone();
         panel.select_only(id.clone());
         panel.begin_rename(&registry, &id);
-        panel.pending = Some(PendingConfirmation::Remove {
-            connection_id: id,
-            connection_name: "x".to_string(),
-            affected_tracks: vec!["track-1".to_string()],
-        });
         panel.set_warnings(vec!["stale".to_string()]);
 
         panel.on_project_changed();
         assert!(panel.selected().is_empty());
         assert!(panel.inline_edit.is_none());
-        assert!(panel.pending.is_none());
         assert!(panel.warnings.is_empty());
     }
 
@@ -707,31 +858,20 @@ mod tests {
 
     #[test]
     fn removing_an_unreferenced_connection_needs_no_confirmation() {
-        let confirmation = PendingConfirmation::Remove {
-            connection_id: AudioConnectionId::from_stored("ac-1"),
-            connection_name: "Spare".to_string(),
-            affected_tracks: Vec::new(),
-        };
-        assert!(!confirmation.is_destructive());
+        assert!(!removal_needs_confirmation(&[]));
     }
 
     #[test]
     fn removing_a_referenced_connection_is_destructive() {
-        let confirmation = PendingConfirmation::Remove {
-            connection_id: AudioConnectionId::from_stored("ac-1"),
-            connection_name: "Microphone".to_string(),
-            affected_tracks: vec!["track-1".to_string(), "track-2".to_string()],
-        };
-        assert!(confirmation.is_destructive());
+        assert!(removal_needs_confirmation(&[
+            "track-1".to_string(),
+            "track-2".to_string()
+        ]));
     }
 
     #[test]
     fn reset_defaults_always_confirms() {
-        assert!(PendingConfirmation::ResetDefaults {
-            direction: AudioConnectionDirection::Input,
-            affected_tracks: Vec::new(),
-        }
-        .is_destructive());
+        assert!(reset_defaults_needs_confirmation());
     }
 
     // ── Status presentation ─────────────────────────────────────────────────
@@ -767,7 +907,7 @@ mod tests {
         registry.revalidate(&AvailablePorts::default());
 
         let panel = AudioConnectionsPanelState::new();
-        let rows = panel.rows(&registry);
+        let rows = panel.rows(&registry, &ports());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].left_port, "—");
         assert_eq!(rows[0].right_port.as_deref(), Some("—"));
@@ -858,7 +998,7 @@ mod tests {
     /// Escape closes the innermost surface first so one press never discards
     /// two things at once.
     #[test]
-    fn escape_closes_dropdown_then_editor_then_confirmation() {
+    fn escape_closes_the_dropdown_before_the_editor() {
         let registry = registry();
         let mut panel = AudioConnectionsPanelState::new();
         let id = registry.by_direction(AudioConnectionDirection::Input)[0]
@@ -866,11 +1006,6 @@ mod tests {
             .clone();
 
         panel.begin_rename(&registry, &id);
-        panel.pending = Some(PendingConfirmation::Remove {
-            connection_id: id.clone(),
-            connection_name: "x".into(),
-            affected_tracks: vec!["t".into()],
-        });
         panel.toggle_dropdown_at(
             OpenDropdown::Device(id.clone()),
             CellAnchor {
@@ -881,14 +1016,18 @@ mod tests {
             },
         );
 
+        // Only the dropdown closes on the first press.
         assert!(panel.dismiss_topmost());
         assert!(panel.open_dropdown.is_none());
-        assert!(panel.pending.is_some(), "only the dropdown closed");
 
-        // The dropdown had already cancelled the inline edit when it opened.
-        assert!(panel.dismiss_topmost());
-        assert!(panel.pending.is_none());
+        // Opening the dropdown had already ended the inline edit, so there is
+        // nothing left for a second press to close.
         assert!(!panel.dismiss_topmost(), "nothing left to close");
+
+        // With an editor open and no dropdown, Escape closes the editor.
+        panel.begin_rename(&registry, &id);
+        assert!(panel.dismiss_topmost());
+        assert!(panel.inline_edit.is_none());
     }
 
     #[test]

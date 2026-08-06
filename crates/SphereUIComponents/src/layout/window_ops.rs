@@ -289,27 +289,29 @@ impl StudioLayout {
             }
         }
 
-        let device_summary = {
+        // Device identity stays separate from bus identity: these two strings
+        // are context for the header, never a source for bus names.
+        let (input_device, output_device) = {
             let settings = self.settings.read(cx);
-            let input = settings.current.hardware.audio.device_in.trim().to_string();
-            let output = settings
-                .current
-                .hardware
-                .audio
-                .device_out
-                .trim()
-                .to_string();
-            match (input.is_empty(), output.is_empty()) {
-                (true, true) => "No compatible audio device is currently available.".to_string(),
-                (true, false) => format!("Out: {output}"),
-                (false, true) => format!("In: {input}"),
-                (false, false) => format!("In: {input}   Out: {output}"),
-            }
+            (
+                settings.current.hardware.audio.device_in.trim().to_string(),
+                settings
+                    .current
+                    .hardware
+                    .audio
+                    .device_out
+                    .trim()
+                    .to_string(),
+            )
         };
 
         crate::components::audio_connections_window::AudioConnectionsSnapshot {
             registry,
-            device_summary,
+            // One consistent view of the hardware per refresh, so the table
+            // and its dropdowns cannot disagree about what exists.
+            ports: crate::audio_connections::current_available_ports(),
+            input_device,
+            output_device,
             has_project: true,
             references,
         }
@@ -326,6 +328,26 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         use crate::components::audio_connections_window::ConnectionEdit;
+
+        // Requests are not mutations: they ask the layout to decide whether a
+        // confirmation is needed, because only the layout knows what
+        // references a bus.
+        match edit {
+            ConnectionEdit::OpenAudioDeviceSetup => {
+                let owner = self.audio_connections_window_bounds(cx);
+                self.open_settings_dialog(owner, cx);
+                return;
+            }
+            ConnectionEdit::RequestRemove { id } => {
+                self.confirm_audio_connection_removal(id.clone(), cx);
+                return;
+            }
+            ConnectionEdit::RequestResetDefaults { direction } => {
+                self.confirm_audio_connection_reset(*direction, cx);
+                return;
+            }
+            _ => {}
+        }
 
         let ports = crate::audio_connections::current_available_ports();
         let device_id = {
@@ -406,6 +428,12 @@ impl StudioLayout {
                     }
                     mutation
                 }
+                // Handled above, before this closure runs.
+                ConnectionEdit::RequestRemove { .. }
+                | ConnectionEdit::RequestResetDefaults { .. }
+                | ConnectionEdit::OpenAudioDeviceSetup => {
+                    crate::audio_connections::ConnectionMutation::default()
+                }
             };
             cx.notify();
             mutation
@@ -423,6 +451,155 @@ impl StudioLayout {
             let _ = handle.update(cx, |window, _w, cx| {
                 window.set_warnings(warnings, cx);
             });
+        }
+    }
+
+    /// Screen bounds of the Audio Connections window, so a confirmation opens
+    /// over it rather than over the main project window.
+    fn audio_connections_window_bounds(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        let handle = self.external_windows.audio_connections.clone()?;
+        handle.update(cx, |_window, w, _cx| w.bounds()).ok()
+    }
+
+    /// Confirm removing a bus, then apply it.
+    ///
+    /// Only a *referenced* bus asks: removing an unused one is trivially
+    /// reversible and a dialog there is noise. The question is a normal
+    /// message-box window, so the rest of Studio keeps working while it is up.
+    fn confirm_audio_connection_removal(
+        &mut self,
+        id: crate::audio_connections::AudioConnectionId,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::audio_connections_panel::removal_needs_confirmation;
+        use crate::components::audio_connections_window::ConnectionEdit;
+        use crate::components::message_box_dialog::{MessageBoxKind, MessageBoxOptions};
+
+        let (name, affected) = {
+            let timeline = self.timeline.read(cx);
+            let name = timeline
+                .state
+                .audio_connections
+                .name_of(&id)
+                .unwrap_or_default()
+                .to_string();
+            let affected: Vec<String> = timeline
+                .state
+                .tracks
+                .iter()
+                .filter(|track| track.routing.audio_input_connection_id.as_ref() == Some(&id))
+                .map(|track| track.name.clone())
+                .collect();
+            (name, affected)
+        };
+
+        if !removal_needs_confirmation(&affected) {
+            self.apply_audio_connection_edit(&ConnectionEdit::Remove { id }, cx);
+            return;
+        }
+
+        let detail = format!(
+            "{} track(s) use this connection and will be set to No Input: {}.",
+            affected.len(),
+            affected.join(", ")
+        );
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Warning,
+            title: "Remove Audio Connection".to_string(),
+            message: format!("Remove \"{name}\"?"),
+            detail: Some(detail),
+            buttons: vec!["Remove".to_string(), "Cancel".to_string()],
+            default_id: 1,
+            cancel_id: Some(1),
+        };
+        self.confirm_audio_connection_edit(options, ConnectionEdit::Remove { id }, cx);
+    }
+
+    /// Confirm resetting a direction to the application defaults.
+    ///
+    /// Always asks: this discards buses the user created by hand.
+    fn confirm_audio_connection_reset(
+        &mut self,
+        direction: crate::audio_connections::AudioConnectionDirection,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::audio_connections_window::ConnectionEdit;
+        use crate::components::message_box_dialog::{MessageBoxKind, MessageBoxOptions};
+
+        let affected = {
+            let timeline = self.timeline.read(cx);
+            let removed: Vec<_> = timeline
+                .state
+                .audio_connections
+                .by_direction(direction)
+                .into_iter()
+                .map(|connection| connection.id.clone())
+                .collect();
+            timeline
+                .state
+                .tracks
+                .iter()
+                .filter(|track| {
+                    track
+                        .routing
+                        .audio_input_connection_id
+                        .as_ref()
+                        .is_some_and(|id| removed.contains(id))
+                })
+                .count()
+        };
+        let label = match direction {
+            crate::audio_connections::AudioConnectionDirection::Input => "input",
+            crate::audio_connections::AudioConnectionDirection::Output => "output",
+        };
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Warning,
+            title: "Reset Audio Connections".to_string(),
+            message: format!("Reset {label} connections to defaults?"),
+            detail: Some(format!(
+                "Existing {label} buses are replaced. {affected} track reference(s) may be \
+                 unassigned."
+            )),
+            buttons: vec!["Reset".to_string(), "Cancel".to_string()],
+            default_id: 1,
+            cancel_id: Some(1),
+        };
+        self.confirm_audio_connection_edit(
+            options,
+            ConnectionEdit::ResetDefaults { direction },
+            cx,
+        );
+    }
+
+    /// Ask, and apply `edit` only if the first button was chosen.
+    fn confirm_audio_connection_edit(
+        &mut self,
+        options: crate::components::message_box_dialog::MessageBoxOptions,
+        edit: crate::components::audio_connections_window::ConnectionEdit,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::message_box_dialog::{
+            open_message_box_window, MessageBoxResponseCb, MessageBoxResult,
+        };
+
+        let owner = self.audio_connections_window_bounds(cx);
+        let studio = cx.entity().clone();
+        let on_response: MessageBoxResponseCb =
+            std::sync::Arc::new(move |result: MessageBoxResult, _window, cx| {
+                if result.response != 0 {
+                    return;
+                }
+                let edit = edit.clone();
+                StudioLayout::defer_update(&studio, cx, move |this, cx| {
+                    this.apply_audio_connection_edit(&edit, cx);
+                });
+            });
+        if let Err(error) = open_message_box_window(owner, options, on_response, cx) {
+            self.audio_bridge.last_error =
+                Some(format!("Audio Connections confirmation failed: {error}"));
         }
     }
 
@@ -473,15 +650,22 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<gpui::Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        // Focus the existing window rather than opening a second one.
-        if let Some(handle) = self.external_windows.audio_connections.clone() {
-            if handle
-                .update(cx, |_window, w, _cx| w.activate_window())
-                .is_ok()
-            {
-                return;
-            }
-            self.external_windows.audio_connections = None;
+        use crate::components::audio_connections_window::{reopen_action, ReopenAction};
+
+        // Exactly one Audio Connections window: focus the live one, replace a
+        // stale handle, never open a second instance.
+        let activated = self
+            .external_windows
+            .audio_connections
+            .clone()
+            .map(|handle| {
+                handle
+                    .update(cx, |_window, w, _cx| w.activate_window())
+                    .is_ok()
+            });
+        match reopen_action(activated) {
+            ReopenAction::FocusExisting => return,
+            ReopenAction::OpenNew => self.external_windows.audio_connections = None,
         }
 
         let snapshot = self.build_audio_connections_snapshot(cx);

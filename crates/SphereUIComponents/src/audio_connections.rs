@@ -1454,9 +1454,15 @@ impl AudioConnectionRegistry {
 
 /// Shared naming for generated input connections, used by both the v33
 /// migration and the Inspector/Add Track bridge so they cannot drift.
-pub fn generated_input_name(channels: &[u32], device_name: Option<&str>) -> String {
+///
+/// The result is a *logical* bus name and deliberately carries no hardware
+/// endpoint description. The device and its ports are shown in their own
+/// columns; folding "Mic/Inst/Line In 1/2 (Studio 24c)" into the name is what
+/// made the routing model unreadable. `device_name` is accepted only so the
+/// signature stays stable for callers that still pass it.
+pub fn generated_input_name(channels: &[u32], _device_name: Option<&str>) -> String {
     let ports: Vec<_> = channels.iter().map(|c| c + 1).collect();
-    let base = match ports.as_slice() {
+    match ports.as_slice() {
         [single] => format!("Input {single}"),
         [left, right] if *right == left + 1 => format!("Stereo Input {left}-{right}"),
         many => format!(
@@ -1466,10 +1472,6 @@ pub fn generated_input_name(channels: &[u32], device_name: Option<&str>) -> Stri
                 .collect::<Vec<_>>()
                 .join("+")
         ),
-    };
-    match device_name {
-        Some(name) if !name.is_empty() => format!("{name} {base}"),
-        _ => base,
     }
 }
 
@@ -1540,6 +1542,27 @@ impl ConnectionMutation {
 pub const PANEL_LAYOUTS: [ChannelLayout; 2] = [ChannelLayout::Mono, ChannelLayout::Stereo];
 
 impl AudioConnectionRegistry {
+    /// The display name of a bus's device — the human-readable endpoint name
+    /// when the device is present, the stored id as a last resort so a
+    /// disconnected assignment still shows *something* identifiable.
+    ///
+    /// Kept separate from the bus name on purpose: the name column is the
+    /// user's logical label, this is the hardware behind it.
+    pub fn device_display_name(
+        &self,
+        id: &AudioConnectionId,
+        ports: &AvailablePorts,
+    ) -> Option<String> {
+        let device_id = self.get(id)?.device_id.clone()?;
+        Some(
+            ports
+                .device_name(&device_id)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or(device_id),
+        )
+    }
+
     /// Create a bus with a unique default name and no port assignment.
     ///
     /// A new bus is never auto-bound to hardware: it starts `Disconnected` so
@@ -1557,6 +1580,8 @@ impl AudioConnectionRegistry {
             (AudioConnectionDirection::Output, ChannelLayout::Mono) => "Mono Output",
             (AudioConnectionDirection::Output, _) => "Stereo Output",
         };
+        // `add` disambiguates the name ("Stereo Input", "Stereo Input 2", …),
+        // so the default stays concise and logical without a device prefix.
         let id = self.add(AudioConnection::new(base, direction, layout));
         self.revalidate(ports);
         (id.clone(), ConnectionMutation::routing(id))
