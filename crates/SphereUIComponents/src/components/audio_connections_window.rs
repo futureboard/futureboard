@@ -19,8 +19,11 @@ use crate::audio_connections::{
     ChannelLayout,
 };
 use crate::components::audio_connections_panel::{
-    AudioConnectionsPanelState, ConnectionRow, ConnectionsTab, PendingConfirmation,
+    AudioConnectionsPanelState, CellAnchor, ConnectionRow, ConnectionsTab, OpenDropdown,
+    PendingConfirmation,
 };
+use crate::components::combo_box::combo_box_string_menu;
+use crate::components::text_input::{text_field, TextInputState};
 use crate::theme::Colors;
 use crate::window_position::{apply_owner_display, centered_window_bounds};
 
@@ -45,6 +48,25 @@ pub enum ConnectionEdit {
     SetEnabled {
         id: AudioConnectionId,
         enabled: bool,
+    },
+    Rename {
+        id: AudioConnectionId,
+        name: String,
+    },
+    SetLayout {
+        id: AudioConnectionId,
+        layout: ChannelLayout,
+    },
+    SetDevice {
+        id: AudioConnectionId,
+        /// `None` unassigns the device and clears every binding.
+        device_id: Option<String>,
+    },
+    SetPort {
+        id: AudioConnectionId,
+        logical_channel: usize,
+        /// `None` clears just this channel.
+        port: Option<crate::audio_connections::AudioPortId>,
     },
     Duplicate {
         id: AudioConnectionId,
@@ -72,6 +94,9 @@ pub struct AudioConnectionsSnapshot {
 
 pub struct AudioConnectionsWindow {
     panel: AudioConnectionsPanelState,
+    /// Shared Studio text input, reused for the Bus Name inline editor rather
+    /// than a table-specific editing system.
+    name_input: TextInputState,
     snapshot: AudioConnectionsSnapshot,
     on_edit: ConnectionEditCb,
     on_close: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>,
@@ -82,13 +107,21 @@ impl AudioConnectionsWindow {
         snapshot: AudioConnectionsSnapshot,
         on_edit: ConnectionEditCb,
         on_close: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>,
+        focus_handle: gpui::FocusHandle,
     ) -> Self {
         Self {
             panel: AudioConnectionsPanelState::new(),
+            name_input: TextInputState::new("audio-connections-name", focus_handle),
             snapshot,
             on_edit,
             on_close,
         }
+    }
+
+    /// Show the warnings from the most recent mutation in the footer.
+    pub fn set_warnings(&mut self, warnings: Vec<String>, cx: &mut Context<Self>) {
+        self.panel.set_warnings(warnings);
+        cx.notify();
     }
 
     /// Push fresh project data. Selections that no longer resolve are pruned so
@@ -207,10 +240,439 @@ fn toolbar_button(
 }
 
 impl AudioConnectionsWindow {
+    /// A cell that opens a dropdown. Renders like the rest of the table but
+    /// carries a hover state, a caret, and a focus ring when it is the active
+    /// Tab target — enough to read as editable without making the table noisy.
+    fn combo_cell(
+        &self,
+        element_id: gpui::ElementId,
+        text: String,
+        width: f32,
+        available: bool,
+        focused: bool,
+        tooltip: Option<String>,
+        dropdown: OpenDropdown,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let enabled = self.snapshot.has_project;
+        div()
+            .id(element_id)
+            .w(px(width))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .h(px(ROW_HEIGHT - 4.0))
+            .px(px(5.0))
+            .rounded_sm()
+            .border(px(1.0))
+            .border_color(if focused {
+                Colors::accent_primary()
+            } else {
+                Colors::border_subtle()
+            })
+            .when(enabled, |cell| {
+                cell.cursor(gpui::CursorStyle::PointingHand)
+                    .hover(|s| s.bg(Colors::button_bg_hover()))
+            })
+            .when_some(tooltip, |cell, text| {
+                cell.child(div().w(px(0.0)).h(px(0.0)).child(text))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(10.0))
+                    .text_color(if available {
+                        Colors::text_primary()
+                    } else {
+                        Colors::accent_warning()
+                    })
+                    .child(text),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(7.0))
+                    .text_color(Colors::text_muted())
+                    .child("▾"),
+            )
+            .when(enabled, |cell| {
+                cell.on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                        // Stop here so opening a dropdown never also toggles
+                        // Enabled or re-triggers the row click.
+                        cx.stop_propagation();
+                        let x: f32 = event.position.x.into();
+                        let y: f32 = event.position.y.into();
+                        let anchor = CellAnchor {
+                            x: x - 4.0,
+                            y: y - ROW_HEIGHT * 0.5,
+                            width,
+                            height: ROW_HEIGHT,
+                        };
+                        this.panel.toggle_dropdown_at(dropdown.clone(), anchor);
+                        cx.notify();
+                    }),
+                )
+            })
+    }
+
+    /// The Bus Name cell: text until a rename is open, then the shared Studio
+    /// text field.
+    fn name_cell(
+        &self,
+        row: &ConnectionRow,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let editing = self
+            .panel
+            .inline_edit
+            .as_ref()
+            .is_some_and(|edit| edit.connection_id == row.id);
+        if editing {
+            return div()
+                .w(px(COL_NAME))
+                .flex_none()
+                .px(px(2.0))
+                .child(text_field(
+                    &self.name_input,
+                    self.name_input.is_focused(window),
+                ))
+                .into_any_element();
+        }
+
+        let id = row.id.clone();
+        div()
+            .id(("audio-connection-name", index))
+            .w(px(COL_NAME))
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(px(ROW_HEIGHT - 4.0))
+            .px(px(6.0))
+            .rounded_sm()
+            .text_size(px(10.0))
+            .truncate()
+            .text_color(Colors::text_primary())
+            .when(self.snapshot.has_project, |cell| {
+                cell.cursor(gpui::CursorStyle::IBeam)
+                    .hover(|s| s.bg(Colors::button_bg_hover()))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, w, cx| {
+                            cx.stop_propagation();
+                            this.panel.select_only(id.clone());
+                            if event.click_count >= 2 {
+                                this.start_rename(&id, w, cx);
+                            }
+                            cx.notify();
+                        }),
+                    )
+            })
+            .child(row.name.clone())
+            .into_any_element()
+    }
+
+    /// Open the inline rename editor, seeding the shared text field from the
+    /// registry and focusing it so typing does not reach transport shortcuts.
+    fn start_rename(
+        &mut self,
+        id: &crate::audio_connections::AudioConnectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel.begin_rename(&self.snapshot.registry, id);
+        if let Some(edit) = self.panel.inline_edit.clone() {
+            self.name_input.set_value(&edit.draft);
+            self.name_input.select_all();
+            self.name_input.focus_handle.focus(window, cx);
+        }
+    }
+
+    /// Commit the open rename through the registry.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.name_input.value.clone();
+        let Some((id, _)) = self.panel.take_rename() else {
+            return;
+        };
+        // An empty or whitespace-only name is rejected by `update_name`; the
+        // editor simply closes and the previous name stays.
+        (self.on_edit)(&ConnectionEdit::Rename { id, name: value }, window, cx);
+        cx.notify();
+    }
+
+    /// The open dropdown, rendered above the table and footer.
+    ///
+    /// Options and the committed value both come from the registry, so a stale
+    /// local copy can never be shown or written back. Placement goes through
+    /// the shared popover rule, so a row near the bottom flips upward instead
+    /// of clipping.
+    /// Root key handling for the table.
+    ///
+    /// While an inline editor is open only Enter and Escape are consumed here —
+    /// every other key belongs to the text field, which is why global transport
+    /// shortcuts cannot fire mid-rename.
+    fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let editing = self.panel.inline_edit.is_some();
+
+        if editing {
+            match key {
+                "enter" => {
+                    cx.stop_propagation();
+                    self.commit_rename(window, cx);
+                }
+                "escape" => {
+                    cx.stop_propagation();
+                    self.panel.cancel_rename();
+                    cx.notify();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key {
+            "escape" => {
+                // Innermost first: dropdown, then editor, then confirmation.
+                if self.panel.dismiss_topmost() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }
+            "up" | "down" => {
+                cx.stop_propagation();
+                let delta = if key == "down" { 1 } else { -1 };
+                self.panel.move_selection(&self.snapshot.registry, delta);
+                cx.notify();
+            }
+            "tab" => {
+                cx.stop_propagation();
+                let stereo = self
+                    .panel
+                    .single_selection()
+                    .and_then(|id| self.snapshot.registry.get(id))
+                    .map(|connection| connection.channel_layout.channel_count() > 1)
+                    .unwrap_or(false);
+                let delta = if event.keystroke.modifiers.shift {
+                    -1
+                } else {
+                    1
+                };
+                self.panel.move_cell_focus(stereo, delta);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(id) = self.panel.single_selection().cloned() {
+                    cx.stop_propagation();
+                    self.start_rename(&id, window, cx);
+                    cx.notify();
+                }
+            }
+            "delete" | "backspace" => {
+                let Some(id) = self.panel.single_selection().cloned() else {
+                    return;
+                };
+                cx.stop_propagation();
+                let name = self
+                    .snapshot
+                    .registry
+                    .name_of(&id)
+                    .unwrap_or_default()
+                    .to_string();
+                let affected = self.references_for(&id);
+                let confirmation = PendingConfirmation::Remove {
+                    connection_id: id.clone(),
+                    connection_name: name,
+                    affected_tracks: affected,
+                };
+                // Same path as the toolbar: referenced buses confirm first.
+                if confirmation.is_destructive() {
+                    self.panel.pending = Some(confirmation);
+                    cx.notify();
+                } else {
+                    (self.on_edit)(&ConnectionEdit::Remove { id }, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_open_dropdown(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        use crate::audio_connections::{AudioPortId, ChannelLayout};
+
+        let dropdown = self.panel.open_dropdown.clone()?;
+        let anchor = self.panel.dropdown_anchor?;
+        let registry = &self.snapshot.registry;
+        let ports = crate::audio_connections::current_available_ports();
+
+        // (label, edit) pairs. `None` entries are the Unassigned rows.
+        let (selected, options): (String, Vec<(String, ConnectionEdit)>) = match &dropdown {
+            OpenDropdown::Layout(id) => {
+                let current = registry.get(id)?.channel_layout;
+                (
+                    match current {
+                        ChannelLayout::Mono => "Mono".to_string(),
+                        _ => "Stereo".to_string(),
+                    },
+                    vec![
+                        (
+                            "Mono".to_string(),
+                            ConnectionEdit::SetLayout {
+                                id: id.clone(),
+                                layout: ChannelLayout::Mono,
+                            },
+                        ),
+                        (
+                            "Stereo".to_string(),
+                            ConnectionEdit::SetLayout {
+                                id: id.clone(),
+                                layout: ChannelLayout::Stereo,
+                            },
+                        ),
+                    ],
+                )
+            }
+            OpenDropdown::Device(id) => {
+                let connection = registry.get(id)?;
+                let current = connection
+                    .device_id
+                    .clone()
+                    .unwrap_or_else(|| "Unassigned".to_string());
+                let mut options = vec![(
+                    "Unassigned".to_string(),
+                    ConnectionEdit::SetDevice {
+                        id: id.clone(),
+                        device_id: None,
+                    },
+                )];
+                for (device_id, label, available) in registry.device_choices(id, &ports) {
+                    // An unavailable device stays listed so the assignment is
+                    // visible, but it is not offered as a new choice.
+                    if !available {
+                        options.push((
+                            label,
+                            ConnectionEdit::SetDevice {
+                                id: id.clone(),
+                                device_id: Some(device_id),
+                            },
+                        ));
+                        continue;
+                    }
+                    options.push((
+                        label,
+                        ConnectionEdit::SetDevice {
+                            id: id.clone(),
+                            device_id: Some(device_id),
+                        },
+                    ));
+                }
+                (current, options)
+            }
+            OpenDropdown::Port {
+                connection_id,
+                logical_channel,
+            } => {
+                let connection = registry.get(connection_id)?;
+                let current = connection
+                    .binding(*logical_channel)
+                    .map(|binding| binding.physical_port_id.port_name.clone())
+                    .unwrap_or_else(|| "Unassigned".to_string());
+                let mut options = vec![(
+                    "Unassigned".to_string(),
+                    ConnectionEdit::SetPort {
+                        id: connection_id.clone(),
+                        logical_channel: *logical_channel,
+                        port: None,
+                    },
+                )];
+                for (port, label, _available) in
+                    registry.port_choices(connection_id, *logical_channel, &ports)
+                {
+                    options.push((
+                        label,
+                        ConnectionEdit::SetPort {
+                            id: connection_id.clone(),
+                            logical_channel: *logical_channel,
+                            port: Some(AudioPortId::new(
+                                port.device_id.clone(),
+                                port.port_name.clone(),
+                                port.port_index,
+                            )),
+                        },
+                    ));
+                }
+                (current, options)
+            }
+            OpenDropdown::AddBus => return None,
+        };
+
+        let labels: Vec<String> = options.iter().map(|(label, _)| label.clone()).collect();
+        let popup_height = (labels.len() as f32 * 20.0 + 8.0).min(180.0);
+        let viewport = crate::overlay::external_dialog_overlay_bounds(window);
+        let placement = crate::overlay::resolve_popup_placement(
+            gpui::bounds(
+                gpui::point(px(anchor.x), px(anchor.y)),
+                gpui::size(px(anchor.width), px(anchor.height)),
+            ),
+            gpui::size(px(anchor.width.max(120.0)), px(popup_height)),
+            viewport,
+            crate::overlay::PopupPlacementOptions {
+                preferred_side: crate::overlay::PopupSide::Bottom,
+                alignment: crate::overlay::PopupAlignment::Start,
+                viewport_margin: px(6.0),
+                gap: px(2.0),
+            },
+        );
+
+        let on_edit = self.on_edit.clone();
+        let lookup: std::collections::HashMap<String, ConnectionEdit> =
+            options.into_iter().collect();
+        let on_select: std::sync::Arc<dyn Fn(String, &mut Window, &mut gpui::App) + 'static> = {
+            let entity = cx.entity().clone();
+            std::sync::Arc::new(move |value: String, window, cx| {
+                if let Some(edit) = lookup.get(&value).cloned() {
+                    on_edit(&edit, window, cx);
+                }
+                let _ = entity.update(cx, |this, cx| {
+                    this.panel.close_dropdown();
+                    cx.notify();
+                });
+            })
+        };
+
+        Some(
+            combo_box_string_menu(
+                "audio-connections-dropdown",
+                crate::overlay::OverlayPosition {
+                    x: placement.origin.x,
+                    y: placement.origin.y,
+                    width: Some(placement.size.width),
+                    max_height: Some(placement.size.height),
+                },
+                &selected,
+                &labels,
+                on_select,
+            )
+            .into_any_element(),
+        )
+    }
+
     fn render_row(
         &self,
         row: ConnectionRow,
         index: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let id = row.id.clone();
@@ -279,23 +741,67 @@ impl AudioConnectionsWindow {
                             ),
                     ),
             )
-            .child(cell(row.name, COL_NAME, false))
-            .child(cell(
+            .child(self.name_cell(&row, index, window, cx))
+            .child(self.combo_cell(
+                ("audio-connection-config", index).into(),
                 match row.layout {
                     ChannelLayout::Mono => "Mono".to_string(),
                     ChannelLayout::Stereo => "Stereo".to_string(),
                     ChannelLayout::Custom { channels } => format!("{channels} ch"),
                 },
                 COL_CONFIG,
+                true,
                 false,
+                None,
+                OpenDropdown::Layout(row.id.clone()),
+                cx,
             ))
-            .child(cell(row.device_label, COL_DEVICE, false))
-            .child(cell(row.left_port, COL_PORT, false))
-            .child(cell(
-                row.right_port.clone().unwrap_or_default(),
+            .child(
+                self.combo_cell(
+                    ("audio-connection-device", index).into(),
+                    row.device_label.clone(),
+                    COL_DEVICE,
+                    !matches!(row.status, AudioConnectionStatus::DeviceMissing),
+                    false,
+                    matches!(row.status, AudioConnectionStatus::DeviceMissing)
+                        .then(|| "This audio device is not currently available.".to_string()),
+                    OpenDropdown::Device(row.id.clone()),
+                    cx,
+                ),
+            )
+            .child(self.combo_cell(
+                ("audio-connection-left", index).into(),
+                row.left_port.clone(),
                 COL_PORT,
-                row.right_port.is_none(),
+                !matches!(row.status, AudioConnectionStatus::PortMissing),
+                false,
+                None,
+                OpenDropdown::Port {
+                    connection_id: row.id.clone(),
+                    logical_channel: 0,
+                },
+                cx,
             ))
+            // A mono row renders an inert cell rather than an active Right
+            // dropdown — there is no second channel to bind.
+            .child(match row.right_port.clone() {
+                Some(text) => self
+                    .combo_cell(
+                        ("audio-connection-right", index).into(),
+                        text,
+                        COL_PORT,
+                        !matches!(row.status, AudioConnectionStatus::PortMissing),
+                        false,
+                        None,
+                        OpenDropdown::Port {
+                            connection_id: row.id.clone(),
+                            logical_channel: 1,
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                None => cell(String::new(), COL_PORT, true).into_any_element(),
+            })
             .child(
                 div()
                     .w(px(COL_STATUS))
@@ -312,6 +818,7 @@ impl AudioConnectionsWindow {
 
 impl Render for AudioConnectionsWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _window: &Window = _window;
         let has_project = self.snapshot.has_project;
         let rows = self.panel.rows(&self.snapshot.registry);
         let (count, attention) = self.panel.summary(&self.snapshot.registry);
@@ -567,7 +1074,7 @@ impl Render for AudioConnectionsWindow {
                 .min_h_0()
                 .overflow_y_scroll();
             for (index, row) in rows.into_iter().enumerate() {
-                list = list.child(self.render_row(row, index, cx));
+                list = list.child(self.render_row(row, index, _window, cx));
             }
             list.into_any_element()
         };
@@ -696,6 +1203,11 @@ impl Render for AudioConnectionsWindow {
         });
 
         div()
+            .id("audio-connections-root")
+            .track_focus(&self.name_input.focus_handle)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                this.on_key(event, window, cx);
+            }))
             .relative()
             .flex()
             .flex_col()
@@ -707,6 +1219,7 @@ impl Render for AudioConnectionsWindow {
             .child(header_row)
             .child(body)
             .child(footer)
+            .children(self.render_open_dropdown(_window, cx))
             .children(confirmation)
     }
 }
@@ -735,7 +1248,10 @@ pub fn open_audio_connections_window(
     apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|_cx| AudioConnectionsWindow::new(snapshot, on_edit, on_close))
+        cx.new(|cx| {
+            let focus_handle = cx.focus_handle();
+            AudioConnectionsWindow::new(snapshot, on_edit, on_close, focus_handle)
+        })
     })
     .map_err(|error| error.to_string())
 }

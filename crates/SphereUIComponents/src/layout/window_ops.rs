@@ -342,6 +342,20 @@ impl StudioLayout {
                 ConnectionEdit::SetEnabled { id, enabled } => {
                     registry.update_enabled(id, *enabled, &ports)
                 }
+                // A rename never reports needs_routing_rebuild, so this path
+                // marks the project dirty without republishing routing.
+                ConnectionEdit::Rename { id, name } => registry.update_name(id, name),
+                ConnectionEdit::SetLayout { id, layout } => {
+                    registry.update_layout(id, *layout, &ports)
+                }
+                ConnectionEdit::SetDevice { id, device_id } => {
+                    registry.update_device(id, device_id.as_deref(), &ports)
+                }
+                ConnectionEdit::SetPort {
+                    id,
+                    logical_channel,
+                    port,
+                } => registry.update_port_binding(id, *logical_channel, port.clone(), &ports),
                 ConnectionEdit::Duplicate { id } => registry.duplicate_connection(id, &ports).1,
                 ConnectionEdit::Remove { id } => {
                     let affected: Vec<String> = timeline
@@ -403,7 +417,13 @@ impl StudioLayout {
         if mutation.did_change() {
             self.mark_dirty_view_only();
         }
+        let warnings = mutation.warnings.clone();
         self.refresh_audio_connections_window(cx);
+        if let Some(handle) = self.external_windows.audio_connections.clone() {
+            let _ = handle.update(cx, |window, _w, cx| {
+                window.set_warnings(warnings, cx);
+            });
+        }
     }
 
     /// Recompile and publish the runtime routing snapshot.

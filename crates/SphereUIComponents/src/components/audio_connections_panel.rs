@@ -47,6 +47,74 @@ pub struct InlineNameEdit {
     pub draft: String,
 }
 
+/// Anchor rectangle of the cell a dropdown was opened from, in window space.
+/// Kept as plain floats so this module stays free of GPUI types and the
+/// placement logic below is testable without a window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellAnchor {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Which side a popover ended up on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopoverSide {
+    Below,
+    Above,
+}
+
+/// Choose the side a dropdown opens on, preferring below and flipping up only
+/// when below cannot hold it and above genuinely has more room.
+///
+/// Mirrors the shared `overlay::resolve_popup_placement` rule so the panel
+/// behaves like every other Futureboard popover; kept here as a pure function
+/// so orientation can be asserted without native geometry.
+pub fn popover_side(anchor: CellAnchor, popup_height: f32, viewport_bottom: f32) -> PopoverSide {
+    let space_below = viewport_bottom - (anchor.y + anchor.height);
+    let space_above = anchor.y;
+    if space_below < popup_height && space_above > space_below {
+        PopoverSide::Above
+    } else {
+        PopoverSide::Below
+    }
+}
+
+/// Which editable cell has keyboard focus, for Tab traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditableCell {
+    Name,
+    Configuration,
+    Device,
+    LeftPort,
+    RightPort,
+}
+
+impl EditableCell {
+    /// Traversal order across a row. `stereo` decides whether the Right port
+    /// participates, so Tab never lands on a cell a mono row does not render.
+    pub fn order(stereo: bool) -> Vec<EditableCell> {
+        let mut cells = vec![
+            EditableCell::Name,
+            EditableCell::Configuration,
+            EditableCell::Device,
+            EditableCell::LeftPort,
+        ];
+        if stereo {
+            cells.push(EditableCell::RightPort);
+        }
+        cells
+    }
+
+    pub fn next(self, stereo: bool, delta: i32) -> EditableCell {
+        let order = Self::order(stereo);
+        let index = order.iter().position(|cell| *cell == self).unwrap_or(0);
+        let next = (index as i32 + delta).rem_euclid(order.len() as i32) as usize;
+        order[next]
+    }
+}
+
 /// Which dropdown is open, so only one can be at a time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenDropdown {
@@ -114,6 +182,10 @@ pub struct AudioConnectionsPanelState {
     selected: Vec<AudioConnectionId>,
     pub inline_edit: Option<InlineNameEdit>,
     pub open_dropdown: Option<OpenDropdown>,
+    /// Anchor of the cell the open dropdown belongs to.
+    pub dropdown_anchor: Option<CellAnchor>,
+    /// Focused editable cell for Tab traversal.
+    pub focused_cell: Option<EditableCell>,
     pub pending: Option<PendingConfirmation>,
     /// Warnings from the most recent mutation, shown in the footer.
     pub warnings: Vec<String>,
@@ -142,13 +214,45 @@ impl AudioConnectionsPanelState {
     pub fn close_transient(&mut self) {
         self.inline_edit = None;
         self.open_dropdown = None;
+        self.dropdown_anchor = None;
         self.pending = None;
+    }
+
+    /// Escape: close the innermost thing first — dropdown, then inline editor,
+    /// then any pending confirmation. Returns `true` when something closed, so
+    /// the caller knows the key was consumed.
+    pub fn dismiss_topmost(&mut self) -> bool {
+        if self.open_dropdown.is_some() {
+            self.open_dropdown = None;
+            self.dropdown_anchor = None;
+            return true;
+        }
+        if self.inline_edit.is_some() {
+            self.inline_edit = None;
+            return true;
+        }
+        if self.pending.is_some() {
+            self.pending = None;
+            return true;
+        }
+        false
+    }
+
+    /// Move keyboard focus across the editable cells of the selected row.
+    pub fn move_cell_focus(&mut self, stereo: bool, delta: i32) {
+        let next = match self.focused_cell {
+            Some(cell) => cell.next(stereo, delta),
+            None if delta >= 0 => EditableCell::Name,
+            None => *EditableCell::order(stereo).last().unwrap(),
+        };
+        self.focused_cell = Some(next);
     }
 
     /// Reset for a different project. Ids never cross projects.
     pub fn on_project_changed(&mut self) {
         self.selected.clear();
         self.close_transient();
+        self.focused_cell = None;
         self.warnings.clear();
     }
 
@@ -254,6 +358,13 @@ impl AudioConnectionsPanelState {
 
     // ── Dropdowns ───────────────────────────────────────────────────────────
 
+    /// Open (or close) a dropdown anchored to a cell.
+    pub fn toggle_dropdown_at(&mut self, dropdown: OpenDropdown, anchor: CellAnchor) {
+        let already_open = self.open_dropdown.as_ref() == Some(&dropdown);
+        self.toggle_dropdown(dropdown);
+        self.dropdown_anchor = (!already_open).then_some(anchor);
+    }
+
     pub fn toggle_dropdown(&mut self, dropdown: OpenDropdown) {
         // Opening a dropdown ends any inline edit, so a stale draft can never
         // be committed by a later click elsewhere.
@@ -267,6 +378,7 @@ impl AudioConnectionsPanelState {
 
     pub fn close_dropdown(&mut self) {
         self.open_dropdown = None;
+        self.dropdown_anchor = None;
     }
 
     pub fn is_dropdown_open(&self, dropdown: &OpenDropdown) -> bool {
@@ -661,5 +773,173 @@ mod tests {
         assert_eq!(rows[0].right_port.as_deref(), Some("—"));
         assert_eq!(rows[0].device_label, "Unassigned");
         assert_eq!(rows[0].status, AudioConnectionStatus::Disconnected);
+    }
+
+    // ── Popover orientation ─────────────────────────────────────────────────
+
+    /// A row near the top opens downward; one near the bottom flips upward
+    /// rather than clipping.
+    #[test]
+    fn a_dropdown_near_the_bottom_edge_flips_upward() {
+        let near_top = CellAnchor {
+            x: 10.0,
+            y: 40.0,
+            width: 120.0,
+            height: 24.0,
+        };
+        assert_eq!(popover_side(near_top, 120.0, 460.0), PopoverSide::Below);
+
+        let near_bottom = CellAnchor {
+            x: 10.0,
+            y: 400.0,
+            width: 120.0,
+            height: 24.0,
+        };
+        assert_eq!(popover_side(near_bottom, 120.0, 460.0), PopoverSide::Above);
+    }
+
+    /// With too little room on either side, it stays on the preferred side
+    /// rather than oscillating.
+    #[test]
+    fn a_dropdown_with_no_room_either_side_stays_below() {
+        let cramped = CellAnchor {
+            x: 0.0,
+            y: 10.0,
+            width: 120.0,
+            height: 24.0,
+        };
+        assert_eq!(popover_side(cramped, 500.0, 60.0), PopoverSide::Below);
+    }
+
+    // ── Cell focus traversal ────────────────────────────────────────────────
+
+    #[test]
+    fn tab_traversal_skips_the_right_port_on_a_mono_row() {
+        assert_eq!(
+            EditableCell::order(false),
+            vec![
+                EditableCell::Name,
+                EditableCell::Configuration,
+                EditableCell::Device,
+                EditableCell::LeftPort
+            ]
+        );
+        assert_eq!(
+            EditableCell::order(true).last(),
+            Some(&EditableCell::RightPort)
+        );
+        // Wraps rather than running off the end.
+        assert_eq!(
+            EditableCell::LeftPort.next(false, 1),
+            EditableCell::Name,
+            "a mono row wraps from Left/Mono back to Name"
+        );
+        assert_eq!(
+            EditableCell::LeftPort.next(true, 1),
+            EditableCell::RightPort
+        );
+    }
+
+    #[test]
+    fn shift_tab_walks_backwards_and_wraps() {
+        let mut panel = AudioConnectionsPanelState::new();
+        panel.move_cell_focus(true, 1);
+        assert_eq!(panel.focused_cell, Some(EditableCell::Name));
+        panel.move_cell_focus(true, -1);
+        assert_eq!(
+            panel.focused_cell,
+            Some(EditableCell::RightPort),
+            "backwards from Name wraps to the last cell"
+        );
+    }
+
+    // ── Escape ordering ─────────────────────────────────────────────────────
+
+    /// Escape closes the innermost surface first so one press never discards
+    /// two things at once.
+    #[test]
+    fn escape_closes_dropdown_then_editor_then_confirmation() {
+        let registry = registry();
+        let mut panel = AudioConnectionsPanelState::new();
+        let id = registry.by_direction(AudioConnectionDirection::Input)[0]
+            .id
+            .clone();
+
+        panel.begin_rename(&registry, &id);
+        panel.pending = Some(PendingConfirmation::Remove {
+            connection_id: id.clone(),
+            connection_name: "x".into(),
+            affected_tracks: vec!["t".into()],
+        });
+        panel.toggle_dropdown_at(
+            OpenDropdown::Device(id.clone()),
+            CellAnchor {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 24.0,
+            },
+        );
+
+        assert!(panel.dismiss_topmost());
+        assert!(panel.open_dropdown.is_none());
+        assert!(panel.pending.is_some(), "only the dropdown closed");
+
+        // The dropdown had already cancelled the inline edit when it opened.
+        assert!(panel.dismiss_topmost());
+        assert!(panel.pending.is_none());
+        assert!(!panel.dismiss_topmost(), "nothing left to close");
+    }
+
+    #[test]
+    fn opening_a_dropdown_records_its_anchor_and_closing_clears_it() {
+        let registry = registry();
+        let mut panel = AudioConnectionsPanelState::new();
+        let id = registry.by_direction(AudioConnectionDirection::Input)[0]
+            .id
+            .clone();
+        let anchor = CellAnchor {
+            x: 12.0,
+            y: 80.0,
+            width: 140.0,
+            height: 24.0,
+        };
+
+        panel.toggle_dropdown_at(OpenDropdown::Layout(id.clone()), anchor);
+        assert_eq!(panel.dropdown_anchor, Some(anchor));
+
+        panel.close_dropdown();
+        assert!(panel.dropdown_anchor.is_none());
+
+        // Toggling the same dropdown closed also clears the anchor.
+        panel.toggle_dropdown_at(OpenDropdown::Layout(id.clone()), anchor);
+        panel.toggle_dropdown_at(OpenDropdown::Layout(id), anchor);
+        assert!(panel.open_dropdown.is_none());
+        assert!(panel.dropdown_anchor.is_none());
+    }
+
+    #[test]
+    fn switching_tabs_and_project_change_clear_the_dropdown_anchor() {
+        let registry = registry();
+        let mut panel = AudioConnectionsPanelState::new();
+        let id = registry.by_direction(AudioConnectionDirection::Input)[0]
+            .id
+            .clone();
+        let anchor = CellAnchor {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+
+        panel.toggle_dropdown_at(OpenDropdown::Device(id.clone()), anchor);
+        panel.set_tab(ConnectionsTab::Outputs);
+        assert!(panel.dropdown_anchor.is_none());
+
+        panel.toggle_dropdown_at(OpenDropdown::Device(id), anchor);
+        panel.focused_cell = Some(EditableCell::Device);
+        panel.on_project_changed();
+        assert!(panel.dropdown_anchor.is_none());
+        assert!(panel.focused_cell.is_none());
     }
 }
