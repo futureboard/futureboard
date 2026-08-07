@@ -15,9 +15,14 @@
 //! Idle is unchanged: the poll loop only notifies on state change, so when
 //! nothing is dirty no frames are scheduled regardless of the configured rate.
 //!
-//! The refresh rate is queried once from the OS and cached. On Windows that is
-//! `EnumDisplaySettingsW(...).dmDisplayFrequency`; everywhere else (and on any
-//! query failure) it falls back to 60 Hz. The detected value is clamped to
+//! The refresh rate is queried once from the OS and cached:
+//! * Windows — `EnumDisplaySettingsW(...).dmDisplayFrequency`
+//! * macOS — `CGDisplayModeGetRefreshRate`, then CoreVideo's nominal output
+//!   period when the mode reports `0` (common on LCD / ProMotion panels)
+//! * Linux — XRandR current rate (native X11 and XWayland); pure Wayland without
+//!   XWayland falls back like any other query failure
+//!
+//! On any query failure it falls back to 60 Hz. The detected value is clamped to
 //! `30..=240` Hz.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,7 +185,7 @@ pub fn frame_interval(mode: FrameRateMode, refresh_hz: u32, class: FrameClass) -
 }
 
 /// Query the primary monitor refresh rate once and cache it. Clamped to
-/// `30..=240`; falls back to 60 Hz on non-Windows or any query failure.
+/// `30..=240`; falls back to 60 Hz on any query failure.
 pub fn detect_refresh_hz() -> u32 {
     static CACHED: OnceLock<u32> = OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -191,6 +196,19 @@ pub fn detect_refresh_hz() -> u32 {
         }
         hz
     })
+}
+
+/// Round a floating OS-reported refresh rate to an integer Hz. Values under
+/// 1.0 (Windows "hardware default", CGDisplay LCD sentinel, XRandR zero) are
+/// treated as unavailable so callers can try the next source.
+pub fn round_refresh_hz(raw: f64) -> Option<u32> {
+    if !raw.is_finite() || raw < 1.0 {
+        None
+    } else {
+        // 59.94 / 119.88 must map to 60 / 120 so DisplaySync intervals land on
+        // whole-frame boundaries rather than drifting.
+        Some(raw.round() as u32)
+    }
 }
 
 #[cfg(windows)]
@@ -211,10 +229,193 @@ fn query_refresh_hz_os() -> Option<u32> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn query_refresh_hz_os() -> Option<u32> {
-    // TODO(non-windows): query via the platform display API when available.
-    // Until then the 60 Hz fallback applies.
+    // Prefer the active display mode when it reports a real rate. LCD and
+    // ProMotion panels often return 0 from CGDisplayModeGetRefreshRate, so
+    // fall through to CoreVideo's nominal output period which still yields a
+    // usable cadence for DisplaySync.
+    type CGDirectDisplayID = u32;
+    type CGDisplayModeRef = *mut std::ffi::c_void;
+    type CVDisplayLinkRef = *mut std::ffi::c_void;
+
+    #[repr(C)]
+    struct CVTime {
+        time_value: i64,
+        time_scale: i32,
+        flags: i32,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> CGDirectDisplayID;
+        fn CGDisplayCopyDisplayMode(display: CGDirectDisplayID) -> CGDisplayModeRef;
+        fn CGDisplayModeGetRefreshRate(mode: CGDisplayModeRef) -> f64;
+        fn CGDisplayModeRelease(mode: CGDisplayModeRef);
+    }
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    extern "C" {
+        fn CVDisplayLinkCreateWithCGDisplay(
+            display_id: CGDirectDisplayID,
+            display_link_out: *mut CVDisplayLinkRef,
+        ) -> i32;
+        fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(display_link: CVDisplayLinkRef)
+        -> CVTime;
+        fn CVDisplayLinkRelease(display_link: CVDisplayLinkRef);
+    }
+
+    unsafe {
+        let display = CGMainDisplayID();
+        let mode = CGDisplayCopyDisplayMode(display);
+        if !mode.is_null() {
+            let rate = CGDisplayModeGetRefreshRate(mode);
+            CGDisplayModeRelease(mode);
+            if let Some(hz) = round_refresh_hz(rate) {
+                return Some(hz);
+            }
+        }
+
+        let mut link: CVDisplayLinkRef = std::ptr::null_mut();
+        // kCVReturnSuccess == 0
+        if CVDisplayLinkCreateWithCGDisplay(display, &mut link) != 0 || link.is_null() {
+            return None;
+        }
+        let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+        CVDisplayLinkRelease(link);
+        if period.time_value <= 0 || period.time_scale <= 0 {
+            return None;
+        }
+        let hz = period.time_scale as f64 / period.time_value as f64;
+        round_refresh_hz(hz)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn query_refresh_hz_os() -> Option<u32> {
+    // XRandR covers native X11 and Wayland sessions that still expose XWayland
+    // (`DISPLAY` set). Pure Wayland without XWayland returns None → 60 Hz
+    // fallback, matching the BPM cursor path.
+    use x11_dl::xlib::{self, Display};
+    use x11_dl::xrandr;
+
+    let xlib = xlib::Xlib::open().ok()?;
+    let xrandr = xrandr::Xrandr::open().ok()?;
+    unsafe {
+        let display: *mut Display = (xlib.XOpenDisplay)(std::ptr::null());
+        if display.is_null() {
+            return None;
+        }
+        let root = (xlib.XDefaultRootWindow)(display);
+
+        // Prefer mode-table rate from the primary (or first connected) output —
+        // more accurate than the legacy screen-config rate on multi-monitor.
+        let hz = refresh_hz_from_xrandr_resources(&xrandr, display, root)
+            .or_else(|| refresh_hz_from_xrandr_screen_config(&xrandr, display, root));
+
+        (xlib.XCloseDisplay)(display);
+        hz
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn refresh_hz_from_xrandr_screen_config(
+    xrandr: &x11_dl::xrandr::Xrandr,
+    display: *mut x11_dl::xlib::Display,
+    root: x11_dl::xlib::Window,
+) -> Option<u32> {
+    let config = unsafe { (xrandr.XRRGetScreenInfo)(display, root) };
+    if config.is_null() {
+        return None;
+    }
+    let rate = unsafe { (xrandr.XRRConfigCurrentRate)(config) };
+    unsafe { (xrandr.XRRFreeScreenConfigInfo)(config) };
+    round_refresh_hz(rate as f64)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn refresh_hz_from_xrandr_resources(
+    xrandr: &x11_dl::xrandr::Xrandr,
+    display: *mut x11_dl::xlib::Display,
+    root: x11_dl::xlib::Window,
+) -> Option<u32> {
+    use x11_dl::xrandr::{RRMode, RR_Connected, XRRModeInfo};
+
+    let resources = unsafe { (xrandr.XRRGetScreenResourcesCurrent)(display, root) };
+    if resources.is_null() {
+        return None;
+    }
+
+    let primary = unsafe { (xrandr.XRRGetOutputPrimary)(display, root) };
+    let noutput = unsafe { (*resources).noutput };
+    let outputs = unsafe { (*resources).outputs };
+    if noutput <= 0 || outputs.is_null() {
+        unsafe { (xrandr.XRRFreeScreenResources)(resources) };
+        return None;
+    }
+
+    let mut chosen_mode: RRMode = 0;
+    // Prefer primary when connected; otherwise first connected output with a CRTC.
+    let order = std::iter::once(primary).chain((0..noutput).map(|i| unsafe { *outputs.add(i as usize) }));
+    for output in order {
+        if output == 0 {
+            continue;
+        }
+        let info = unsafe { (xrandr.XRRGetOutputInfo)(display, resources, output) };
+        if info.is_null() {
+            continue;
+        }
+        let connected = unsafe { (*info).connection } == RR_Connected as u16;
+        let crtc = unsafe { (*info).crtc };
+        unsafe { (xrandr.XRRFreeOutputInfo)(info) };
+        if !connected || crtc == 0 {
+            continue;
+        }
+        let crtc_info = unsafe { (xrandr.XRRGetCrtcInfo)(display, resources, crtc) };
+        if crtc_info.is_null() {
+            continue;
+        }
+        let mode = unsafe { (*crtc_info).mode };
+        unsafe { (xrandr.XRRFreeCrtcInfo)(crtc_info) };
+        if mode != 0 {
+            chosen_mode = mode;
+            break;
+        }
+    }
+
+    let mut hz = None;
+    if chosen_mode != 0 {
+        let nmode = unsafe { (*resources).nmode };
+        let modes = unsafe { (*resources).modes };
+        if nmode > 0 && !modes.is_null() {
+            for i in 0..nmode as usize {
+                let mode: &XRRModeInfo = unsafe { &*modes.add(i) };
+                if mode.id == chosen_mode {
+                    hz = refresh_hz_from_xrr_mode(mode);
+                    break;
+                }
+            }
+        }
+    }
+
+    unsafe { (xrandr.XRRFreeScreenResources)(resources) };
+    hz
+}
+
+/// Compute Hz from an XRRModeInfo: `dotClock / (hTotal * vTotal)`.
+#[cfg(target_os = "linux")]
+fn refresh_hz_from_xrr_mode(mode: &x11_dl::xrandr::XRRModeInfo) -> Option<u32> {
+    let denom = (mode.hTotal as u64).saturating_mul(mode.vTotal as u64);
+    if denom == 0 || mode.dotClock == 0 {
+        return None;
+    }
+    // dotClock is kHz in XRandR.
+    let hz = (mode.dotClock as f64 * 1000.0) / denom as f64;
+    round_refresh_hz(hz)
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn query_refresh_hz_os() -> Option<u32> {
     None
 }
 
@@ -480,5 +681,15 @@ mod tests {
     fn detect_is_clamped_and_nonzero() {
         let hz = detect_refresh_hz();
         assert!((MIN_REFRESH_HZ..=MAX_REFRESH_HZ).contains(&hz));
+    }
+
+    #[test]
+    fn round_refresh_maps_fractional_panel_rates() {
+        assert_eq!(round_refresh_hz(59.94), Some(60));
+        assert_eq!(round_refresh_hz(119.88), Some(120));
+        assert_eq!(round_refresh_hz(144.0), Some(144));
+        assert_eq!(round_refresh_hz(0.0), None, "LCD/ProMotion sentinel");
+        assert_eq!(round_refresh_hz(-1.0), None);
+        assert_eq!(round_refresh_hz(f64::NAN), None);
     }
 }
