@@ -5142,27 +5142,29 @@ mod platform {
     use windows::Win32::Foundation::{LPARAM, RECT, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::System::Threading::{
-        GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetCurrentProcessId, GetCurrentThreadId, GetExitCodeProcess, OpenProcess,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetCapture, GetFocus, GetKeyState, IsWindowEnabled, ReleaseCapture, SetFocus, VIRTUAL_KEY,
-        VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+        GetAsyncKeyState, GetCapture, GetFocus, GetKeyState, IsWindowEnabled, ReleaseCapture,
+        SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SPACE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
-        EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow,
-        GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsChild,
-        IsDialogMessageW, IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
-        PostThreadMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+        BringWindowToTop, CallNextHookEx, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow,
+        DispatchMessageW, EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW,
+        GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow, IsWindowVisible,
+        MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, SetForegroundWindow,
+        SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
         WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWLP_HWNDPARENT, GWL_EXSTYLE,
-        GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
-        WS_VISIBLE,
+        GWL_STYLE, GW_CHILD, GW_OWNER, HHOOK, HOOKPROC, HWND_TOP, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+        MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+        WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -5296,6 +5298,74 @@ mod platform {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
+        install_transport_keyboard_hook();
+    }
+
+    /// Low-level keyboard hook so Space still reaches the host when a plug-in's
+    /// own UI thread (CEF / JUCE / browser editors) owns the message queue.
+    /// Only claims when *this process* owns the foreground window — the main
+    /// Studio process keeps Space when the arrangement is focused.
+    fn install_transport_keyboard_hook() {
+        static HOOK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        HOOK.get_or_init(|| {
+            unsafe {
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(transport_ll_keyboard_proc), None, 0)
+                {
+                    Ok(hook) if !hook.is_invalid() => {
+                        // Keep the hook alive for process lifetime. The OS unhooks
+                        // when the process exits; we deliberately leak the handle.
+                        std::mem::forget(hook);
+                        eprintln!("[PluginEditorInput] WH_KEYBOARD_LL transport hook installed");
+                    }
+                    Ok(_) | Err(_) => {
+                        eprintln!(
+                            "[PluginEditorInput] WARNING failed to install WH_KEYBOARD_LL transport hook"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    unsafe extern "system" fn transport_ll_keyboard_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        if code >= 0 {
+                let msg = wparam.0 as u32;
+                if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
+                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                let injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
+                if !injected && kb.vkCode == VK_SPACE.0 as u32 {
+                    let held = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) < 0;
+                    if !held(VK_CONTROL) && !held(VK_MENU) && !held(VK_LWIN) && !held(VK_RWIN) {
+                        let fg = GetForegroundWindow();
+                        let mut pid = 0u32;
+                        if !fg.is_invalid() {
+                            GetWindowThreadProcessId(fg, Some(&mut pid));
+                        }
+                        if pid == GetCurrentProcessId() {
+                            let focus = GetFocus();
+                            let text =
+                                !focus.is_invalid() && is_text_entry_class(&class_name(focus));
+                            if !text {
+                                TRANSPORT_TOGGLE_REQUESTS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if plugin_debug() {
+                                    eprintln!(
+                                        "[PluginEditorInput] transport key claimed via WH_KEYBOARD_LL"
+                                    );
+                                }
+                                // Swallow so the plug-in does not also act on Space.
+                                return windows::Win32::Foundation::LRESULT(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        CallNextHookEx(None, code, wparam, lparam)
     }
 
     pub fn ensure_dpi_awareness() {
@@ -5554,7 +5624,9 @@ mod platform {
     fn is_transport_toggle_key(msg: &MSG) -> bool {
         const VK_SPACE_W: usize = 0x20;
         const KEY_REPEAT_BIT: isize = 1 << 30;
-        if msg.message != WM_KEYDOWN || msg.wParam.0 != VK_SPACE_W {
+        if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN)
+            || msg.wParam.0 != VK_SPACE_W
+        {
             return false;
         }
         if msg.lParam.0 & KEY_REPEAT_BIT != 0 {
@@ -5576,7 +5648,17 @@ mod platform {
     /// Number of transport-key presses since the last call. The IPC loop turns
     /// each into a `HostEvent::TransportToggleRequested`.
     pub fn take_transport_toggle_requests() -> u32 {
-        TRANSPORT_TOGGLE_REQUESTS.swap(0, std::sync::atomic::Ordering::Relaxed)
+        let from_pump = TRANSPORT_TOGGLE_REQUESTS.swap(0, std::sync::atomic::Ordering::Relaxed);
+        // C++ editor shell / shared VST3 host also publishes claims here (e.g.
+        // Content HWND WndProc when focus never enters the PeekMessage path).
+        let from_daux = unsafe { daux_transport::sphere_daux_vst3_take_transport_toggle_requests() };
+        from_pump.saturating_add(from_daux)
+    }
+
+    mod daux_transport {
+        unsafe extern "C" {
+            pub fn sphere_daux_vst3_take_transport_toggle_requests() -> u32;
+        }
     }
 
     #[cfg(test)]
@@ -6121,17 +6203,26 @@ mod platform {
     }
 
     /// Number of transport-key presses claimed from plug-in editor windows since
-    /// the last call. The AppKit pump swallows a bare Space so the main app can
-    /// run its own `transport:play-pause`; see the Windows pump for the same
-    /// contract.
+    /// the last call. Platform pumps + the process-wide C++ VST3 counter all
+    /// feed this.
     pub fn take_transport_toggle_requests() -> u32 {
-        #[cfg(target_os = "macos")]
-        {
-            unsafe { appkit::sphere_plugin_host_mac_ui_take_transport_toggles() as u32 }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            0
+        let from_platform = {
+            #[cfg(target_os = "macos")]
+            {
+                unsafe { appkit::sphere_plugin_host_mac_ui_take_transport_toggles() as u32 }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                0u32
+            }
+        };
+        let from_daux = unsafe { daux_transport::sphere_daux_vst3_take_transport_toggle_requests() };
+        from_platform.saturating_add(from_daux)
+    }
+
+    mod daux_transport {
+        unsafe extern "C" {
+            pub fn sphere_daux_vst3_take_transport_toggle_requests() -> u32;
         }
     }
 

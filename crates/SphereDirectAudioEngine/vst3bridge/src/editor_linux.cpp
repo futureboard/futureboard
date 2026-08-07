@@ -29,6 +29,8 @@
 
 #ifdef GDK_WINDOWING_X11
 #  include <gdk/x11/gdkx.h>
+#  include <X11/Xlib.h>
+#  include <X11/keysym.h>
 #endif
 #ifdef GDK_WINDOWING_WAYLAND
 #  include <gdk/wayland/gdkwayland.h>
@@ -38,6 +40,8 @@
 #include "pluginterfaces/gui/iplugview.h"
 
 #include "sphere_daux_editor_bridge.h"
+
+extern "C" void sphere_daux_vst3_claim_transport_toggle(void);
 
 // The Linux run-loop interfaces are GUI-layer IIDs that the SDK IID TUs we
 // compile (coreiids.cpp / vstinitiids.cpp) do not emit. Our IRunLoop frame's
@@ -63,6 +67,106 @@ GMainLoop*              s_main_loop    = nullptr;
 std::mutex              s_init_mutex;
 std::condition_variable s_init_cv;
 bool                    s_gtk_ready    = false;
+
+/// Bare Space presses claimed from plug-in editor windows for the DAW
+/// transport. Written on the GTK thread; drained by the host IPC loop via
+/// `sphere_daux_vst3_take_transport_toggle_requests` (process-wide counter in
+/// the VST3 processor TU).
+bool is_transport_toggle_key(guint keyval, GdkModifierType state) {
+    if (keyval != GDK_KEY_space && keyval != GDK_KEY_KP_Space) {
+        return false;
+    }
+    const GdkModifierType blocking = static_cast<GdkModifierType>(
+        GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK | GDK_META_MASK |
+        GDK_HYPER_MASK);
+    return (state & blocking) == 0;
+}
+
+/// Claim Space for transport before the plug-in sees it. Returns TRUE when
+/// consumed (stop further handling), matching the Win32 / AppKit pumps.
+gboolean on_editor_key_pressed(GtkEventControllerKey* /*controller*/,
+                                guint keyval,
+                                guint /*keycode*/,
+                                GdkModifierType state,
+                                gpointer /*user_data*/) {
+    if (!is_transport_toggle_key(keyval, state)) {
+        return FALSE;
+    }
+    sphere_daux_vst3_claim_transport_toggle();
+    std::fprintf(stderr,
+                 "[SphereVST3/linux] transport key claimed from editor focus\n");
+    return TRUE;
+}
+
+#ifdef GDK_WINDOWING_X11
+/// XEmbed children hold the keyboard focus independently of the GtkWindow.
+/// A passive grab on the host XID still delivers Space to us when a descendant
+/// (the plug-in view) has focus — without it, Space never reaches GTK.
+void grab_transport_key_on_x11_window(GtkWidget* window) {
+    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(window));
+    if (!surface || !GDK_IS_X11_SURFACE(surface)) {
+        return;
+    }
+    Display* dpy = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+    Window xid = gdk_x11_surface_get_xid(surface);
+    KeyCode code = XKeysymToKeycode(dpy, XK_space);
+    if (code == 0 || xid == 0) {
+        return;
+    }
+    // Lock/NumLock as irrelevant noise — grab every common combination so a
+    // sticky lock state does not silently re-arm the plug-in's Space.
+    const unsigned int masks[] = {
+        0u,
+        LockMask,
+        Mod2Mask,
+        LockMask | Mod2Mask,
+    };
+    for (unsigned int mask : masks) {
+        // owner_events=False: we claim the press even when the focus window is
+        // an embedded foreign XEmbed child.
+        XGrabKey(dpy, code, mask, xid, False, GrabModeAsync, GrabModeAsync);
+    }
+    XFlush(dpy);
+}
+
+void ungrab_transport_key_on_x11_window(GtkWidget* window) {
+    if (!window || !GTK_IS_NATIVE(window)) {
+        return;
+    }
+    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(window));
+    if (!surface || !GDK_IS_X11_SURFACE(surface)) {
+        return;
+    }
+    Display* dpy = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+    Window xid = gdk_x11_surface_get_xid(surface);
+    KeyCode code = XKeysymToKeycode(dpy, XK_space);
+    if (code == 0 || xid == 0) {
+        return;
+    }
+    const unsigned int masks[] = {
+        0u,
+        LockMask,
+        Mod2Mask,
+        LockMask | Mod2Mask,
+    };
+    for (unsigned int mask : masks) {
+        XUngrabKey(dpy, code, mask, xid);
+    }
+    XFlush(dpy);
+}
+#else
+void grab_transport_key_on_x11_window(GtkWidget*) {}
+void ungrab_transport_key_on_x11_window(GtkWidget*) {}
+#endif
+
+void install_transport_key_handlers(GtkWidget* window) {
+    GtkEventController* controller = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_CAPTURE);
+    g_signal_connect(controller, "key-pressed", G_CALLBACK(on_editor_key_pressed),
+                     nullptr);
+    gtk_widget_add_controller(window, controller);
+    grab_transport_key_on_x11_window(window);
+}
 
 /// Entry point for the dedicated GTK event-loop thread.
 void gtk_thread_main() {
@@ -324,6 +428,8 @@ static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
     void* win_ptr = sphere_daux_editor_get_native_window(proc);
     if (!win_ptr) return;
 
+    ungrab_transport_key_on_x11_window(static_cast<GtkWidget*>(win_ptr));
+
     // Grab the IRunLoop frame (stored in native_embed) before clearing.
     auto* frame = static_cast<LinuxRunLoopFrame*>(
         sphere_daux_editor_get_native_embed(proc));
@@ -455,6 +561,9 @@ static gboolean idle_open_editor(gpointer user_data) {
         // XEmbed expect a mapped parent XID when the plug-in reparents.
         gtk_window_present(GTK_WINDOW(window));
 
+        // Space → transport before the plug-in (or its XEmbed child) can eat it.
+        install_transport_key_handlers(window);
+
         // ── Attach IPlugView ──────────────────────────────────────────────
         // Pass the X11 Window ID cast to void* (XEmbed parent).
         if (!sphere_daux_editor_attach_view(proc,
@@ -466,6 +575,7 @@ static gboolean idle_open_editor(gpointer user_data) {
                          kLinuxPlatformType);
             sphere_daux_editor_set_frame(proc, nullptr);
             delete frame;
+            ungrab_transport_key_on_x11_window(window);
             gtk_window_destroy(GTK_WINDOW(window));
             goto done;
         }

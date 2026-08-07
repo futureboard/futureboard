@@ -123,6 +123,9 @@ fn apply_vst3_platform_config(
             }
 
             println!("cargo:rustc-link-lib=dl");
+            // editor_linux.cpp uses XGrabKey so Space reaches the host even when
+            // an XEmbed plug-in child holds focus.
+            println!("cargo:rustc-link-lib=X11");
         }
         _ => {}
     }
