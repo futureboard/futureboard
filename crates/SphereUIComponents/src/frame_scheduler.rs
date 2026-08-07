@@ -113,12 +113,35 @@ const MIN_REFRESH_HZ: u32 = 30;
 const MAX_REFRESH_HZ: u32 = 240;
 const FALLBACK_REFRESH_HZ: u32 = 60;
 const BACKGROUND_CAP_HZ: u32 = 30;
+/// Ceiling `DisplaySync` uses on a machine with no discrete GPU. A 120/144 Hz
+/// panel driven by integrated graphics spends the extra frames on memory
+/// bandwidth the CPU is also competing for, and a DAW's continuous motion —
+/// playhead, meters, scroll — reads the same at 60. Only the automatic mode is
+/// capped: picking a fixed rate in Settings is an explicit choice and wins.
+const INTEGRATED_GPU_CAP_HZ: u32 = 60;
 /// Floor for `Unlimited` so the poll loop never busy-spins.
 const UNLIMITED_FLOOR: Duration = Duration::from_millis(1);
 
 #[inline]
 fn hz_to_interval(hz: u32) -> Duration {
     Duration::from_nanos(1_000_000_000u64 / hz.max(1) as u64)
+}
+
+/// The refresh rate `mode` should actually pace against on `class` hardware.
+///
+/// Pure policy, so it can be tested without a GPU: only `DisplaySync` on an
+/// integrated-only machine is capped, and only downward — a 60 Hz panel is
+/// already at the cap, and every explicit mode passes through untouched.
+pub fn effective_refresh_hz(
+    mode: FrameRateMode,
+    refresh_hz: u32,
+    class: crate::perf::GpuClass,
+) -> u32 {
+    if mode == FrameRateMode::DisplaySync && class == crate::perf::GpuClass::IntegratedOnly {
+        refresh_hz.min(INTEGRATED_GPU_CAP_HZ)
+    } else {
+        refresh_hz
+    }
 }
 
 /// Clamp a raw OS-reported refresh rate. `0` / `1` are the Windows "use
@@ -218,7 +241,12 @@ impl FrameScheduler {
         let env_override = FrameRateMode::from_env();
         let mode = env_override.unwrap_or(settings_mode);
         let continuous_nanos = Arc::new(AtomicU64::new(
-            frame_interval(mode, refresh_hz, FrameClass::Continuous).as_nanos() as u64,
+            frame_interval(
+                mode,
+                effective_refresh_hz(mode, refresh_hz, crate::perf::gpu_class()),
+                FrameClass::Continuous,
+            )
+            .as_nanos() as u64,
         ));
         let scheduler = Self {
             mode,
@@ -252,7 +280,8 @@ impl FrameScheduler {
         if mode != self.mode {
             self.mode = mode;
             self.continuous_nanos.store(
-                frame_interval(mode, self.refresh_hz, FrameClass::Continuous).as_nanos() as u64,
+                frame_interval(mode, self.paced_refresh_hz(), FrameClass::Continuous).as_nanos()
+                    as u64,
                 Ordering::Relaxed,
             );
             if frame_diag_enabled() {
@@ -269,16 +298,22 @@ impl FrameScheduler {
         self.refresh_hz
     }
 
+    /// The rate the scheduler actually paces against — the detected refresh,
+    /// capped on integrated-only hardware while in `DisplaySync`.
+    fn paced_refresh_hz(&self) -> u32 {
+        effective_refresh_hz(self.mode, self.refresh_hz, crate::perf::gpu_class())
+    }
+
     pub fn continuous_interval(&self) -> Duration {
-        frame_interval(self.mode, self.refresh_hz, FrameClass::Continuous)
+        frame_interval(self.mode, self.paced_refresh_hz(), FrameClass::Continuous)
     }
 
     pub fn meter_min_interval(&self) -> Duration {
-        frame_interval(self.mode, self.refresh_hz, FrameClass::Meter)
+        frame_interval(self.mode, self.paced_refresh_hz(), FrameClass::Meter)
     }
 
     pub fn background_interval(&self) -> Duration {
-        frame_interval(self.mode, self.refresh_hz, FrameClass::Background)
+        frame_interval(self.mode, self.paced_refresh_hz(), FrameClass::Background)
     }
 
     /// Effective continuous FPS for the HUD (e.g. `144` for DisplaySync@144).
@@ -291,7 +326,17 @@ impl FrameScheduler {
     pub fn describe(&self) -> String {
         match self.mode {
             FrameRateMode::DisplaySync => {
-                format!("Display Sync {}Hz", self.refresh_hz)
+                let paced = self.paced_refresh_hz();
+                if paced < self.refresh_hz {
+                    // Say why the app is not running at panel rate, so a capped
+                    // machine never looks like a bug.
+                    format!(
+                        "Display Sync {paced}Hz (iGPU cap, panel {}Hz)",
+                        self.refresh_hz
+                    )
+                } else {
+                    format!("Display Sync {paced}Hz")
+                }
             }
             FrameRateMode::Unlimited => "Unlimited".to_string(),
             other => format!("{} ({} FPS)", other.label(), self.effective_fps()),
@@ -316,6 +361,46 @@ mod tests {
         assert_eq!(clamp_refresh(144), 144);
         assert_eq!(clamp_refresh(30), 30);
         assert_eq!(clamp_refresh(240), 240);
+    }
+
+    #[test]
+    fn display_sync_is_capped_on_integrated_only_hardware() {
+        use crate::perf::GpuClass;
+        let sync = FrameRateMode::DisplaySync;
+        assert_eq!(
+            effective_refresh_hz(sync, 144, GpuClass::IntegratedOnly),
+            60,
+            "a 144Hz panel on an iGPU paces at the cap"
+        );
+        assert_eq!(
+            effective_refresh_hz(sync, 60, GpuClass::IntegratedOnly),
+            60,
+            "the cap never raises a slower panel"
+        );
+        assert_eq!(effective_refresh_hz(sync, 30, GpuClass::IntegratedOnly), 30);
+    }
+
+    #[test]
+    fn discrete_hardware_and_explicit_modes_are_never_capped() {
+        use crate::perf::GpuClass;
+        assert_eq!(
+            effective_refresh_hz(FrameRateMode::DisplaySync, 144, GpuClass::Discrete),
+            144
+        );
+        assert_eq!(
+            effective_refresh_hz(FrameRateMode::DisplaySync, 144, GpuClass::Unknown),
+            144,
+            "undetected hardware keeps panel rate"
+        );
+        // Choosing a fixed rate in Settings is an explicit decision.
+        assert_eq!(
+            effective_refresh_hz(FrameRateMode::Fixed144, 144, GpuClass::IntegratedOnly),
+            144
+        );
+        assert_eq!(
+            effective_refresh_hz(FrameRateMode::Unlimited, 240, GpuClass::IntegratedOnly),
+            240
+        );
     }
 
     #[test]

@@ -906,13 +906,21 @@ impl StudioLayout {
             .as_ref()
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
-        let min_interval = if transport_active {
+        let scheduled_interval = if transport_active {
             self.frame_scheduler.meter_min_interval()
         } else {
             // Idle meters only need to finish their release animation; 30 Hz
             // halves snapshot/track traversal work while remaining smooth.
             self.frame_scheduler.background_interval()
         };
+        // Floor from the render-cost profile. On an integrated-only machine a
+        // meter tick is one of the few things that repaints while nothing else
+        // is happening, and every tick walks the full track list; 15 Hz still
+        // reads as a live meter. `max` = the slower of the two, so the profile
+        // can only ever reduce work.
+        let power_interval =
+            Duration::from_secs_f32(1.0 / crate::perf::power_mode().meter_update_hz().max(1.0));
+        let min_interval = scheduled_interval.max(power_interval);
         let now = Instant::now();
         let elapsed = now.duration_since(self.engine_sync.meter_applied_at);
         if elapsed < min_interval {

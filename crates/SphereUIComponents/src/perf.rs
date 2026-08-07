@@ -454,10 +454,45 @@ pub fn record_notify(reason: &'static str) {
     let _ = NOTIFY.try_with(|n| n.borrow_mut().record(reason));
 }
 
+/// What kind of GPU this machine renders on. Detected once at startup from the
+/// adapters wgpu can see (see `render::wgpu_renderer::detect_gpu_class`) and
+/// published here so cheap render-path checks never touch wgpu.
+///
+/// The distinction that matters is "is there a discrete GPU at all": a
+/// machine with only integrated graphics — an Intel Mac, a Windows laptop on
+/// Iris/UHD/Vega — pays for every extra frame and every extra grid line in
+/// shared memory bandwidth the CPU also needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuClass {
+    /// No discrete adapter present. Integrated / software rendering only.
+    IntegratedOnly,
+    /// At least one discrete adapter is available to the process.
+    Discrete,
+    /// Not detected (enumeration failed, or the `gpu-renderer` feature is off).
+    /// Treated exactly like `Discrete`: never slow the UI down on a guess.
+    Unknown,
+}
+
+static DETECTED_GPU_CLASS: std::sync::OnceLock<GpuClass> = std::sync::OnceLock::new();
+
+/// Publish the detected GPU class. Call once during startup, **before** the
+/// first `power_mode()` read — that resolves lazily and then caches.
+pub fn set_detected_gpu_class(class: GpuClass) {
+    let _ = DETECTED_GPU_CLASS.set(class);
+}
+
+/// The detected GPU class, or [`GpuClass::Unknown`] before detection runs.
+pub fn gpu_class() -> GpuClass {
+    DETECTED_GPU_CLASS
+        .get()
+        .copied()
+        .unwrap_or(GpuClass::Unknown)
+}
+
 /// Render-cost setting profile applied by the UI to reduce frame cost on
-/// low-end GPUs. Controlled at runtime via `FUTUREBOARD_POWER_MODE`
-/// (`lowend` / `balanced` / `performance`) and read by render code via
-/// the cheap accessors below.
+/// low-end GPUs. Selected automatically from [`gpu_class`] and overridable at
+/// runtime via `FUTUREBOARD_POWER_MODE` (`lowend` / `balanced` / `performance`);
+/// read by render code via the cheap accessors below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerMode {
     Balanced,
@@ -508,22 +543,44 @@ impl PowerMode {
     }
 }
 
-/// Returns the currently active power mode. Driven by the
-/// `FUTUREBOARD_POWER_MODE` env var so we can ship and dogfood it without
-/// blocking on a full settings UI. The result is cached on first read —
-/// changing the env var requires a restart.
+/// Resolve the power mode from an explicit override and the detected GPU class.
+/// Pure, so the policy can be tested without a GPU or an environment.
+///
+/// An integrated-only machine gets [`PowerMode::LowEnd`] by default: that is
+/// the configuration where grid density, meter rate, and repaint frequency
+/// actually decide whether the UI keeps up. Anything else stays Balanced, and an
+/// explicit override always wins — a user who asks for Performance on an iGPU
+/// gets it.
+pub fn resolve_power_mode(override_label: Option<&str>, class: GpuClass) -> PowerMode {
+    match override_label.map(str::to_ascii_lowercase).as_deref() {
+        Some("lowend") | Some("low-end") | Some("low_end") | Some("low") => {
+            return PowerMode::LowEnd
+        }
+        Some("performance") | Some("perf") | Some("high") => return PowerMode::Performance,
+        Some("balanced") | Some("normal") => return PowerMode::Balanced,
+        _ => {}
+    }
+    match class {
+        GpuClass::IntegratedOnly => PowerMode::LowEnd,
+        GpuClass::Discrete | GpuClass::Unknown => PowerMode::Balanced,
+    }
+}
+
+/// Returns the currently active power mode: the `FUTUREBOARD_POWER_MODE`
+/// override if set, otherwise the profile for the detected GPU class. Cached on
+/// first read, so startup must publish the GPU class (and any override must be
+/// in the environment) before the first render.
 pub fn power_mode() -> PowerMode {
     static MODE: std::sync::OnceLock<PowerMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
-        match std::env::var("FUTUREBOARD_POWER_MODE")
-            .map(|v| v.to_ascii_lowercase())
-            .ok()
-            .as_deref()
-        {
-            Some("lowend") | Some("low-end") | Some("low_end") | Some("low") => PowerMode::LowEnd,
-            Some("performance") | Some("perf") | Some("high") => PowerMode::Performance,
-            _ => PowerMode::Balanced,
-        }
+        let override_label = std::env::var("FUTUREBOARD_POWER_MODE").ok();
+        let mode = resolve_power_mode(override_label.as_deref(), gpu_class());
+        eprintln!(
+            "[perf] power mode {mode:?} (gpu class {:?}, override {:?})",
+            gpu_class(),
+            override_label
+        );
+        mode
     })
 }
 
@@ -638,5 +695,62 @@ pub fn tick_root_frame(reason: &'static str) {
     };
     if should_flush {
         let _ = COLLECTOR.try_with(|c| c.borrow_mut().flush());
+    }
+}
+
+#[cfg(test)]
+mod power_mode_tests {
+    use super::*;
+
+    #[test]
+    fn an_integrated_only_machine_defaults_to_the_low_end_profile() {
+        assert_eq!(
+            resolve_power_mode(None, GpuClass::IntegratedOnly),
+            PowerMode::LowEnd
+        );
+    }
+
+    #[test]
+    fn a_discrete_or_undetected_gpu_keeps_the_balanced_profile() {
+        assert_eq!(
+            resolve_power_mode(None, GpuClass::Discrete),
+            PowerMode::Balanced
+        );
+        // Undetected must never cost the user frames on a guess.
+        assert_eq!(
+            resolve_power_mode(None, GpuClass::Unknown),
+            PowerMode::Balanced
+        );
+    }
+
+    #[test]
+    fn an_explicit_override_wins_over_the_detected_hardware() {
+        assert_eq!(
+            resolve_power_mode(Some("performance"), GpuClass::IntegratedOnly),
+            PowerMode::Performance,
+            "asking for Performance on an iGPU must be honoured"
+        );
+        assert_eq!(
+            resolve_power_mode(Some("Balanced"), GpuClass::IntegratedOnly),
+            PowerMode::Balanced
+        );
+        assert_eq!(
+            resolve_power_mode(Some("lowend"), GpuClass::Discrete),
+            PowerMode::LowEnd
+        );
+        // Unrecognized values fall through to the hardware default rather than
+        // silently pinning a profile.
+        assert_eq!(
+            resolve_power_mode(Some("turbo"), GpuClass::IntegratedOnly),
+            PowerMode::LowEnd
+        );
+    }
+
+    #[test]
+    fn the_low_end_profile_only_ever_reduces_work() {
+        assert!(PowerMode::LowEnd.meter_update_hz() < PowerMode::Balanced.meter_update_hz());
+        assert!(PowerMode::LowEnd.meter_min_delta() > PowerMode::Balanced.meter_min_delta());
+        assert!(PowerMode::LowEnd.grid_line_budget_scale() < 1.0);
+        assert!(!PowerMode::LowEnd.allow_sub_grid_lines());
     }
 }

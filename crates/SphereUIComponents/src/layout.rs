@@ -134,6 +134,10 @@ fn apply_renderer_preference(schema: &crate::settings::SettingsSchema) {
         crate::settings::GpuDevicePreference::DeviceId(id) => id.as_str(),
     };
     set_preferred_gpu_device_id(device_id);
+    // Render-cost profile. Detected here, before the first frame, because
+    // `perf::power_mode()` caches on its first read and the grid/meter paths
+    // read it during render.
+    crate::perf::set_detected_gpu_class(crate::components::timeline::render::detect_gpu_class());
     if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
         eprintln!(
             "[gpu-renderer] startup: render_mode={:?} gpu_device={:?}",

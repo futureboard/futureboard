@@ -27,12 +27,19 @@ pub use snapshot::{
 pub use viewport::TimelineViewport;
 #[cfg(feature = "gpu-renderer")]
 pub use wgpu_renderer::{
-    list_available_gpu_devices, set_preferred_gpu_device_id, GpuDeviceInfo, TimelineGpuPreference,
-    WgpuOffscreenFrame, WgpuTimelineRenderer,
+    detect_gpu_class, list_available_gpu_devices, set_preferred_gpu_device_id, GpuDeviceInfo,
+    TimelineGpuPreference, WgpuOffscreenFrame, WgpuTimelineRenderer,
 };
 
 #[cfg(not(feature = "gpu-renderer"))]
 pub fn set_preferred_gpu_device_id(_id: &str) {}
+
+/// Without the `gpu-renderer` feature there is no adapter enumeration, so the
+/// UI keeps its normal render cost rather than guessing at the hardware.
+#[cfg(not(feature = "gpu-renderer"))]
+pub fn detect_gpu_class() -> crate::perf::GpuClass {
+    crate::perf::GpuClass::Unknown
+}
 
 /// Stub used when the `gpu-renderer` cargo feature isn't enabled so the
 /// settings UI can still compile and show a flat "GPU unavailable" state

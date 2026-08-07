@@ -144,13 +144,18 @@ pub(super) fn numbered_name_stem(name: &str) -> String {
     }
 }
 
+/// Advance one smoothed meter value. Returns whether the move is large enough
+/// to be worth a repaint — the threshold comes from the render-cost profile, so
+/// an integrated-only machine stops repainting the whole mixer for meter motion
+/// too small to see. The value itself always advances; only the "dirty" verdict
+/// is profiled, so ballistics never depend on the hardware.
 pub(super) fn smooth_meter_value(current: &mut f32, target: f32, dt_secs: f32) -> bool {
     let target = target.clamp(0.0, 1.0);
     let dt_frames = (dt_secs.clamp(1.0 / 240.0, 0.1) * 60.0).max(0.0);
     let base_rate: f32 = if target > *current { 0.72 } else { 0.18 };
     let rate = 1.0 - (1.0 - base_rate).powf(dt_frames);
     let next = (*current + (target - *current) * rate).clamp(0.0, 1.0);
-    let changed = (*current - next).abs() > 0.001;
+    let changed = (*current - next).abs() > crate::perf::power_mode().meter_min_delta();
     *current = if next < 0.002 { 0.0 } else { next };
     changed
 }

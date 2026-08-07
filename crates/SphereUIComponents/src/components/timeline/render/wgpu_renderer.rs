@@ -143,6 +143,40 @@ pub fn list_available_gpu_devices() -> Vec<GpuDeviceInfo> {
     }
 }
 
+/// Classify this machine from the adapters wgpu can see, for the UI's
+/// render-cost profile (see [`crate::perf::GpuClass`]).
+///
+/// Only the presence of a discrete adapter matters. Enumeration is the same
+/// call the Settings GPU list uses — a few milliseconds, once, at startup — and
+/// a driver that cannot enumerate yields `Unknown`, which never slows the UI
+/// down on a guess.
+pub fn detect_gpu_class() -> crate::perf::GpuClass {
+    use crate::perf::GpuClass;
+    let result = std::panic::catch_unwind(|| {
+        let instance = wgpu::Instance::default();
+        let adapters: Vec<wgpu::Adapter> =
+            pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        adapters
+            .into_iter()
+            .map(|adapter| adapter.get_info().device_type)
+            .collect::<Vec<_>>()
+    });
+    let Ok(types) = result else {
+        return GpuClass::Unknown;
+    };
+    if types.is_empty() {
+        return GpuClass::Unknown;
+    }
+    if types
+        .iter()
+        .any(|kind| matches!(kind, wgpu::DeviceType::DiscreteGpu))
+    {
+        GpuClass::Discrete
+    } else {
+        GpuClass::IntegratedOnly
+    }
+}
+
 /// GPU texture produced by an offscreen arrangement pass.
 pub struct WgpuOffscreenFrame {
     pub width: u32,
