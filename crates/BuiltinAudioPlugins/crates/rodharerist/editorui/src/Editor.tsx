@@ -184,7 +184,9 @@ function factorySnapshot(id: string): RigSnapshot | null {
     pathOrder: p.path ? [...p.path] : defaultPath(),
     bypassed,
     parameters: parametersForPreset(p),
-    globals: { ...DEFAULT_GLOBALS },
+    // The bank is level-matched through Output Trim so each preset can keep
+    // the amp settings its tone actually calls for (see `Preset.outputTrim`).
+    globals: { ...DEFAULT_GLOBALS, outputTrim: p.outputTrim ?? DEFAULT_GLOBALS.outputTrim },
   };
 }
 
