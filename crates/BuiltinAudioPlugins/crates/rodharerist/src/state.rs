@@ -19,7 +19,19 @@ use crate::Params;
 /// v3: `stage_order` grew from 9 to 10 slots (Wah stage). The new
 /// `mod_model`/`wah_*` fields use `#[serde(default)]` and would not have
 /// required a bump on their own.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// v4: `stage_order` grew from 10 to 15 slots — every doublable stage
+/// (`StageKind::Drive2` …) can now be in the path at the same time as the one
+/// it doubles. The new `stage_b` block uses `#[serde(default)]` and would not
+/// have required a bump on its own.
+///
+/// Unlike v2 and v3, this growth does *not* cost an older project its path:
+/// `stage_order` now deserializes through `dsp::deserialize_stage_order`,
+/// which pads a shorter saved array with empty slots. A v1/v2/v3 blob loads
+/// with its stages in the order it saved them and both new blocks out of the
+/// path, so the rig sounds exactly as it did. The version still moves, because
+/// an *older* build cannot read a 15-slot array and needs to know why.
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RodhareistState {
@@ -118,6 +130,54 @@ mod tests {
         let mut params = default_params();
         params.delay_model = crate::DelayModel::PingPong;
         params.delay_tone = 2.75;
+        let restored =
+            RodhareistState::from_json(&RodhareistState::new(params.clone()).to_json().unwrap())
+                .unwrap();
+        assert_eq!(restored.params, params);
+    }
+
+    /// A v3 project predates the second instances entirely. It must load with
+    /// a full, legal B block that no path slot references — the saved rig
+    /// sounds exactly as it did, and the new blocks sit in the rack.
+    #[test]
+    fn legacy_state_without_second_instances_loads_with_them_out_of_the_path() {
+        let state = RodhareistState::new(default_params());
+        let mut value = serde_json::to_value(state).unwrap();
+        let params = value["params"].as_object_mut().unwrap();
+        params.remove("stage_b");
+        // v3 wrote ten path slots, not fifteen.
+        let order = params["stage_order"].as_array_mut().unwrap();
+        order.truncate(10);
+
+        let restored: RodhareistState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.params.stage_b, crate::StageBParams::default());
+        assert_eq!(restored.params.stage_order.len(), crate::PATH_SLOTS);
+        assert!(
+            restored
+                .params
+                .stage_order
+                .iter()
+                .flatten()
+                .all(|s| s.doubles().is_none()),
+            "a v3 rig must not gain a doubled block on load"
+        );
+        // The stages it did save are still there, in order.
+        assert_eq!(
+            restored.params.stage_order[..10],
+            default_params().stage_order[..10]
+        );
+    }
+
+    #[test]
+    fn second_instance_params_round_trip() {
+        let mut params = default_params();
+        params.stage_b.drive_model = crate::DriveModel::Rat;
+        params.stage_b.drive_gain = 9.25;
+        params.stage_b.mod_model = crate::ModModel::Flanger;
+        params.stage_b.delay_time_ms = 96.0;
+        params.stage_b.comp_on = false;
+        params.stage_order[9] = Some(crate::StageKind::Drive2);
+        params.stage_order[10] = Some(crate::StageKind::Delay2);
         let restored =
             RodhareistState::from_json(&RodhareistState::new(params.clone()).to_json().unwrap())
                 .unwrap();

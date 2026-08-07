@@ -1,4 +1,5 @@
-export type CategoryId =
+/** The ten stages the DSP has always had — one instance each. */
+export type PrimaryCategoryId =
   | "dyn"
   | "comp"
   | "wah"
@@ -9,6 +10,47 @@ export type CategoryId =
   | "delay"
   | "verb"
   | "cab";
+
+/**
+ * Second instances of the five stages a player actually doubles on a real
+ * board (Rust `StageKind::Drive2` …). Independent blocks with their own model,
+ * enable and knobs — a "B" block shares nothing with its "A" but the model
+ * list it picks from.
+ *
+ * Amp, Cabinet, Reverb, Gate and Wah have no second instance: a second cabinet
+ * convolver or NAM model would double the plugin's heaviest allocation for a
+ * rig nobody builds.
+ */
+export type SecondCategoryId = "comp2" | "dist2" | "eq2" | "mod2" | "delay2";
+
+export type CategoryId = PrimaryCategoryId | SecondCategoryId;
+
+/** Which stage each second instance doubles. Mirrors Rust `StageKind::doubles`. */
+export const doubles: Record<SecondCategoryId, PrimaryCategoryId> = {
+  comp2: "comp",
+  dist2: "dist",
+  eq2: "eq",
+  mod2: "mod",
+  delay2: "delay",
+};
+
+export const secondCategoryIds = Object.keys(doubles) as SecondCategoryId[];
+
+export function isSecondInstance(cat: CategoryId): cat is SecondCategoryId {
+  return cat in doubles;
+}
+
+/**
+ * The B-side id for an A-side one: the stage's own token gains a `2`.
+ *
+ * One rule covers models, params and node ids, so `drive_gain` → `drive2_gain`
+ * and `chorus_rate` → `chorus2_rate` read as "which block, then which knob" —
+ * and match the Rust `apply_to_params` arms exactly.
+ */
+export function secondInstanceParamId(id: string): string {
+  const cut = id.indexOf("_");
+  return cut < 0 ? `${id}2` : `${id.slice(0, cut)}2${id.slice(cut)}`;
+}
 
 export type Category = {
   name: string;
@@ -826,7 +868,7 @@ export const presetsData: Preset[] = [
   },
 ];
 
-export const categories: Record<CategoryId, Category> = {
+const primaryCategories: Record<PrimaryCategoryId, Category> = {
   dyn: {
     name: "Gate",
     short: "Gate",
@@ -899,7 +941,31 @@ export const categories: Record<CategoryId, Category> = {
   },
 };
 
-export const models: Record<CategoryId, Model[]> = {
+/**
+ * A second instance carries its stage's colour and icon — it is the same kind
+ * of gear — but says "B" in its name and label so the two blocks in the path
+ * are never confused for one another. `node` is the DSP-side stage id, which
+ * is what makes `drive2_on` and `drive2_gain` reach the right block.
+ */
+export const categories: Record<CategoryId, Category> = {
+  ...primaryCategories,
+  ...(Object.fromEntries(
+    secondCategoryIds.map((cat) => {
+      const base = primaryCategories[doubles[cat]];
+      return [
+        cat,
+        {
+          ...base,
+          name: `${base.name} B`,
+          short: `${base.short} B`,
+          node: `${base.node}2`,
+        } satisfies Category,
+      ];
+    }),
+  ) as Record<SecondCategoryId, Category>),
+};
+
+const primaryModels: Record<PrimaryCategoryId, Model[]> = {
   dyn: [
     {
       id: "gate",
@@ -1247,7 +1313,37 @@ export const models: Record<CategoryId, Model[]> = {
   ],
 };
 
-export const parameterDefaults: Record<string, Param[]> = {
+/**
+ * Model id for the second instance of a stage.
+ *
+ * `parameterDefaults` and the editor's live `parameters` map are keyed by model
+ * id, so the two instances of a stage must not share one — otherwise dialling
+ * Drive B's Gain would move Drive A's. The bridge strips the suffix again
+ * before the id reaches the DSP, which knows only `screamer`.
+ */
+export function secondInstanceModelId(modelId: string): string {
+  return `${modelId}_2`;
+}
+
+/** Strip `secondInstanceModelId`. Safe to call on an A-side id. */
+export function baseModelId(modelId: string): string {
+  return modelId.endsWith("_2") ? modelId.slice(0, -2) : modelId;
+}
+
+export const models: Record<CategoryId, Model[]> = {
+  ...primaryModels,
+  ...(Object.fromEntries(
+    secondCategoryIds.map((cat) => [
+      cat,
+      primaryModels[doubles[cat]].map((m) => ({
+        ...m,
+        id: secondInstanceModelId(m.id),
+      })),
+    ]),
+  ) as Record<SecondCategoryId, Model[]>),
+};
+
+const primaryParameterDefaults: Record<string, Param[]> = {
   gate: [
     {
       id: "gate_thresh",
@@ -1743,24 +1839,51 @@ export const parameterDefaults: Record<string, Param[]> = {
   ],
 };
 
+/**
+ * The B blocks' knobs are the A blocks' knobs on the B ids, so the parameter
+ * schema stays one table: adding a control to the Delay adds it to Delay B
+ * too, and neither can drift.
+ */
+export const parameterDefaults: Record<string, Param[]> = {
+  ...primaryParameterDefaults,
+  ...Object.fromEntries(
+    secondCategoryIds.flatMap((cat) =>
+      models[cat].map((model) => [
+        model.id,
+        (primaryParameterDefaults[baseModelId(model.id)] ?? []).map((param) => ({
+          ...param,
+          id: secondInstanceParamId(param.id),
+        })),
+      ]),
+    ),
+  ),
+};
+
+/** Stage order as the rack lists it: each B block sits beside its A block. */
 export const chainOrder: CategoryId[] = [
   "dyn",
   "comp",
+  "comp2",
   "wah",
   "dist",
+  "dist2",
   "amp",
   "eq",
+  "eq2",
   "mod",
+  "mod2",
   "delay",
+  "delay2",
   "verb",
   "cab",
 ];
 
 /** Number of DSP path slots (mirrors Rust `PATH_SLOTS`). */
-export const PATH_SLOTS = 10;
+export const PATH_SLOTS = 15;
 
 /** Index used by DSP `path_slot_*` / `StageKind`. Append-only — these values
- * are the Rust `StageKind` discriminants (comp/eq appended as 7/8, wah as 9). */
+ * are the Rust `StageKind` discriminants (comp/eq appended as 7/8, wah as 9,
+ * the second instances as 10-14). */
 export const stageIndex: Record<CategoryId, number> = {
   dyn: 0,
   dist: 1,
@@ -1772,6 +1895,11 @@ export const stageIndex: Record<CategoryId, number> = {
   comp: 7,
   eq: 8,
   wah: 9,
+  dist2: 10,
+  mod2: 11,
+  delay2: 12,
+  eq2: 13,
+  comp2: 14,
 };
 
 export const stageByIndex: CategoryId[] = [
@@ -1785,6 +1913,11 @@ export const stageByIndex: CategoryId[] = [
   "comp",
   "eq",
   "wah",
+  "dist2",
+  "mod2",
+  "delay2",
+  "eq2",
+  "comp2",
 ];
 
 /** Pack a path into the DSP slots (empty = -1). */
@@ -1797,9 +1930,10 @@ export function pathToSlotValues(path: CategoryId[]): number[] {
 }
 
 /** Factory default path. The wah is never tonally neutral, so it starts in
- * the rack and joins the path only when the user places it. */
+ * the rack and joins the path only when the user places it — and a doubled
+ * block is always a choice, never a default. */
 export function defaultPath(): CategoryId[] {
-  return chainOrder.filter((c) => c !== "wah");
+  return chainOrder.filter((c) => c !== "wah" && !isSecondInstance(c));
 }
 
 export function emptyPath(): CategoryId[] {
@@ -1824,6 +1958,12 @@ export const icons: Record<string, string> = {
   cab: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
   wah: '<path d="M5 20 L9 4 L15 4 L19 20 Z"/><line x1="7" y1="15" x2="17" y2="15"/>',
 };
+
+// A second instance is the same kind of gear, so it wears the same icon; the
+// "B" in its name and label is what tells the two blocks apart.
+for (const cat of secondCategoryIds) {
+  icons[categories[cat].node] = icons[categories[doubles[cat]].node] ?? "";
+}
 
 export function fmt(val: number, unit: string): string {
   if (unit === "" || unit === "s") return `${val.toFixed(1)}${unit}`;

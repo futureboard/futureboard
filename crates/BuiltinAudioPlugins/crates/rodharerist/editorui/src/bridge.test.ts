@@ -23,6 +23,7 @@ import {
   clearActiveParamBinding,
   setActiveParamBinding,
 } from "./instanceBridge";
+import { PATH_SLOTS } from "./data";
 
 /** Capture `futureboard.setParams` POST bodies fired by a flush. */
 function captureBatches(): { id: string; value: number }[][] {
@@ -218,7 +219,9 @@ describe("param edit coalescing", () => {
     ]);
   });
 
-  test("path order publishes all ten slots with -1 for empty", () => {
+  // Every slot on every publish, including the ones past the end of the path:
+  // this is what makes removing a block actually stop the DSP running it.
+  test("path order publishes all slots with -1 for empty", () => {
     const batches = captureBatches();
     postPathOrder(["amp", "comp", "eq", "wah"]);
     __flushParamEditsForTest();
@@ -228,13 +231,43 @@ describe("param edit coalescing", () => {
         { id: "path_slot_1", value: 7 },
         { id: "path_slot_2", value: 8 },
         { id: "path_slot_3", value: 9 },
-        { id: "path_slot_4", value: -1 },
-        { id: "path_slot_5", value: -1 },
-        { id: "path_slot_6", value: -1 },
-        { id: "path_slot_7", value: -1 },
-        { id: "path_slot_8", value: -1 },
-        { id: "path_slot_9", value: -1 },
+        ...Array.from({ length: PATH_SLOTS - 4 }, (_, i) => ({
+          id: `path_slot_${i + 4}`,
+          value: -1,
+        })),
       ],
+    ]);
+  });
+
+  // A doubled block travels on its own StageKind discriminant, so the DSP runs
+  // the second instance rather than the first a second time.
+  test("second instances take the path slots the DSP knows them by", () => {
+    const batches = captureBatches();
+    postPathOrder(["dist", "dist2", "amp", "delay", "delay2"]);
+    __flushParamEditsForTest();
+    expect(batches[0]?.slice(0, 5)).toEqual([
+      { id: "path_slot_0", value: 1 },
+      { id: "path_slot_1", value: 10 },
+      { id: "path_slot_2", value: 2 },
+      { id: "path_slot_3", value: 4 },
+      { id: "path_slot_4", value: 12 },
+    ]);
+  });
+
+  // The `_2` suffix is an editor-side key so the two blocks' knobs stay apart;
+  // the DSP shares one model enum and must not see it.
+  test("second-instance model selects strip the editor suffix", () => {
+    const batches = captureBatches();
+    postModel("drive2", "rat_2");
+    __flushParamEditsForTest();
+    postModel("mod2", "phaser_2");
+    __flushParamEditsForTest();
+    postModel("delay2", "ping_pong_2");
+    __flushParamEditsForTest();
+    expect(batches).toEqual([
+      [{ id: "drive2_model", value: 2 }],
+      [{ id: "mod2_model", value: 1 }],
+      [{ id: "delay2_model", value: 3 }],
     ]);
   });
 

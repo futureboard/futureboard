@@ -75,12 +75,20 @@ use wah::Wah;
 pub const PLUGIN_ID: &str = "futureboard.rodharerist";
 
 /// Number of slots in the user-orderable signal path (one per [`StageKind`]).
-pub const PATH_SLOTS: usize = 10;
+pub const PATH_SLOTS: usize = 15;
 
 /// One slot in the Helix-style signal path. Order is user-editable.
 ///
 /// Discriminants are a wire/persistence ABI (`path_slot_*` values, saved
 /// `stage_order`) — append new stages, never renumber.
+///
+/// The `*2` variants are the second instance of the five stages a player
+/// actually doubles on a real board: two drives (a screamer pushing a Klon),
+/// chorus *and* phaser, a slapback into a long repeat, an EQ each side of the
+/// amp, a compressor at each end. They are independent stages with their own
+/// model, enable and knobs — not a re-run of the first. Amp, Cab, Reverb, Gate
+/// and Wah stay single: a second cabinet convolver or NAM model would double
+/// this plugin's heaviest allocation for a rig nobody builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum StageKind {
@@ -94,9 +102,18 @@ pub enum StageKind {
     Comp = 7,
     Eq = 8,
     Wah = 9,
+    Drive2 = 10,
+    Mod2 = 11,
+    Delay2 = 12,
+    Eq2 = 13,
+    Comp2 = 14,
 }
 
 impl StageKind {
+    /// Number of distinct stages. Not the same thing as [`PATH_SLOTS`], even
+    /// when the numbers coincide.
+    pub const COUNT: usize = 15;
+
     pub const ALL: &'static [Self] = &[
         Self::Gate,
         Self::Drive,
@@ -108,6 +125,11 @@ impl StageKind {
         Self::Comp,
         Self::Eq,
         Self::Wah,
+        Self::Drive2,
+        Self::Mod2,
+        Self::Delay2,
+        Self::Eq2,
+        Self::Comp2,
     ];
 
     pub fn from_index(i: i32) -> Option<Self> {
@@ -122,6 +144,11 @@ impl StageKind {
             7 => Some(Self::Comp),
             8 => Some(Self::Eq),
             9 => Some(Self::Wah),
+            10 => Some(Self::Drive2),
+            11 => Some(Self::Mod2),
+            12 => Some(Self::Delay2),
+            13 => Some(Self::Eq2),
+            14 => Some(Self::Comp2),
             _ => None,
         }
     }
@@ -137,20 +164,34 @@ impl StageKind {
     ///
     /// The Wah stage is deliberately *not* in the default path — a wah is
     /// never tonally neutral, so it starts in the editor's rack (last slot
-    /// empty) and joins the path only when the user places it.
+    /// empty) and joins the path only when the user places it. The same holds
+    /// for every second instance: a doubled block is a choice, never a default.
     pub fn default_path() -> [Option<Self>; PATH_SLOTS] {
-        [
-            Some(Self::Gate),
-            Some(Self::Comp),
-            Some(Self::Drive),
-            Some(Self::Amp),
-            Some(Self::Eq),
-            Some(Self::Mod),
-            Some(Self::Delay),
-            Some(Self::Reverb),
-            Some(Self::Cab),
-            None,
-        ]
+        let mut path = [None; PATH_SLOTS];
+        path[0] = Some(Self::Gate);
+        path[1] = Some(Self::Comp);
+        path[2] = Some(Self::Drive);
+        path[3] = Some(Self::Amp);
+        path[4] = Some(Self::Eq);
+        path[5] = Some(Self::Mod);
+        path[6] = Some(Self::Delay);
+        path[7] = Some(Self::Reverb);
+        path[8] = Some(Self::Cab);
+        path
+    }
+
+    /// The first instance this stage doubles, if it is a second instance.
+    /// Used to read a `*2` block's shared traits (colour, model list) from the
+    /// stage it duplicates.
+    pub fn doubles(self) -> Option<Self> {
+        match self {
+            Self::Drive2 => Some(Self::Drive),
+            Self::Mod2 => Some(Self::Mod),
+            Self::Delay2 => Some(Self::Delay),
+            Self::Eq2 => Some(Self::Eq),
+            Self::Comp2 => Some(Self::Comp),
+            _ => None,
+        }
     }
 }
 
@@ -634,6 +675,7 @@ pub struct Params {
 
     /// Helix-style ordered path. `None` = empty slot (stage not in path).
     /// Stages absent from this list are not processed.
+    #[serde(deserialize_with = "deserialize_stage_order")]
     pub stage_order: [Option<StageKind>; PATH_SLOTS],
 
     /// Noise gate threshold (dB, -80..0).
@@ -717,6 +759,185 @@ pub struct Params {
     pub nam_output_trim_db: f32, // -24..24
     pub nam_mix: f32,            // 0..100 % wet
     pub nam_loudness_norm: bool,
+
+    /// The second instance of each doublable stage (`StageKind::Drive2` and
+    /// friends). Absent from a pre-v4 save; `Default` then supplies a full,
+    /// legal set which no path references, so an old project loads unchanged.
+    #[serde(default)]
+    pub stage_b: StageBParams,
+}
+
+/// Read the saved path, accepting the shorter array an older project wrote.
+///
+/// `stage_order` is a fixed-size array, and serde rejects a sequence of the
+/// wrong length outright. That is why each past growth of this array (7 → 9 →
+/// 10) made older saves unparseable and needed a schema bump purely to signal
+/// "give up and use defaults" — the user's path was lost. Reading it as a
+/// sequence and padding with empty slots keeps a pre-v4 rig exactly as saved:
+/// the stages it names stay in the same order, and the slots it never knew
+/// about are simply empty. A *longer* array is still an error: that is a save
+/// from a future build, and quietly truncating it would drop stages.
+fn deserialize_stage_order<'de, D>(d: D) -> Result<[Option<StageKind>; PATH_SLOTS], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let slots = Vec::<Option<StageKind>>::deserialize(d)?;
+    if slots.len() > PATH_SLOTS {
+        return Err(serde::de::Error::invalid_length(
+            slots.len(),
+            &"a path of at most PATH_SLOTS stages",
+        ));
+    }
+    let mut out = [None; PATH_SLOTS];
+    for (slot, saved) in out.iter_mut().zip(slots) {
+        *slot = saved;
+    }
+    Ok(out)
+}
+
+/// Knobs, model and enable for the *second* instance of each doublable stage.
+///
+/// Nested rather than flattened into 29 more `*2_*` fields on [`Params`]: this
+/// is one coherent thing (the B half of the path) with one `Default`, one
+/// serde default and one clamp — and it leaves every A-side field, which the
+/// factory presets, the wire table and the DSP tests all read by name,
+/// untouched.
+///
+/// Field names deliberately mirror their A-side counterparts, so
+/// `p.chorus_rate` and `p.stage_b.chorus_rate` are visibly the same knob on
+/// two different blocks.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct StageBParams {
+    pub drive_on: bool,
+    pub drive_model: DriveModel,
+    pub drive_gain: f32,
+    pub drive_tone: f32,
+    pub drive_level: f32,
+
+    pub mod_on: bool,
+    pub mod_model: ModModel,
+    pub chorus_rate: f32,
+    pub chorus_depth: f32,
+    pub chorus_mix: f32,
+
+    pub delay_on: bool,
+    pub delay_model: DelayModel,
+    pub delay_time_ms: f32,
+    pub delay_fb: f32,
+    pub delay_mix: f32,
+    pub delay_tone: f32,
+
+    pub eq_on: bool,
+    pub eq_low_gain_db: f32,
+    pub eq_mid1_freq_hz: f32,
+    pub eq_mid1_gain_db: f32,
+    pub eq_mid2_freq_hz: f32,
+    pub eq_mid2_gain_db: f32,
+    pub eq_high_gain_db: f32,
+
+    pub comp_on: bool,
+    pub comp_thresh_db: f32,
+    pub comp_ratio: f32,
+    pub comp_attack_ms: f32,
+    pub comp_release_ms: f32,
+    pub comp_makeup_db: f32,
+}
+
+impl Default for StageBParams {
+    /// The same defaults as the stage each of these doubles.
+    ///
+    /// It is tempting to give the second drive a boost voicing or the second
+    /// delay a slapback, but the editor derives its own B defaults from the
+    /// A-side tables and pushes them at insert time, so a different default
+    /// here would only ever be overwritten — a value no user would ever hear,
+    /// disagreeing with what the UI shows. Two sources of truth for one knob
+    /// is the bug; a clever default is not worth it. Pinned by
+    /// `second_instance_defaults_match_the_stage_they_double`.
+    /// Written out rather than read from [`default_params`], which would
+    /// recurse — it builds this struct. The test named above is what keeps the
+    /// two in step.
+    fn default() -> Self {
+        Self {
+            drive_on: true,
+            drive_model: DriveModel::Screamer,
+            drive_gain: 6.0,
+            drive_tone: 5.5,
+            drive_level: 6.5,
+
+            mod_on: true,
+            mod_model: ModModel::Chorus,
+            chorus_rate: 4.0,
+            chorus_depth: 5.5,
+            chorus_mix: 40.0,
+
+            delay_on: true,
+            delay_model: DelayModel::Tape,
+            delay_time_ms: 420.0,
+            delay_fb: 35.0,
+            delay_mix: 30.0,
+            delay_tone: default_delay_tone(),
+
+            eq_on: true,
+            eq_low_gain_db: 0.0,
+            eq_mid1_freq_hz: default_eq_mid1_freq(),
+            eq_mid1_gain_db: 0.0,
+            eq_mid2_freq_hz: default_eq_mid2_freq(),
+            eq_mid2_gain_db: 0.0,
+            eq_high_gain_db: 0.0,
+
+            comp_on: true,
+            comp_thresh_db: default_comp_thresh(),
+            comp_ratio: default_comp_ratio(),
+            comp_attack_ms: default_comp_attack(),
+            comp_release_ms: default_comp_release(),
+            comp_makeup_db: 0.0,
+        }
+    }
+}
+
+impl StageBParams {
+    /// Same legal ranges as the A-side fields in [`Dsp::set_params`]. Kept
+    /// beside the struct so the two instances of a stage can never drift into
+    /// different limits.
+    fn clamped(&self) -> Self {
+        Self {
+            drive_on: self.drive_on,
+            drive_model: self.drive_model,
+            drive_gain: clamp(self.drive_gain, 0.0, 10.0),
+            drive_tone: clamp(self.drive_tone, 0.0, 10.0),
+            drive_level: clamp(self.drive_level, 0.0, 10.0),
+
+            mod_on: self.mod_on,
+            mod_model: self.mod_model,
+            chorus_rate: clamp(self.chorus_rate, 0.0, 10.0),
+            chorus_depth: clamp(self.chorus_depth, 0.0, 10.0),
+            chorus_mix: clamp(self.chorus_mix, 0.0, 100.0),
+
+            delay_on: self.delay_on,
+            delay_model: self.delay_model,
+            delay_time_ms: clamp(self.delay_time_ms, 40.0, 1_200.0),
+            delay_fb: clamp(self.delay_fb, 0.0, 100.0),
+            delay_mix: clamp(self.delay_mix, 0.0, 100.0),
+            delay_tone: clamp(self.delay_tone, 0.0, 10.0),
+
+            eq_on: self.eq_on,
+            eq_low_gain_db: clamp(self.eq_low_gain_db, -15.0, 15.0),
+            eq_mid1_freq_hz: clamp(self.eq_mid1_freq_hz, 100.0, 1_000.0),
+            eq_mid1_gain_db: clamp(self.eq_mid1_gain_db, -15.0, 15.0),
+            eq_mid2_freq_hz: clamp(self.eq_mid2_freq_hz, 600.0, 6_000.0),
+            eq_mid2_gain_db: clamp(self.eq_mid2_gain_db, -15.0, 15.0),
+            eq_high_gain_db: clamp(self.eq_high_gain_db, -15.0, 15.0),
+
+            comp_on: self.comp_on,
+            comp_thresh_db: clamp(self.comp_thresh_db, -60.0, 0.0),
+            comp_ratio: clamp(self.comp_ratio, 1.0, 20.0),
+            comp_attack_ms: clamp(self.comp_attack_ms, 0.1, 100.0),
+            comp_release_ms: clamp(self.comp_release_ms, 10.0, 1_000.0),
+            comp_makeup_db: clamp(self.comp_makeup_db, 0.0, 24.0),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -822,6 +1043,7 @@ pub fn default_params() -> Params {
         nam_output_trim_db: 0.0,
         nam_mix: 100.0,
         nam_loudness_norm: true,
+        stage_b: StageBParams::default(),
     }
 }
 
@@ -1181,6 +1403,18 @@ pub struct Dsp {
     cab_ir_step: f32,
     reverb: PlateReverb,
     cab: Cabinet,
+    /// Second instances of the doublable stages (`StageKind::Drive2` …). Fully
+    /// independent objects, not re-runs of the first: each carries its own
+    /// filter, envelope and delay-line state, so a doubled block behaves like
+    /// a second pedal on the board rather than the same pedal clocked twice.
+    /// Always constructed — they cost a few kB of scalar state each, and
+    /// allocating one the moment a user drops the block in would mean
+    /// allocating on the control thread mid-session.
+    comp_b: CompStage,
+    drive_b: Drive,
+    eq_b: EqStage,
+    mod_b: ModStage,
+    delay_b: DelayStage,
     /// Linear gains derived from `input_trim_db` / `output_trim_db`, recomputed
     /// on the control thread so the audio path only multiplies.
     in_gain: smooth::Smoothed,
@@ -1270,6 +1504,11 @@ impl Dsp {
             cab_ir_step: 1.0 / (sr * CAB_ENGINE_FADE_SECONDS).max(1.0),
             reverb: PlateReverb::new(sr),
             cab: Cabinet::new(sr),
+            comp_b: CompStage::new(sr),
+            drive_b: Drive::new(sr),
+            eq_b: EqStage::new(sr),
+            mod_b: ModStage::new(sr),
+            delay_b: DelayStage::new(sr),
             in_gain: smooth::Smoothed::new(sr, TRIM_SMOOTH_SECONDS, 1.0),
             out_gain: smooth::Smoothed::new(sr, TRIM_SMOOTH_SECONDS, 1.0),
             meters: Meters::new(sr),
@@ -1375,6 +1614,7 @@ impl Dsp {
             nam_output_trim_db: clamp(params.nam_output_trim_db, -24.0, 24.0),
             nam_mix: clamp(params.nam_mix, 0.0, 100.0),
             nam_loudness_norm: params.nam_loudness_norm,
+            stage_b: params.stage_b.clamped(),
         };
         self.apply_params();
     }
@@ -1446,10 +1686,32 @@ impl Dsp {
                 };
                 p.delay_model = m;
             }
+            // Second instances. The editor sends the same model ids as the
+            // stage they double, so the model lists stay one table.
+            "drive2" => {
+                let Some(m) = DriveModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.stage_b.drive_model = m;
+            }
+            "mod2" => {
+                let Some(m) = ModModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.stage_b.mod_model = m;
+            }
+            "delay2" => {
+                let Some(m) = DelayModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.stage_b.delay_model = m;
+            }
             // Single-algorithm stages: accept their canonical model ids.
             "gate" if model_id == "gate" => {}
             "comp" if model_id == "softknee" => {}
             "eq" if model_id == "parametric" => {}
+            "comp2" if model_id == "softknee" => {}
+            "eq2" if model_id == "parametric" => {}
             "cab" => {
                 let Some(m) = CabModel::from_model_id(model_id) else {
                     return false;
@@ -1520,6 +1782,36 @@ impl Dsp {
         );
         self.cab
             .configure(p.cab_model, p.mic_model, p.cab_mic, p.cab_dist);
+
+        // Second instances. Same `configure` calls against the same stage
+        // types — the only difference is which params block feeds them.
+        let b = &p.stage_b;
+        self.comp_b.configure(
+            b.comp_thresh_db,
+            b.comp_ratio,
+            b.comp_attack_ms,
+            b.comp_release_ms,
+            b.comp_makeup_db,
+        );
+        self.drive_b
+            .configure(b.drive_model, b.drive_gain, b.drive_tone, b.drive_level);
+        self.eq_b.configure(
+            b.eq_low_gain_db,
+            b.eq_mid1_freq_hz,
+            b.eq_mid1_gain_db,
+            b.eq_mid2_freq_hz,
+            b.eq_mid2_gain_db,
+            b.eq_high_gain_db,
+        );
+        self.mod_b
+            .configure(b.mod_model, b.chorus_rate, b.chorus_depth, b.chorus_mix);
+        self.delay_b.configure(
+            b.delay_model,
+            b.delay_time_ms,
+            b.delay_fb,
+            b.delay_mix,
+            b.delay_tone,
+        );
     }
 
     /// Replace the Helix path order (control thread).
@@ -1696,6 +1988,11 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "path_slot_7" => p.stage_order[7] = StageKind::from_index(value.round() as i32),
         "path_slot_8" => p.stage_order[8] = StageKind::from_index(value.round() as i32),
         "path_slot_9" => p.stage_order[9] = StageKind::from_index(value.round() as i32),
+        "path_slot_10" => p.stage_order[10] = StageKind::from_index(value.round() as i32),
+        "path_slot_11" => p.stage_order[11] = StageKind::from_index(value.round() as i32),
+        "path_slot_12" => p.stage_order[12] = StageKind::from_index(value.round() as i32),
+        "path_slot_13" => p.stage_order[13] = StageKind::from_index(value.round() as i32),
+        "path_slot_14" => p.stage_order[14] = StageKind::from_index(value.round() as i32),
         "gate_thresh" => p.gate_thresh_db = value,
         "drive_gain" => p.drive_gain = value,
         "drive_tone" => p.drive_tone = value,
@@ -1736,6 +2033,40 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "nam_output_trim" => p.nam_output_trim_db = value,
         "nam_mix" => p.nam_mix = value,
         "nam_loudness_norm" => p.nam_loudness_norm = on,
+
+        // Second instances. Same knob names with the stage's `2` suffix, so an
+        // id reads as "which block" then "which knob" — `chorus2_rate` is the
+        // Rate on the second Mod block.
+        "drive2_on" => p.stage_b.drive_on = on,
+        "drive2_model" => p.stage_b.drive_model = DriveModel::from_index(value.round() as u32),
+        "drive2_gain" => p.stage_b.drive_gain = value,
+        "drive2_tone" => p.stage_b.drive_tone = value,
+        "drive2_level" => p.stage_b.drive_level = value,
+        "mod2_on" => p.stage_b.mod_on = on,
+        "mod2_model" => p.stage_b.mod_model = ModModel::from_index(value.round() as u32),
+        "chorus2_rate" => p.stage_b.chorus_rate = value,
+        "chorus2_depth" => p.stage_b.chorus_depth = value,
+        "chorus2_mix" => p.stage_b.chorus_mix = value,
+        "delay2_on" => p.stage_b.delay_on = on,
+        "delay2_model" => p.stage_b.delay_model = DelayModel::from_index(value.round() as u32),
+        "delay2_time" => p.stage_b.delay_time_ms = value,
+        "delay2_fb" => p.stage_b.delay_fb = value,
+        "delay2_mix" => p.stage_b.delay_mix = value,
+        "delay2_tone" => p.stage_b.delay_tone = value,
+        "eq2_on" => p.stage_b.eq_on = on,
+        "eq2_low_gain" => p.stage_b.eq_low_gain_db = value,
+        "eq2_mid1_freq" => p.stage_b.eq_mid1_freq_hz = value,
+        "eq2_mid1_gain" => p.stage_b.eq_mid1_gain_db = value,
+        "eq2_mid2_freq" => p.stage_b.eq_mid2_freq_hz = value,
+        "eq2_mid2_gain" => p.stage_b.eq_mid2_gain_db = value,
+        "eq2_high_gain" => p.stage_b.eq_high_gain_db = value,
+        "comp2_on" => p.stage_b.comp_on = on,
+        "comp2_thresh" => p.stage_b.comp_thresh_db = value,
+        "comp2_ratio" => p.stage_b.comp_ratio = value,
+        "comp2_attack" => p.stage_b.comp_attack_ms = value,
+        "comp2_release" => p.stage_b.comp_release_ms = value,
+        "comp2_makeup" => p.stage_b.comp_makeup_db = value,
+
         _ => return false,
     }
     true
@@ -1753,7 +2084,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
     }
-    let mut out = Vec::with_capacity(73);
+    let mut out = Vec::with_capacity(crate::wire::UI_PARAM_IDS.len());
     out.push(("power", b(p.power)));
     out.push(("input_trim", p.input_trim_db));
     out.push(("output_trim", p.output_trim_db));
@@ -1790,6 +2121,11 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
         "path_slot_7",
         "path_slot_8",
         "path_slot_9",
+        "path_slot_10",
+        "path_slot_11",
+        "path_slot_12",
+        "path_slot_13",
+        "path_slot_14",
     ];
     for (i, id) in PATH_SLOT_IDS.iter().enumerate() {
         out.push((
@@ -1838,6 +2174,37 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("nam_output_trim", p.nam_output_trim_db));
     out.push(("nam_mix", p.nam_mix));
     out.push(("nam_loudness_norm", b(p.nam_loudness_norm)));
+
+    let sb = &p.stage_b;
+    out.push(("drive2_on", b(sb.drive_on)));
+    out.push(("drive2_model", model_index(DriveModel::ALL, sb.drive_model)));
+    out.push(("drive2_gain", sb.drive_gain));
+    out.push(("drive2_tone", sb.drive_tone));
+    out.push(("drive2_level", sb.drive_level));
+    out.push(("mod2_on", b(sb.mod_on)));
+    out.push(("mod2_model", model_index(ModModel::ALL, sb.mod_model)));
+    out.push(("chorus2_rate", sb.chorus_rate));
+    out.push(("chorus2_depth", sb.chorus_depth));
+    out.push(("chorus2_mix", sb.chorus_mix));
+    out.push(("delay2_on", b(sb.delay_on)));
+    out.push(("delay2_model", model_index(DelayModel::ALL, sb.delay_model)));
+    out.push(("delay2_time", sb.delay_time_ms));
+    out.push(("delay2_fb", sb.delay_fb));
+    out.push(("delay2_mix", sb.delay_mix));
+    out.push(("delay2_tone", sb.delay_tone));
+    out.push(("eq2_on", b(sb.eq_on)));
+    out.push(("eq2_low_gain", sb.eq_low_gain_db));
+    out.push(("eq2_mid1_freq", sb.eq_mid1_freq_hz));
+    out.push(("eq2_mid1_gain", sb.eq_mid1_gain_db));
+    out.push(("eq2_mid2_freq", sb.eq_mid2_freq_hz));
+    out.push(("eq2_mid2_gain", sb.eq_mid2_gain_db));
+    out.push(("eq2_high_gain", sb.eq_high_gain_db));
+    out.push(("comp2_on", b(sb.comp_on)));
+    out.push(("comp2_thresh", sb.comp_thresh_db));
+    out.push(("comp2_ratio", sb.comp_ratio));
+    out.push(("comp2_attack", sb.comp_attack_ms));
+    out.push(("comp2_release", sb.comp_release_ms));
+    out.push(("comp2_makeup", sb.comp_makeup_db));
     out
 }
 
@@ -1849,7 +2216,9 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
 /// slots are simply skipped by the process loop.
 fn sanitize_stage_order(order: [Option<StageKind>; PATH_SLOTS]) -> [Option<StageKind>; PATH_SLOTS] {
     let mut out = [None; PATH_SLOTS];
-    let mut seen = [false; PATH_SLOTS];
+    // Indexed by `StageKind::index()`, which is a discriminant — not a slot
+    // number. The two happen to have the same count today; do not conflate them.
+    let mut seen = [false; StageKind::COUNT];
     for (i, slot) in order.into_iter().enumerate() {
         let Some(stage) = slot else { continue };
         let idx = stage.index() as usize;
@@ -1875,6 +2244,11 @@ impl StereoEffect for Dsp {
         self.reverb.reset();
         self.cab.reset();
         self.ir.reset();
+        self.comp_b.reset();
+        self.drive_b.reset();
+        self.eq_b.reset();
+        self.mod_b.reset();
+        self.delay_b.reset();
         self.meters.reset();
         self.in_gain.snap();
         self.out_gain.snap();
@@ -1896,6 +2270,11 @@ impl StereoEffect for Dsp {
         self.reverb.set_sample_rate(sr);
         self.cab.set_sample_rate(sr);
         self.ir.set_sample_rate(sr);
+        self.comp_b.set_sample_rate(sr);
+        self.drive_b.set_sample_rate(sr);
+        self.eq_b.set_sample_rate(sr);
+        self.mod_b.set_sample_rate(sr);
+        self.delay_b.set_sample_rate(sr);
         self.cab_ir_step = 1.0 / (sr * CAB_ENGINE_FADE_SECONDS).max(1.0);
         self.meters.rms_coeff = time_constant(sr, 0.300);
         self.apply_params();
@@ -1979,6 +2358,21 @@ impl StereoEffect for Dsp {
                 }
                 StageKind::Eq if self.params.eq_on => {
                     (l, r) = self.eq_stage.process(l, r);
+                }
+                StageKind::Drive2 if self.params.stage_b.drive_on => {
+                    (l, r) = self.drive_b.process(l, r);
+                }
+                StageKind::Mod2 if self.params.stage_b.mod_on => {
+                    (l, r) = self.mod_b.process(l, r);
+                }
+                StageKind::Delay2 if self.params.stage_b.delay_on => {
+                    (l, r) = self.delay_b.process(l, r);
+                }
+                StageKind::Eq2 if self.params.stage_b.eq_on => {
+                    (l, r) = self.eq_b.process(l, r);
+                }
+                StageKind::Comp2 if self.params.stage_b.comp_on => {
+                    (l, r) = self.comp_b.process(l, r);
                 }
                 _ => {}
             }
@@ -2227,6 +2621,201 @@ mod tests {
         "weights": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
         "sample_rate": 48000.0
     }"#;
+
+    /// Render a fixed guitar-ish burst through `dsp` and return the samples.
+    /// Deterministic, so two rigs can be compared sample-for-sample.
+    fn render(dsp: &mut Dsp, n: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            if i % 128 == 0 {
+                dsp.begin_block();
+            }
+            let t = i as f32 / 48_000.0;
+            let env = (-t * 3.0).exp();
+            let x = ((t * 220.0 * std::f32::consts::TAU).sin() * 0.6
+                + (t * 330.0 * std::f32::consts::TAU).sin() * 0.3)
+                * env
+                * 0.5;
+            let (l, _r) = dsp.process_stereo(x, x);
+            out.push(l);
+        }
+        out
+    }
+
+    fn rms(xs: &[f32]) -> f32 {
+        (xs.iter().map(|v| v * v).sum::<f32>() / xs.len().max(1) as f32).sqrt()
+    }
+
+    /// Put `stages` in the path, in order, and nothing else.
+    fn path_of(dsp: &mut Dsp, stages: &[StageKind]) {
+        let mut order = [None; PATH_SLOTS];
+        for (i, s) in stages.iter().enumerate() {
+            order[i] = Some(*s);
+        }
+        dsp.set_path_order(order);
+    }
+
+    /// A second instance must start exactly where the stage it doubles starts.
+    /// The editor derives its B tables from the A tables, so any drift here
+    /// would put a different number in the DSP from the one on screen.
+    #[test]
+    fn second_instance_defaults_match_the_stage_they_double() {
+        let a = default_params();
+        let b = StageBParams::default();
+        assert_eq!(b.drive_model, a.drive_model);
+        assert_eq!(b.drive_gain, a.drive_gain);
+        assert_eq!(b.drive_tone, a.drive_tone);
+        assert_eq!(b.drive_level, a.drive_level);
+        assert_eq!(b.mod_model, a.mod_model);
+        assert_eq!(b.chorus_rate, a.chorus_rate);
+        assert_eq!(b.chorus_depth, a.chorus_depth);
+        assert_eq!(b.chorus_mix, a.chorus_mix);
+        assert_eq!(b.delay_model, a.delay_model);
+        assert_eq!(b.delay_time_ms, a.delay_time_ms);
+        assert_eq!(b.delay_fb, a.delay_fb);
+        assert_eq!(b.delay_mix, a.delay_mix);
+        assert_eq!(b.delay_tone, a.delay_tone);
+        assert_eq!(b.eq_low_gain_db, a.eq_low_gain_db);
+        assert_eq!(b.eq_mid1_freq_hz, a.eq_mid1_freq_hz);
+        assert_eq!(b.eq_mid1_gain_db, a.eq_mid1_gain_db);
+        assert_eq!(b.eq_mid2_freq_hz, a.eq_mid2_freq_hz);
+        assert_eq!(b.eq_mid2_gain_db, a.eq_mid2_gain_db);
+        assert_eq!(b.eq_high_gain_db, a.eq_high_gain_db);
+        assert_eq!(b.comp_thresh_db, a.comp_thresh_db);
+        assert_eq!(b.comp_ratio, a.comp_ratio);
+        assert_eq!(b.comp_attack_ms, a.comp_attack_ms);
+        assert_eq!(b.comp_release_ms, a.comp_release_ms);
+        assert_eq!(b.comp_makeup_db, a.comp_makeup_db);
+    }
+
+    /// A stage and its double are different stages, so both survive the
+    /// duplicate filter — that filter exists to stop the *same* block being
+    /// listed twice, not to stop a rig having two drives.
+    #[test]
+    fn a_stage_and_its_double_both_stay_in_the_path() {
+        let mut dsp = Dsp::new(48_000.0);
+        path_of(
+            &mut dsp,
+            &[
+                StageKind::Drive,
+                StageKind::Drive2,
+                StageKind::Amp,
+                StageKind::Drive,
+            ],
+        );
+        let order = dsp.params().stage_order;
+        assert_eq!(order[0], Some(StageKind::Drive));
+        assert_eq!(order[1], Some(StageKind::Drive2));
+        assert_eq!(order[2], Some(StageKind::Amp));
+        // The *repeat* of Drive is still dropped — one block, one slot.
+        assert_eq!(order[3], None);
+    }
+
+    /// The second instance must be its own block: its own model, its own
+    /// knobs, its own filter/delay state. If it were a re-run of the first,
+    /// changing only the B knobs would not move the output at all.
+    #[test]
+    fn a_doubled_drive_is_an_independent_block() {
+        let single = {
+            let mut dsp = Dsp::new(48_000.0);
+            path_of(&mut dsp, &[StageKind::Drive]);
+            render(&mut dsp, 12_000)
+        };
+
+        let mut doubled = Dsp::new(48_000.0);
+        path_of(&mut doubled, &[StageKind::Drive, StageKind::Drive2]);
+        assert!(doubled.select_model("drive2", "rat"));
+        assert!(doubled.apply_ui_param("drive2_gain", 8.5));
+        assert!(doubled.apply_ui_param("drive2_level", 7.0));
+        assert_eq!(doubled.params().stage_b.drive_model, DriveModel::Rat);
+        // The first drive is untouched by anything addressed to the second.
+        assert_eq!(doubled.params().drive_model, DriveModel::Screamer);
+        assert_eq!(doubled.params().drive_gain, default_params().drive_gain);
+        let stacked = render(&mut doubled, 12_000);
+
+        assert!(stacked.iter().all(|v| v.is_finite()));
+        assert!(
+            rms(&stacked) > rms(&single) * 1.05,
+            "a second drive at gain 8.5 did not change the sound: \
+             single {:.5} vs stacked {:.5}",
+            rms(&single),
+            rms(&stacked)
+        );
+
+        // The same rig with only the second block switched off must be the
+        // single-drive rig, sample for sample: proof the extra sound came from
+        // the B instance rather than from the A one being configured twice.
+        // A fresh `Dsp` rather than a `reset()` — comparing two rigs from cold
+        // is the honest comparison; a reset one carries settled smoother state
+        // the cold one has not reached yet.
+        let mut off = Dsp::new(48_000.0);
+        path_of(&mut off, &[StageKind::Drive, StageKind::Drive2]);
+        assert!(off.select_model("drive2", "rat"));
+        assert!(off.apply_ui_param("drive2_gain", 8.5));
+        assert!(off.apply_ui_param("drive2_level", 7.0));
+        assert!(off.apply_ui_param("drive2_on", 0.0));
+        let bypassed = render(&mut off, 12_000);
+        for (i, (a, b)) in single.iter().zip(bypassed.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1.0e-6,
+                "bypassing Drive2 did not restore the single-drive rig at {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Each doublable stage must actually run its B object when the B block is
+    /// in the path — a missing `process` arm would be a block that looks
+    /// placed and does nothing.
+    #[test]
+    fn every_doubled_stage_processes_its_own_instance() {
+        // Settings extreme enough that the B block cannot be mistaken for a
+        // no-op, paired with the block that must carry them.
+        let cases: [(StageKind, &[(&str, f32)]); 5] = [
+            (
+                StageKind::Drive2,
+                &[("drive2_gain", 10.0), ("drive2_level", 9.0)],
+            ),
+            (
+                StageKind::Mod2,
+                &[("chorus2_mix", 100.0), ("chorus2_depth", 10.0)],
+            ),
+            (
+                StageKind::Delay2,
+                &[("delay2_mix", 100.0), ("delay2_fb", 60.0)],
+            ),
+            (
+                StageKind::Eq2,
+                &[("eq2_low_gain", 15.0), ("eq2_high_gain", 15.0)],
+            ),
+            (
+                StageKind::Comp2,
+                &[("comp2_thresh", -50.0), ("comp2_makeup", 18.0)],
+            ),
+        ];
+
+        for (stage, edits) in cases {
+            let mut dsp = Dsp::new(48_000.0);
+            path_of(&mut dsp, &[stage]);
+            for (id, v) in edits {
+                assert!(dsp.apply_ui_param(id, *v), "`{id}` was not routed");
+            }
+            let with = render(&mut dsp, 12_000);
+            assert!(
+                with.iter().all(|v| v.is_finite()),
+                "{stage:?} went non-finite"
+            );
+
+            let mut dry = Dsp::new(48_000.0);
+            path_of(&mut dry, &[]);
+            let without = render(&mut dry, 12_000);
+
+            let changed = with
+                .iter()
+                .zip(without.iter())
+                .any(|(a, b)| (a - b).abs() > 1.0e-4);
+            assert!(changed, "{stage:?} in the path did not process anything");
+        }
+    }
 
     #[test]
     fn tone_engine_is_mutually_exclusive_via_select_model_and_ui_param() {

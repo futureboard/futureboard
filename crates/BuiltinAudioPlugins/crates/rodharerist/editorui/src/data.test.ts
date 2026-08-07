@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
+  PATH_SLOTS,
+  baseModelId,
+  categories,
+  chainOrder,
   completeParameters,
+  defaultPath,
+  doubles,
+  icons,
   models,
   parameterDefaults,
   presetsData,
+  secondCategoryIds,
+  secondInstanceModelId,
+  secondInstanceParamId,
+  stageByIndex,
+  stageIndex,
   stageModelsForPreset,
 } from "./data";
 import { OUTPUT_TRIM } from "./globals";
@@ -115,6 +127,79 @@ describe("factory presets", () => {
       const hz = (0.05 + t * t * t * 3.95) * scale;
       expect(hz, `${preset.id} ${modModel} rate ${knob} = ${hz.toFixed(3)} Hz`).toBeGreaterThan(
         0.15,
+      );
+    }
+  });
+});
+
+// A second instance is only a real block if it addresses its own DSP stage.
+// Sharing a model key or a param id with the stage it doubles would make
+// dialling Drive B move Drive A — the exact failure this suffixing prevents.
+describe("second instances", () => {
+  test("are their own blocks, sharing no model or parameter id", () => {
+    const seenModels = new Set<string>();
+    for (const list of Object.values(models)) {
+      for (const model of list) {
+        expect(seenModels.has(model.id), `duplicate model id ${model.id}`).toBe(
+          false,
+        );
+        seenModels.add(model.id);
+      }
+    }
+
+    for (const cat of secondCategoryIds) {
+      const primary = doubles[cat];
+      expect(models[cat].map((m) => m.id)).toEqual(
+        models[primary].map((m) => secondInstanceModelId(m.id)),
+      );
+
+      for (const model of models[cat]) {
+        const bParams = parameterDefaults[model.id]!;
+        const aParams = parameterDefaults[baseModelId(model.id)]!;
+        expect(bParams.map((p) => p.id)).toEqual(
+          aParams.map((p) => secondInstanceParamId(p.id)),
+        );
+        // Same controls, same ranges, same starting values — a doubled block
+        // starts exactly where the one it doubles starts (pinned on the Rust
+        // side by `second_instance_defaults_match_the_stage_they_double`).
+        expect(bParams.map(({ id, ...rest }) => rest)).toEqual(
+          aParams.map(({ id, ...rest }) => rest),
+        );
+      }
+    }
+  });
+
+  test("are in the rack but never in the factory default path", () => {
+    for (const cat of secondCategoryIds) {
+      expect(chainOrder, `${cat} missing from the rack`).toContain(cat);
+      expect(defaultPath(), `${cat} must not start in the path`).not.toContain(
+        cat,
+      );
+    }
+  });
+
+  // `stageIndex` is the Rust `StageKind` discriminant, and it travels over the
+  // wire. A wrong number here silently runs a different stage.
+  test("carry the DSP stage discriminants the path slots expect", () => {
+    expect(stageIndex.dist2).toBe(10);
+    expect(stageIndex.mod2).toBe(11);
+    expect(stageIndex.delay2).toBe(12);
+    expect(stageIndex.eq2).toBe(13);
+    expect(stageIndex.comp2).toBe(14);
+    expect(PATH_SLOTS).toBe(chainOrder.length);
+    expect(new Set(Object.values(stageIndex)).size).toBe(chainOrder.length);
+    for (const cat of chainOrder) {
+      expect(stageByIndex[stageIndex[cat]], `${cat} round trip`).toBe(cat);
+    }
+  });
+
+  // The enable and model ids are built from the category's node, so a wrong
+  // node would post `drive_on` for Drive B and bypass the wrong block.
+  test("address their own DSP stage, not the one they double", () => {
+    for (const cat of secondCategoryIds) {
+      expect(categories[cat].node).toBe(`${categories[doubles[cat]].node}2`);
+      expect(icons[categories[cat].node]).toBe(
+        icons[categories[doubles[cat]].node],
       );
     }
   });

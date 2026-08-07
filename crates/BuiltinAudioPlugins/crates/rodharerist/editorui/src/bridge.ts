@@ -27,6 +27,7 @@ import {
   postLoadNamCaptureForBoundInstance,
   postSetParams,
 } from "./instanceBridge";
+import { PATH_SLOTS, baseModelId, stageIndex } from "./data";
 
 export type NamCaptureLoadOptions = {
   /** Display name shown in the editor after a successful load. */
@@ -152,24 +153,22 @@ export function postParam(id: string, value: number): void {
   }
 }
 
-/** Publish the full Helix path (10 slots). Missing stages use -1. Values are
- * the Rust `StageKind` discriminants (comp/eq appended as 7/8, wah as 9). */
+/**
+ * Publish the full Helix path. Every slot is written on every call, missing
+ * stages as -1, so removing a block clears its slot rather than leaving the
+ * DSP running a stage the path no longer shows.
+ *
+ * Values are the Rust `StageKind` discriminants, read from `data.ts`'s
+ * `stageIndex` rather than a second copy here — one table cannot drift from
+ * itself. `gate`/`drive` are the node aliases the DSP uses for `dyn`/`dist`.
+ */
 export function postPathOrder(path: string[]): void {
   const index: Record<string, number> = {
-    dyn: 0,
-    dist: 1,
-    amp: 2,
-    mod: 3,
-    delay: 4,
-    verb: 5,
-    cab: 6,
-    comp: 7,
-    eq: 8,
-    wah: 9,
-    gate: 0,
-    drive: 1,
+    ...stageIndex,
+    gate: stageIndex.dyn,
+    drive: stageIndex.dist,
   };
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < PATH_SLOTS; i++) {
     const cat = path[i];
     const v = cat !== undefined ? (index[cat] ?? -1) : -1;
     postParam(`path_slot_${i}`, v);
@@ -178,8 +177,8 @@ export function postPathOrder(path: string[]): void {
 
 /** Forward a per-stage bypass toggle. `stage` is a category node id (`amp`…). */
 export function postEnabled(stage: string, enabled: boolean): void {
-  // Category node ids (`gate`/`drive`/`amp`/`mod`/`delay`/`reverb`/`cab`)
-  // match the Rust `*_on` param ids exactly.
+  // Category node ids (`gate`/`drive`/`amp`/`mod`/`delay`/`reverb`/`cab`, plus
+  // the `*2` second instances) match the Rust `*_on` param ids exactly.
   postParam(`${stage}_on`, enabled ? 1 : 0);
 }
 
@@ -273,9 +272,31 @@ export const TONE_ENGINE_INDEX = {
   bypass: 2,
 } as const;
 
-/** Forward a model selection within a category (`amp` → `plexi`, …). */
+/**
+ * Forward a model selection within a category (`amp` → `plexi`, …).
+ *
+ * A second instance arrives as its own node (`drive2`) carrying an editor-side
+ * model id (`rat_2`). The suffix exists only so the editor's parameter map can
+ * key the two blocks separately — the DSP's model enums are shared, so it is
+ * stripped here and the value lands on that block's own `*2_model` param.
+ */
 export function postModel(category: string, modelId: string): void {
   switch (category) {
+    case "drive2": {
+      const i = DRIVE_MODEL_INDEX[baseModelId(modelId)];
+      if (i !== undefined) postParam("drive2_model", i);
+      return;
+    }
+    case "mod2": {
+      const i = MOD_MODEL_INDEX[baseModelId(modelId)];
+      if (i !== undefined) postParam("mod2_model", i);
+      return;
+    }
+    case "delay2": {
+      const i = DELAY_MODEL_INDEX[baseModelId(modelId)];
+      if (i !== undefined) postParam("delay2_model", i);
+      return;
+    }
     case "amp": {
       // The Tone/Amp slot's special engines ride the `tone_engine` param;
       // a concrete amp model implies Classic (the Rust side resets
@@ -325,7 +346,8 @@ export function postModel(category: string, modelId: string): void {
       return;
     }
     default:
-      // Single-algorithm stages (gate/comp/eq) have no model select.
+      // Single-algorithm stages (gate/comp/eq and their B blocks) have no
+      // model select.
       return;
   }
 }

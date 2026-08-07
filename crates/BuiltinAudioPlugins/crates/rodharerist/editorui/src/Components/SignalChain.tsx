@@ -41,6 +41,7 @@ type SignalChainProps = {
 };
 
 const EMPTY_PATH_DROP_ID = "path-empty";
+const RACK_DROP_ID = "rack-drop";
 
 function modelLabel(cat: CategoryId, modelId: string): string {
   const list = models[cat] ?? [];
@@ -166,6 +167,35 @@ function EmptyPathDropTarget() {
   );
 }
 
+/**
+ * The rack, and the drop target that takes a block back out of the path.
+ *
+ * Rendered even when every stage is in the path (nothing left to add), because
+ * it is still the place a block is dragged to in order to leave.
+ */
+function Rack({
+  rack,
+  onAdd,
+}: {
+  rack: CategoryId[];
+  onAdd: (cat: CategoryId) => void;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: RACK_DROP_ID });
+  return (
+    <div ref={setNodeRef} className={`rack${isOver ? " drag-over" : ""}`}>
+      <span className="rack-label">Rack</span>
+      {rack.map((cat) => (
+        <RackItem key={cat} cat={cat} onAdd={onAdd} />
+      ))}
+      {rack.length === 0 && (
+        <span className="rack-empty">
+          Every block is in the path — drag one here to remove it
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function SignalChain({
   pathOrder,
   activeCat,
@@ -258,6 +288,9 @@ export function SignalChain({
 
     if (dragData?.fromRack) {
       const cat = dragData.cat as CategoryId;
+      // Dropped back where it started: the rack is the "not in the path" area,
+      // so this is a cancelled drag, not an append.
+      if (over.id === RACK_DROP_ID) return;
       if (over.id === EMPTY_PATH_DROP_ID) {
         addToPath(cat);
         return;
@@ -268,6 +301,12 @@ export function SignalChain({
     }
 
     const activeCatId = active.id as CategoryId;
+    // Dragging a block onto the rack is how it leaves the path — the mirror of
+    // dragging one out of the rack to add it.
+    if (over.id === RACK_DROP_ID) {
+      removeFromPath(activeCatId);
+      return;
+    }
     const overCatId = over.id as CategoryId;
     if (activeCatId === overCatId) return;
     const oldIndex = pathOrder.indexOf(activeCatId);
@@ -280,7 +319,7 @@ export function SignalChain({
     <section className="chain">
       <span className="chain-title">Path</span>
       <span className="chain-hint">
-        Drag to reorder · ⋮ for block options · rack adds back
+        Drag to reorder · drag to the rack to remove · ⋮ for block options
       </span>
       <DndContext
         sensors={sensors}
@@ -350,14 +389,7 @@ export function SignalChain({
           </div>
         </div>
 
-        {rack.length > 0 && (
-          <div className="rack">
-            <span className="rack-label">Rack</span>
-            {rack.map((cat) => (
-              <RackItem key={cat} cat={cat} onAdd={addToPath} />
-            ))}
-          </div>
-        )}
+        <Rack rack={rack} onAdd={addToPath} />
       </DndContext>
     </section>
   );

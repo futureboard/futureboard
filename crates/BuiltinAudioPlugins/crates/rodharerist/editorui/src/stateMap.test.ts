@@ -94,7 +94,8 @@ describe("snapshotFromRodhareistState", () => {
   });
 
   test("variant tables cover every Rust enum variant", () => {
-    expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(10);
+    // 10 stages + the 5 second instances (`StageKind::Drive2` …).
+    expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(15);
     expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
     expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(12);

@@ -15,7 +15,7 @@ pub use dsp::{
     AmpModel, CabModel, DelayModel, DriveModel, Dsp, IR_PARTITION_SAMPLES, IrInfo, IrLoadError,
     IrLoader, MAX_IR_SECONDS, MicModel, ModModel, NAM_BLOCK_SAMPLES, NamCaptureInfo, NamLoadError,
     NamLoader, PATH_SLOTS, PLUGIN_ID, Params, PreparedIrRuntime, PreparedNamRuntime, ReverbModel,
-    StageKind, ToneEngineKind, WahModel, apply_to_params, default_params, descriptor,
+    StageBParams, StageKind, ToneEngineKind, WahModel, apply_to_params, default_params, descriptor,
     prepare_ir_runtime, prepare_nam_runtime, ui_values,
 };
 pub use state::{RodhareistState, SCHEMA_VERSION};

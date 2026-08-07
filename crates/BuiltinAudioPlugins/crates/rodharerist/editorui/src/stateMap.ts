@@ -13,6 +13,7 @@ import {
   chainOrder,
   cloneParameters,
   models,
+  secondInstanceModelId,
   type CategoryId,
   type Param,
 } from "./data";
@@ -30,6 +31,11 @@ export const STAGE_VARIANT_TO_CATEGORY: Record<string, CategoryId> = {
   Comp: "comp",
   Eq: "eq",
   Wah: "wah",
+  Drive2: "dist2",
+  Mod2: "mod2",
+  Delay2: "delay2",
+  Eq2: "eq2",
+  Comp2: "comp2",
 };
 
 /** Rust `AmpModel` variant → editor model id. */
@@ -180,6 +186,25 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   if (REVERB_VARIANT_TO_MODEL[reverbVariant]) {
     stageModels.verb = REVERB_VARIANT_TO_MODEL[reverbVariant]!;
   }
+  // Second instances live in their own `stage_b` block. Absent from a pre-v4
+  // blob, in which case every B stage keeps its editor default — which is the
+  // default of the stage it doubles, so nothing on screen changes.
+  const b: ParamsJson =
+    p.stage_b && typeof p.stage_b === "object"
+      ? (p.stage_b as ParamsJson)
+      : {};
+  const driveBVariant = typeof b.drive_model === "string" ? b.drive_model : "";
+  if (DRIVE_VARIANT_TO_MODEL[driveBVariant]) {
+    stageModels.dist2 = secondInstanceModelId(DRIVE_VARIANT_TO_MODEL[driveBVariant]!);
+  }
+  const modBVariant = typeof b.mod_model === "string" ? b.mod_model : "";
+  if (MOD_VARIANT_TO_MODEL[modBVariant]) {
+    stageModels.mod2 = secondInstanceModelId(MOD_VARIANT_TO_MODEL[modBVariant]!);
+  }
+  const delayBVariant = typeof b.delay_model === "string" ? b.delay_model : "";
+  if (DELAY_VARIANT_TO_MODEL[delayBVariant]) {
+    stageModels.delay2 = secondInstanceModelId(DELAY_VARIANT_TO_MODEL[delayBVariant]!);
+  }
   const ampVariant = typeof p.amp_model === "string" ? p.amp_model : "";
   const toneEngine = typeof p.tone_engine === "string" ? p.tone_engine : "Classic";
   if (toneEngine === "NamCapture") {
@@ -206,6 +231,16 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   ];
   for (const [cat, key] of enables) {
     if (!bool(p, key, true)) bypassed[cat] = true;
+  }
+  const bEnables: [CategoryId, string][] = [
+    ["comp2", "comp_on"],
+    ["dist2", "drive_on"],
+    ["eq2", "eq_on"],
+    ["mod2", "mod_on"],
+    ["delay2", "delay_on"],
+  ];
+  for (const [cat, key] of bEnables) {
+    if (!bool(b, key, true)) bypassed[cat] = true;
   }
 
   // Knob values: only each category's *selected* model receives blob values
@@ -274,6 +309,35 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(cab, "cab_mic_type", micIndex);
   setVal(cab, "cab_mic", num(p, "cab_mic"));
   setVal(cab, "cab_dist", num(p, "cab_dist"));
+
+  // Second-instance knobs, on the same rule: only the B block's *selected*
+  // model receives them.
+  const distB = parameters[stageModels.dist2];
+  setVal(distB, "drive2_gain", num(b, "drive_gain"));
+  setVal(distB, "drive2_tone", num(b, "drive_tone"));
+  setVal(distB, "drive2_level", num(b, "drive_level"));
+  const softkneeB = parameters.softknee_2;
+  setVal(softkneeB, "comp2_thresh", num(b, "comp_thresh_db"));
+  setVal(softkneeB, "comp2_ratio", num(b, "comp_ratio"));
+  setVal(softkneeB, "comp2_attack", num(b, "comp_attack_ms"));
+  setVal(softkneeB, "comp2_release", num(b, "comp_release_ms"));
+  setVal(softkneeB, "comp2_makeup", num(b, "comp_makeup_db"));
+  const parametricB = parameters.parametric_2;
+  setVal(parametricB, "eq2_low_gain", num(b, "eq_low_gain_db"));
+  setVal(parametricB, "eq2_mid1_freq", num(b, "eq_mid1_freq_hz"));
+  setVal(parametricB, "eq2_mid1_gain", num(b, "eq_mid1_gain_db"));
+  setVal(parametricB, "eq2_mid2_freq", num(b, "eq_mid2_freq_hz"));
+  setVal(parametricB, "eq2_mid2_gain", num(b, "eq_mid2_gain_db"));
+  setVal(parametricB, "eq2_high_gain", num(b, "eq_high_gain_db"));
+  const modB = parameters[stageModels.mod2];
+  setVal(modB, "chorus2_rate", num(b, "chorus_rate"));
+  setVal(modB, "chorus2_depth", num(b, "chorus_depth"));
+  setVal(modB, "chorus2_mix", num(b, "chorus_mix"));
+  const delayB = parameters[stageModels.delay2];
+  setVal(delayB, "delay2_time", num(b, "delay_time_ms"));
+  setVal(delayB, "delay2_fb", num(b, "delay_fb"));
+  setVal(delayB, "delay2_mix", num(b, "delay_mix"));
+  setVal(delayB, "delay2_tone", num(b, "delay_tone"));
 
   const globals: GlobalState = {
     inputTrim: num(p, "input_trim_db") ?? 0,

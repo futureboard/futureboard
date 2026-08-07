@@ -86,6 +86,43 @@ pub const UI_PARAM_IDS: &[&str] = &[
     "reverb_shimmer",    // 70
     "delay_model",       // 71
     "delay_tone",        // 72
+    // Second instances of the doublable stages (`StageKind::Drive2` …), plus
+    // the five path slots they need. Appended, never interleaved: an index in
+    // this table is an ABI a running host may already hold.
+    "path_slot_10",  // 73
+    "path_slot_11",  // 74
+    "path_slot_12",  // 75
+    "path_slot_13",  // 76
+    "path_slot_14",  // 77
+    "drive2_on",     // 78
+    "drive2_model",  // 79
+    "drive2_gain",   // 80
+    "drive2_tone",   // 81
+    "drive2_level",  // 82
+    "mod2_on",       // 83
+    "mod2_model",    // 84
+    "chorus2_rate",  // 85
+    "chorus2_depth", // 86
+    "chorus2_mix",   // 87
+    "delay2_on",     // 88
+    "delay2_model",  // 89
+    "delay2_time",   // 90
+    "delay2_fb",     // 91
+    "delay2_mix",    // 92
+    "delay2_tone",   // 93
+    "eq2_on",        // 94
+    "eq2_low_gain",  // 95
+    "eq2_mid1_freq", // 96
+    "eq2_mid1_gain", // 97
+    "eq2_mid2_freq", // 98
+    "eq2_mid2_gain", // 99
+    "eq2_high_gain", // 100
+    "comp2_on",      // 101
+    "comp2_thresh",  // 102
+    "comp2_ratio",   // 103
+    "comp2_attack",  // 104
+    "comp2_release", // 105
+    "comp2_makeup",  // 106
 ];
 
 /// String id → wire index. Linear scan over a small table — control/UI
@@ -137,7 +174,7 @@ mod tests {
     /// accidental reorder/insert must fail here, loudly.
     #[test]
     fn wire_indices_are_pinned() {
-        assert_eq!(UI_PARAM_IDS.len(), 73);
+        assert_eq!(UI_PARAM_IDS.len(), 107);
         assert_eq!(ui_param_index("power"), Some(0));
         assert_eq!(ui_param_index("gate_on"), Some(3));
         assert_eq!(ui_param_index("drive_model"), Some(10));
@@ -171,6 +208,16 @@ mod tests {
         assert_eq!(ui_param_index("reverb_shimmer"), Some(70));
         assert_eq!(ui_param_index("delay_model"), Some(71));
         assert_eq!(ui_param_index("delay_tone"), Some(72));
+        assert_eq!(ui_param_index("path_slot_10"), Some(73));
+        assert_eq!(ui_param_index("path_slot_14"), Some(77));
+        assert_eq!(ui_param_index("drive2_on"), Some(78));
+        assert_eq!(ui_param_index("drive2_gain"), Some(80));
+        assert_eq!(ui_param_index("mod2_on"), Some(83));
+        assert_eq!(ui_param_index("chorus2_rate"), Some(85));
+        assert_eq!(ui_param_index("delay2_on"), Some(88));
+        assert_eq!(ui_param_index("eq2_on"), Some(94));
+        assert_eq!(ui_param_index("comp2_on"), Some(101));
+        assert_eq!(ui_param_index("comp2_makeup"), Some(106));
     }
 
     /// `ui_values` must cover every wire id except `clear_clip` (an action,
