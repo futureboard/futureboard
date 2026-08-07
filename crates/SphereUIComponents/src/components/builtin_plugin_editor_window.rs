@@ -246,6 +246,23 @@ struct HostStatusMsg {
     latency_samples: u32,
 }
 
+/// Native -> React: DAW transport state. Pushed on change only (and once when
+/// the page announces `bridgeReady`), never per frame — an editor needs to know
+/// *that* the transport started, not where the playhead is. Plugin DSP gets the
+/// full per-block `ProcessContext` through the shared audio bridge instead.
+///
+/// This is the return leg of the transport key: the editor's Space reaches the
+/// DAW through `futureboard.globalCommand`, and the resulting state comes back
+/// here, so an editor can render a play indicator that cannot disagree with the
+/// transport.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransportMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    playing: bool,
+}
+
 /// Native -> React: one kind's user-file listing (rebuilt wholesale).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -538,6 +555,10 @@ pub type BuiltinSpectrumSource = std::sync::Arc<
     dyn Fn(&PluginInstanceKey) -> Option<(u32, [f32; SpherePluginHost::spectrum::SPECTRUM_BINS])>,
 >;
 
+/// Reads whether the DAW transport is advancing. One relaxed atomic load on the
+/// engine's shared state — safe to call every pump tick.
+pub type BuiltinTransportSource = std::sync::Arc<dyn Fn() -> bool>;
+
 /// Everything the shared editor window can do against the live host, injected
 /// by `plugin_ops.rs` (the owner of the engine handle and bridge runtime this
 /// window deliberately does not hold). Any member may be `None` while the
@@ -551,6 +572,7 @@ pub struct BuiltinEditorHostOps {
     pub meter_source: Option<BuiltinMeterSource>,
     pub host_status_source: Option<BuiltinHostStatusSource>,
     pub spectrum_source: Option<BuiltinSpectrumSource>,
+    pub transport_source: Option<BuiltinTransportSource>,
 }
 
 impl BuiltinEditorHostOps {
@@ -562,6 +584,7 @@ impl BuiltinEditorHostOps {
             && self.meter_source.is_none()
             && self.host_status_source.is_none()
             && self.spectrum_source.is_none()
+            && self.transport_source.is_none()
     }
 }
 
@@ -673,6 +696,10 @@ pub struct BuiltinPluginEditorWindow {
     /// frame; re-sending it would cost a `execute_javascript` round trip for a
     /// picture that has not changed.
     spectrum_seq: u32,
+    /// Last transport state pushed to the page. `None` until the first push, so
+    /// a freshly loaded page always receives one regardless of what the
+    /// transport is doing.
+    pushed_transport_playing: Option<bool>,
     /// Cached `Documents/Futureboard Studio/<plugin>/` root, resolved and
     /// created lazily on the first file message from the page.
     files_root: Option<std::path::PathBuf>,
@@ -726,6 +753,7 @@ impl BuiltinPluginEditorWindow {
             host_ops,
             telemetry_tick: 0,
             spectrum_seq: 0,
+            pushed_transport_playing: None,
             files_root: None,
         }
     }
@@ -933,6 +961,10 @@ impl BuiltinPluginEditorWindow {
                 self.bridge_ready_retries = 0;
                 self.install_browser_policy();
                 self.push_selected_instance();
+                // A fresh page knows nothing about the transport; the next
+                // telemetry tick sends the current state rather than waiting
+                // for the user to press play.
+                self.pushed_transport_playing = None;
             }
             InboundMsg::InstanceReady {
                 instance_id,
@@ -1320,6 +1352,9 @@ impl BuiltinPluginEditorWindow {
         if !self.browser_ready {
             return;
         }
+        // Transport state is window-wide, not per-instance: push it even before
+        // an instance is bound, and only when it actually changed.
+        self.push_transport_if_changed();
         let Some(active) = self.active_instance.as_ref() else {
             return;
         };
@@ -1378,6 +1413,25 @@ impl BuiltinPluginEditorWindow {
                 }
             }
         }
+    }
+
+    /// Send `futureboard.transport` when the DAW's play state differs from what
+    /// the page was last told. Edge-triggered: a stopped session posts nothing
+    /// after the initial state, so this costs one atomic load per pump tick.
+    fn push_transport_if_changed(&mut self) {
+        let Some(source) = self.host_ops.transport_source.as_ref() else {
+            return;
+        };
+        let playing = source();
+        if self.pushed_transport_playing == Some(playing) {
+            return;
+        }
+        self.pushed_transport_playing = Some(playing);
+        self.post_to_view(&TransportMsg {
+            r#type: "futureboard.transport",
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            playing,
+        });
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -2477,6 +2531,23 @@ mod tests {
             }
             other => panic!("expected GlobalCommand, got {other:?}"),
         }
+    }
+
+    /// The return leg of the editor's transport key. Editors match on `type`,
+    /// so pin the wire shape the same way the inbound messages are pinned.
+    #[test]
+    fn transport_message_carries_only_the_play_state() {
+        let json = serde_json::to_value(TransportMsg {
+            r#type: "futureboard.transport",
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            playing: true,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "futureboard.transport");
+        assert_eq!(json["playing"], true);
+        assert_eq!(json["protocolVersion"], BRIDGE_PROTOCOL_VERSION);
+        // No playhead position: this is a state edge, not a per-frame clock.
+        assert!(json.get("positionSeconds").is_none());
     }
 
     /// The IR load carries a file name, not the file: native reads the bytes

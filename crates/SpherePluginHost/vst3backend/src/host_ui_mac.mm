@@ -33,7 +33,55 @@ constexpr short kWakeEventSubtype = 0x5742; // 'WB'
 /// never starve the IPC loop.
 constexpr unsigned int kMaxEventsPerPump = 64;
 
+/// `kVK_Space` from Carbon's Events.h, without pulling Carbon in.
+constexpr unsigned short kSpaceKeyCode = 49;
+
 bool ui_ready() { return NSApp != nil; }
+
+/// Transport-key presses claimed from plug-in editors, not yet reported to the
+/// main app. Written and drained on the UI thread only.
+unsigned int g_transport_toggle_requests = 0;
+
+/// True when the key window is currently editing text, so Space belongs to the
+/// caret rather than the transport (preset name fields, search boxes).
+bool key_window_is_editing_text() {
+  NSWindow *window = NSApp.keyWindow;
+  if (window == nil) {
+    return false;
+  }
+  NSResponder *responder = window.firstResponder;
+  if ([responder isKindOfClass:[NSTextView class]]) {
+    // A field editor stands in for the NSTextField that owns it; either way a
+    // caret is live in this window.
+    return true;
+  }
+  return [responder isKindOfClass:[NSTextField class]];
+}
+
+/// Claim a bare Space keyDown for the DAW transport. Returns true when the
+/// event was consumed and must not reach the plug-in.
+///
+/// Deliberately narrow, matching the Windows pump: no Command / Control /
+/// Option held, and no text field editing in the key window.
+bool claim_transport_key(NSEvent *event) {
+  if (event.type != NSEventTypeKeyDown || event.keyCode != kSpaceKeyCode) {
+    return false;
+  }
+  if (event.isARepeat) {
+    return false; // one press, one toggle
+  }
+  NSEventModifierFlags blocking = NSEventModifierFlagCommand |
+                                  NSEventModifierFlagControl |
+                                  NSEventModifierFlagOption;
+  if ((event.modifierFlags & blocking) != 0) {
+    return false;
+  }
+  if (key_window_is_editing_text()) {
+    return false;
+  }
+  g_transport_toggle_requests++;
+  return true;
+}
 
 } // namespace
 
@@ -77,6 +125,10 @@ extern "C" unsigned int sphere_plugin_host_mac_ui_pump(void) {
       if (!event) {
         break;
       }
+      if (claim_transport_key(event)) {
+        dispatched++;
+        continue;
+      }
       if (event.type != NSEventTypeApplicationDefined ||
           event.subtype != kWakeEventSubtype) {
         [NSApp sendEvent:event];
@@ -112,6 +164,9 @@ extern "C" int sphere_plugin_host_mac_ui_wait(unsigned int timeout_ms) {
     if (!event) {
       return 0;
     }
+    if (claim_transport_key(event)) {
+      return 1;
+    }
     if (event.type != NSEventTypeApplicationDefined ||
         event.subtype != kWakeEventSubtype) {
       [NSApp sendEvent:event];
@@ -119,6 +174,14 @@ extern "C" int sphere_plugin_host_mac_ui_wait(unsigned int timeout_ms) {
     }
     return 1;
   }
+}
+
+/// Number of transport-key presses claimed from plug-in editors since the last
+/// call. The IPC loop turns each into a `HostEvent::TransportToggleRequested`.
+extern "C" unsigned int sphere_plugin_host_mac_ui_take_transport_toggles(void) {
+  unsigned int taken = g_transport_toggle_requests;
+  g_transport_toggle_requests = 0;
+  return taken;
 }
 
 /// End an in-progress wait early. Safe to call from any thread — the IPC reader

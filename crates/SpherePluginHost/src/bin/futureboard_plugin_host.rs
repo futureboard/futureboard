@@ -2845,6 +2845,21 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 },
             );
         }
+        // Transport key claimed from a focused plug-in editor. The main app owns
+        // what play/pause means; this only reports that the key was pressed
+        // somewhere the main app's window could not see it.
+        timed_section!("transport_key_poll", {
+            let toggles = platform::take_transport_toggle_requests();
+            for _ in 0..toggles {
+                eprintln!("[PluginEditorInput] transport toggle requested from editor focus");
+                let _ = ipc::write_frame(
+                    &mut out,
+                    &HostEvent::TransportToggleRequested {
+                        source: "editor".to_string(),
+                    },
+                );
+            }
+        });
         timed_section!("resize_poll", {
             let resizes = preview
                 .try_lock_for(Duration::from_millis(2))
@@ -5133,7 +5148,8 @@ mod platform {
         GetDpiForSystem, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetCapture, GetFocus, IsWindowEnabled, ReleaseCapture, SetFocus,
+        GetCapture, GetFocus, GetKeyState, IsWindowEnabled, ReleaseCapture, SetFocus, VIRTUAL_KEY,
+        VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
@@ -5512,6 +5528,92 @@ mod platform {
     /// for pathological message storms — it never drops messages.
     const MAX_PUMP_PER_CALL: u32 = 512;
 
+    /// Transport-key presses seen by this thread's pump and not yet reported to
+    /// the main app. Written only by the UI thread; drained by the IPC loop on
+    /// the same thread, so a plain relaxed counter is enough.
+    static TRANSPORT_TOGGLE_REQUESTS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    /// Window classes that own a text caret. Space belongs to them, never to the
+    /// transport — renaming a preset must not start playback.
+    fn is_text_entry_class(class: &str) -> bool {
+        let lower = class.to_ascii_lowercase();
+        lower == "edit"
+            || lower == "combobox"
+            || lower.starts_with("richedit")
+            || lower.starts_with("windows.ui.core")
+            || lower.contains("textbox")
+    }
+
+    /// True when `msg` is the bare Space key the DAW's transport owns.
+    ///
+    /// Deliberately narrow: only a fresh (non-repeating) Space with no Ctrl /
+    /// Alt / Win held, and only when the focused window is not a text control.
+    /// Everything else — including Space inside a plug-in's search or preset
+    /// name field — is left for the plug-in.
+    fn is_transport_toggle_key(msg: &MSG) -> bool {
+        const VK_SPACE_W: usize = 0x20;
+        const KEY_REPEAT_BIT: isize = 1 << 30;
+        if msg.message != WM_KEYDOWN || msg.wParam.0 != VK_SPACE_W {
+            return false;
+        }
+        if msg.lParam.0 & KEY_REPEAT_BIT != 0 {
+            return false; // auto-repeat: one press, one toggle
+        }
+        unsafe {
+            let held = |vk: VIRTUAL_KEY| GetKeyState(vk.0 as i32) < 0;
+            if held(VK_CONTROL) || held(VK_MENU) || held(VK_LWIN) || held(VK_RWIN) {
+                return false;
+            }
+            let focus = GetFocus();
+            if !focus.is_invalid() && is_text_entry_class(&class_name(focus)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Number of transport-key presses since the last call. The IPC loop turns
+    /// each into a `HostEvent::TransportToggleRequested`.
+    pub fn take_transport_toggle_requests() -> u32 {
+        TRANSPORT_TOGGLE_REQUESTS.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    mod transport_key_tests {
+        use super::is_text_entry_class;
+
+        #[test]
+        fn text_controls_keep_the_space_key() {
+            for class in [
+                "Edit",
+                "EDIT",
+                "ComboBox",
+                "RichEdit20W",
+                "RICHEDIT50W",
+                "Windows.UI.Core.CoreWindow",
+                "JUCE_TextBox_1",
+            ] {
+                assert!(
+                    is_text_entry_class(class),
+                    "{class} owns a caret; Space must not start playback"
+                );
+            }
+        }
+
+        #[test]
+        fn plugin_view_classes_hand_the_space_key_to_the_transport() {
+            for class in [
+                "JUCE_1",
+                "VSTPluginEditorWindow",
+                "FutureboardDauxVst3EditorContent",
+                "Static",
+            ] {
+                assert!(!is_text_entry_class(class), "{class} is not a text control");
+            }
+        }
+    }
+
     /// Block until this thread's message queue has input or `timeout_ms`
     /// elapses. Returns `true` when woken by input. This replaces the old
     /// unconditional `sleep(8ms)` poll: the loop now idles in the kernel and
@@ -5704,6 +5806,21 @@ mod platform {
                 }
                 if debug {
                     log_input_dispatch(&msg);
+                }
+                // Transport key: claim it before the plug-in sees it, so Space
+                // means play/pause with an editor focused exactly as it does in
+                // the arrangement. Swallowed here and reported over IPC.
+                if is_transport_toggle_key(&msg) {
+                    TRANSPORT_TOGGLE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if debug {
+                        eprintln!(
+                            "[PluginEditorInput] transport key claimed hwnd=0x{:x} class='{}'",
+                            msg.hwnd.0 as u64,
+                            class_name(msg.hwnd)
+                        );
+                    }
+                    dispatched += 1;
+                    continue;
                 }
                 // Focus/capture + hit-test summary on click. Explicit debug
                 // only, and throttled so a click storm cannot flood stderr.
@@ -5999,6 +6116,22 @@ mod platform {
             ) -> std::os::raw::c_int;
             pub fn sphere_plugin_host_mac_ui_wake();
             pub fn sphere_plugin_host_mac_ui_focus_window(handle: u64) -> std::os::raw::c_int;
+            pub fn sphere_plugin_host_mac_ui_take_transport_toggles() -> std::os::raw::c_uint;
+        }
+    }
+
+    /// Number of transport-key presses claimed from plug-in editor windows since
+    /// the last call. The AppKit pump swallows a bare Space so the main app can
+    /// run its own `transport:play-pause`; see the Windows pump for the same
+    /// contract.
+    pub fn take_transport_toggle_requests() -> u32 {
+        #[cfg(target_os = "macos")]
+        {
+            unsafe { appkit::sphere_plugin_host_mac_ui_take_transport_toggles() as u32 }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0
         }
     }
 

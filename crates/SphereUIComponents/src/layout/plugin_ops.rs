@@ -603,6 +603,18 @@ impl StudioLayout {
                         );
                     }
                 }
+                // Space was pressed while a plug-in editor owned keyboard focus.
+                // Keyboard input goes to the thread owning the focused window,
+                // so the main window never saw it. Run the same command the
+                // arrangement's spacebar and the chrome Play button run — the
+                // host reports the key, this process decides what it means.
+                ClientEvent::Host(HostEvent::TransportToggleRequested { source }) => {
+                    eprintln!(
+                        "[plugin-bridge] event TransportToggleRequested source={source} -> transport:play-pause"
+                    );
+                    self.dispatch_command_id("transport:play-pause", cx);
+                    changed = true;
+                }
                 _ => {}
             }
         }
@@ -2068,7 +2080,7 @@ impl StudioLayout {
             BuiltinEditorHostOps, BuiltinGlobalCommandDispatcher, BuiltinHostStatusSource,
             BuiltinIrLoadForwarder, BuiltinIrLoadRequest, BuiltinMeterSource,
             BuiltinNamLoadForwarder, BuiltinNamLoadRequest, BuiltinParamForwarder,
-            BuiltinSpectrumSource, PluginInstanceKey,
+            BuiltinSpectrumSource, BuiltinTransportSource, PluginInstanceKey,
         };
 
         let target = PluginInstanceKey {
@@ -2193,6 +2205,13 @@ impl StudioLayout {
                     .and_then(|bridge| bridge.builtin_host_status(&key.insert_id))
             }) as BuiltinHostStatusSource
         });
+        // Return leg of the editor's transport key: the editor sends
+        // `transport:play-pause`, this reports what the transport actually does.
+        // One relaxed atomic load, so the editor pump can poll it every tick.
+        let transport_source: Option<BuiltinTransportSource> =
+            self.audio_bridge.engine.clone().map(|engine| {
+                std::sync::Arc::new(move || engine.transport_playing()) as BuiltinTransportSource
+            });
         let command_owner = cx.entity().clone();
         let dispatch_global_command: Option<BuiltinGlobalCommandDispatcher> =
             Some(std::sync::Arc::new(move |command_id, cx| {
@@ -2209,6 +2228,7 @@ impl StudioLayout {
             meter_source,
             host_status_source,
             spectrum_source,
+            transport_source,
         };
 
         // Focus the existing shared window and rebind it to this instance,

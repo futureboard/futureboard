@@ -268,6 +268,25 @@ pub enum HostEvent {
     Ready { protocol_version: u32, pid: u32 },
     /// Reply to [`HostCommand::Ping`] — confirms the bridge is live.
     Pong { pid: u32 },
+    /// The transport key (Space) was pressed while a plug-in editor window
+    /// owned by this process had keyboard focus, and no text field in that
+    /// window wanted it.
+    ///
+    /// Keyboard input goes to the thread owning the focused window, so once a
+    /// plug-in editor takes focus the main app's window never sees the key —
+    /// including for editors embedded into a main-app child HWND, because the
+    /// plug-in's view still belongs to this process's UI thread. The host
+    /// swallows the key and reports it here; the main app runs its normal
+    /// `transport:play-pause` command, so Space means the same thing whether or
+    /// not an editor has focus.
+    ///
+    /// Transport *state* travels the other way through the shared audio bridge
+    /// (per-block `ProcessContext`), not over this channel.
+    TransportToggleRequested {
+        /// Where the key was seen, for diagnostics ("editor" / "window").
+        #[serde(default)]
+        source: String,
+    },
     /// Host accepted a load request and is resolving the plugin.
     PluginLoading { plugin_instance_id: String },
     /// Plugin runtime is available in the host process.
@@ -590,6 +609,27 @@ mod tests {
         write_frame(&mut buf, &ev).unwrap();
         let mut reader = Cursor::new(buf);
         assert_eq!(read_frame::<HostEvent, _>(&mut reader).unwrap(), Some(ev));
+    }
+
+    /// The transport key event carries no instance and must stay decodable from
+    /// an older host that predates the `source` field.
+    #[test]
+    fn transport_toggle_event_round_trips_and_tolerates_a_missing_source() {
+        let ev = HostEvent::TransportToggleRequested {
+            source: "editor".into(),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &ev).unwrap();
+        let mut reader = Cursor::new(buf);
+        assert_eq!(read_frame::<HostEvent, _>(&mut reader).unwrap(), Some(ev));
+
+        let mut legacy = Cursor::new(b"{\"event\":\"TransportToggleRequested\"}\n".to_vec());
+        assert_eq!(
+            read_frame::<HostEvent, _>(&mut legacy).unwrap(),
+            Some(HostEvent::TransportToggleRequested {
+                source: String::new()
+            })
+        );
     }
 
     #[test]

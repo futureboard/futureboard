@@ -1154,6 +1154,9 @@ impl PluginEditorWindow {
             // by `poll_plugin_bridge_runtime`, not this VST3 state machine.
             | ClientEvent::Host(HostEvent::BuiltinNamCaptureResult { .. })
             | ClientEvent::Host(HostEvent::BuiltinIrResult { .. }) => {}
+            // Transport keys are a workspace command, not editor state — the
+            // studio layout runs them (see `poll_plugin_bridge_runtime`).
+            ClientEvent::Host(HostEvent::TransportToggleRequested { .. }) => {}
             ClientEvent::Host(HostEvent::Log { level, message }) => {
                 eprintln!("[plugin-view][host][{level}] {message}");
             }
