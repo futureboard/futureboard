@@ -193,6 +193,13 @@ pub struct FileBrowserState {
     /// the mini preview pane — guards against re-spawning a decode while one is
     /// in flight (e.g. arrowing quickly through a folder).
     pub waveform_inflight: HashSet<PathBuf>,
+    /// File the engine is currently auditioning, plus its playhead in seconds of
+    /// that file. Both are polled from the engine (never guessed from a UI
+    /// timer), and the pair is dropped together the moment the preview voice
+    /// retires — so the pane can never draw a stale playhead, nor one belonging
+    /// to a different file than the waveform on screen.
+    pub preview_playing: Option<PathBuf>,
+    pub preview_position_seconds: Option<f32>,
     /// Group headers (`group:*` ids) the user has collapsed. Collapsed groups
     /// hide all their child rows. Default = all groups expanded.
     pub collapsed_groups: HashSet<String>,
@@ -215,6 +222,8 @@ impl Default for FileBrowserState {
             filter: String::new(),
             preview_enabled: true,
             waveform_inflight: HashSet::new(),
+            preview_playing: None,
+            preview_position_seconds: None,
             collapsed_groups: {
                 // "Filesystem" (raw drives / `/` / mounted volumes) is advanced,
                 // beginner-unfriendly territory — start collapsed. Every other
@@ -336,6 +345,40 @@ impl FileBrowserState {
     pub fn selected_audio_path(&self) -> Option<&Path> {
         let path = self.selected.as_deref()?;
         is_audio_path(path).then_some(path)
+    }
+
+    /// Record which file the engine was asked to audition. The playhead stays
+    /// empty until the engine reports a real position, so a decode that never
+    /// produces sound never draws one.
+    pub fn set_preview_playing(&mut self, path: PathBuf) {
+        self.preview_playing = Some(path);
+        self.preview_position_seconds = None;
+    }
+
+    /// Apply the engine's preview playhead. `None` means nothing is auditioning,
+    /// which also clears the file the playhead belonged to. Returns whether the
+    /// pane needs a repaint.
+    pub fn apply_preview_position(&mut self, position_seconds: Option<f32>) -> bool {
+        match position_seconds {
+            Some(seconds) => {
+                let changed = self.preview_position_seconds != Some(seconds);
+                self.preview_position_seconds = Some(seconds);
+                changed
+            }
+            None => {
+                let changed =
+                    self.preview_position_seconds.is_some() || self.preview_playing.is_some();
+                self.preview_position_seconds = None;
+                self.preview_playing = None;
+                changed
+            }
+        }
+    }
+
+    /// Playhead for `path` in seconds, if that is the file currently being
+    /// auditioned.
+    pub fn preview_position_for(&self, path: &Path) -> Option<f32> {
+        (self.preview_playing.as_deref() == Some(path)).then_some(self.preview_position_seconds)?
     }
 
     /// Mark `path` as having an in-flight waveform decode. Returns `true` if it
@@ -1185,6 +1228,36 @@ mod tests {
         assert_eq!(header.kind, BrowserNodeKind::GroupHeader);
         assert!(!header.is_selectable());
         assert!(header.path.is_none());
+    }
+
+    #[test]
+    fn preview_playhead_belongs_to_the_auditioned_file_only() {
+        let mut state = FileBrowserState::default();
+        let kick = PathBuf::from("C:/samples/kick.wav");
+        let snare = PathBuf::from("C:/samples/snare.wav");
+
+        state.set_preview_playing(kick.clone());
+        assert_eq!(
+            state.preview_position_for(&kick),
+            None,
+            "no playhead before the engine reports one"
+        );
+
+        assert!(state.apply_preview_position(Some(1.25)));
+        assert_eq!(state.preview_position_for(&kick), Some(1.25));
+        assert_eq!(
+            state.preview_position_for(&snare),
+            None,
+            "another file must never inherit the playhead"
+        );
+
+        // Same position twice is not a repaint reason.
+        assert!(!state.apply_preview_position(Some(1.25)));
+
+        // The voice retiring clears both the playhead and its owner.
+        assert!(state.apply_preview_position(None));
+        assert_eq!(state.preview_position_for(&kick), None);
+        assert!(!state.apply_preview_position(None), "idle stays quiet");
     }
 
     #[test]

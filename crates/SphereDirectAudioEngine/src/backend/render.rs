@@ -1295,6 +1295,7 @@ fn fill_output_f32_inner(
     if channels >= 2 {
         local.audition.mix_into(data, channels);
     }
+    shared.publish_audition_position(local.audition.position_seconds());
 
     // Legacy master-bus bridge fallback (disabled by default — per-track routing
     // through external-bridge-plugin inserts is the normal path).

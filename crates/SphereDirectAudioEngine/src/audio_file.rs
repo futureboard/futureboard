@@ -41,6 +41,14 @@ pub struct AudioFileBuffer {
 const AUDITION_ATTACK_SECONDS: f32 = 0.002;
 const AUDITION_RELEASE_SECONDS: f32 = 0.008;
 
+/// How much of a file a Browser preview plays before it fades out on its own.
+///
+/// Browsing a folder is a scan, not a listen: a five second head is enough to
+/// identify a sample and keeps a long stem from occupying the preview voice
+/// (and the user's ears) until the next selection. Files shorter than this play
+/// to their real end — the limit only ever truncates.
+pub const AUDITION_PREVIEW_SECONDS: f64 = 5.0;
+
 /// A pre-decoded, one-shot browser audition voice. It owns immutable PCM data
 /// prepared off the audio thread; rendering only advances a cursor and mixes
 /// samples, so no callback allocation, locks, or I/O are required.
@@ -57,26 +65,45 @@ pub struct AudioFileAudition {
     /// that fade's length — precomputed so the mix loop stays division-free.
     tail_start: f64,
     inv_tail_len: f64,
+    /// Last source frame this voice will play (exclusive) — the file end, or the
+    /// [`AUDITION_PREVIEW_SECONDS`] head of it, whichever comes first.
+    end_frame: f64,
+    /// Source seconds per source frame — publishing the playhead must not divide
+    /// on the audio thread.
+    seconds_per_frame: f64,
 }
 
 impl AudioFileAudition {
     pub fn new(source: Box<AudioFileBuffer>, output_rate: u32) -> Self {
         let rate = output_rate.max(1);
-        let step = source.sample_rate.max(1) as f64 / rate as f64;
+        let source_rate = source.sample_rate.max(1);
+        let step = source_rate as f64 / rate as f64;
+        // Preview head: whole file when it is shorter than the limit.
+        let end_frame = (AUDITION_PREVIEW_SECONDS * source_rate as f64).min(source.frames as f64);
         // The tail fade is measured in source frames, so it stays the same
-        // audible length whatever the resample ratio is.
-        let tail_len = (AUDITION_RELEASE_SECONDS as f64 * source.sample_rate.max(1) as f64)
-            .min(source.frames as f64)
+        // audible length whatever the resample ratio is. It hangs off the
+        // preview end, so a truncated file fades out instead of being cut.
+        let tail_len = (AUDITION_RELEASE_SECONDS as f64 * source_rate as f64)
+            .min(end_frame)
             .max(1.0);
         Self {
             source_frame: 0.0,
             step,
             gain: 0.0,
             gain_step: 1.0 / (AUDITION_ATTACK_SECONDS * rate as f32).max(1.0),
-            tail_start: source.frames as f64 - tail_len,
+            tail_start: end_frame - tail_len,
             inv_tail_len: 1.0 / tail_len,
+            end_frame,
+            seconds_per_frame: 1.0 / source_rate as f64,
             source,
         }
+    }
+
+    /// Playhead of this voice in seconds of the source file. Read by the
+    /// callback right after mixing so the Browser preview pane can draw it.
+    #[inline]
+    pub fn position_seconds(&self) -> f64 {
+        self.source_frame * self.seconds_per_frame
     }
 
     /// Start fading this voice out; it retires once the ramp reaches silence.
@@ -100,7 +127,7 @@ impl AudioFileAudition {
         }
         for frame in output.chunks_mut(output_channels) {
             let source_index = self.source_frame as usize;
-            if source_index >= self.source.frames {
+            if self.source_frame >= self.end_frame || source_index >= self.source.frames {
                 return true;
             }
             self.gain = (self.gain + self.gain_step).clamp(0.0, 1.0);
@@ -113,8 +140,7 @@ impl AudioFileAudition {
                 self.source.samples[frame_index * self.source.channels + channel]
             };
             let tail = if self.source_frame > self.tail_start {
-                (((self.source.frames as f64 - self.source_frame) * self.inv_tail_len) as f32)
-                    .clamp(0.0, 1.0)
+                (((self.end_frame - self.source_frame) * self.inv_tail_len) as f32).clamp(0.0, 1.0)
             } else {
                 1.0
             };
@@ -131,7 +157,7 @@ impl AudioFileAudition {
             }
             self.source_frame += self.step;
         }
-        self.source_frame >= self.source.frames as f64
+        self.source_frame >= self.end_frame
     }
 }
 
@@ -165,6 +191,17 @@ impl AuditionPlayer {
     /// to decide whether the graph still has to be woken while stopped.
     pub fn is_idle(&self) -> bool {
         self.current.is_none() && self.releasing.is_none()
+    }
+
+    /// Playhead of the voice the user is actually auditioning, in seconds of the
+    /// source file. `None` while nothing is auditioning — a voice that is only
+    /// fading out has already been replaced or stopped, so it no longer owns the
+    /// Browser's playhead.
+    #[inline]
+    pub fn position_seconds(&self) -> Option<f64> {
+        self.current
+            .as_ref()
+            .map(AudioFileAudition::position_seconds)
     }
 
     /// Mix both voices into an interleaved output block and retire whichever
@@ -1538,6 +1575,48 @@ mod audition_tests {
             "end of file must fade out, got {last} on the last frame"
         );
         assert!(player.is_idle(), "finished source must retire the voice");
+    }
+
+    #[test]
+    fn long_file_previews_only_its_head_and_reports_the_playhead() {
+        let mut player = AuditionPlayer::default();
+        // Twice the preview limit: playback must stop at the limit, not at EOF.
+        player.start(dc_source(AUDITION_PREVIEW_SECONDS as f32 * 2.0), RATE);
+
+        let limit_frames = (AUDITION_PREVIEW_SECONDS * RATE as f64) as usize;
+        let _ = mix_block(&mut player, limit_frames / 2);
+        let halfway = player
+            .position_seconds()
+            .expect("an auditioning voice must report a playhead");
+        assert!(
+            (halfway - AUDITION_PREVIEW_SECONDS / 2.0).abs() < 0.01,
+            "playhead must track the source position, got {halfway}"
+        );
+
+        let block = mix_block(&mut player, limit_frames / 2 + 2);
+        assert!(
+            block[block.len() - 2].abs() < 1e-6,
+            "preview must be silent past the limit, got {}",
+            block[block.len() - 2]
+        );
+        assert!(player.is_idle(), "preview limit must retire the voice");
+        assert!(
+            player.position_seconds().is_none(),
+            "an idle player must report no playhead"
+        );
+    }
+
+    #[test]
+    fn a_file_shorter_than_the_preview_limit_still_plays_to_its_end() {
+        let mut player = AuditionPlayer::default();
+        player.start(dc_source(0.5), RATE);
+        let _ = mix_block(&mut player, (RATE as f32 * 0.4) as usize);
+        assert!(
+            !player.is_idle(),
+            "a half-second file must not be cut at 0.4 s"
+        );
+        let _ = mix_block(&mut player, (RATE as f32 * 0.1) as usize + 2);
+        assert!(player.is_idle(), "the file must retire at its own end");
     }
 }
 

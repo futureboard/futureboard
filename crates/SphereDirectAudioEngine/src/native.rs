@@ -825,6 +825,23 @@ impl AudioEngine {
         self.inner.stop_audition()
     }
 
+    /// Playhead of the Browser sample preview, in seconds of the source file.
+    /// `None` when nothing is auditioning. Published by the render callback, so
+    /// this is a single relaxed atomic read — safe to poll from the UI loop.
+    pub fn audition_position_seconds(&self) -> Option<f64> {
+        let raw = self
+            .inner
+            .shared
+            .audition_position_us
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (raw != crate::engine::AUDITION_POSITION_IDLE).then(|| raw as f64 / 1_000_000.0)
+    }
+
+    /// How much of a file a Browser preview plays before it fades out.
+    pub fn audition_preview_seconds(&self) -> f64 {
+        crate::audio_file::AUDITION_PREVIEW_SECONDS
+    }
+
     /// Enumerate output devices for the engine's configured backend.
     pub fn list_output_devices(&self) -> Vec<EngineDeviceInfo> {
         self.list_output_devices_for_backend(self.config.backend)

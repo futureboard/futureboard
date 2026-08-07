@@ -545,7 +545,16 @@ pub struct SharedState {
     /// both the decode worker and the callback compare against this before a
     /// source is allowed to start playing.
     pub audition_request_token: AtomicU64,
+    /// Playhead of the Browser sample preview, in microseconds of the source
+    /// file, published once per callback (audio → control). [`u64::MAX`] means
+    /// nothing is auditioning. Integer microseconds keep this a single relaxed
+    /// store with no float-bit dance on the realtime path.
+    pub audition_position_us: AtomicU64,
 }
+
+/// Sentinel stored in [`SharedState::audition_position_us`] when no Browser
+/// preview is playing.
+pub const AUDITION_POSITION_IDLE: u64 = u64::MAX;
 
 impl Default for SharedState {
     fn default() -> Self {
@@ -624,11 +633,26 @@ impl Default for SharedState {
             pdc_enabled: AtomicBool::new(true),
             latency_graph_version: AtomicU64::new(1),
             audition_request_token: AtomicU64::new(0),
+            audition_position_us: AtomicU64::new(AUDITION_POSITION_IDLE),
         }
     }
 }
 
 impl SharedState {
+    /// Publish the Browser preview playhead from the render callback. One
+    /// relaxed store per block; `None` parks the sentinel so the UI stops
+    /// drawing a playhead the moment the voice retires.
+    #[inline]
+    pub(crate) fn publish_audition_position(&self, seconds: Option<f64>) {
+        let value = match seconds {
+            Some(seconds) if seconds >= 0.0 => {
+                ((seconds * 1_000_000.0) as u64).min(AUDITION_POSITION_IDLE - 1)
+            }
+            _ => AUDITION_POSITION_IDLE,
+        };
+        self.audition_position_us.store(value, Ordering::Relaxed);
+    }
+
     #[inline]
     pub(crate) fn set_monitor_source_pair(&self, left: u32, right: u32) {
         self.monitor_src_pair
@@ -4679,6 +4703,10 @@ where
                 }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
                 let audition_active = !audition.is_idle();
+                // Park the Browser preview playhead here as well: the mix below
+                // is skipped entirely on idle blocks, so the sentinel would
+                // otherwise stay at the last played position.
+                shared.publish_audition_position(audition.position_seconds());
                 // A Browser preview is mixed into the master output and needs
                 // nothing from the graph, so it is not a graph wake reason —
                 // see the DAUx path for the same split.
@@ -4763,6 +4791,7 @@ where
                         )
                     };
                     audition.mix_into(scratch, ch);
+                    shared.publish_audition_position(audition.position_seconds());
                     if !render_path_logged {
                         render_path_logged = true;
                         if callback_debug_enabled() {

@@ -821,11 +821,16 @@ impl StudioLayout {
             self.notify_status_bar_if_changed(cx);
         }
 
+        // Browser sample preview playhead. Lives in the studio shell (the
+        // sidebar's preview pane), so its motion is a shell repaint reason on
+        // its own — auditioning happens with the transport stopped.
+        let preview_playhead_moved = self.poll_browser_preview_playhead();
+
         // While playing the root layout must repaint every tick so the
         // transport chrome (bar:beat:tick, status line) tracks the
         // playhead. Meter-only changes route to isolated mixer/timeline
         // entities and must not invalidate the full studio shell when idle.
-        state_changed || was_playing
+        state_changed || was_playing || preview_playhead_moved
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's

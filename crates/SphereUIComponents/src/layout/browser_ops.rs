@@ -16,12 +16,32 @@ impl StudioLayout {
             return false;
         };
         match engine.audition_file(path.to_string_lossy().into_owned()) {
-            Ok(audible) => audible,
+            Ok(audible) => {
+                if audible {
+                    self.file_browser.set_preview_playing(path.to_path_buf());
+                }
+                audible
+            }
             Err(error) => {
                 eprintln!("[browser-preview] audition error: {error}");
                 false
             }
         }
+    }
+
+    /// Pull the Browser preview playhead published by the render callback into
+    /// the browser state. Returns whether the preview pane needs a repaint.
+    ///
+    /// One relaxed atomic read per UI poll — the engine owns the position, so
+    /// the pane never runs its own clock and can never drift from the audio.
+    pub(crate) fn poll_browser_preview_playhead(&mut self) -> bool {
+        let position = self
+            .audio_bridge
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.audition_position_seconds())
+            .map(|seconds| seconds as f32);
+        self.file_browser.apply_preview_position(position)
     }
 
     /// Ensure the mini waveform peaks for `path` are decoded for the preview

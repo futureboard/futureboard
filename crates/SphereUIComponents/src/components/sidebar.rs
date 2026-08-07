@@ -33,6 +33,7 @@ use crate::components::text_input::{
 use crate::components::timeline::waveform_cache;
 use crate::i18n::I18n;
 use crate::theme::Colors;
+use DirectAudio::AUDITION_PREVIEW_SECONDS;
 
 pub const SIDEBAR_WIDTH: f32 = 272.0;
 /// Compact utility toolbar above the search field.
@@ -259,7 +260,9 @@ pub fn sidebar(
         .child(thumb);
 
     // ── Mini waveform preview pane (shown for the selected audio file) ──
-    let preview_pane = state.selected_audio_path().map(browser_waveform_pane);
+    let preview_pane = state
+        .selected_audio_path()
+        .map(|path| browser_waveform_pane(path, state.preview_position_for(path)));
 
     // ── Footer: current selection (lightweight info row) ─────────────
     let selected_label = state
@@ -317,7 +320,14 @@ pub fn sidebar(
 /// Mini waveform details for the selected audio file. Peaks come from the shared
 /// waveform cache (decoded off-thread on select); while decoding it shows an
 /// honest pending baseline. Selecting a file queues its audible audition.
-fn browser_waveform_pane(path: &std::path::Path) -> impl IntoElement {
+///
+/// `playhead_seconds` is the engine's real preview position for this exact file
+/// (see `FileBrowserState::preview_position_for`), so the line below only ever
+/// moves while audio is actually playing.
+fn browser_waveform_pane(
+    path: &std::path::Path,
+    playhead_seconds: Option<f32>,
+) -> impl IntoElement {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -364,7 +374,7 @@ fn browser_waveform_pane(path: &std::path::Path) -> impl IntoElement {
         }));
 
     let waveform: gpui::AnyElement = match preview {
-        Some(preview) => mini_waveform_canvas(preview).into_any_element(),
+        Some(preview) => mini_waveform_canvas(preview, playhead_seconds).into_any_element(),
         None => div()
             .flex()
             .items_center()
@@ -401,11 +411,23 @@ fn browser_waveform_pane(path: &std::path::Path) -> impl IntoElement {
 /// Draw a peak-rendered waveform filling the canvas. Columns are computed from
 /// the real paint bounds (DPI-correct) using one min/max bar per pixel column —
 /// canvas + `paint_quad`, never DOM spam (DESIGN.md waveform rules).
+///
+/// Two overlays share this canvas so they cannot disagree about the
+/// seconds → x transform: the preview-limit shade (the part of a long file the
+/// audition will not reach) and the playhead.
 fn mini_waveform_canvas(
     preview: std::sync::Arc<waveform_cache::WaveformPreview>,
+    playhead_seconds: Option<f32>,
 ) -> impl IntoElement {
     let mut color = Colors::accent_primary();
     color.a = 0.72;
+    let mut past_limit_shade = Colors::surface_base();
+    past_limit_shade.a = 0.55;
+    let mut limit_marker = Colors::text_faint();
+    limit_marker.a = 0.55;
+    let playhead_color = Colors::timeline_playhead();
+    let mut played_shade = Colors::accent_primary();
+    played_shade.a = 0.10;
     let element = canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
@@ -413,6 +435,9 @@ fn mini_waveform_canvas(
             let h: f32 = f32::from(bounds.size.height).max(1.0);
             let center = h / 2.0;
             let cols = (w.floor() as usize).max(1);
+            // Whole-file seconds → x. Both overlays below use only this.
+            let duration = preview.duration_seconds.max(f64::MIN_POSITIVE);
+            let x_at = |seconds: f64| ((seconds / duration) as f32).clamp(0.0, 1.0) * w;
             let samples_per_pixel = (preview.total_frames.max(1) as f32 / w).max(1.0);
             let Some(lod) = waveform_cache::pick_lod(&preview, samples_per_pixel) else {
                 return;
@@ -442,6 +467,45 @@ fn mini_waveform_canvas(
                     size(px(1.0), px(bar_h)),
                 );
                 window.paint_quad(fill(r, color));
+            }
+
+            // Preview window: a selection only auditions the file's first
+            // `AUDITION_PREVIEW_SECONDS`. Shade the rest so the waveform stays
+            // honest about what will actually be heard.
+            let limit_x = x_at(AUDITION_PREVIEW_SECONDS);
+            if limit_x < w - 1.0 {
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(limit_x), px(0.0)),
+                        size(px(w - limit_x), px(h)),
+                    ),
+                    past_limit_shade,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(limit_x), px(0.0)),
+                        size(px(1.0), px(h)),
+                    ),
+                    limit_marker,
+                ));
+            }
+
+            // Playhead — engine position, drawn only while a preview is audible.
+            if let Some(seconds) = playhead_seconds {
+                let x = x_at(seconds as f64);
+                if x > 0.0 {
+                    window.paint_quad(fill(
+                        Bounds::new(bounds.origin, size(px(x), px(h))),
+                        played_shade,
+                    ));
+                }
+                window.paint_quad(fill(
+                    Bounds::new(
+                        bounds.origin + point(px(x.min(w - 1.0)), px(0.0)),
+                        size(px(1.0), px(h)),
+                    ),
+                    playhead_color,
+                ));
             }
         },
     )
