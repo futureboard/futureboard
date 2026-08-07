@@ -242,13 +242,15 @@ fn lib_matches(entry_name: &str, lib_name: &str) -> bool {
 /// inside the application's bridge module, so those comments become ordinary
 /// comments in the generated copies.
 fn stage_professional_sources() {
-    // Service endpoints and the license signing key are baked in via
+    // The account endpoint and the license signing key are baked in via
     // `option_env!`, from the build environment or the repo `.env`. Rebuild when
-    // any of them changes so a build never keeps stale config and never
-    // silently ships without it.
+    // either changes so a build never keeps stale config and never silently
+    // ships without it.
+    //
+    // The *activation* endpoint is deliberately not among them: it is a constant
+    // in `license.rs`, so no build flag can point licensing at another service.
     println!("cargo:rerun-if-changed=../../../.env");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_PUBLIC_KEY");
-    println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_API_URL");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_AUTH_API_URL");
     // The EULA is embedded (include_str!) from the staged copies below; rebuild
     // when the source text changes.
@@ -301,15 +303,17 @@ fn copy_professional_asset(assets_dir: &Path, output_dir: &Path, file_name: &str
     });
 }
 
-/// Bake the account and licensing endpoints, plus the license signing key, for
-/// `option_env!` in the staged private sources. Source precedence: an explicit
-/// build-environment value wins (CI/distribution), otherwise the repo `.env` is
-/// read so a plain `cargo build` produces a working Professional build.
+/// Bake the account endpoint and the license signing key for `option_env!` in
+/// the staged private sources. Source precedence: an explicit build-environment
+/// value wins (CI/distribution), otherwise the repo `.env` is read so a plain
+/// `cargo build` produces a working Professional build.
 ///
-/// Everything baked here is public by construction:
+/// Both values baked here are public by construction:
 /// - the account API URL, which the app's sign-in opens in a browser;
-/// - the licensing API URL;
 /// - the Ed25519 **public** key licenses verify against.
+///
+/// The activation service URL is *not* configurable and is not read here — it is
+/// a constant in `license.rs`, so no build can point licensing elsewhere.
 ///
 /// SECURITY: no secret is ever read or emitted here. The `.env` also carries
 /// service-role and issuing secrets, and any of those in a shipped desktop
@@ -333,9 +337,6 @@ fn bake_service_config() {
 
     if let Some(url) = resolve("FUTUREBOARD_AUTH_API_URL", "AUTH_API_URL") {
         println!("cargo:rustc-env=FUTUREBOARD_AUTH_API_URL={url}");
-    }
-    if let Some(url) = resolve("FUTUREBOARD_LICENSE_API_URL", "LICENSE_API_URL") {
-        println!("cargo:rustc-env=FUTUREBOARD_LICENSE_API_URL={url}");
     }
     if let Some(key) = resolve("FUTUREBOARD_LICENSE_PUBLIC_KEY", "LICENSE_PUBLIC_KEY") {
         println!("cargo:rustc-env=FUTUREBOARD_LICENSE_PUBLIC_KEY={key}");
