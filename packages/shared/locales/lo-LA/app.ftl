@@ -1,11 +1,11 @@
 # Futureboard Studio — en-US
-# ສະກັດຈາກ SphereUIComponents + native-menu.json
-# ສ້າງເມື່ອ: 2026-05-29
+# Extracted from SphereUIComponents + native-menu.json
+# Generated: 2026-05-29
 
-## ເມນູແອັບພລິເຄຊັນ
+## Application Menu
 
 
-## ປ່ອງຢ້ຽມໂຕ້ຕອບ
+## Dialogs
 
 add-track.arm = ກຽມພ້ອມບັນທຶກ
 add-track.badge.exists = ມີຢູ່ແລ້ວ
@@ -81,9 +81,9 @@ add-track.summary.master-managed = Native ໃຊ້ການຈັດການ�
 add-track.summary.plugin-unwired = ແທຣັກປລັກອິນຍັງບໍ່ທັນເຊື່ອມຕໍ່ໃນ Native ເທື່ອ
 add-track.title = ແທຣັກໃໝ່
 
-## ແຜງຄວບຄຸມ & ທາມລາຍ
+## Panels & Timeline
 
-bottom-panel.mix-level = ລະດັບການປະສົມ: 80%
+bottom-panel.mix-level = ລະດັບການປະສົມ\: 80%
 bottom-panel.plugin.compressor = ຄອມເພຣສເຊີ
 bottom-panel.plugin.delay = ເຄື່ອງເຮັດສຽງດີເລ
 bottom-panel.plugin.equalizer = ອີຄວໍໄລເຊີ
@@ -91,7 +91,7 @@ bottom-panel.tab.editor = ຕົວແກ້ໄຂ
 bottom-panel.tab.effect-editor = ຕົວແກ້ໄຂເອັບເຟັກ
 bottom-panel.tab.mixer = ມິກເຊີ
 
-## ບຣາວເຊີ (Browser)
+## Browser
 
 browser.category.audio-files = ໄຟລ໌ສຽງ
 browser.category.instruments = ເຄື່ອງດົນຕີ
@@ -104,11 +104,11 @@ browser.file.unavailable = ບໍ່ພ້ອມໃຊ້ງານ
 browser.loading = ກຳລັງໂຫຼດ…
 browser.panel.title = ບຣາວເຊີ
 browser.root.current-project = ໂປຣເຈັກປັດຈຸບັນ
-browser.root.project-prefix = ໂປຣເຈັກ: { $name }
+browser.root.project-prefix = ໂປຣເຈັກ\: { $name }
 browser.selection.label = ເລືອກ
 browser.selection.none = ບໍ່ມີໄຟລ໌ທີ່ຖືກເລືອກ
 
-## ສ່ວນປະກອບແອັບ
+## App Chrome
 
 chrome.import = ນຳເຂົ້າ
 chrome.project.saved = ບັນທຶກແລ້ວ
@@ -117,11 +117,11 @@ chrome.report-bug = ແຈ້ງບັນຫາ
 chrome.save = ບັນທຶກ
 chrome.share = ແບ່ງປັນ
 
-## ສ່ວນປະກອບຍ່ອຍ
+## Components
 
 clip.imported-audio = ສຽງທີ່ນຳເຂົ້າ
 
-## ເມນູຄລິກຂວາ
+## Context Menus
 
 context.browser.copy-path = ຄັດລອກທີ່ຢູ່ໄຟລ໌
 context.browser.import = ນຳເຂົ້າສູ່ທາມລາຍ
@@ -153,7 +153,7 @@ context.track.solo = ໂຊໂລ
 context.zoom-in = ຊູມເຂົ້າ
 context.zoom-out = ຊູມອອກ
 
-## ສະຖານະ & ຂໍ້ຜິດພາດ
+## Status & Errors
 
 dialog.choose-project-location = ເລືອກບ່ອນເກັບໂປຣເຈັກ
 dialog.filter.futureboard-project = ໂປຣເຈັກ Futureboard
@@ -161,26 +161,26 @@ dialog.open-project = ເປີດໂປຣເຈັກ
 dialog.save-copy = ບັນທຶກສຳເນົາ
 dialog.save-project-as = ບັນທຶກໂປຣເຈັກເປັນ...
 
-## ສ່ວນປະກອບຍ່ອຍ
+## Components
 
 edit.copy = ຄັດລອກ
 edit.cut = ຕັດ
 edit.paste = ວາງ
 edit.select-all = ເລືອກທັງໝົດ
 
-## ສະຖານະ & ຂໍ້ຜິດພາດ
+## Status & Errors
 
 error.audio-engine-unavailable = ລະບົບສຽງບໍ່ພ້ອມໃຊ້ງານ
-error.create-project-folder = ບໍ່ສາມາດສ້າງໂຟນເດີໂປຣເຈັກໄດ້: { $e }
+error.create-project-folder = ບໍ່ສາມາດສ້າງໂຟນເດີໂປຣເຈັກໄດ້\: { $e }
 error.plugin-instantiate-failed = ປລັກອິນບໍ່ສາມາດເລີ່ມເຮັດວຽກໄດ້
-error.save-initial-project = ບໍ່ສາມາດບັນທຶກໄຟລ໌ໂປຣເຈັກເລີ່ມຕົ້ນໄດ້: { $e }
-error.update-studio-window = ບໍ່ສາມາດອັບເດດໜ້າຕ່າງຫຼັກຂອງສະຕູດິໂອໄດ້: { $error }
+error.save-initial-project = ບໍ່ສາມາດບັນທຶກໄຟລ໌ໂປຣເຈັກເລີ່ມຕົ້ນໄດ້\: { $e }
+error.update-studio-window = ບໍ່ສາມາດອັບເດດໜ້າຕ່າງຫຼັກຂອງສະຕູດິໂອໄດ້\: { $error }
 
-## ສ່ວນປະກອບຍ່ອຍ
+## Components
 
 insert.slot.empty = ວ່າງ
 
-## ແຜງຄວບຄຸມ & ທາມລາຍ
+## Panels & Timeline
 
 inspector.badge.input = I
 inspector.badge.mute = M
@@ -215,7 +215,7 @@ inspector.track-type.return = ຣີເທີນ
 inspector.track-type.video = ວິດີໂອ
 inspector.volume.db = { $db } dB
 
-## ເມນູແອັບພລິເຄຊັນ
+## Application Menu
 
 menu.audio = ສຽງ
 menu.audio-audio_settings = ຕັ້ງຄ່າສຽງ...
@@ -260,8 +260,8 @@ menu.automation = ອໍໂຕເມຊັນ
 menu.automation-add_pan_lane = ເພີ່ມເສັ້ນຄວບຄຸມແພນ
 menu.automation-add_volume_lane = ເພີ່ມເສັ້ນຄວບຄຸມລະດັບສຽງ
 menu.automation-clear_lane = ລ້າງເສັ້ນທີ່ເລືອກ
-menu.automation-curve_hold = ຮູບແບບເສັ້ນ: ຄ້າງໄວ້
-menu.automation-curve_linear = ຮູບແບບເສັ້ນ: ເສັ້ນຊື່
+menu.automation-curve_hold = ຮູບແບບເສັ້ນ\: ຄ້າງໄວ້
+menu.automation-curve_linear = ຮູບແບບເສັ້ນ\: ເສັ້ນຊື່
 menu.automation-delete_selected_points = ລຶບຈຸດທີ່ເລືອກ
 menu.automation-mode = ໂໝດອໍໂຕເມຊັນ
 menu.automation-mode-latch = Latch
@@ -458,7 +458,7 @@ menu.window-workspace_layouts = ການຈັດວາງພື້ນທີ່
 menu.window-zoom_in = ຊູມເຂົ້າ
 menu.window-zoom_out = ຊູມອອກ
 
-## ແຜງຄວບຄຸມ & ທາມລາຍ
+## Panels & Timeline
 
 mixer.channel = ຊ່ອງ { $nn }
 mixer.insert.empty = ວ່າງ
@@ -488,7 +488,7 @@ panel.browser = ບຣາວເຊີ
 panel.inspector = ອິນສະເປັກ
 panel.mixer = ມິກເຊີ
 
-## ປລັກອິນ
+## Plugins
 
 plugin-manager.action.editor = ເປີດຕົວແກ້ໄຂປລັກອິນ
 plugin-manager.action.insert = ໃສ່ລົງໃນແທຣັກທີ່ເລືອກ
@@ -498,9 +498,9 @@ plugin-manager.action.reveal-preset = ສະແດງຄ່າທີ່ຕັ້
 plugin-manager.add-location = + ເພີ່ມບ່ອນເກັບ
 plugin-manager.column.status = ສະຖານະ
 plugin-manager.details.title = ລາຍລະອຽດປລັກອິນ
-plugin-manager.editor.hint = ຕົວແກ້ໄຂ: ສຳລັບປລັກອິນ VST3 ທີ່ມີຄ່າທີ່ຕັ້ງໄວ້ເທົ່ານັ້ນ.
-plugin-manager.error.editor-not-connected = ຕົວແກ້ໄຂປລັກອິນ: ຍັງບໍ່ທັນເຊື່ອມຕໍ່.
-plugin-manager.error.insert-not-connected = ການໃສ່ລົງແທຣັກ: ຍັງບໍ່ທັນເຊື່ອມຕໍ່.
+plugin-manager.editor.hint = ຕົວແກ້ໄຂ\: ສຳລັບປລັກອິນ VST3 ທີ່ມີຄ່າທີ່ຕັ້ງໄວ້ເທົ່ານັ້ນ.
+plugin-manager.error.editor-not-connected = ຕົວແກ້ໄຂປລັກອິນ\: ຍັງບໍ່ທັນເຊື່ອມຕໍ່.
+plugin-manager.error.insert-not-connected = ການໃສ່ລົງແທຣັກ\: ຍັງບໍ່ທັນເຊື່ອມຕໍ່.
 plugin-manager.error.panic = ການສະແກນຢຸດເຮັດວຽກກະທັນຫັນ.
 plugin-manager.field.category = ໝວດໝູ່
 plugin-manager.field.class-id = ID ຄລາສ
@@ -525,7 +525,7 @@ plugin-manager.list.empty = ຍັງບໍ່ມີປລັກອິນໃນ�
 plugin-manager.list.no-match = ບໍ່ພົບປລັກອິນທີ່ກົງກັບການກອງ.
 plugin-manager.list.scanning = ກຳລັງສະແກນ… ປລັກອິນຈະປາກົດຂຶ້ນເທື່ອລະອັນ.
 plugin-manager.ready = ພ້ອມສະແກນປລັກອິນ VST3 ແລະ CLAP.
-plugin-manager.register.failed = ລົງທະບຽນບໍ່ສຳເລັດ: { $error }
+plugin-manager.register.failed = ລົງທະບຽນບໍ່ສຳເລັດ\: { $error }
 plugin-manager.register.success = ລົງທະບຽນຄ່າທີ່ຕັ້ງໄວ້ສຳລັບ { $name } ແລ້ວ.
 plugin-manager.rescan = ສະແກນໃໝ່
 plugin-manager.rescan-all = ສະແກນທັງໝົດໃໝ່
@@ -539,7 +539,7 @@ plugin-manager.scan.in-progress = ກຳລັງສະແກນ ແລະ ລ�
 plugin-manager.scan.none-found = ບໍ່ພົບປລັກອິນໃນຕຳແໜ່ງທີ່ກຳນົດ.
 plugin-manager.scan.path-errors = ການສະແກນສຳເລັດແຕ່ມີຂໍ້ຜິດພາດ { $n } ບ່ອນ.
 plugin-manager.scan.progress = ກຳລັງສະແກນ { $current } ຈາກ { $total } — { $name }
-plugin-manager.scan.reading = ກຳລັງອ່ານຂໍ້ມູນ: { $name }
+plugin-manager.scan.reading = ກຳລັງອ່ານຂໍ້ມູນ\: { $name }
 plugin-manager.scan.registered = ລົງທະບຽນຄ່າທີ່ຕັ້ງໄວ້ { $presets } ຄ່າ. ເກັບປລັກອິນແລ້ວ { $count } ອັນ.
 plugin-manager.scan.rescan-all = ກຳລັງລຶບຄ່າທີ່ຕັ້ງໄວ້ ແລະ ສະແກນປລັກອິນໃໝ່ທັງໝົດ…
 plugin-manager.sort.category = ໝວດໝູ່
@@ -563,7 +563,7 @@ plugin.format.unknown = ບໍ່ຮູ້ຈັກ
 plugin.format.vst3 = VST3
 plugin.stub.display-name = ເອັບເຟັກ Stub
 
-## ສ່ວນປະກອບຍ່ອຍ
+## Components
 
 project-switcher.empty.no-match = ບໍ່ມີໂປຣເຈັກທີ່ກົງກັບ "{ $query }"
 project-switcher.empty.no-recent = ບໍ່ມີໂປຣເຈັກຫຼ້າສຸດ
@@ -572,7 +572,7 @@ project-switcher.section.this-window = ໜ້າຕ່າງນີ້
 project-switcher.status.saved = ບັນທຶກແລ້ວ
 project-switcher.status.unsaved = ຍັງບໍ່ໄດ້ບັນທຶກ
 
-## ຍິນດີຕ້ອນຮັບ
+## Welcome
 welcome.button.continue-without-project = ດຳເນີນການຕໍ່ໂດຍບໍ່ມີໂປຣເຈັກ
 welcome.nav.audio = ສຽງ
 welcome.nav.feed = ຂ່າວສານ
@@ -582,22 +582,22 @@ welcome.nav.start = ເລີ່ມຕົ້ນ
 welcome.open-project = ເປີດໂປຣເຈັກ
 
 
-## ສະຖານະ & ຂໍ້ຜິດພາດ
+## Status & Errors
 
 project.default-name = ໂປຣເຈັກທີ່ບໍ່ມີຊື່
-project.error.checksum = Checksum ບໍ່ກົງກັນ: ຕ້ອງການ { $expected }, ໄດ້ຮັບ { $got }
-project.error.corrupted = ໂປຣເຈັກເສຍຫາຍ: { $msg }
+project.error.checksum = Checksum ບໍ່ກົງກັນ\: ຕ້ອງການ { $expected }, ໄດ້ຮັບ { $got }
+project.error.corrupted = ໂປຣເຈັກເສຍຫາຍ\: { $msg }
 project.error.invalid-magic = ບໍ່ແມ່ນໄຟລ໌ໂປຣເຈັກ Futureboard
-project.error.io = ຂໍ້ຜິດພາດ I/O: { $e }
-project.error.unsupported-version = ເວີຊັນໂປຣເຈັກທີ່ບໍ່ຮອງຮັບ: { $v }
+project.error.io = ຂໍ້ຜິດພາດ I/O\: { $e }
+project.error.unsupported-version = ເວີຊັນໂປຣເຈັກທີ່ບໍ່ຮອງຮັບ\: { $v }
 project.file.missing = ຫາຍສາບສູນ
 project.subtitle.opened = ເປີດແລ້ວ
-project.subtitle.save-failed = ບັນທຶກບໍ່ສຳເລັດ: { $error }
+project.subtitle.save-failed = ບັນທຶກບໍ່ສຳເລັດ\: { $error }
 project.subtitle.saved = ບັນທຶກແລ້ວ
 project.subtitle.saved-locally = ບັນທຶກໄວ້ໃນເຄື່ອງແລ້ວ
 project.subtitle.unsaved-changes = ຍັງມີການປ່ຽນແປງທີ່ບໍ່ໄດ້ບັນທຶກ
 
-## ບຣາວເຊີ (Browser)
+## Browser
 
 search.browser.placeholder = ຄົ້ນຫາ...
 search.plugins-manager.placeholder = ຄົ້ນຫາປລັກອິນ...
@@ -605,7 +605,7 @@ search.plugins.placeholder = ຄົ້ນຫາປລັກອິນ...
 search.projects.placeholder = ຄົ້ນຫາໂປຣເຈັກ...
 search.settings.placeholder = ຄົ້ນຫາການຕັ້ງຄ່າ...
 
-## ການຕັ້ງຄ່າ
+## Settings
 
 settings.about.built-with = ສ້າງຂຶ້ນດ້ວຍ GPUI, Rust, ແລະ C++ VST3 SDK.
 settings.about.copyright = © 2026 ທີມງານ Futureboard Studio. ສະຫງວນລິຂະສິດທຸກປະການ.
@@ -821,17 +821,17 @@ settings.theme.fleet-dark = Fleet Dark
 settings.title = ການຕັ້ງຄ່າ
 settings.ui-scale.value = { $scale }x
 
-## ສະຖານະ & ຂໍ້ຜິດພາດ
+## Status & Errors
 
-status.audio-error = ສຽງ: { $error }
-status.audio-info = { $rate } Hz  { $backend }  ຄວາມໜ່ວງ: { $ms } ms
+status.audio-error = ສຽງ\: { $error }
+status.audio-info = { $rate } Hz  { $backend }  ຄວາມໜ່ວງ\: { $ms } ms
 status.audio-offline = ລະບົບສຽງອອບໄລນ໌
 status.audio-ready = ລະບົບສຽງພ້ອມແລ້ວ
 status.fps = { $fps } fps  { $ms } ms
 status.playing = ກຳລັງຫຼິ້ນ
 status.ready = ພ້ອມແລ້ວ
 
-## ປ່ອງຢ້ຽມໂຕ້ຕອບ
+## Dialogs
 
 template.beat-making.description = ເລນ MIDI ສຳລັບກອງ, ເບສ, ຄີບອດ ແລະ ສຽງປະກອບ.
 template.beat-making.label = ການສ້າງບີດ (Beat Making)
@@ -849,7 +849,7 @@ template.scoring.description = ການຈັດວາງແບບ MIDI ສຳ�
 template.scoring.label = ການເຮັດເພງປະກອບ (Scoring)
 template.scoring.metadata = 8 MIDI | 120 BPM
 
-## ແຜງຄວບຄຸມ & ທາມລາຍ
+## Panels & Timeline
 
 timeline.snap.1-bar = 1 ຫ້ອງ
 timeline.snap.auto = ອໍໂຕ
@@ -869,7 +869,7 @@ track-header.type.master = MAS
 track-header.type.midi = MID
 track-header.type.return = RTN
 
-## ສ່ວນປະກອບແອັບ
+## App Chrome
 
 transport.bpm-label = BPM
 transport.follow = ຕິດຕາມ
@@ -885,7 +885,7 @@ window.maximize = ຂະຫຍາຍ
 window.minimize = -
 window.restore = ຄືນຄ່າ
 
-## ປ່ອງຢ້ຽມໂຕ້ຕອບ
+## Dialogs
 
 wizard.bpm = BPM
 wizard.button.browse = ເລືອກ...
