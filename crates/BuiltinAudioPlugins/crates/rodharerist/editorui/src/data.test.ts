@@ -6,6 +6,7 @@ import {
   presetsData,
   stageModelsForPreset,
 } from "./data";
+import { OUTPUT_TRIM } from "./globals";
 
 describe("factory presets", () => {
   test("use unique stable ids and names", () => {
@@ -65,6 +66,56 @@ describe("factory presets", () => {
           param.max,
         );
       }
+    }
+  });
+
+  // The bank is level-matched through Output Trim (see `Preset.outputTrim`), so
+  // a preset that plays a rig but declares no level is one that was never
+  // measured — the exact gap that let the bank drift 25 dB apart.
+  test("carry a measured output level within the DSP's trim range", () => {
+    for (const preset of presetsData) {
+      const playsSomething = (preset.path ?? []).length > 0;
+      if (!playsSomething) {
+        expect(preset.outputTrim, `${preset.id} empty preset`).toBeUndefined();
+        continue;
+      }
+      expect(preset.outputTrim, `${preset.id} missing outputTrim`).toBeNumber();
+      expect(preset.outputTrim, `${preset.id} outputTrim minimum`).toBeGreaterThanOrEqual(
+        OUTPUT_TRIM.min,
+      );
+      expect(preset.outputTrim, `${preset.id} outputTrim maximum`).toBeLessThanOrEqual(
+        OUTPUT_TRIM.max,
+      );
+    }
+  });
+
+  // The phaser voices take Rate on a cubic law scaled per voice
+  // (`rate_hz_from_knob` in `src/dsp/phaser.rs`), so a knob value read as if it
+  // were linear in Hz lands near DC: Molam Swirl sat at 2.2, which is 0.05 Hz —
+  // one sweep every twenty seconds. Anything below ~0.15 Hz is a stopped LFO,
+  // not a slow one.
+  test("set phaser-voice rates that actually sweep", () => {
+    const RATE_SCALE: Record<string, number> = {
+      phaser: 0.85,
+      molam_swirl: 0.55,
+      phin_vibe: 0.9,
+      khaen_swirl: 0.55,
+      bi_lam: 0.4,
+      isan_jet: 1.35,
+    };
+    for (const preset of presetsData) {
+      if (!(preset.path ?? []).includes("mod")) continue;
+      const modModel = stageModelsForPreset(preset).mod;
+      const scale = RATE_SCALE[modModel];
+      if (scale === undefined) continue; // chorus/flanger/tremolo are linear
+      const knob =
+        preset.values.chorus_rate ??
+        parameterDefaults[modModel]!.find((p) => p.id === "chorus_rate")!.val;
+      const t = knob / 10;
+      const hz = (0.05 + t * t * t * 3.95) * scale;
+      expect(hz, `${preset.id} ${modModel} rate ${knob} = ${hz.toFixed(3)} Hz`).toBeGreaterThan(
+        0.15,
+      );
     }
   });
 });
