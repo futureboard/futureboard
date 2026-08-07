@@ -146,34 +146,42 @@ pub fn list_available_gpu_devices() -> Vec<GpuDeviceInfo> {
 /// Classify this machine from the adapters wgpu can see, for the UI's
 /// render-cost profile (see [`crate::perf::GpuClass`]).
 ///
-/// Only the presence of a discrete adapter matters. Enumeration is the same
-/// call the Settings GPU list uses — a few milliseconds, once, at startup — and
-/// a driver that cannot enumerate yields `Unknown`, which never slows the UI
-/// down on a guess.
+/// A discrete adapter is always enough. Apple Silicon is integrated silicon
+/// but has the memory bandwidth the LowEnd / 60 Hz DisplaySync profile was
+/// written *against* leaving free — so it is treated as capable rather than
+/// low-end. Enumeration is the same call the Settings GPU list uses — a few
+/// milliseconds, once, at startup — and a driver that cannot enumerate yields
+/// `Unknown`, which never slows the UI down on a guess.
 pub fn detect_gpu_class() -> crate::perf::GpuClass {
-    use crate::perf::GpuClass;
     let result = std::panic::catch_unwind(|| {
         let instance = wgpu::Instance::default();
         let adapters: Vec<wgpu::Adapter> =
             pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
         adapters
             .into_iter()
-            .map(|adapter| adapter.get_info().device_type)
+            .map(|adapter| {
+                let info = adapter.get_info();
+                (info.device_type, info.name)
+            })
             .collect::<Vec<_>>()
     });
-    let Ok(types) = result else {
-        return GpuClass::Unknown;
+    let Ok(adapters) = result else {
+        return crate::perf::GpuClass::Unknown;
     };
-    if types.is_empty() {
-        return GpuClass::Unknown;
-    }
-    if types
-        .iter()
-        .any(|kind| matches!(kind, wgpu::DeviceType::DiscreteGpu))
-    {
-        GpuClass::Discrete
-    } else {
-        GpuClass::IntegratedOnly
+    crate::perf::classify_gpu_adapters(
+        adapters
+            .iter()
+            .map(|(kind, name)| (device_type_class(*kind), name.as_str())),
+    )
+}
+
+fn device_type_class(kind: wgpu::DeviceType) -> crate::perf::GpuDeviceKind {
+    match kind {
+        wgpu::DeviceType::DiscreteGpu => crate::perf::GpuDeviceKind::Discrete,
+        wgpu::DeviceType::IntegratedGpu => crate::perf::GpuDeviceKind::Integrated,
+        wgpu::DeviceType::VirtualGpu => crate::perf::GpuDeviceKind::Virtual,
+        wgpu::DeviceType::Cpu => crate::perf::GpuDeviceKind::Cpu,
+        wgpu::DeviceType::Other => crate::perf::GpuDeviceKind::Other,
     }
 }
 

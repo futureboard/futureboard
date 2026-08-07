@@ -458,19 +458,74 @@ pub fn record_notify(reason: &'static str) {
 /// adapters wgpu can see (see `render::wgpu_renderer::detect_gpu_class`) and
 /// published here so cheap render-path checks never touch wgpu.
 ///
-/// The distinction that matters is "is there a discrete GPU at all": a
-/// machine with only integrated graphics — an Intel Mac, a Windows laptop on
-/// Iris/UHD/Vega — pays for every extra frame and every extra grid line in
-/// shared memory bandwidth the CPU also needs.
+/// Low-end shared-memory iGPUs — Intel Iris/UHD, older Radeon Vega on Windows
+/// laptops, Intel Macs — pay for every extra frame in bandwidth the CPU also
+/// needs. Apple Silicon is integrated metal but is *not* that class of
+/// device: treating it as low-end would leave ProMotion frames on the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuClass {
-    /// No discrete adapter present. Integrated / software rendering only.
+    /// No discrete or otherwise capable adapter: classic low-end iGPU only.
     IntegratedOnly,
-    /// At least one discrete adapter is available to the process.
+    /// At least one discrete adapter — or a capable integrated GPU such as
+    /// Apple Silicon — is available to the process.
     Discrete,
     /// Not detected (enumeration failed, or the `gpu-renderer` feature is off).
     /// Treated exactly like `Discrete`: never slow the UI down on a guess.
     Unknown,
+}
+
+/// Adapter flavour used by [`classify_gpu_adapters`]. Kept as a plain enum so
+/// the pure classifier can be unit-tested without linking wgpu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuDeviceKind {
+    Discrete,
+    Integrated,
+    Virtual,
+    Cpu,
+    Other,
+}
+
+/// Classify enumerated adapters into a [`GpuClass`]. Pure policy: discrete
+/// wins, then capable integrated (Apple Silicon), then classic iGPU.
+pub fn classify_gpu_adapters<'a, I>(adapters: I) -> GpuClass
+where
+    I: IntoIterator<Item = (GpuDeviceKind, &'a str)>,
+{
+    let mut saw_any = false;
+    let mut saw_discrete = false;
+    let mut saw_capable_integrated = false;
+    let mut saw_classic_integrated = false;
+    for (kind, name) in adapters {
+        saw_any = true;
+        match kind {
+            GpuDeviceKind::Discrete => saw_discrete = true,
+            GpuDeviceKind::Integrated if is_capable_integrated_gpu(name) => {
+                saw_capable_integrated = true;
+            }
+            GpuDeviceKind::Integrated => saw_classic_integrated = true,
+            GpuDeviceKind::Virtual | GpuDeviceKind::Cpu | GpuDeviceKind::Other => {}
+        }
+    }
+    if !saw_any {
+        GpuClass::Unknown
+    } else if saw_discrete || saw_capable_integrated {
+        GpuClass::Discrete
+    } else if saw_classic_integrated {
+        GpuClass::IntegratedOnly
+    } else {
+        // Software / virtual only — do not apply the low-end cap on a guess.
+        GpuClass::Unknown
+    }
+}
+
+/// Integrated GPUs that still have enough shared-memory bandwidth that the
+/// LowEnd profile and 60 Hz DisplaySync cap would only waste panel rate.
+///
+/// Today: Apple Silicon (`"Apple M1"`, `"Apple M4 Pro"`, `"Apple GPU"`, …).
+/// Keep this list tight — Iris/UHD/Vega must continue to select LowEnd.
+fn is_capable_integrated_gpu(name: &str) -> bool {
+    // wgpu Metal reports names like "Apple M3 Pro" / "Apple M1" / "Apple GPU".
+    name.to_ascii_lowercase().starts_with("apple ")
 }
 
 static DETECTED_GPU_CLASS: std::sync::OnceLock<GpuClass> = std::sync::OnceLock::new();
@@ -752,5 +807,31 @@ mod power_mode_tests {
         assert!(PowerMode::LowEnd.meter_min_delta() > PowerMode::Balanced.meter_min_delta());
         assert!(PowerMode::LowEnd.grid_line_budget_scale() < 1.0);
         assert!(!PowerMode::LowEnd.allow_sub_grid_lines());
+    }
+
+    #[test]
+    fn classic_igpu_is_low_end_but_apple_silicon_is_not() {
+        assert_eq!(
+            classify_gpu_adapters([(GpuDeviceKind::Integrated, "Intel(R) UHD Graphics 620")]),
+            GpuClass::IntegratedOnly
+        );
+        assert_eq!(
+            classify_gpu_adapters([(GpuDeviceKind::Integrated, "AMD Radeon(TM) Graphics")]),
+            GpuClass::IntegratedOnly
+        );
+        assert_eq!(
+            classify_gpu_adapters([(GpuDeviceKind::Integrated, "Apple M3 Pro")]),
+            GpuClass::Discrete,
+            "Apple Silicon must not inherit the Iris/UHD LowEnd profile"
+        );
+        assert_eq!(
+            classify_gpu_adapters([(GpuDeviceKind::Discrete, "NVIDIA GeForce RTX 3070")]),
+            GpuClass::Discrete
+        );
+        assert_eq!(
+            classify_gpu_adapters([(GpuDeviceKind::Cpu, "llvmpipe")]),
+            GpuClass::Unknown
+        );
+        assert_eq!(classify_gpu_adapters([]), GpuClass::Unknown);
     }
 }
