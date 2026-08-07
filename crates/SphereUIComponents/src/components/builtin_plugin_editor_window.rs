@@ -1820,11 +1820,27 @@ impl Render for BuiltinPluginEditorWindow {
             _ => None,
         };
 
+        // Space must work even when focus is not on the CEF surface (titlebar /
+        // instance sidebar) and on every OS — not only off-screen hosts. Capture
+        // phase on the shell so bare Space always reaches the same transport
+        // command as the arrangement. Windowed CEF still also claims via
+        // OnPreKeyEvent; that path returns 1 (consumed) so we never toggle twice.
+        let transport_claim = cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            if !Self::is_transport_toggle_keystroke(&event.keystroke) || event.is_held {
+                return;
+            }
+            if let Some(dispatch) = this.host_ops.dispatch_global_command.as_ref() {
+                dispatch("transport:play-pause", cx);
+                cx.stop_propagation();
+            }
+        });
+
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(Colors::surface_panel())
+            .capture_key_down(transport_claim)
             .child(
                 // Shared external-dialog titlebar: gives this window the same
                 // chrome as every other floating Studio surface, plus the drag
@@ -2103,12 +2119,27 @@ impl BuiltinPluginEditorWindow {
         Self::schedule_input_pump(cx);
     }
 
+    /// Bare Space (no Ctrl/Alt/Cmd/Win, no platform key) — DAW transport
+    /// owns this, not the page. Matches the CEF `OnPreKeyEvent` contract used
+    /// by the windowed Windows path.
+    fn is_transport_toggle_keystroke(keystroke: &gpui::Keystroke) -> bool {
+        let key = keystroke.key.as_str();
+        if key != "space" && key != " " {
+            return false;
+        }
+        let mods = keystroke.modifiers;
+        !(mods.control || mods.alt || mods.platform || mods.secondary())
+    }
+
     fn on_surface_key_down(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Bare Space is claimed on the shell (`capture_key_down` in `render`) so
+        // it never lands here as character input into the page.
+
         let modifiers = self.surface.modifiers(event.keystroke.modifiers);
         if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Down, modifiers) {
             self.send_input(EditorInput::Key(key));

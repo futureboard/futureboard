@@ -145,6 +145,14 @@ sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor *processor);
 SPHERE_DAUX_VST3_API int
 sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor *processor);
 
+/// Claim one bare-Space transport toggle from any editor UI thread. Process-wide.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_claim_transport_toggle(void);
+
+/// Number of bare Space presses claimed from plug-in editor windows since the
+/// last call. Process-wide; the host turns each into HostEvent::TransportToggleRequested.
+SPHERE_DAUX_VST3_API unsigned int
+sphere_daux_vst3_take_transport_toggle_requests(void);
+
 SPHERE_DAUX_VST3_API void
 sphere_daux_vst3_embed_set_waiting_stage(SphereDauxVst3Processor *processor,
                                          const char *stage);

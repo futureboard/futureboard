@@ -102,9 +102,23 @@ extern "C" void sphere_plugin_host_mac_ui_init(void) {
     // stays the app the user sees.
     [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
     [app finishLaunching];
+
+    // Local monitor covers every key window in this process, including plug-in
+    // views that never go through nextEventMatchingMask in our pump (CEF/JUCE
+    // nested run loops). Returning nil swallows the event — same contract as
+    // the Windows WH_KEYBOARD_LL path.
+    [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                     handler:^NSEvent *(NSEvent *event) {
+                                       if (claim_transport_key(event)) {
+                                         return nil;
+                                       }
+                                       return event;
+                                     }];
+
     std::fprintf(stderr,
                  "[plugin-host-ui/mac] NSApplication ready policy=accessory "
-                 "main_thread=%d\n",
+                 "transport_key_monitor=on main_thread=%d\n",
                  (int)NSThread.isMainThread);
   }
 }
