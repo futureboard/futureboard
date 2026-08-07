@@ -464,6 +464,7 @@ mixer.channel = ຊ່ອງ { $nn }
 mixer.insert.empty = ວ່າງ
 mixer.master.bus-label = MST·BUS
 mixer.master.label = ມາສເຕີ
+mixer.master.output = ຊ່ອງອອກ
 mixer.monitor.label = ມໍນິເຕີ
 mixer.monitor.bus-label = ຫ້ອງຄວບຄຸມ
 mixer.monitor.source = ແຫຼ່ງສັນຍານ

@@ -1955,38 +1955,11 @@ pub(crate) fn master_strip(
         .border_l(px(1.0))
         .border_color(Colors::border_default())
         .child(div().w_full().h(px(2.0)).bg(accent))
-        // Header
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(SEC_HEADER_H))
-                .px(px(5.0))
-                .border_b(px(1.0))
-                .border_color(Colors::border_default())
-                .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_primary())
-                                .child(i18n.tr("mixer.master.label")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(7.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_secondary())
-                                .child(i18n.tr("mixer.master.bus-label")),
-                        ),
-                ),
-        )
+        .child(pinned_strip_header(
+            accent,
+            i18n.tr("mixer.master.label"),
+            i18n.tr("mixer.master.bus-label"),
+        ))
         .child(master_inserts_section(
             accent, master, callbacks, insert_h, i18n,
         ))
@@ -1999,45 +1972,20 @@ pub(crate) fn master_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                // Master skips pan; show the level pill in this row instead so
-                // the overall vertical rhythm matches a normal strip.
+                // Master skips pan. This row states the bus format only — a
+                // caption, not a control: it used to be an accent-bordered chip
+                // that read as an armed toggle nobody could press.
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap(px(4.0))
                         .h(px(SEC_PAN_H))
                         .border_b(px(1.0))
                         .border_color(Colors::border_default())
                         .px(px(5.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .min_w(px(46.0))
-                                .px(px(6.0))
-                                .h(px(14.0))
-                                .rounded_sm()
-                                .bg(Colors::button_bg())
-                                .border(px(1.0))
-                                .border_color(Colors::accent_primary())
-                                .text_size(px(9.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_secondary())
-                                .child(i18n.tr("mixer.stereo")),
-                        )
-                        // Output destination — a logical Output Audio
-                        // Connection, never a raw hardware pair.
-                        .child(control_room_selector(
-                            "master-output",
-                            i18n.tr("mixer.master.output"),
-                            master.output_label.clone(),
-                            false,
-                            callbacks.on_master_output_picker.clone(),
-                        )),
+                        .child(strip_caption(i18n.tr("mixer.stereo"))),
                 )
                 .child(
                     div()
@@ -2088,36 +2036,75 @@ pub(crate) fn master_strip(
                                 )),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(SEC_BUTTONS_H))
-                        .px(px(4.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .h(px(16.0))
-                                .px(px(6.0))
-                                .rounded_sm()
-                                .bg(Colors::button_bg())
-                                .border(px(1.0))
-                                .border_color(Colors::border_default())
-                                .text_size(px(8.5))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_muted())
-                                .child(master.output_label.clone()),
-                        ),
-                ),
+                // Master has no M/S/R/I; the row is kept empty so the fader,
+                // meter, and footer stay on the same baselines as every channel
+                // strip beside it.
+                .child(div().h(px(SEC_BUTTONS_H)).w_full().flex_none()),
         )
+        // Output destination — a logical Output Audio Connection, never a raw
+        // hardware pair. Same slot as a channel strip's output picker.
+        .child(control_room_output_button(
+            "master-output",
+            i18n.tr("mixer.master.output"),
+            master.output_label.clone(),
+            callbacks.on_master_output_picker.clone(),
+        ))
         .child(strip_footer(&i18n.tr("mixer.master.label")))
 }
 
+/// Tooltip body for a pinned-strip control. The strips are 88 px wide, so every
+/// routing value truncates sooner or later — the hover text is the only place
+/// the full name can be read.
+struct StripTooltip(String);
+
+impl gpui::Render for StripTooltip {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded_sm()
+            .bg(Colors::surface_raised())
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .text_size(px(10.0))
+            .text_color(Colors::text_secondary())
+            .child(self.0.clone())
+    }
+}
+
+fn strip_tooltip(
+    text: String,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |_window, cx| cx.new(|_| StripTooltip(text.clone())).into()
+}
+
+/// Quiet, non-interactive caption used where a pinned strip states a fact
+/// (channel format) rather than offering a control. Deliberately has no chip,
+/// border, or hover: only real controls get button chrome on these strips.
+fn strip_caption(text: String) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .text_size(px(8.5))
+        .line_height(px(11.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .truncate()
+        .text_color(Colors::text_muted())
+        .child(text)
+}
+
 /// One Control Room selector row: a quiet label and a value chip that opens a
-/// picker. Used for both Source and Output so they read as one control group.
+/// picker. Used for the Monitor Source so it reads as one control group.
+///
+/// The chip carries the full affordance set of a real dropdown — chevron, hover,
+/// pointer cursor, and a tooltip with the untruncated value — because clicking
+/// it is the only way to change the routing.
 fn control_room_selector(
     id: &str,
     label: String,
@@ -2126,22 +2113,33 @@ fn control_room_selector(
     on_click: Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
     let clickable = on_click.is_some();
+    let tooltip_value = value.clone();
     div()
         .id(gpui::ElementId::Name(id.to_string().into()))
         .flex()
         .flex_col()
         .w_full()
-        .gap(px(1.0))
+        .min_w(px(0.0))
+        .gap(px(2.0))
         .child(
             div()
+                .w_full()
+                .min_w(px(0.0))
+                .truncate()
                 .text_size(px(7.5))
+                .line_height(px(9.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_secondary())
                 .child(label),
         )
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(3.0))
                 .w_full()
+                .min_w(px(0.0))
                 .px(px(4.0))
                 .py(px(2.0))
                 .rounded_sm()
@@ -2152,14 +2150,34 @@ fn control_room_selector(
                 } else {
                     Colors::border_default()
                 })
-                .text_size(px(8.5))
-                .truncate()
-                .text_color(Colors::text_primary())
                 .when(clickable, |chip| {
-                    chip.cursor(gpui::CursorStyle::PointingHand)
+                    chip.cursor(gpui::CursorStyle::PointingHand).hover(|s| {
+                        s.bg(Colors::surface_control_hover())
+                            .border_color(Colors::border_strong())
+                    })
                 })
-                .child(value),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(8.5))
+                        .line_height(px(11.0))
+                        .text_color(Colors::text_primary())
+                        .child(value),
+                )
+                .when(clickable, |chip| {
+                    chip.child(
+                        svg()
+                            .path(assets::ICON_CHEVRON_DOWN_PATH)
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .flex_shrink_0()
+                            .text_color(Colors::text_faint()),
+                    )
+                }),
         )
+        .when(clickable, |row| row.tooltip(strip_tooltip(tooltip_value)))
         .when_some(on_click, |row, cb| {
             row.on_mouse_down(
                 gpui::MouseButton::Left,
@@ -2171,6 +2189,135 @@ fn control_room_selector(
                 },
             )
         })
+}
+
+/// Output-routing button for a pinned strip, in the same slot and shape as a
+/// channel strip's [`output_button`] so all three read as one control.
+///
+/// Master and Monitor previously repeated their output name as a static chip
+/// here while the only working picker sat elsewhere in the strip — this is that
+/// row turned into the real control, with the duplicate removed.
+fn control_room_output_button(
+    id: &str,
+    label: String,
+    value: String,
+    on_open: Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App)>>,
+) -> impl IntoElement {
+    let clickable = on_open.is_some();
+    let tooltip_value = format!("{label}: {value}");
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(22.0))
+        .px(px(4.0))
+        .child(
+            div()
+                .id(gpui::ElementId::Name(id.to_string().into()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(4.0))
+                .h(px(16.0))
+                .px(px(6.0))
+                .max_w_full()
+                .min_w(px(0.0))
+                .rounded_sm()
+                .bg(Colors::button_bg())
+                .border(px(1.0))
+                .border_color(Colors::border_default())
+                .when(clickable, |button| {
+                    button
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|s| {
+                            s.bg(Colors::surface_control_hover())
+                                .border_color(Colors::border_strong())
+                        })
+                        .tooltip(strip_tooltip(tooltip_value))
+                })
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(8.5))
+                        .line_height(px(11.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_muted())
+                        .child(value),
+                )
+                .when(clickable, |button| {
+                    button.child(
+                        svg()
+                            .path(assets::ICON_CHEVRON_DOWN_PATH)
+                            .w(px(9.0))
+                            .h(px(9.0))
+                            .flex_shrink_0()
+                            .text_color(Colors::text_faint()),
+                    )
+                })
+                .when_some(on_open, |button, cb| {
+                    button
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            move |event: &gpui::MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                let x: f32 = event.position.x.into();
+                                // Same drop as a channel strip's output picker:
+                                // the menu opens under the pill, not over it.
+                                let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
+                                cb(&(x, y), window, cx);
+                            },
+                        )
+                        .occlude()
+                }),
+        )
+}
+
+/// Two-line pinned-strip header (name + bus caption). Both lines truncate and
+/// carry explicit line heights: the captions are 7.5 px, and scripts with tall
+/// marks (Thai, Lao) otherwise collide with the name above them.
+fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(SEC_HEADER_H))
+        .px(px(5.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_default())
+        .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(10.0))
+                        .line_height(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(7.5))
+                        .line_height(px(10.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_secondary())
+                        .child(bus_label),
+                ),
+        )
 }
 
 /// A Control Room toggle (Mute / Dim / Mono).
@@ -2289,42 +2436,14 @@ pub(crate) fn monitor_strip(
         .border_l(px(1.0))
         .border_color(Colors::border_default())
         .child(div().w_full().h(px(2.0)).bg(accent))
-        // Header
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(SEC_HEADER_H))
-                .px(px(5.0))
-                .border_b(px(1.0))
-                .border_color(Colors::border_default())
-                .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w(px(0.0))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_primary())
-                                .child(i18n.tr("mixer.monitor.label")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(7.5))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .truncate()
-                                .text_color(Colors::text_secondary())
-                                .child(i18n.tr("mixer.monitor.bus-label")),
-                        ),
-                ),
-        )
-        // Routing section — Source and Output. Occupies Master's insert slot so
-        // the two pinned strips stay on matching baselines.
+        .child(pinned_strip_header(
+            accent,
+            i18n.tr("mixer.monitor.label"),
+            i18n.tr("mixer.monitor.bus-label"),
+        ))
+        // Routing section — Source only. Occupies Master's insert slot so the
+        // two pinned strips stay on matching baselines; Output moved down to the
+        // shared output-picker row, where every other strip keeps it.
         .child(
             div()
                 .flex()
@@ -2342,13 +2461,6 @@ pub(crate) fn monitor_strip(
                     source_value,
                     monitor.listen_active,
                     callbacks.on_monitor_source_picker.clone(),
-                ))
-                .child(control_room_selector(
-                    "monitor-output",
-                    i18n.tr("mixer.monitor.output"),
-                    monitor.output_name.clone(),
-                    false,
-                    callbacks.on_monitor_output_picker.clone(),
                 )),
         )
         // Lower control: Mute/Dim/Mono, fader cluster, output label.
@@ -2451,32 +2563,16 @@ pub(crate) fn monitor_strip(
                                 )),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .h(px(SEC_BUTTONS_H))
-                        .px(px(4.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .h(px(16.0))
-                                .px(px(6.0))
-                                .rounded_sm()
-                                .bg(Colors::button_bg())
-                                .border(px(1.0))
-                                .border_color(Colors::border_default())
-                                .text_size(px(8.5))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .truncate()
-                                .text_color(Colors::text_muted())
-                                .child(monitor.output_name.clone()),
-                        ),
-                ),
+                // Mute/Dim/Mono already took the pan row; this row stays empty so
+                // the fader, meter, and footer align with the strips beside it.
+                .child(div().h(px(SEC_BUTTONS_H)).w_full().flex_none()),
         )
+        .child(control_room_output_button(
+            "monitor-output",
+            i18n.tr("mixer.monitor.output"),
+            monitor.output_name.clone(),
+            callbacks.on_monitor_output_picker.clone(),
+        ))
         .child(strip_footer(&i18n.tr("mixer.monitor.label")))
 }
 

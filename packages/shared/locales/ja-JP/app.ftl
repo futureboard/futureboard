@@ -464,6 +464,7 @@ mixer.channel = CH{ $nn }
 mixer.insert.empty = empty
 mixer.master.bus-label = MST·BUS
 mixer.master.label = Master
+mixer.master.output = 出力
 mixer.monitor.label = モニター
 mixer.monitor.bus-label = CONTROL ROOM
 mixer.monitor.source = ソース

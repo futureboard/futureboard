@@ -462,8 +462,9 @@ menu.window-zoom_out = ซูมออก
 
 mixer.channel = CH{ $nn }
 mixer.insert.empty = ว่าง
-mixer.master.bus-label = Master Bus
+mixer.master.bus-label = MST·BUS
 mixer.master.label = มาสเตอร์
+mixer.master.output = เอาต์พุต
 mixer.monitor.label = มอนิเตอร์
 mixer.monitor.bus-label = CONTROL ROOM
 mixer.monitor.source = แหล่งสัญญาณ
