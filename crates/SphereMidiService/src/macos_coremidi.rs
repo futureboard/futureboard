@@ -11,6 +11,8 @@ use crate::{
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int, c_ulong};
 use std::ptr;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
 type OSStatus = c_int;
@@ -55,7 +57,7 @@ unsafe extern "C" {
     ) -> OSStatus;
     fn MIDIClientCreate(
         name: CFStringRef,
-        notify_proc: *const c_void,
+        notify_proc: Option<unsafe extern "C" fn(*const MIDINotification, *mut c_void)>,
         notify_ref_con: *mut c_void,
         out_client: *mut MIDIClientRef,
     ) -> OSStatus;
@@ -105,6 +107,87 @@ unsafe extern "C" {
         encoding: CFStringEncoding,
     ) -> u8;
     fn CFRelease(cf: *const c_void);
+}
+
+/// CoreMIDI notification message ids we care about. Any of these means the port
+/// inventory moved, so a cached device list is stale.
+const K_MIDI_MSG_SETUP_CHANGED: i32 = 1;
+const K_MIDI_MSG_OBJECT_ADDED: i32 = 2;
+const K_MIDI_MSG_OBJECT_REMOVED: i32 = 3;
+
+#[repr(C)]
+struct MIDINotification {
+    message_id: i32,
+    message_size: u32,
+}
+
+/// The process-wide CoreMIDI client, and whether the inventory changed since it
+/// was last checked.
+static CLIENT: AtomicU32 = AtomicU32::new(0);
+static CLIENT_INIT: Once = Once::new();
+static PORTS_CHANGED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn midi_notify_proc(message: *const MIDINotification, _ref_con: *mut c_void) {
+    if message.is_null() {
+        return;
+    }
+    // SAFETY: CoreMIDI passes a live notification for the duration of the call.
+    let message_id = unsafe { (*message).message_id };
+    if matches!(
+        message_id,
+        K_MIDI_MSG_SETUP_CHANGED | K_MIDI_MSG_OBJECT_ADDED | K_MIDI_MSG_OBJECT_REMOVED
+    ) {
+        PORTS_CHANGED.store(true, Ordering::Release);
+    }
+}
+
+/// The shared CoreMIDI client, created once per process.
+///
+/// **This is what makes enumeration work at all.** CoreMIDI connects a process
+/// to `MIDIServer` lazily, when it first creates a client; until then
+/// `MIDIGetNumberOfSources` / `MIDIGetNumberOfDestinations` report **zero** even
+/// with hardware attached. Every other CoreMIDI implementation (RtMidi, midir's
+/// CoreMIDI backend) creates a client before enumerating for this reason.
+///
+/// The client is deliberately never disposed: it is the process's connection to
+/// the MIDI server, and tearing it down would take the port inventory with it.
+/// Returns 0 when creation failed, which callers treat as "enumerate anyway" —
+/// a failed bootstrap must degrade to the previous behaviour, not to a panic.
+fn shared_client() -> MIDIClientRef {
+    CLIENT_INIT.call_once(|| {
+        let name = cfstr("Futureboard");
+        if name.is_null() {
+            eprintln!("[MIDI scan] CoreMIDI client name allocation failed");
+            return;
+        }
+        let mut client: MIDIClientRef = 0;
+        let status =
+            unsafe { MIDIClientCreate(name, Some(midi_notify_proc), ptr::null_mut(), &mut client) };
+        unsafe { CFRelease(name) };
+        if status != 0 || client == 0 {
+            // -10844 is kMIDIServerStartErr; anything non-zero means the
+            // process could not reach MIDIServer.
+            eprintln!(
+                "[MIDI scan] MIDIClientCreate failed (status {status}); CoreMIDI enumeration \
+                 will report no devices"
+            );
+            return;
+        }
+        CLIENT.store(client, Ordering::Release);
+        if crate::midi_settings_debug_enabled() {
+            eprintln!("[MIDI scan] CoreMIDI client created (ref {client})");
+        }
+    });
+    CLIENT.load(Ordering::Acquire)
+}
+
+/// True when CoreMIDI reported an added/removed port since the last call, and
+/// clears the flag. Notifications are delivered on the run loop of the thread
+/// that created the client, so this reports changes only when that thread runs
+/// a run loop — it is a hint for refreshing a cache, never the sole path to a
+/// correct device list.
+pub fn take_ports_changed() -> bool {
+    PORTS_CHANGED.swap(false, Ordering::AcqRel)
 }
 
 fn cfstr(s: &str) -> CFStringRef {
@@ -165,12 +248,15 @@ fn endpoint_name(endpoint: MIDIEndpointRef) -> Option<String> {
 }
 
 pub fn scan_ports() -> Vec<DetectedMidiDevice> {
+    // Establish the MIDIServer connection first. Without it CoreMIDI reports
+    // zero endpoints regardless of what is plugged in.
+    let client = shared_client();
     let mut devices = Vec::new();
     unsafe {
         let n_src = MIDIGetNumberOfSources();
         for i in 0..n_src {
             let src = MIDIGetSource(i);
-            if let Some(name) = endpoint_name(src) {
+            if let Some(name) = endpoint_name(src).map(|name| crate::normalize_port_name(&name)) {
                 devices.push(DetectedMidiDevice {
                     id: stable_id(MidiDeviceDirection::Input, &name),
                     name,
@@ -181,13 +267,28 @@ pub fn scan_ports() -> Vec<DetectedMidiDevice> {
         let n_dst = MIDIGetNumberOfDestinations();
         for i in 0..n_dst {
             let dst = MIDIGetDestination(i);
-            if let Some(name) = endpoint_name(dst) {
+            if let Some(name) = endpoint_name(dst).map(|name| crate::normalize_port_name(&name)) {
                 devices.push(DetectedMidiDevice {
                     id: stable_id(MidiDeviceDirection::Output, &name),
                     name,
                     direction: MidiDeviceDirection::Output,
                 });
             }
+        }
+        if crate::midi_settings_debug_enabled() {
+            eprintln!(
+                "[MIDI scan] CoreMIDI client={client} sources={n_src} destinations={} named={}",
+                MIDIGetNumberOfDestinations(),
+                devices.len()
+            );
+        }
+        // Endpoints exist but none of them yielded a name: the list would be
+        // silently empty, so say why rather than looking like "no hardware".
+        if devices.is_empty() && (n_src > 0 || MIDIGetNumberOfDestinations() > 0) {
+            eprintln!(
+                "[MIDI scan] CoreMIDI reported endpoints but no readable names; \
+                 no MIDI devices will be listed"
+            );
         }
     }
     coalesce_detected_midi_devices(devices)
@@ -259,13 +360,20 @@ impl Drop for MacMidiInputConnection {
 }
 
 fn find_source_by_name_or_id(device_id: &str, device_name: &str) -> Option<MIDIEndpointRef> {
+    // Same bootstrap as the scan: without a client there are no endpoints to
+    // find, so opening would fail with a misleading "source not found".
+    let _ = shared_client();
     let ordinal = stable_id_ordinal(device_id, device_name);
     let mut occurrence = 0usize;
     unsafe {
         let n = MIDIGetNumberOfSources();
         for i in 0..n {
             let src = MIDIGetSource(i);
-            if endpoint_name(src).as_deref() == Some(device_name) {
+            if endpoint_name(src)
+                .map(|name| crate::normalize_port_name(&name))
+                .as_deref()
+                == Some(device_name)
+            {
                 occurrence += 1;
                 if occurrence == ordinal {
                     return Some(src);
@@ -277,12 +385,13 @@ fn find_source_by_name_or_id(device_id: &str, device_name: &str) -> Option<MIDIE
 }
 
 fn find_destination_by_name_or_id(device_id_or_name: &str) -> Option<(MIDIEndpointRef, String)> {
+    let _ = shared_client();
     let mut occurrences = std::collections::HashMap::<String, usize>::new();
     unsafe {
         let n = MIDIGetNumberOfDestinations();
         for i in 0..n {
             let dst = MIDIGetDestination(i);
-            if let Some(name) = endpoint_name(dst) {
+            if let Some(name) = endpoint_name(dst).map(|name| crate::normalize_port_name(&name)) {
                 let stable = stable_id(MidiDeviceDirection::Output, &name);
                 let stable_io = stable_id(MidiDeviceDirection::InputOutput, &name);
                 let occurrence = occurrences.entry(name.clone()).or_insert(0);
@@ -324,8 +433,7 @@ pub fn open_inputs(
         if client_name.is_null() {
             continue;
         }
-        let status =
-            unsafe { MIDIClientCreate(client_name, ptr::null(), ptr::null_mut(), &mut client) };
+        let status = unsafe { MIDIClientCreate(client_name, None, ptr::null_mut(), &mut client) };
         unsafe { CFRelease(client_name) };
         if status != 0 || client == 0 {
             eprintln!("[MIDI input] MIDIClientCreate failed for '{device_name}': {status}");
@@ -433,8 +541,7 @@ pub fn open_output(device_id_or_name: &str) -> Option<MacMidiOutputConnection> {
     if client_name.is_null() {
         return None;
     }
-    let status =
-        unsafe { MIDIClientCreate(client_name, ptr::null(), ptr::null_mut(), &mut client) };
+    let status = unsafe { MIDIClientCreate(client_name, None, ptr::null_mut(), &mut client) };
     unsafe { CFRelease(client_name) };
     if status != 0 || client == 0 {
         eprintln!("[MIDI output] MIDIClientCreate failed for '{name}': {status}");

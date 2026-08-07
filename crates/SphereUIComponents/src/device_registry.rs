@@ -140,7 +140,11 @@ pub fn scan_midi_resilient() -> u64 {
 /// read if startup never scanned (e.g. the `--skip-splash` path), so the cache
 /// is correct without ever scanning on a hot render path.
 pub fn cached_midi_devices() -> Vec<DetectedMidiDevice> {
-    if !state().read().unwrap().midi_scanned {
+    // A platform hot-plug notification (macOS CoreMIDI today) invalidates the
+    // cache exactly once, so plugging a controller in shows up without the user
+    // hunting for a Rescan button. Platforms with no notification answer false
+    // and keep the previous explicit-rescan behaviour.
+    if !state().read().unwrap().midi_scanned || sphere_midi_service::take_midi_ports_changed() {
         scan_midi();
     }
     state().read().unwrap().midi.clone()

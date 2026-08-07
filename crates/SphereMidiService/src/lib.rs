@@ -145,6 +145,46 @@ pub fn midi_settings_debug_enabled() -> bool {
 #[cfg(target_os = "macos")]
 mod macos_coremidi;
 
+/// Strip the volatile ALSA sequencer address from a port name.
+///
+/// On Linux, midir reports ports as `"Client:Port <client_id>:<port_id>"`, e.g.
+/// `"Launchkey Mini:Launchkey Mini MIDI 1 24:0"`. Those numbers are assigned by
+/// the sequencer at connect time and change whenever the device is replugged or
+/// the machine reboots.
+///
+/// Leaving them in is not cosmetic: [`stable_id`] slugs the name, so the id
+/// would change with the address and a saved device would come back as a new
+/// one — losing its enabled state and leaving a phantom disconnected row behind.
+/// Stripping the address makes the identity stable across sessions.
+///
+/// Windows and macOS never produce this shape, so this is a no-op there. Only a
+/// trailing ` <digits>:<digits>` is removed; a name that merely *contains* a
+/// colon (which both other platforms do) is left alone.
+pub(crate) fn normalize_port_name(name: &str) -> String {
+    let trimmed = name.trim_end();
+    let Some((head, tail)) = trimmed.rsplit_once(' ') else {
+        return trimmed.to_string();
+    };
+    let Some((client, port)) = tail.split_once(':') else {
+        return trimmed.to_string();
+    };
+    let is_address = !client.is_empty()
+        && !port.is_empty()
+        && client.bytes().all(|b| b.is_ascii_digit())
+        && port.bytes().all(|b| b.is_ascii_digit());
+    if !is_address {
+        return trimmed.to_string();
+    }
+    let head = head.trim_end();
+    // Never normalize a name down to nothing — an address-only port keeps the
+    // only text it has rather than becoming unnameable.
+    if head.is_empty() {
+        trimmed.to_string()
+    } else {
+        head.to_string()
+    }
+}
+
 pub(crate) fn stable_id(direction: MidiDeviceDirection, name: &str) -> String {
     let slug = name
         .chars()
@@ -190,6 +230,25 @@ pub(crate) fn stable_id_ordinal(device_id: &str, name: &str) -> usize {
     1
 }
 
+/// True when the platform reported a MIDI port added or removed since the last
+/// call, and clears the flag.
+///
+/// A *hint* for invalidating a cached device list, never the list itself: only
+/// macOS currently pushes notifications (via the CoreMIDI client's notify proc),
+/// so Windows and Linux always answer `false` and keep relying on an explicit
+/// rescan. Callers must therefore treat `false` as "nothing new to report",
+/// not as "the cache is definitely current".
+pub fn take_midi_ports_changed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_coremidi::take_ports_changed()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Real MIDI port scan. Windows/Linux use `midir`; macOS uses a thin CoreMIDI
 /// FFI path (avoids midir/coremidi vs gpui `core-foundation` pin conflict).
 /// Enumeration only reads port names — it never opens the hardware.
@@ -231,6 +290,8 @@ fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
         Ok(input) => {
             for port in input.ports() {
                 if let Ok(name) = input.port_name(&port) {
+                    // Normalized so a Linux replug does not mint a new identity.
+                    let name = normalize_port_name(&name);
                     devices.push(DetectedMidiDevice {
                         id: stable_id(MidiDeviceDirection::Input, &name),
                         name,
@@ -245,6 +306,7 @@ fn real_scan_midi_ports() -> Vec<DetectedMidiDevice> {
         Ok(output) => {
             for port in output.ports() {
                 if let Ok(name) = output.port_name(&port) {
+                    let name = normalize_port_name(&name);
                     devices.push(DetectedMidiDevice {
                         id: stable_id(MidiDeviceDirection::Output, &name),
                         name,
@@ -676,6 +738,7 @@ fn open_hardware_midi_inputs(
                 scanner
                     .port_name(port)
                     .ok()
+                    .map(|name| normalize_port_name(&name))
                     .is_some_and(|name| name == device_name)
             })
             .nth(ordinal - 1)
@@ -833,9 +896,12 @@ fn open_midi_output(device_id_or_name: &str) -> Option<MidiOutputConnection> {
         let midi_out = midir::MidiOutput::new("Futureboard MIDI playback").ok()?;
         let ports = midi_out.ports();
         for port in &ports {
-            let Ok(name) = midi_out.port_name(&port) else {
+            let Ok(raw_name) = midi_out.port_name(&port) else {
                 continue;
             };
+            // Match on the same normalized name the scan published, or a saved
+            // Linux id would never resolve after the sequencer address moved.
+            let name = normalize_port_name(&raw_name);
             let stable = stable_id(MidiDeviceDirection::Output, &name);
             let stable_io = stable_id(MidiDeviceDirection::InputOutput, &name);
             if name == device_id_or_name
@@ -847,7 +913,12 @@ fn open_midi_output(device_id_or_name: &str) -> Option<MidiOutputConnection> {
             let ordinal = stable_id_ordinal(device_id_or_name, &name);
             if ordinal > 1 {
                 let matching = ports.iter().filter(|candidate| {
-                    midi_out.port_name(candidate).ok().as_deref() == Some(&name)
+                    midi_out
+                        .port_name(candidate)
+                        .ok()
+                        .map(|candidate_name| normalize_port_name(&candidate_name))
+                        .as_deref()
+                        == Some(name.as_str())
                 });
                 if let Some(target) = matching.into_iter().nth(ordinal - 1) {
                     return midi_out.connect(target, "Futureboard MIDI Out").ok();
@@ -1339,6 +1410,104 @@ pub fn migrate_legacy_midi_settings(midi: &mut MidiHardwareSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Cross-platform port naming ──────────────────────────────────────────
+
+    /// Linux/ALSA appends a volatile `client:port` address that changes on
+    /// every replug. Stripping it is what keeps a device's identity — and so
+    /// its saved enabled state — stable across sessions.
+    #[test]
+    fn an_alsa_sequencer_address_is_stripped_from_the_port_name() {
+        assert_eq!(
+            normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 24:0"),
+            "Launchkey Mini:Launchkey Mini MIDI 1"
+        );
+        assert_eq!(
+            normalize_port_name("Midi Through:Midi Through Port-0 14:0"),
+            "Midi Through:Midi Through Port-0"
+        );
+    }
+
+    #[test]
+    fn a_replugged_alsa_port_keeps_its_stable_id() {
+        let before = normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 24:0");
+        let after = normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 28:0");
+        assert_eq!(before, after);
+        assert_eq!(
+            stable_id(MidiDeviceDirection::Input, &before),
+            stable_id(MidiDeviceDirection::Input, &after),
+            "a replug must not mint a new device identity"
+        );
+    }
+
+    /// Windows and macOS names must survive untouched — including the colons
+    /// CoreMIDI and WinMM names legitimately contain.
+    #[test]
+    fn windows_and_macos_names_are_left_alone() {
+        for name in [
+            "Launchkey Mini MK3",
+            "IAC Driver Bus 1",
+            "MPKmini2",
+            "Scarlett 18i20 USB",
+            // A colon that is not an ALSA address.
+            "Roland: SC-88",
+            "Port 1:2 Extra",
+        ] {
+            assert_eq!(normalize_port_name(name), name, "{name} must not change");
+        }
+    }
+
+    #[test]
+    fn a_trailing_non_numeric_suffix_is_not_mistaken_for_an_address() {
+        assert_eq!(normalize_port_name("Device MIDI a:0"), "Device MIDI a:0");
+        assert_eq!(normalize_port_name("Device MIDI 24:b"), "Device MIDI 24:b");
+        assert_eq!(normalize_port_name("Device MIDI 24:"), "Device MIDI 24:");
+        assert_eq!(normalize_port_name("Device MIDI :0"), "Device MIDI :0");
+    }
+
+    /// Normalizing must never leave a port unnameable.
+    #[test]
+    fn an_address_only_name_is_preserved() {
+        assert_eq!(normalize_port_name("24:0"), "24:0");
+        assert_eq!(normalize_port_name(" 24:0"), " 24:0");
+        assert_eq!(normalize_port_name(""), "");
+    }
+
+    #[test]
+    fn normalizing_is_idempotent() {
+        let once = normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 24:0");
+        assert_eq!(normalize_port_name(&once), once);
+    }
+
+    /// The saved-vs-detected merge keys on id and name, so a normalized name
+    /// carries the user's enabled state across a replug.
+    #[test]
+    fn a_replugged_linux_device_keeps_its_saved_enabled_state() {
+        let name = normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 24:0");
+        let saved = vec![MidiDeviceSetting {
+            id: stable_id(MidiDeviceDirection::Input, &name),
+            name: name.clone(),
+            direction: MidiDeviceDirection::Input,
+            enabled: false,
+            connected: true,
+            clock_enabled: false,
+        }];
+        // Same hardware, new sequencer address.
+        let replugged = normalize_port_name("Launchkey Mini:Launchkey Mini MIDI 1 31:0");
+        let detected = vec![DetectedMidiDevice {
+            id: stable_id(MidiDeviceDirection::Input, &replugged),
+            name: replugged,
+            direction: MidiDeviceDirection::Input,
+        }];
+
+        let resolved = resolve_midi_devices(&saved, &detected);
+        assert_eq!(resolved.len(), 1, "no phantom duplicate row");
+        assert!(resolved[0].connected);
+        assert!(
+            !resolved[0].enabled,
+            "the user's disabled choice must survive the replug"
+        );
+    }
 
     #[test]
     fn resolve_keeps_missing_saved_devices() {
