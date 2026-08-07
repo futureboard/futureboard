@@ -398,3 +398,17 @@ export function postSetParams(edits: ParamEdit[]): void {
     params: edits,
   });
 }
+
+/**
+ * Ask the DAW for a workspace command (e.g. transport play/pause). Not tied to
+ * a parameter binding so Space can still reach the studio with no instance yet.
+ * Native dedupes against `OnPreKeyEvent` / shell capture when those already
+ * claimed the physical key.
+ */
+export function postGlobalCommand(commandId: string): void {
+  if (!commandId) return;
+  post({
+    type: "futureboard.globalCommand",
+    commandId,
+  });
+}

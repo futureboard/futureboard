@@ -32,6 +32,7 @@ import {
   postPathOrder,
   type NamCaptureLoadOptions,
 } from "./bridge";
+import { postGlobalCommand } from "./instanceBridge";
 import { POWER_PARAM_ID } from "./globals";
 import {
   activeSnapshot,
@@ -1054,8 +1055,20 @@ export function RodhareistEditor({
         return;
       }
       if (e.key === " " || e.code === "Space") {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        // DAW transport owns bare Space on the editor surface. Forward so
+        // play/pause still works when the native claim path misses an OSR
+        // focus edge case. Never steal Space for bypass.
         e.preventDefault();
-        toggleBypass();
+        postGlobalCommand("transport:play-pause");
         return;
       }
       if (e.key >= "1" && e.key <= "9") {
@@ -1078,7 +1091,6 @@ export function RodhareistEditor({
     saveRig,
     selectCategory,
     stepPreset,
-    toggleBypass,
   ]);
 
   const pendingName =
