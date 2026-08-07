@@ -1033,6 +1033,18 @@ impl AudioEngine {
         self.inner.set_monitor_output(target)
     }
 
+    /// Publish which stage owns the physical output write, with Master's and
+    /// the effective monitoring channel pairs already resolved.
+    pub fn set_hardware_output_ownership(
+        &self,
+        owner: crate::monitor::HardwareOutputOwner,
+        master: Option<(u16, u16)>,
+        monitor: Option<(u16, u16)>,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .set_hardware_output_ownership(owner, master, monitor)
+    }
+
     /// Set one channel's Pre/After-Fader Listen state.
     pub fn set_track_listen(
         &self,

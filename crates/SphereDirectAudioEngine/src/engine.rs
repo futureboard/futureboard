@@ -1841,6 +1841,25 @@ impl EngineInner {
         self.send_command(EngineCommand::SetMonitorOutput { target })
     }
 
+    /// Publish which stage owns the physical output write, plus the resolved
+    /// Master and effective monitoring channel pairs.
+    ///
+    /// Everything expensive — connection lookup, port resolution, and the
+    /// ownership decision itself — has already happened on the control thread;
+    /// this hands the callback plain integers.
+    pub fn set_hardware_output_ownership(
+        &self,
+        owner: crate::monitor::HardwareOutputOwner,
+        master: Option<(u16, u16)>,
+        monitor: Option<(u16, u16)>,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetHardwareOutputOwnership {
+            owner,
+            master,
+            monitor,
+        })
+    }
+
     /// Set one channel's Listen (PFL/AFL) state. The stable track id is
     /// resolved to an index here, off the audio thread.
     pub fn set_track_listen(
@@ -3823,6 +3842,7 @@ impl EngineInner {
                 EngineCommand::SetMonitorSource { .. } => "SetMonitorSource",
                 EngineCommand::SetMonitorControl { .. } => "SetMonitorControl",
                 EngineCommand::SetMonitorOutput { .. } => "SetMonitorOutput",
+                EngineCommand::SetHardwareOutputOwnership { .. } => "SetHardwareOutputOwnership",
                 EngineCommand::SetTrackListen { .. } => "SetTrackListen",
                 EngineCommand::ClearAllListen => "ClearAllListen",
                 EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
@@ -4404,6 +4424,17 @@ where
                         }
                         EngineCommand::SetMonitorOutput { target } => {
                             runtime.monitor.output = target;
+                        }
+                        EngineCommand::SetHardwareOutputOwnership {
+                            owner,
+                            master,
+                            monitor,
+                        } => {
+                            runtime.monitor.hardware_owner = owner;
+                            runtime.monitor.master_output = master;
+                            if let Some((left, _right)) = monitor {
+                                runtime.monitor.output.left_channel = left;
+                            }
                         }
                         EngineCommand::SetTrackListen {
                             track_index,

@@ -691,6 +691,15 @@ pub struct FutureboardProject {
     /// v34+: project Audio Connections. The single source of truth for logical
     /// audio buses; tracks reference entries here by stable id.
     pub audio_connections: Vec<ProjectAudioConnection>,
+    /// v35+: the project's Master output, as an Audio Connection id. `None` is
+    /// No Output. Only the id is stored — never a device, port, or channel.
+    pub master_output_connection_id: Option<String>,
+    /// v35+: the Monitor / Control Room output override. `None` means Follow
+    /// Master Output.
+    pub monitor_output_connection_id: Option<String>,
+    /// v35+: latch for the one-time output-routing bootstrap, so a deliberately
+    /// deleted Master output is not recreated on the next load.
+    pub output_routing_initialized: bool,
 }
 
 /// One persisted logical audio bus. Runtime-derived status is deliberately not
@@ -725,6 +734,9 @@ impl FutureboardProject {
         let now = now_secs();
         Self {
             audio_connections: Vec::new(),
+            master_output_connection_id: None,
+            monitor_output_connection_id: None,
+            output_routing_initialized: false,
             id: new_id(),
             name: name.into(),
             created_at: now,
@@ -1247,6 +1259,18 @@ impl From<&TimelineState> for FutureboardProject {
         project.mixer.tree_pinned_channel_ids = tl.mixer_tree.pinned_list();
         project.mixer.tree_hidden_channel_ids = tl.mixer_tree.hidden_list();
         project.audio_connections = audio_connections_to_project(&tl.audio_connections);
+        // Ids only. The resolved route, runtime device index, hardware owner,
+        // and channel list all describe the current machine and are recompiled
+        // on load rather than saved.
+        project.master_output_connection_id = tl
+            .master_output_connection_id
+            .as_ref()
+            .map(|id| id.as_str().to_string());
+        project.monitor_output_connection_id = tl
+            .monitor_output_connection_id
+            .as_ref()
+            .map(|id| id.as_str().to_string());
+        project.output_routing_initialized = tl.output_routing_initialized;
         project
     }
 }
@@ -1797,6 +1821,50 @@ pub fn apply_to_timeline(
     tl.audio_connections = migrated_connections;
 
     let mut warnings: Vec<ProjectLoadWarning> = Vec::new();
+
+    // ── Master / Monitor output routing ─────────────────────────────────────
+    // A referenced bus that is missing from this project is dropped rather than
+    // pointed somewhere else; an *unavailable* one is kept, because the device
+    // may simply be unplugged right now.
+    tl.master_output_connection_id = project
+        .master_output_connection_id
+        .as_deref()
+        .map(crate::audio_connections::AudioConnectionId::from_stored)
+        .filter(|id| tl.audio_connections.get(id).is_some());
+    tl.monitor_output_connection_id = project
+        .monitor_output_connection_id
+        .as_deref()
+        .map(crate::audio_connections::AudioConnectionId::from_stored)
+        .filter(|id| tl.audio_connections.get(id).is_some());
+    tl.output_routing_initialized = project.output_routing_initialized;
+
+    // Compatibility bootstrap: a project that has never initialized output
+    // routing (every pre-v35 file) gets a Master output once, so upgrading does
+    // not make it unexpectedly silent. The latch below is what stops a deleted
+    // output from reappearing on the next launch.
+    if !tl.output_routing_initialized {
+        let bootstrap = crate::output_routing::bootstrap_master_output(
+            &mut tl.audio_connections,
+            &migration_ports,
+            false,
+        );
+        if let Some(id) = bootstrap.assigned() {
+            tl.master_output_connection_id = Some(id.clone());
+        }
+        if let Some(message) = bootstrap.warning() {
+            warnings.push(ProjectLoadWarning {
+                kind: ProjectLoadWarningKind::NoMasterOutput,
+                track_id: None,
+                track_name: None,
+                source_project_version: crate::project::format::PROJECT_VERSION,
+                message,
+            });
+        }
+        tl.output_routing_initialized = true;
+    }
+    // Monitor keeps its default of Follow Master Output; the bootstrap never
+    // assigns an override.
+    tl.refresh_output_labels();
     for warning in &migration_warnings {
         let crate::project::routing_migration::RoutingMigrationWarning::ConflictingMidiInput {
             track_id,
@@ -1848,6 +1916,9 @@ pub enum ProjectLoadWarningKind {
     ConflictingLegacyMidiInput,
     /// A track referenced an Audio Connection id absent from the registry.
     MissingAudioConnection,
+    /// The one-time output bootstrap could not give the project a Master
+    /// output. Playback stays silent rather than falling back to a device.
+    NoMasterOutput,
 }
 
 /// Convert a v33 combined input value into the split runtime fields.
@@ -2493,11 +2564,228 @@ mod v33_routing_adapter_tests {
     }
 
     #[test]
-    fn v34_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v34"));
+    fn the_encoder_writes_the_current_format_version() {
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v35"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 34);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 34);
+        assert_eq!(version, 35);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 35);
+    }
+
+    // ── v35 Master / Monitor output routing ─────────────────────────────────
+
+    /// Build a timeline whose registry holds `Main Output 1-2` plus a second
+    /// `Headphones` output on 3-4, with output routing already initialized so
+    /// the compatibility bootstrap stays out of the way.
+    fn timeline_with_two_outputs() -> (
+        crate::components::timeline::timeline_state::TimelineState,
+        crate::audio_connections::AudioConnectionId,
+        crate::audio_connections::AudioConnectionId,
+    ) {
+        use crate::audio_connections::{
+            AudioConnection, AudioConnectionDirection, AudioConnectionRegistry, AvailablePorts,
+            ChannelLayout,
+        };
+        use crate::components::timeline::timeline_state::TimelineState;
+
+        let ports = AvailablePorts::for_device("dev-1", "Interface", 2, 4);
+        let mut registry = AudioConnectionRegistry::default_template(&ports, "dev-1");
+        let headphones = registry.add(
+            AudioConnection::new(
+                "Headphones",
+                AudioConnectionDirection::Output,
+                ChannelLayout::Stereo,
+            )
+            .bind_consecutive("dev-1", 2, |i| format!("Output {}", i + 1)),
+        );
+        registry.revalidate(&ports);
+        let main = registry
+            .by_direction(AudioConnectionDirection::Output)
+            .into_iter()
+            .find(|c| c.name == "Main Output 1-2")
+            .expect("main output")
+            .id
+            .clone();
+
+        let mut tl = TimelineState::default();
+        tl.audio_connections = registry;
+        tl.output_routing_initialized = true;
+        (tl, main, headphones)
+    }
+
+    #[test]
+    fn v35_round_trips_master_and_monitor_output_assignments() {
+        let (mut tl, main, headphones) = timeline_with_two_outputs();
+        tl.set_master_output_connection(Some(main.clone()));
+        tl.set_monitor_output_connection(Some(headphones.clone()));
+
+        let bytes = crate::project::format::encode_project(&FutureboardProject::from(&tl));
+        let reopened = crate::project::format::decode_project(&bytes).expect("decode");
+        assert_eq!(
+            reopened.master_output_connection_id.as_deref(),
+            Some(main.as_str())
+        );
+        assert_eq!(
+            reopened.monitor_output_connection_id.as_deref(),
+            Some(headphones.as_str())
+        );
+        assert!(reopened.output_routing_initialized);
+
+        let mut loaded = crate::components::timeline::timeline_state::TimelineState::default();
+        let _ = apply_to_timeline(&reopened, &mut loaded);
+        assert_eq!(loaded.master_output_connection_id.as_ref(), Some(&main));
+        assert_eq!(
+            loaded.monitor_output_connection_id.as_ref(),
+            Some(&headphones)
+        );
+    }
+
+    /// Follow Master Output is a stored state in its own right: `None` must
+    /// come back as `None`, not as a copy of the Master id.
+    #[test]
+    fn v35_round_trips_a_monitor_that_follows_the_master_output() {
+        let (mut tl, main, _headphones) = timeline_with_two_outputs();
+        tl.set_master_output_connection(Some(main.clone()));
+        assert!(tl.monitor_output_connection_id.is_none());
+
+        let bytes = crate::project::format::encode_project(&FutureboardProject::from(&tl));
+        let reopened = crate::project::format::decode_project(&bytes).expect("decode");
+        let mut loaded = crate::components::timeline::timeline_state::TimelineState::default();
+        let _ = apply_to_timeline(&reopened, &mut loaded);
+
+        assert!(
+            loaded.monitor_output_connection_id.is_none(),
+            "Follow Master Output must not be flattened into an explicit override"
+        );
+        assert_eq!(loaded.effective_monitor_output_connection(), Some(main));
+    }
+
+    /// Only ids are persisted. The resolved route, runtime device index,
+    /// hardware owner, and channel list all describe the current machine.
+    #[test]
+    fn v35_persists_only_connection_ids_for_output_routing() {
+        let (mut tl, main, headphones) = timeline_with_two_outputs();
+        tl.set_master_output_connection(Some(main.clone()));
+        tl.set_monitor_output_connection(Some(headphones.clone()));
+
+        let project = FutureboardProject::from(&tl);
+        assert_eq!(
+            project.master_output_connection_id.as_deref(),
+            Some(main.as_str())
+        );
+        assert_eq!(
+            project.monitor_output_connection_id.as_deref(),
+            Some(headphones.as_str())
+        );
+        // The persisted forms are exactly the ids — no device, port, or channel
+        // is smuggled into them.
+        assert!(project
+            .master_output_connection_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("ac-")));
+    }
+
+    /// A pre-v35 project has never initialized output routing, so the
+    /// compatibility bootstrap runs — once. Which id it picks depends on the
+    /// machine's real hardware (that choice is covered exhaustively in
+    /// [`crate::output_routing`]); what this test pins down is that the latch
+    /// is set on load and that a second load does not re-run it.
+    #[test]
+    fn a_pre_v35_project_bootstraps_output_routing_exactly_once() {
+        let (tl, main, _headphones) = timeline_with_two_outputs();
+        let mut legacy = FutureboardProject::from(&tl);
+        legacy
+            .audio_connections
+            .retain(|connection| connection.id == main.as_str());
+        legacy.master_output_connection_id = None;
+        legacy.monitor_output_connection_id = None;
+        legacy.output_routing_initialized = false;
+
+        let mut loaded = crate::components::timeline::timeline_state::TimelineState::default();
+        let _ = apply_to_timeline(&legacy, &mut loaded);
+        assert!(loaded.output_routing_initialized, "the latch is set");
+        assert!(
+            loaded.monitor_output_connection_id.is_none(),
+            "Monitor is left following Master; the bootstrap never sets an override"
+        );
+
+        // Saving and reopening must not run it again — a user who then deletes
+        // the Master output keeps it deleted.
+        let mut reopened = FutureboardProject::from(&loaded);
+        assert!(reopened.output_routing_initialized);
+        let connections_before = reopened.audio_connections.len();
+        reopened.master_output_connection_id = None;
+        let mut second = crate::components::timeline::timeline_state::TimelineState::default();
+        let _ = apply_to_timeline(&reopened, &mut second);
+        assert!(
+            second.master_output_connection_id.is_none(),
+            "a deliberately cleared Master output must not be recreated"
+        );
+        assert_eq!(
+            second.audio_connections.len(),
+            connections_before,
+            "no second bootstrap bus is created"
+        );
+    }
+
+    /// The bootstrap never invents a hardware destination when there is none.
+    #[test]
+    fn a_project_with_no_valid_output_stays_unassigned_and_warns() {
+        let mut legacy = FutureboardProject::new("legacy");
+        legacy.output_routing_initialized = false;
+
+        let mut loaded = crate::components::timeline::timeline_state::TimelineState::default();
+        let warnings = apply_to_timeline(&legacy, &mut loaded);
+
+        if crate::audio_connections::current_available_ports()
+            .ports_for(
+                "",
+                crate::audio_connections::AudioConnectionDirection::Output,
+            )
+            .is_empty()
+            && loaded.master_output_connection_id.is_none()
+        {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.kind == ProjectLoadWarningKind::NoMasterOutput),
+                "no usable output must produce a structured warning, not a fallback"
+            );
+        }
+        assert!(loaded.output_routing_initialized);
+    }
+
+    /// A reference to a bus that is not in the project is dropped rather than
+    /// pointed at some other output.
+    #[test]
+    fn a_master_output_referencing_a_missing_bus_loads_unassigned() {
+        let (tl, _main, _headphones) = timeline_with_two_outputs();
+        let mut project = FutureboardProject::from(&tl);
+        project.master_output_connection_id = Some("ac-ghost".to_string());
+        project.monitor_output_connection_id = Some("ac-ghost".to_string());
+
+        let mut loaded = crate::components::timeline::timeline_state::TimelineState::default();
+        let _ = apply_to_timeline(&project, &mut loaded);
+        assert!(loaded.master_output_connection_id.is_none());
+        assert!(loaded.monitor_output_connection_id.is_none());
+    }
+
+    /// Renaming the assigned bus changes the chip labels and nothing else.
+    #[test]
+    fn renaming_the_assigned_output_updates_labels_without_touching_the_routing() {
+        let (mut tl, main, _headphones) = timeline_with_two_outputs();
+        tl.set_master_output_connection(Some(main.clone()));
+        tl.refresh_output_labels();
+        assert_eq!(tl.master.output_label, "Main Output 1-2");
+
+        tl.audio_connections.update_name(&main, "Studio Monitors");
+        tl.refresh_output_labels();
+
+        assert_eq!(tl.master.output_label, "Studio Monitors");
+        assert_eq!(
+            tl.master_output_connection_id.as_ref(),
+            Some(&main),
+            "a rename never changes the stored id"
+        );
     }
 
     /// Audio and MIDI assignments are independent in v34 — the hybrid state
@@ -2623,10 +2911,14 @@ mod v33_routing_adapter_tests {
             3
         );
 
-        // Save as v34 and reopen.
+        // Save at the current version and reopen.
         let saved = crate::project::format::encode_project(&FutureboardProject::from(&migrated));
         let version = u32::from_le_bytes(saved[8..12].try_into().unwrap());
-        assert_eq!(version, 34, "a migrated project saves as v34");
+        assert_eq!(
+            version,
+            crate::project::format::PROJECT_VERSION,
+            "a migrated project saves at the current version"
+        );
 
         let reopened = crate::project::format::decode_project(&saved).expect("decode");
         assert!(
@@ -2746,13 +3038,13 @@ mod v33_routing_adapter_tests {
         // 5. Disable, so the enabled flag is exercised too.
         tl.audio_connections.update_enabled(&id, false, &ports);
 
-        // 6/7. Save as v34 and reopen.
+        // 6/7. Save and reopen.
         let project = FutureboardProject::from(&tl);
         let bytes = crate::project::format::encode_project(&project);
         assert_eq!(
             u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            34,
-            "panel edits save as v34"
+            crate::project::format::PROJECT_VERSION,
+            "panel edits save at the current version"
         );
         let reopened = crate::project::format::decode_project(&bytes).expect("decode");
         let mut loaded = TimelineState::default();

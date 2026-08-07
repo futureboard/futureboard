@@ -202,6 +202,17 @@ pub struct RuntimeMonitor {
     pub source_stage: Option<crate::monitor::TapStage>,
     pub control: crate::monitor::MonitorControl,
     pub output: crate::monitor::MonitorOutputTarget,
+    /// Which stage owns the physical write this configuration. Resolved on the
+    /// control thread; the callback only obeys it.
+    pub hardware_owner: crate::monitor::HardwareOutputOwner,
+    /// Master's own destination as resolved `(left, right)` device channels.
+    /// `None` means Master has no hardware destination at all.
+    ///
+    /// The graph always renders the master mix into device channels 0/1, so
+    /// this is where that feed is *moved to* when Master owns the write, and
+    /// which channels are silenced when the Control Room owns it instead. A
+    /// plain integer pair, so applying it allocates nothing.
+    pub master_output: Option<(u16, u16)>,
     /// Monitor-only insert chain. Never reached by export.
     pub inserts: Vec<RuntimeInsert>,
     /// Scratch holding the routed non-master source for this block.

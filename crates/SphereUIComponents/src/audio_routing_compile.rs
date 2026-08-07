@@ -92,6 +92,78 @@ pub struct ResolvedOutputConnection {
     pub channels: SmallChannelList,
 }
 
+/// One output destination as the callback sees it: a runtime device index and
+/// an ordered channel list, nothing else. No id, no name, no port identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedOutputRoute {
+    /// Index into `output_connections`, so the callback can also reach the
+    /// shared row without a lookup.
+    pub connection_runtime_index: u32,
+    pub device_runtime_id: RuntimeAudioDeviceId,
+    pub channels: SmallChannelList,
+}
+
+impl ResolvedOutputRoute {
+    /// True when both routes touch at least one identical physical channel on
+    /// the same device.
+    #[inline]
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.device_runtime_id == other.device_runtime_id
+            && self
+                .channels
+                .as_slice()
+                .iter()
+                .any(|channel| other.channels.as_slice().contains(channel))
+    }
+}
+
+/// Which stage performs the physical write this configuration.
+///
+/// Decided here, on the control thread, precisely so the callback never has to
+/// reason about it — and so the master feed and a Control Room copy of the same
+/// mix can never both reach one hardware destination (a +6 dB duplicate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HardwareOutputOwner {
+    /// The Control Room is off; Master writes its own output connection.
+    MasterDirect,
+    /// The Control Room is on and is the only stage writing hardware.
+    MonitorControlRoom,
+    /// Nothing resolves. Playback is silent — never a default device.
+    #[default]
+    None,
+}
+
+/// Fully resolved Master / Monitor output routing for one snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolvedOutputRouting {
+    /// Master's own destination, when it resolves.
+    pub master: Option<ResolvedOutputRoute>,
+    /// The Monitor override, when one is set *and* resolves. `None` here does
+    /// not mean "unassigned" — it means Monitor follows Master.
+    pub monitor_override: Option<ResolvedOutputRoute>,
+    /// Where the Control Room writes: the override, else Master.
+    pub effective_monitor: Option<ResolvedOutputRoute>,
+    pub hardware_owner: HardwareOutputOwner,
+}
+
+impl ResolvedOutputRouting {
+    /// The single route that reaches hardware, if any.
+    #[inline]
+    pub fn hardware_route(&self) -> Option<&ResolvedOutputRoute> {
+        match self.hardware_owner {
+            HardwareOutputOwner::MasterDirect => self.master.as_ref(),
+            HardwareOutputOwner::MonitorControlRoom => self.effective_monitor.as_ref(),
+            HardwareOutputOwner::None => None,
+        }
+    }
+
+    /// Every route that reaches hardware this configuration. At most one, by
+    /// construction: this is the shape the duplicate-write tests assert on.
+    pub fn hardware_writers(&self) -> Vec<ResolvedOutputRoute> {
+        self.hardware_route().copied().into_iter().collect()
+    }
+}
+
 /// Immutable routing snapshot. Published by `Arc` swap; the previous snapshot
 /// stays alive until the callback holding it releases its clone.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -101,13 +173,11 @@ pub struct EngineAudioRoutingSnapshot {
     pub generation: u64,
     pub track_inputs: Vec<ResolvedTrackInput>,
     pub output_connections: Vec<ResolvedOutputConnection>,
-    /// Index into `output_connections` for the master bus, if assigned.
-    pub master_output: Option<u32>,
-    /// Index into `output_connections` for the Control Room, if assigned.
-    pub monitor_output: Option<u32>,
+    /// Master / Monitor destinations and which of them owns the physical write.
+    pub output_routing: ResolvedOutputRouting,
     /// True when master and monitor resolve to overlapping physical ports on
-    /// the same device. The engine uses this to avoid writing the same mix
-    /// twice into one hardware destination.
+    /// the same device. Informational only: `output_routing.hardware_owner`
+    /// already guarantees a single writer.
     pub master_monitor_share_ports: bool,
 }
 
@@ -133,8 +203,14 @@ impl EngineAudioRoutingSnapshot {
 pub struct RoutingCompileRequest {
     /// Track input assignments in engine track order. `None` = No Input.
     pub track_inputs: Vec<Option<AudioConnectionId>>,
+    /// Project Master output. `None` = no Master hardware destination.
     pub master_output: Option<AudioConnectionId>,
-    pub monitor_output: Option<AudioConnectionId>,
+    /// Monitor / Control Room override. `None` = Follow Master Output — never
+    /// "unassigned".
+    pub monitor_output_override: Option<AudioConnectionId>,
+    /// Whether the Control Room is in the playback path. Decides ownership of
+    /// the physical write; compiled here so the callback never branches on it.
+    pub control_room_active: bool,
 }
 
 /// A problem found while compiling. Surfaced to the UI as a warning; never a
@@ -161,8 +237,12 @@ pub enum RoutingWarning {
     OutputUnavailable {
         connection: AudioConnectionId,
     },
-    /// Master and monitor resolve to overlapping hardware ports.
+    /// Master and monitor resolve to the *same* hardware destination. Allowed
+    /// as a logical selection — the Control Room simply owns the write.
     DuplicateHardwareWrite,
+    /// Nothing resolves, so playback is silent. Reported instead of falling
+    /// back to a system default device or to channels 0/1.
+    NoHardwareOutput,
 }
 
 /// Result of one compile pass.
@@ -249,10 +329,10 @@ pub fn compile_routing(
 
     // ── Outputs ─────────────────────────────────────────────────────────────
     let mut output_connections: Vec<ResolvedOutputConnection> = Vec::new();
-    let mut resolve_output = |id: &AudioConnectionId,
-                              devices: &mut DeviceIndexer,
-                              outputs: &mut Vec<ResolvedOutputConnection>,
-                              warnings: &mut Vec<RoutingWarning>|
+    let resolve_output = |id: &AudioConnectionId,
+                          devices: &mut DeviceIndexer,
+                          outputs: &mut Vec<ResolvedOutputConnection>,
+                          warnings: &mut Vec<RoutingWarning>|
      -> Option<u32> {
         let connection = match registry.get(id) {
             None => {
@@ -297,34 +377,65 @@ pub fn compile_routing(
         Some(runtime_index)
     };
 
-    let master_output = request
+    let master_index = request
         .master_output
         .as_ref()
         .and_then(|id| resolve_output(id, &mut devices, &mut output_connections, &mut warnings));
-    let monitor_output = request
-        .monitor_output
+    let monitor_index = request
+        .monitor_output_override
         .as_ref()
         .and_then(|id| resolve_output(id, &mut devices, &mut output_connections, &mut warnings));
 
-    // ── Duplicate hardware writes ───────────────────────────────────────────
-    // Master and Monitor landing on the same physical ports would write the
-    // same mix twice into one destination. Flag it so the engine can let the
-    // Control Room own that pair instead of summing both.
-    let master_monitor_share_ports = match (master_output, monitor_output) {
-        (Some(master), Some(monitor)) => {
-            let master = &output_connections[master as usize];
-            let monitor = &output_connections[monitor as usize];
-            master.device_runtime_id == monitor.device_runtime_id
-                && master
-                    .channels
-                    .as_slice()
-                    .iter()
-                    .any(|channel| monitor.channels.as_slice().contains(channel))
+    let route_at = |index: u32, outputs: &[ResolvedOutputConnection]| -> ResolvedOutputRoute {
+        let entry = &outputs[index as usize];
+        ResolvedOutputRoute {
+            connection_runtime_index: entry.connection_runtime_index,
+            device_runtime_id: entry.device_runtime_id,
+            channels: entry.channels,
         }
+    };
+    let master = master_index.map(|index| route_at(index, &output_connections));
+    let monitor_override = monitor_index.map(|index| route_at(index, &output_connections));
+
+    // Follow Master Output is resolved here, not in the callback: `None` on the
+    // override means "use Master", and when Master has none too the result is
+    // silence rather than any fallback destination.
+    let effective_monitor = monitor_override.or(master);
+
+    // ── Shared and overlapping hardware ─────────────────────────────────────
+    // A *partial* overlap (1-2 against 2-3) never gets this far: the registry
+    // marks the second bus `Conflict`, so it resolves to nothing. What remains
+    // is the legitimate case of both pointing at the same destination.
+    let master_monitor_share_ports = match (&master, &monitor_override) {
+        (Some(master), Some(monitor)) => master.overlaps(monitor),
         _ => false,
     };
     if master_monitor_share_ports {
         warnings.push(RoutingWarning::DuplicateHardwareWrite);
+    }
+
+    // ── Hardware ownership ──────────────────────────────────────────────────
+    // Exactly one stage writes hardware. With the Control Room in the path it
+    // is the Control Room, even when both point at the same destination — that
+    // is what prevents the master feed and its monitored copy from summing.
+    let hardware_owner = if request.control_room_active {
+        match effective_monitor {
+            Some(_) => HardwareOutputOwner::MonitorControlRoom,
+            None => HardwareOutputOwner::None,
+        }
+    } else {
+        match master {
+            Some(_) => HardwareOutputOwner::MasterDirect,
+            None => HardwareOutputOwner::None,
+        }
+    };
+    // Only report silence when an output was actually *asked for* and did not
+    // resolve. A project with nothing assigned is already reported once, at
+    // load time, by the output bootstrap.
+    let requested_an_output =
+        request.master_output.is_some() || request.monitor_output_override.is_some();
+    if requested_an_output && matches!(hardware_owner, HardwareOutputOwner::None) {
+        warnings.push(RoutingWarning::NoHardwareOutput);
     }
 
     RoutingCompileResult {
@@ -332,8 +443,12 @@ pub fn compile_routing(
             generation,
             track_inputs,
             output_connections,
-            master_output,
-            monitor_output,
+            output_routing: ResolvedOutputRouting {
+                master,
+                monitor_override,
+                effective_monitor,
+                hardware_owner,
+            },
             master_monitor_share_ports,
         },
         warnings,
@@ -543,24 +658,135 @@ mod tests {
 
         let request = RoutingCompileRequest {
             master_output: Some(output_id(&registry, "Main Output 1-2")),
-            monitor_output: Some(headphones),
+            monitor_output_override: Some(headphones),
+            control_room_active: true,
             ..Default::default()
         };
         let result = compile_routing(&registry, &ports, &request, 7);
 
         assert_eq!(result.snapshot.generation, 7);
-        let master = result
-            .snapshot
-            .output(result.snapshot.master_output.unwrap())
-            .unwrap();
-        let monitor = result
-            .snapshot
-            .output(result.snapshot.monitor_output.unwrap())
-            .unwrap();
-        assert_eq!(master.channels.as_slice(), &[0, 1]);
-        assert_eq!(monitor.channels.as_slice(), &[2, 3]);
+        let routing = result.snapshot.output_routing;
+        assert_eq!(routing.master.unwrap().channels.as_slice(), &[0, 1]);
+        assert_eq!(
+            routing.monitor_override.unwrap().channels.as_slice(),
+            &[2, 3]
+        );
+        assert_eq!(
+            routing.effective_monitor.unwrap().channels.as_slice(),
+            &[2, 3]
+        );
+        assert_eq!(
+            routing.hardware_owner,
+            HardwareOutputOwner::MonitorControlRoom
+        );
         assert!(!result.snapshot.master_monitor_share_ports);
         assert!(result.warnings.is_empty());
+    }
+
+    /// Monitor with no override follows Master — `None` is Follow Master
+    /// Output, not "unassigned".
+    #[test]
+    fn a_monitor_without_an_override_follows_the_master_output() {
+        let ports = device();
+        let registry = registry();
+        let request = RoutingCompileRequest {
+            master_output: Some(output_id(&registry, "Main Output 1-2")),
+            monitor_output_override: None,
+            control_room_active: true,
+            ..Default::default()
+        };
+        let result = compile_routing(&registry, &ports, &request, 1);
+        let routing = result.snapshot.output_routing;
+
+        assert!(routing.monitor_override.is_none());
+        assert_eq!(
+            routing.effective_monitor.unwrap().channels.as_slice(),
+            &[0, 1]
+        );
+        assert_eq!(
+            routing.hardware_owner,
+            HardwareOutputOwner::MonitorControlRoom
+        );
+        assert_eq!(
+            routing.hardware_writers().len(),
+            1,
+            "one stage owns the hardware write"
+        );
+    }
+
+    /// With the Control Room out of the path Master writes its own output.
+    #[test]
+    fn master_owns_the_hardware_write_when_the_control_room_is_disabled() {
+        let ports = device();
+        let registry = registry();
+        let request = RoutingCompileRequest {
+            master_output: Some(output_id(&registry, "Main Output 1-2")),
+            control_room_active: false,
+            ..Default::default()
+        };
+        let result = compile_routing(&registry, &ports, &request, 1);
+        let routing = result.snapshot.output_routing;
+
+        assert_eq!(routing.hardware_owner, HardwareOutputOwner::MasterDirect);
+        assert_eq!(
+            routing.hardware_route().unwrap().channels.as_slice(),
+            &[0, 1]
+        );
+    }
+
+    /// No output device, no assignment: silence. Never channels 0/1 by default,
+    /// never a system default device.
+    #[test]
+    fn nothing_assigned_compiles_to_silence_rather_than_a_fallback() {
+        let ports = device();
+        let registry = registry();
+        for control_room_active in [true, false] {
+            let request = RoutingCompileRequest {
+                master_output: None,
+                monitor_output_override: None,
+                control_room_active,
+                ..Default::default()
+            };
+            let result = compile_routing(&registry, &ports, &request, 1);
+            let routing = result.snapshot.output_routing;
+
+            assert_eq!(routing.hardware_owner, HardwareOutputOwner::None);
+            assert!(routing.hardware_route().is_none());
+            assert!(routing.hardware_writers().is_empty());
+            assert!(
+                result.warnings.is_empty(),
+                "an unassigned project is reported once at load time, not on \
+                 every recompile"
+            );
+        }
+    }
+
+    /// A disabled output bus resolves to nothing at all — the assignment is
+    /// kept by the project, but the snapshot carries silence.
+    #[test]
+    fn a_disabled_output_compiles_to_silence_and_warns() {
+        let ports = device();
+        let mut registry = registry();
+        let main = output_id(&registry, "Main Output 1-2");
+        registry.set_enabled(&main, false);
+        registry.revalidate(&ports);
+
+        let request = RoutingCompileRequest {
+            master_output: Some(main.clone()),
+            control_room_active: false,
+            ..Default::default()
+        };
+        let result = compile_routing(&registry, &ports, &request, 1);
+
+        assert!(result.snapshot.output_routing.master.is_none());
+        assert_eq!(
+            result.snapshot.output_routing.hardware_owner,
+            HardwareOutputOwner::None
+        );
+        assert!(result
+            .warnings
+            .contains(&RoutingWarning::OutputUnavailable { connection: main }));
+        assert!(result.warnings.contains(&RoutingWarning::NoHardwareOutput));
     }
 
     /// Master and Monitor on the same pair is the duplicate-write case: the
@@ -572,7 +798,8 @@ mod tests {
         let main = output_id(&registry, "Main Output 1-2");
         let request = RoutingCompileRequest {
             master_output: Some(main.clone()),
-            monitor_output: Some(main),
+            monitor_output_override: Some(main),
+            control_room_active: true,
             ..Default::default()
         };
         let result = compile_routing(&registry, &ports, &request, 1);
@@ -586,22 +813,34 @@ mod tests {
             1,
             "an identical resolved output is reused, not duplicated"
         );
+
+        // The point of the flag: only one stage writes, so the destination
+        // carries the mix once — never master + monitored copy at +6 dB.
+        let routing = result.snapshot.output_routing;
+        assert_eq!(
+            routing.hardware_owner,
+            HardwareOutputOwner::MonitorControlRoom
+        );
+        assert_eq!(routing.hardware_writers().len(), 1);
+        assert_eq!(
+            routing.hardware_route().unwrap().channels.as_slice(),
+            &[0, 1]
+        );
     }
 
-    /// Two *different* output buses overlapping on a physical port are caught
-    /// one layer earlier, by registry validation, so the compiler never sees a
-    /// resolvable pair. It compiles the loser to silence and warns rather than
-    /// emitting a route that would double-write the port.
-    ///
-    /// This is why `master_monitor_share_ports` only has to catch the case
-    /// where both buses resolve to the *same* Active connection.
+    /// Master on 1-2 and Monitor on 2-3 share physical port 2 without being the
+    /// same destination. Neither summing them nor compensating that port's gain
+    /// is acceptable, so the pair is rejected one layer earlier (registry
+    /// `Conflict`) and the compiler emits silence for the loser — still exactly
+    /// one hardware writer.
     #[test]
-    fn overlapping_output_buses_are_rejected_before_they_can_double_write() {
+    fn overlapping_master_and_monitor_outputs_are_rejected_not_summed() {
         let ports = device();
         let mut registry = registry();
+        let master = output_id(&registry, "Main Output 1-2");
         let overlapping = registry.add(
             AudioConnection::new(
-                "Offset Pair",
+                "Offset Monitor",
                 AudioConnectionDirection::Output,
                 ChannelLayout::Stereo,
             )
@@ -610,26 +849,42 @@ mod tests {
         registry.revalidate(&ports);
         assert_eq!(
             registry.get(&overlapping).unwrap().status,
-            crate::audio_connections::AudioConnectionStatus::Conflict,
-            "sharing output channel 1 with Main Output 1-2 is a registry conflict"
+            crate::audio_connections::AudioConnectionStatus::Conflict
         );
 
         let request = RoutingCompileRequest {
-            master_output: Some(output_id(&registry, "Main Output 1-2")),
-            monitor_output: Some(overlapping.clone()),
+            master_output: Some(master),
+            monitor_output_override: Some(overlapping.clone()),
+            control_room_active: true,
             ..Default::default()
         };
         let result = compile_routing(&registry, &ports, &request, 1);
 
-        assert!(
-            result.snapshot.monitor_output.is_none(),
-            "a conflicted output must compile to silence, not to a shared port"
-        );
         assert!(result
             .warnings
             .contains(&RoutingWarning::OutputUnavailable {
                 connection: overlapping
             }));
+        assert!(
+            result.snapshot.output_routing.monitor_override.is_none(),
+            "a conflicted override must not resolve to the shared port"
+        );
+        assert_eq!(
+            result.snapshot.output_routing.hardware_writers().len(),
+            1,
+            "the shared port is still written by exactly one stage"
+        );
+        assert_eq!(
+            result
+                .snapshot
+                .output_routing
+                .hardware_route()
+                .unwrap()
+                .channels
+                .as_slice(),
+            &[0, 1],
+            "Monitor falls back to Follow Master, not to the conflicted pair"
+        );
     }
 
     #[test]
@@ -683,6 +938,97 @@ mod tests {
         assert_copy(&source.channels);
         assert_copy(&source.device_runtime_id);
         assert_eq!(source.channels.len(), 2);
+    }
+
+    /// The output routing the callback reads is the same shape: plain integers.
+    /// Nothing here is a UUID, a stable port id, a name, or a map — resolving
+    /// any of those in the callback is what this type exists to prevent.
+    #[test]
+    fn output_routing_carries_only_callback_safe_resolved_data() {
+        let ports = device();
+        let registry = registry();
+        let request = RoutingCompileRequest {
+            master_output: Some(output_id(&registry, "Main Output 1-2")),
+            control_room_active: true,
+            ..Default::default()
+        };
+        let routing = compile_routing(&registry, &ports, &request, 1)
+            .snapshot
+            .output_routing;
+
+        fn assert_copy<T: Copy>(_: &T) {}
+        assert_copy(&routing);
+        let route = routing.hardware_route().expect("resolved route");
+        assert_copy(route);
+        assert_copy(&route.device_runtime_id);
+        assert_copy(&route.channels);
+        // Reading the destination is a slice index over inline `u32`s.
+        assert_eq!(route.channels.as_slice(), &[0, 1]);
+    }
+
+    /// Callback-safety audit. Everything the audio callback reads out of a
+    /// published snapshot is `Copy` integer data: no allocation, no lock, no
+    /// map, no id to parse, no device string, no backend enumeration. The type
+    /// system is the enforcement — this test states the contract.
+    #[test]
+    fn the_published_snapshot_exposes_no_id_string_or_map_to_the_callback() {
+        fn assert_copy<T: Copy>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        // Every per-block type the callback touches.
+        assert_copy::<SmallChannelList>();
+        assert_copy::<RuntimeAudioDeviceId>();
+        assert_copy::<ResolvedInputSource>();
+        assert_copy::<ResolvedOutputRoute>();
+        assert_copy::<ResolvedOutputRouting>();
+        assert_copy::<HardwareOutputOwner>();
+        // The snapshot is shared by Arc across the control and audio threads.
+        assert_send_sync::<EngineAudioRoutingSnapshot>();
+
+        let ports = device();
+        let registry = registry();
+        let request = RoutingCompileRequest {
+            track_inputs: vec![Some(input_id(&registry, "Stereo Input 1-2"))],
+            master_output: Some(output_id(&registry, "Main Output 1-2")),
+            control_room_active: true,
+            ..Default::default()
+        };
+        let snapshot = compile_routing(&registry, &ports, &request, 1).snapshot;
+
+        // Reads the callback performs: a bounds-checked slice index and a
+        // slice of `u32`. No hashing, no parsing, no lookup.
+        let source = snapshot.track_input(0).expect("resolved source");
+        assert_eq!(source.channels.as_slice(), &[0, 1]);
+        let route = snapshot
+            .output_routing
+            .hardware_route()
+            .expect("resolved route");
+        assert_eq!(route.channels.as_slice(), &[0, 1]);
+        assert_eq!(route.device_runtime_id, RuntimeAudioDeviceId(0));
+    }
+
+    /// Cloning the published `Arc` is what the callback actually does per
+    /// block: one atomic increment, no allocation, and the snapshot it holds
+    /// survives a concurrent publish.
+    #[test]
+    fn the_callback_side_read_is_an_arc_clone_not_a_rebuild() {
+        let publisher = RoutingSnapshotPublisher::new();
+        let generation = publisher.next_generation();
+        publisher.publish(EngineAudioRoutingSnapshot {
+            generation,
+            output_routing: ResolvedOutputRouting {
+                hardware_owner: HardwareOutputOwner::MonitorControlRoom,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let held = publisher.current();
+        assert_eq!(Arc::strong_count(&held) >= 2, true);
+        assert_eq!(
+            held.output_routing.hardware_owner,
+            HardwareOutputOwner::MonitorControlRoom
+        );
     }
 
     #[test]

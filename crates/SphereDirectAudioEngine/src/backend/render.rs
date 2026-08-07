@@ -671,6 +671,19 @@ pub fn drain_commands(
             EngineCommand::SetMonitorOutput { target } => {
                 runtime.monitor.output = target;
             }
+            // Plain integers: applying ownership on this thread stores a small
+            // enum and two channel pairs — no lookup, no allocation.
+            EngineCommand::SetHardwareOutputOwnership {
+                owner,
+                master,
+                monitor,
+            } => {
+                runtime.monitor.hardware_owner = owner;
+                runtime.monitor.master_output = master;
+                if let Some((left, _right)) = monitor {
+                    runtime.monitor.output.left_channel = left;
+                }
+            }
             EngineCommand::SetTrackListen {
                 track_index,
                 listen,
@@ -1475,6 +1488,36 @@ pub(crate) fn run_control_room(
     if frames == 0 {
         return None;
     }
+    // ── 0. Hardware ownership ───────────────────────────────────────────────
+    // Decided on the control thread; the callback only obeys it. The graph has
+    // already rendered the master mix into device channels 0/1, so the two
+    // non-Control-Room branches are handled entirely here.
+    match runtime.monitor.hardware_owner {
+        crate::monitor::HardwareOutputOwner::None => {
+            // Nothing resolves: silence, never a fallback pair.
+            for sample in data.iter_mut() {
+                *sample = 0.0;
+            }
+            return Some((0.0, 0.0));
+        }
+        crate::monitor::HardwareOutputOwner::MasterDirect => {
+            // Master owns the write and the Control Room is out of the path, so
+            // no monitor gain, dim, mono, or inserts are applied.
+            let Some(pair) = runtime.monitor.master_output else {
+                for sample in data.iter_mut() {
+                    *sample = 0.0;
+                }
+                return Some((0.0, 0.0));
+            };
+            let Some((master_l, master_r)) = resolved_output_pair(pair, channels) else {
+                return None;
+            };
+            move_master_feed(data, channels, frames, master_l, master_r);
+            return None;
+        }
+        crate::monitor::HardwareOutputOwner::MonitorControlRoom => {}
+    }
+
     let (out_l, out_r) = runtime.monitor.output.resolved_pair(channels)?;
     if !runtime.monitor.has_block_capacity(frames) {
         return None;
@@ -1550,7 +1593,60 @@ pub(crate) fn run_control_room(
         frame[out_l] = l;
         frame[out_r] = r;
     }
+
+    // ── 5. Master's direct feed ─────────────────────────────────────────────
+    // The Control Room owns the hardware, so Master must not also write. Any
+    // channel of Master's own destination that the monitoring pair does not
+    // cover is silenced; when the two destinations coincide the monitor block
+    // above already replaced (never summed into) those samples. Either way the
+    // destination carries the mix exactly once.
+    if let Some(master) = runtime.monitor.master_output {
+        if let Some((master_l, master_r)) = resolved_output_pair(master, channels) {
+            for channel in [master_l, master_r] {
+                if channel == out_l || channel == out_r {
+                    continue;
+                }
+                for i in 0..frames {
+                    data[i * channels + channel] = 0.0;
+                }
+            }
+        }
+    }
+
     Some((monitor_peak_l, monitor_peak_r))
+}
+
+/// Clamp a resolved `(left, right)` pair into a device with `channels` outputs.
+///
+/// Out-of-range is `None`, not a fallback pair: writing the master mix to some
+/// other physical output because the configured one no longer exists would be
+/// worse than silence.
+fn resolved_output_pair(pair: (u16, u16), channels: usize) -> Option<(usize, usize)> {
+    let (left, right) = (pair.0 as usize, pair.1 as usize);
+    (left < channels && right < channels).then_some((left, right))
+}
+
+/// Move the graph's master feed from device channels 0/1 to `(left, right)`,
+/// silencing 0/1 when they are not the destination.
+///
+/// Realtime-safe: an in-place per-frame swap over the interleaved buffer, no
+/// allocation and no scratch.
+fn move_master_feed(data: &mut [f32], channels: usize, frames: usize, left: usize, right: usize) {
+    if left == 0 && right == 1 {
+        return;
+    }
+    for i in 0..frames {
+        let frame = &mut data[i * channels..i * channels + channels];
+        let (l, r) = (frame[0], frame[1]);
+        if left != 0 && right != 0 {
+            frame[0] = 0.0;
+        }
+        if left != 1 && right != 1 {
+            frame[1] = 0.0;
+        }
+        frame[left] = l;
+        frame[right] = r;
+    }
 }
 
 /// Largest block the bridge mix reads in one callback (stack scratch bound).

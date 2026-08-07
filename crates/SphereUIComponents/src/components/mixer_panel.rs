@@ -2011,6 +2011,7 @@ pub(crate) fn master_strip(
                         .h(px(SEC_PAN_H))
                         .border_b(px(1.0))
                         .border_color(Colors::border_default())
+                        .px(px(5.0))
                         .child(
                             div()
                                 .flex()
@@ -2028,12 +2029,15 @@ pub(crate) fn master_strip(
                                 .text_color(Colors::text_secondary())
                                 .child(i18n.tr("mixer.stereo")),
                         )
-                        .child(
-                            div()
-                                .text_size(px(7.5))
-                                .text_color(Colors::text_secondary())
-                                .child(i18n.tr("mixer.output.1-2")),
-                        ),
+                        // Output destination — a logical Output Audio
+                        // Connection, never a raw hardware pair.
+                        .child(control_room_selector(
+                            "master-output",
+                            i18n.tr("mixer.master.output"),
+                            master.output_label.clone(),
+                            false,
+                            callbacks.on_master_output_picker.clone(),
+                        )),
                 )
                 .child(
                     div()
@@ -2105,7 +2109,7 @@ pub(crate) fn master_strip(
                                 .text_size(px(8.5))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_muted())
-                                .child(i18n.tr("mixer.output.1-2")),
+                                .child(master.output_label.clone()),
                         ),
                 ),
         )

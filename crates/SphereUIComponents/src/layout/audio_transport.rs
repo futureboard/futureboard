@@ -215,6 +215,9 @@ pub(crate) struct AudioBridgeState {
     pub sample_rate_notice_until: Option<Instant>,
     /// Text of the most recent sample-rate notice.
     pub sample_rate_notice_text: String,
+    /// One aggregated surface for Audio Connections / routing warnings. See
+    /// [`crate::layout::routing_warnings`] — never one dialog per track.
+    pub routing_warnings: crate::layout::routing_warnings::RoutingWarningState,
 }
 
 impl Default for AudioBridgeState {
@@ -257,6 +260,7 @@ impl Default for AudioBridgeState {
             sample_rate_deferred_target: Arc::new(AtomicU32::new(0)),
             sample_rate_notice_until: None,
             sample_rate_notice_text: String::new(),
+            routing_warnings: Default::default(),
         }
     }
 }

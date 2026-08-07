@@ -557,3 +557,251 @@ fn monitoring_the_main_pair_replaces_it_instead_of_summing_into_it() {
          would read ~1.5x instead"
     );
 }
+
+// ── Hardware output ownership ───────────────────────────────────────────────
+//
+// Exactly one stage writes the device buffer. The decision is compiled on the
+// control thread and handed to the runtime; these tests drive the real Control
+// Room stage over a real graph render to check that it is obeyed.
+
+use crate::monitor::HardwareOutputOwner;
+
+/// Render `channels`-wide and run the Control Room, returning the per-channel
+/// peak of the device buffer.
+fn render_wide_and_monitor(runtime: &mut RuntimeProject, channels: usize, level: f32) -> Vec<f32> {
+    let input = vec![level; FRAMES];
+    let mut data = vec![0.0f32; FRAMES * channels];
+    render_project_block_interleaved_with_live_input(
+        runtime, 0, 1.0, &mut data, channels, true, 4, 4, None, &input, &input,
+    );
+    runtime.monitor.ensure_block_capacity(FRAMES);
+    run_control_room(&mut data, channels, runtime, None, transport());
+    (0..channels)
+        .map(|channel| {
+            peak(
+                &data
+                    .chunks(channels)
+                    .map(|f| f[channel])
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// Master on 1-2, Monitor on 3-4: valid, and only the Control Room writes. The
+/// master feed the graph left on 1-2 must be cleared, or the destination would
+/// carry both the raw master and its monitored copy.
+#[test]
+fn the_control_room_owns_the_hardware_while_master_writes_a_different_pair() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::MonitorControlRoom;
+    runtime.monitor.master_output = Some((0, 1));
+    runtime.monitor.output = MonitorOutputTarget::new("Headphones", 2);
+
+    let peaks = render_wide_and_monitor(&mut runtime, 4, 0.5);
+    assert!(peaks[2] > 0.01, "the monitoring pair carries the mix");
+    assert_eq!(
+        (peaks[0], peaks[1]),
+        (0.0, 0.0),
+        "Master must not also write its own destination while the Control \
+         Room owns the hardware"
+    );
+}
+
+/// Same destination for both: allowed as a logical selection. The Control Room
+/// replaces the samples rather than summing into them, so the mix is carried
+/// once — never at +6 dB.
+#[test]
+fn master_and_monitor_on_one_destination_write_it_once_not_twice() {
+    let mut unowned = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    let master_peak = peak(&render_master(&mut unowned, 0.5));
+    assert!(master_peak > 0.01);
+
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::MonitorControlRoom;
+    runtime.monitor.master_output = Some((0, 1));
+    runtime.monitor.output = MonitorOutputTarget::new("Main Output", 0);
+
+    let peaks = render_wide_and_monitor(&mut runtime, CHANNELS, 0.5);
+    assert!(
+        (peaks[0] - master_peak).abs() < 1.0e-4,
+        "one write at unity: a summed path would read ~2x (+6 dB), got {} against {master_peak}",
+        peaks[0]
+    );
+}
+
+/// Control Room out of the path: Master writes its own destination directly,
+/// and the graph's 1-2 feed is moved rather than duplicated.
+#[test]
+fn master_writes_directly_when_the_control_room_is_not_in_the_path() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::MasterDirect;
+    runtime.monitor.master_output = Some((2, 3));
+    // Monitor gain must not apply on this path at all.
+    runtime.monitor.control.gain = 0.25;
+
+    let peaks = render_wide_and_monitor(&mut runtime, 4, 0.5);
+    assert!(peaks[2] > 0.01, "Master writes its own destination");
+    assert_eq!(
+        (peaks[0], peaks[1]),
+        (0.0, 0.0),
+        "the graph's 1-2 feed is moved to the destination, not duplicated"
+    );
+}
+
+/// Nothing resolves: silence. Never channels 0/1 by default, never another
+/// device.
+#[test]
+fn no_owner_produces_silence_rather_than_a_fallback_pair() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::None;
+
+    let peaks = render_wide_and_monitor(&mut runtime, 4, 0.5);
+    assert_eq!(peaks, vec![0.0; 4]);
+}
+
+/// Master owning the write with no destination is also silence — the mix does
+/// not fall back onto the main pair.
+#[test]
+fn master_direct_without_a_destination_is_silent() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::MasterDirect;
+    runtime.monitor.master_output = None;
+
+    let peaks = render_wide_and_monitor(&mut runtime, CHANNELS, 0.5);
+    assert_eq!(peaks, vec![0.0; CHANNELS]);
+}
+
+/// Ownership is a playback-only concern: the offline exporter renders the graph
+/// directly and never enters the Control Room stage, so no ownership setting
+/// can change exported audio.
+#[test]
+fn hardware_ownership_does_not_change_exported_audio() {
+    let mut plain = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    let mut owned = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    owned.monitor.hardware_owner = HardwareOutputOwner::None;
+    owned.monitor.master_output = Some((6, 7));
+    owned.monitor.control.gain = 0.1;
+
+    assert_eq!(
+        render_for_export(&mut plain),
+        render_for_export(&mut owned),
+        "output ownership and monitor level are playback-only"
+    );
+}
+
+/// Listen leaves through the *monitoring* destination, not through a direct
+/// master writer — and it still never enters export.
+#[test]
+fn listen_uses_the_monitoring_destination_and_stays_out_of_export() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    runtime.monitor.hardware_owner = HardwareOutputOwner::MonitorControlRoom;
+    runtime.monitor.master_output = Some((0, 1));
+    runtime.monitor.output = MonitorOutputTarget::new("Headphones", 2);
+    runtime.tracks[0].listen = ListenMode::Afl;
+
+    let peaks = render_wide_and_monitor(&mut runtime, 4, 0.5);
+    assert!(
+        peaks[2] > 0.01,
+        "the Listen tap leaves through the monitoring destination"
+    );
+    assert_eq!(
+        (peaks[0], peaks[1]),
+        (0.0, 0.0),
+        "Listen must not reach the direct master writer"
+    );
+
+    let mut exporting = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    exporting.tracks[0].listen = ListenMode::Afl;
+    let mut plain = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    assert_eq!(
+        render_for_export(&mut exporting),
+        render_for_export(&mut plain),
+        "a Listen tap must never enter export"
+    );
+}
+
+// ── Export safety audit ─────────────────────────────────────────────────────
+//
+// The structural guarantee is that offline export renders the graph directly:
+//
+// ```txt
+// Tracks / Buses -> Master -> Export
+// ```
+//
+// and never
+//
+// ```txt
+// Tracks / Buses -> Master -> Monitor -> Export
+// ```
+//
+// The Control Room lives in `backend::render::apply_control_room`, reachable
+// only from the device callback, while export calls
+// `render_project_block_interleaved_with_taps`. These tests pin that by moving
+// *every* Control Room control at once and asserting export is bit-identical.
+
+/// One sweep over the whole Control Room: gain, dim, mute, mono, monitor
+/// inserts, a Listen tap, an alternate monitoring destination, and hardware
+/// ownership. Export must not move by a single sample.
+#[test]
+fn no_control_room_setting_can_reach_exported_audio() {
+    let tracks = || {
+        let mut master = track("master", "master");
+        master.inserts = vec![gain_insert("master-gain", 0.0)];
+        vec![track("audio-1", "audio"), master]
+    };
+
+    let mut plain = build(tracks());
+    let baseline = render_for_export(&mut plain);
+
+    let mut loud = build(tracks());
+    loud.monitor.control = MonitorControl {
+        gain: 8.0,
+        mute: true,
+        dim: true,
+        mono: true,
+    };
+    loud.monitor.inserts = monitor_insert_chain(24.0);
+    loud.monitor.output = MonitorOutputTarget::new("Headphones", 2);
+    loud.monitor.hardware_owner = HardwareOutputOwner::MonitorControlRoom;
+    loud.monitor.master_output = Some((0, 1));
+    loud.tracks[0].listen = ListenMode::Pfl;
+
+    assert_eq!(
+        render_for_export(&mut loud),
+        baseline,
+        "the Control Room is a playback stage; export taps before it"
+    );
+}
+
+/// Export stays correct after the Control Room has actually run on a playback
+/// block — the monitoring stage must not leave state behind that colours the
+/// next offline render.
+#[test]
+fn exporting_after_a_monitored_playback_block_is_unchanged() {
+    let mut runtime = build(vec![track("audio-1", "audio"), track("master", "master")]);
+    let baseline = render_for_export(&mut runtime);
+
+    runtime.monitor.control.gain = 0.25;
+    runtime.monitor.control.mono = true;
+    let _ = render_and_monitor(&mut runtime, 0.5);
+
+    assert_eq!(render_for_export(&mut runtime), baseline);
+}
+
+/// A Listen tap is monitoring-only in both directions: it changes what the
+/// Control Room plays, and it changes nothing that is rendered offline.
+#[test]
+fn neither_pfl_nor_afl_alters_exported_audio() {
+    for mode in [ListenMode::Pfl, ListenMode::Afl] {
+        let mut plain = build(vec![track("audio-1", "audio"), track("master", "master")]);
+        let mut listening = build(vec![track("audio-1", "audio"), track("master", "master")]);
+        listening.tracks[0].listen = mode;
+
+        assert_eq!(
+            render_for_export(&mut listening),
+            render_for_export(&mut plain),
+            "{mode:?} must not enter export"
+        );
+    }
+}

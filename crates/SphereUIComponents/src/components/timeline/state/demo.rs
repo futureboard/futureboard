@@ -241,6 +241,9 @@ impl TimelineState {
             },
             tracks: vec![track1, track2, track3],
             audio_connections: crate::audio_connections::AudioConnectionRegistry::new(),
+            master_output_connection_id: None,
+            monitor_output_connection_id: None,
+            output_routing_initialized: false,
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
                 inserts: Vec::new(),
@@ -249,13 +252,12 @@ impl TimelineState {
                 meter_peak_hold_l: 0.0,
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
+                output_label: crate::output_routing::NO_OUTPUT_LABEL.to_string(),
             },
             monitor: MonitorBusState {
                 source: MonitorSourceKind::MasterBus,
                 source_display: "Master Bus".to_string(),
                 output_name: "Out 1-2".to_string(),
-                output_left_channel: 0,
-                available_outputs: vec![("Out 1-2".to_string(), 0)],
                 volume: volume::db_to_norm(0.0),
                 mute: false,
                 dim: false,
@@ -266,6 +268,7 @@ impl TimelineState {
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
                 listen_active: false,
+                control_room_enabled: true,
             },
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),

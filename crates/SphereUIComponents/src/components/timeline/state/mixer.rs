@@ -202,44 +202,25 @@ impl TimelineState {
         options
     }
 
-    /// Publish the stereo output pairs the active device can offer.
+    /// Re-resolve the Master and Monitor Output chip labels from the registry.
     ///
-    /// Called with the real channel count of the configured output device, so
-    /// the Output selector never offers a pair the hardware does not have. A
-    /// stored selection that no longer fits (after switching to a smaller
-    /// interface) falls back to the main pair — the engine clamps the same way,
-    /// so monitoring cannot go silent because of a stale selection.
-    pub fn set_monitor_output_devices(&mut self, output_channels: u32) -> bool {
-        let mut options = vec![("Out 1-2".to_string(), 0u16)];
-        let mut left = 2u16;
-        while (left as u32 + 1) < output_channels {
-            options.push((format!("Out {}-{}", left + 1, left + 2), left));
-            left += 2;
-        }
-        if options == self.monitor.available_outputs {
-            return false;
-        }
-        self.monitor.available_outputs = options;
-        if !self
-            .monitor
-            .available_outputs
-            .iter()
-            .any(|(_, left)| *left == self.monitor.output_left_channel)
-        {
-            self.monitor.output_left_channel = 0;
-            self.monitor.output_name = "Out 1-2".to_string();
-        }
-        true
-    }
-
-    /// Select the Control Room's hardware output pair.
-    pub fn set_monitor_output(&mut self, name: String, left_channel: u16) -> bool {
-        let changed =
-            self.monitor.output_name != name || self.monitor.output_left_channel != left_channel;
-        if changed {
-            self.monitor.output_name = name;
-            self.monitor.output_left_channel = left_channel;
-        }
+    /// Display only — neither `master_output_connection_id` nor
+    /// `monitor_output_connection_id` is touched, which is why renaming a bus
+    /// updates both strips without disturbing any routing. Call after a
+    /// registry edit, an output assignment, or a project load.
+    pub fn refresh_output_labels(&mut self) -> bool {
+        let master = crate::output_routing::master_output_label(
+            &self.audio_connections,
+            self.master_output_connection_id.as_ref(),
+        );
+        let monitor = crate::output_routing::monitor_output_label(
+            &self.audio_connections,
+            self.master_output_connection_id.as_ref(),
+            self.monitor_output_connection_id.as_ref(),
+        );
+        let changed = self.master.output_label != master || self.monitor.output_name != monitor;
+        self.master.output_label = master;
+        self.monitor.output_name = monitor;
         changed
     }
 
@@ -536,8 +517,10 @@ mod control_room_state_tests {
         let state = TimelineState::default();
         assert_eq!(state.monitor.source, MonitorSourceKind::MasterBus);
         assert_eq!(state.monitor.source_label(), "Master Bus");
-        assert_eq!(state.monitor.output_name, "Out 1-2");
-        assert_eq!(state.monitor.output_left_channel, 0);
+        assert_eq!(
+            state.monitor.output_name, "Out 1-2",
+            "the chip carries the resolved destination label once refreshed"
+        );
         assert!(!state.monitor.mute);
         assert!(!state.monitor.dim);
         assert!(!state.monitor.mono);
@@ -603,28 +586,52 @@ mod control_room_state_tests {
         );
     }
 
+    /// The Monitor Output chip reads a logical connection, and Follow Master
+    /// Output is what it shows before any destination is assigned.
     #[test]
-    fn output_pairs_follow_the_device_channel_count() {
+    fn the_monitor_output_chip_reads_the_effective_connection() {
+        use crate::audio_connections::{
+            AudioConnection, AudioConnectionDirection, AvailablePorts, ChannelLayout,
+        };
+
+        let ports = AvailablePorts::for_device("dev-1", "Interface", 2, 4);
         let mut state = TimelineState::default();
+        state.refresh_output_labels();
+        assert_eq!(
+            state.monitor.output_name,
+            "Follow Master Output — No Master Output"
+        );
 
-        assert!(state.set_monitor_output_devices(8));
-        let names: Vec<_> = state
-            .monitor
-            .available_outputs
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
-        assert_eq!(names, vec!["Out 1-2", "Out 3-4", "Out 5-6", "Out 7-8"]);
+        let main = state.audio_connections.add(
+            AudioConnection::new(
+                "Main Output",
+                AudioConnectionDirection::Output,
+                ChannelLayout::Stereo,
+            )
+            .bind_consecutive("dev-1", 0, |i| format!("Output {}", i + 1)),
+        );
+        let headphones = state.audio_connections.add(
+            AudioConnection::new(
+                "Headphones",
+                AudioConnectionDirection::Output,
+                ChannelLayout::Stereo,
+            )
+            .bind_consecutive("dev-1", 2, |i| format!("Output {}", i + 1)),
+        );
+        state.audio_connections.revalidate(&ports);
 
-        assert!(state.set_monitor_output("Out 5-6".to_string(), 4));
-        assert_eq!(state.monitor.output_left_channel, 4);
+        state.set_master_output_connection(Some(main));
+        state.refresh_output_labels();
+        assert_eq!(state.master.output_label, "Main Output");
+        assert_eq!(state.monitor.output_name, "Follow Master Output");
 
-        // Switching to a plain stereo interface must not leave the Control Room
-        // pointed at a pair that no longer exists.
-        assert!(state.set_monitor_output_devices(2));
-        assert_eq!(state.monitor.available_outputs.len(), 1);
-        assert_eq!(state.monitor.output_left_channel, 0);
-        assert_eq!(state.monitor.output_name, "Out 1-2");
+        state.set_monitor_output_connection(Some(headphones));
+        state.refresh_output_labels();
+        assert_eq!(state.monitor.output_name, "Headphones");
+        assert_eq!(
+            state.master.output_label, "Main Output",
+            "the Monitor override must not change the Master destination"
+        );
     }
 
     #[test]

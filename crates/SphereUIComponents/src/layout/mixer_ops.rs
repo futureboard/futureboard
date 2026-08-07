@@ -1667,7 +1667,7 @@ impl StudioLayout {
             push_monitor_control(&audio_engine_monitor, &timeline_monitor, cx);
         });
 
-        let mut make_monitor_toggle =
+        let make_monitor_toggle =
             |mutate: fn(&mut crate::components::timeline::timeline_state::TimelineState)| {
                 let timeline = self.timeline.clone();
                 let owner = owner.clone();
@@ -1733,45 +1733,34 @@ impl StudioLayout {
             }
         }));
 
-        // Output chip: step through the stereo pairs the active device offers.
-        let timeline_output = self.timeline.clone();
-        let owner_output = owner.clone();
-        let engine_output = audio_engine.clone();
-        let on_monitor_output_picker: Option<
+        // Output chips: open the Master / Monitor destination menus. Both list
+        // Output Audio Connections, never a raw hardware pair, so the selection
+        // that lands in the project is only ever an AudioConnectionId.
+        let open_output_picker = |target: ContextTarget| -> Option<
             std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static>,
-        > = Some(std::sync::Arc::new(move |_: &(f32, f32), _w, cx| {
-            let changed = timeline_output.update(cx, |t, cx| {
-                let options = t.state.monitor.available_outputs.clone();
-                if options.is_empty() {
-                    return false;
-                }
-                let current = options
-                    .iter()
-                    .position(|(_, left)| *left == t.state.monitor.output_left_channel)
-                    .unwrap_or(0);
-                let (name, left) = options[(current + 1) % options.len()].clone();
-                let changed = t.state.set_monitor_output(name, left);
-                if changed {
-                    cx.notify();
-                }
-                changed
-            });
-            if !changed {
-                return;
-            }
-            StudioLayout::defer_update(&owner_output, cx, |this, cx| {
-                this.push_mixer_snapshot_to_window(cx);
-                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
-            });
-            let (name, left) = {
-                let state = &timeline_output.read(cx).state.monitor;
-                (state.output_name.clone(), state.output_left_channel)
-            };
-            if let Some(engine) = engine_output.as_ref() {
-                let _ = engine
-                    .set_monitor_output(DirectAudio::monitor::MonitorOutputTarget::new(name, left));
-            }
-        }));
+        > {
+            let owner = owner.clone();
+            Some(std::sync::Arc::new(
+                move |(x, y): &(f32, f32), window: &mut Window, cx: &mut gpui::App| {
+                    let (x, y) = (*x, *y);
+                    let window_id = window.window_handle().window_id();
+                    let target = target.clone();
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.try_open_context_menu(
+                            ContextMenuRequest::new(
+                                window_id,
+                                x,
+                                y,
+                                ContextMenuTarget::Extended(target),
+                            ),
+                            cx,
+                        );
+                    });
+                },
+            ))
+        };
+        let on_master_output_picker = open_output_picker(ContextTarget::MasterOutputPicker);
+        let on_monitor_output_picker = open_output_picker(ContextTarget::MonitorOutputPicker);
 
         let on_context_menu: std::sync::Arc<
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
@@ -2138,6 +2127,7 @@ impl StudioLayout {
             on_monitor_toggle_dim,
             on_monitor_toggle_mono,
             on_monitor_source_picker,
+            on_master_output_picker,
             on_monitor_output_picker,
             on_context_menu: Some(on_context_menu),
             on_add_insert,
@@ -2153,6 +2143,108 @@ impl StudioLayout {
             on_send_gain_change,
             on_reorder_send,
         }
+    }
+
+    /// Apply one Master / Monitor Output menu selection.
+    ///
+    /// `is_master` picks which field is written; the two are never written
+    /// together, because Master's destination and the Control Room's override
+    /// are independent selections.
+    pub(crate) fn apply_output_routing_command(
+        &mut self,
+        command: crate::output_routing::OutputCommand,
+        is_master: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::output_routing::OutputCommand;
+
+        self.overlay.open_popover = None;
+
+        let assignment = match command {
+            OutputCommand::OpenAudioConnections => {
+                // Not a routing change: the current assignment stays exactly as
+                // it is while the user edits the buses themselves.
+                self.open_audio_connections_window(None, cx);
+                cx.notify();
+                return;
+            }
+            OutputCommand::Clear => None,
+            OutputCommand::Assign(id) => Some(id),
+        };
+
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let changed = if is_master {
+                timeline.state.set_master_output_connection(assignment)
+            } else {
+                timeline.state.set_monitor_output_connection(assignment)
+            };
+            if changed {
+                timeline.state.refresh_output_labels();
+                cx.notify();
+            }
+            changed
+        });
+        if !changed {
+            cx.notify();
+            return;
+        }
+
+        self.mark_dirty();
+        self.audio_bridge.project_dirty = true;
+        // Recompiles the snapshot and pushes the new ownership to the engine.
+        self.publish_audio_connection_routing(cx);
+        self.push_mixer_snapshot_to_window(cx);
+        let _ = self.mixer_panel.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    /// Push the compiled hardware ownership and monitoring destination to the
+    /// engine.
+    ///
+    /// Everything expensive — id lookup, port resolution, ownership — has
+    /// already happened in `compile_routing` on this thread; the engine receives
+    /// resolved channel indexes only.
+    pub(crate) fn push_output_routing_to_engine(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.audio_bridge.engine.clone() else {
+            return;
+        };
+        let snapshot = crate::audio_routing_compile::global_routing_publisher().current();
+        let routing = snapshot.output_routing;
+
+        let pair = |route: &crate::audio_routing_compile::ResolvedOutputRoute| {
+            let channels = route.channels.as_slice();
+            match channels.len() {
+                0 => None,
+                1 => Some((channels[0] as u16, channels[0] as u16)),
+                _ => Some((channels[0] as u16, channels[1] as u16)),
+            }
+        };
+        let owner = match routing.hardware_owner {
+            crate::audio_routing_compile::HardwareOutputOwner::MasterDirect => {
+                DirectAudio::monitor::HardwareOutputOwner::MasterDirect
+            }
+            crate::audio_routing_compile::HardwareOutputOwner::MonitorControlRoom => {
+                DirectAudio::monitor::HardwareOutputOwner::MonitorControlRoom
+            }
+            crate::audio_routing_compile::HardwareOutputOwner::None => {
+                DirectAudio::monitor::HardwareOutputOwner::None
+            }
+        };
+
+        // Display name comes from the project, the pair from the compiled
+        // route: the engine never resolves a name or an id.
+        let monitor_label = self.timeline.read(cx).state.monitor.output_name.clone();
+        if let Some((left, _right)) = routing.effective_monitor.as_ref().and_then(pair) {
+            let _ = engine.set_monitor_output(DirectAudio::monitor::MonitorOutputTarget::new(
+                monitor_label,
+                left,
+            ));
+        }
+        let _ = engine.set_hardware_output_ownership(
+            owner,
+            routing.master.as_ref().and_then(pair),
+            routing.effective_monitor.as_ref().and_then(pair),
+        );
     }
 }
 

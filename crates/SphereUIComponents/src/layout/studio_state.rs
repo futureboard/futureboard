@@ -162,6 +162,12 @@ pub enum ContextTarget {
     OutputPicker {
         track_id: String,
     },
+    /// Master Output picker opened from the Master strip. Lists Output Audio
+    /// Connections only; selecting one stores nothing but its stable id.
+    MasterOutputPicker,
+    /// Monitor / Control Room Output picker. Leads with Follow Master Output,
+    /// which is a real selection rather than an empty one.
+    MonitorOutputPicker,
     /// Automation target picker opened from a track's automation control lane.
     AutomationTargetPicker {
         track_id: String,

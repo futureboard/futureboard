@@ -106,23 +106,20 @@ pub enum AudioFormat {
     Stereo,
 }
 
-pub(crate) const FIRST_STEREO_PAIR_INPUT_LABEL: &str = "Stereo Pair 1+2";
-const MONO_AUDIO_INPUT_OPTIONS: &[&str] = &["Input 1", "Input 2", "None"];
-const STEREO_AUDIO_INPUT_OPTIONS: &[&str] =
-    &["Input 1", "Input 2", FIRST_STEREO_PAIR_INPUT_LABEL, "None"];
+/// Label for an Audio track with no input connection. Captures nothing — it is
+/// never a system default input.
+pub(crate) const NO_AUDIO_INPUT_LABEL: &str = crate::input_routing::NO_INPUT_LABEL;
 
-fn audio_input_options(format: AudioFormat) -> &'static [&'static str] {
-    match format {
-        AudioFormat::Mono => MONO_AUDIO_INPUT_OPTIONS,
-        AudioFormat::Stereo => STEREO_AUDIO_INPUT_OPTIONS,
-    }
-}
-
-fn default_audio_input(format: AudioFormat) -> &'static str {
-    match format {
-        AudioFormat::Mono => "Input 1",
-        AudioFormat::Stereo => FIRST_STEREO_PAIR_INPUT_LABEL,
-    }
+/// One logical Input Audio Connection the dialog can offer.
+///
+/// Carries the bus's channel count so switching Mono/Stereo re-filters the list
+/// without asking the layout for a fresh one — a mono track must never be able
+/// to select a stereo bus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddTrackInputChoice {
+    pub label: String,
+    pub connection_id: crate::audio_connections::AudioConnectionId,
+    pub channels: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +257,9 @@ impl AddTrackKind {
     pub fn default_input(self) -> &'static str {
         match self {
             Self::Midi | Self::Instrument => "All MIDI Inputs",
-            Self::Audio => FIRST_STEREO_PAIR_INPUT_LABEL,
+            // An Audio track starts with no input: creating one must never
+            // open a capture device the user did not choose.
+            Self::Audio => NO_AUDIO_INPUT_LABEL,
             _ => "None",
         }
     }
@@ -315,6 +314,10 @@ pub struct AddTrackDialogState {
     pub output_label: String,
     /// Live Bus/Return destinations for the Output select: `(track_id, display_name)`.
     pub audio_output_targets: Vec<(String, String)>,
+    /// Logical Input Audio Connections offered by the Input select, as
+    /// `(menu label, connection id)`. Built from the project registry — the
+    /// dialog never enumerates hardware and never creates a bus of its own.
+    pub audio_input_choices: Vec<AddTrackInputChoice>,
     pub ascending_input: bool,
     pub ascending_output: bool,
     pub midi_channel_label: String,
@@ -374,6 +377,7 @@ impl AddTrackDialogState {
             input_label: kind.default_input().to_string(),
             output_label: "Main".to_string(),
             audio_output_targets: Vec::new(),
+            audio_input_choices: Vec::new(),
             ascending_input: false,
             ascending_output: false,
             midi_channel_label: "All Channels".to_string(),
@@ -405,6 +409,49 @@ impl AddTrackDialogState {
             && kind_singleton_available(self.selected_kind, self)
     }
 
+    /// Menu labels for the Audio track Input select.
+    ///
+    /// No Input first, then the project's Input Audio Connections that fit this
+    /// track's channel count. A physical device never appears: mapping hardware
+    /// is Audio Connections' job, and this dialog creates no bus of its own.
+    pub fn audio_input_option_labels(&self) -> Vec<SelectOption> {
+        let track_channels = match self.audio_format {
+            AudioFormat::Mono => 1,
+            AudioFormat::Stereo => 2,
+        };
+        let mut options = vec![SelectOption::new(
+            NO_AUDIO_INPUT_LABEL,
+            NO_AUDIO_INPUT_LABEL,
+        )];
+        options.extend(
+            self.audio_input_choices
+                .iter()
+                // A mono bus up-mixed into a stereo track is well defined; a
+                // stereo bus feeding a mono track is not, so it is not offered.
+                .filter(|choice| choice.channels <= track_channels)
+                .map(|choice| SelectOption::new(choice.label.clone(), choice.label.clone())),
+        );
+        options
+    }
+
+    /// The connection a label selects. `None` for No Input and for the
+    /// Audio Connections escape hatch, which is not a routing value.
+    pub fn audio_input_connection_for_label(
+        &self,
+        label: &str,
+    ) -> Option<crate::audio_connections::AudioConnectionId> {
+        self.audio_input_option_labels()
+            .iter()
+            .any(|option| option.id == label)
+            .then(|| {
+                self.audio_input_choices
+                    .iter()
+                    .find(|choice| choice.label == label)
+                    .map(|choice| choice.connection_id.clone())
+            })
+            .flatten()
+    }
+
     pub fn sync_channel_count_from_format(&mut self) {
         self.channel_count = match self.audio_format {
             AudioFormat::Mono => 1,
@@ -415,19 +462,20 @@ impl AddTrackDialogState {
     pub fn set_audio_format(&mut self, audio_format: AudioFormat) {
         self.audio_format = audio_format;
         self.sync_channel_count_from_format();
-        if !audio_input_options(audio_format).contains(&self.input_label.as_str()) {
-            self.input_label = default_audio_input(audio_format).to_string();
+        // Mono/Stereo changes which connections *fit*, so a selection that no
+        // longer appears falls back to No Input rather than to another bus.
+        if !self
+            .audio_input_option_labels()
+            .iter()
+            .any(|option| option.id == self.input_label)
+        {
+            self.input_label = NO_AUDIO_INPUT_LABEL.to_string();
         }
     }
 
     pub fn set_kind(&mut self, kind: AddTrackKind) {
         self.selected_kind = kind;
-        self.input_label = if kind == AddTrackKind::Audio {
-            default_audio_input(self.audio_format)
-        } else {
-            kind.default_input()
-        }
-        .to_string();
+        self.input_label = kind.default_input().to_string();
     }
 }
 
@@ -1280,7 +1328,7 @@ fn type_fields(
                         "add-track-input-select",
                         Some(state.input_label.as_str()),
                         "Select input...",
-                        select_options(audio_input_options(state.audio_format)),
+                        state.audio_input_option_labels(),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
                         SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
@@ -1829,6 +1877,25 @@ impl AddTrackWindow {
                 .any(|(_, name)| self.state.output_label == format!("Bus - {name}"))
         {
             self.state.output_label = "Main".to_string();
+        }
+    }
+
+    /// Refresh the logical Input Audio Connections offered by the Input select.
+    /// Called whenever the dialog opens or reactivates, so buses created in the
+    /// Audio Connections window appear without reopening the dialog.
+    ///
+    /// A selection whose bus disappeared falls back to No Input — never to
+    /// another connection.
+    pub fn set_audio_input_choices(&mut self, audio_input_choices: Vec<AddTrackInputChoice>) {
+        self.state.audio_input_choices = audio_input_choices;
+        if self.state.selected_kind == AddTrackKind::Audio
+            && self.state.input_label != NO_AUDIO_INPUT_LABEL
+            && self
+                .state
+                .audio_input_connection_for_label(&self.state.input_label.clone())
+                .is_none()
+        {
+            self.state.input_label = NO_AUDIO_INPUT_LABEL.to_string();
         }
     }
 
@@ -2678,6 +2745,7 @@ pub fn open_add_track_window(
     instrument_plugins: Vec<RegistryPlugin>,
     midi_input_devices: Vec<String>,
     audio_output_targets: Vec<(String, String)>,
+    audio_input_choices: Vec<AddTrackInputChoice>,
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
     cx: &mut App,
 ) -> Result<WindowHandle<AddTrackWindow>, String> {
@@ -2697,6 +2765,7 @@ pub fn open_add_track_window(
     state.selected_kind = kind;
     state.input_label = kind.default_input().to_string();
     state.audio_output_targets = audio_output_targets;
+    state.audio_input_choices = audio_input_choices;
     state.track_name = format!("{} {}", i18n.tr(kind.label_key()), state.next_number);
     add_track_debug(&format!(
         "open window kind={} track_count={}",
@@ -2742,42 +2811,94 @@ fn valid_monitor_mode(mode: &'static str) -> &'static str {
 mod tests {
     use super::*;
 
+    fn mic_choice() -> AddTrackInputChoice {
+        AddTrackInputChoice {
+            label: "Microphone".to_string(),
+            connection_id: crate::audio_connections::AudioConnectionId::from_stored("ac-mic"),
+            channels: 1,
+        }
+    }
+
+    fn stereo_choice() -> AddTrackInputChoice {
+        AddTrackInputChoice {
+            label: "Stereo Input".to_string(),
+            connection_id: crate::audio_connections::AudioConnectionId::from_stored("ac-stereo"),
+            channels: 2,
+        }
+    }
+
+    /// An Audio track starts with No Input. Creating one must never open a
+    /// capture device the user did not choose.
     #[test]
-    fn audio_input_options_only_offer_pairs_for_stereo() {
-        assert_eq!(
-            audio_input_options(AudioFormat::Mono),
-            &["Input 1", "Input 2", "None"]
-        );
-        assert_eq!(
-            audio_input_options(AudioFormat::Stereo),
-            &["Input 1", "Input 2", FIRST_STEREO_PAIR_INPUT_LABEL, "None"]
-        );
+    fn a_new_audio_track_starts_with_no_input() {
+        let state = AddTrackDialogState::open_for(0, false);
+        assert_eq!(state.selected_kind, AddTrackKind::Audio);
+        assert_eq!(state.input_label, NO_AUDIO_INPUT_LABEL);
     }
 
     #[test]
-    fn format_changes_preserve_mono_selections_and_replace_stereo_pairs() {
+    fn only_connections_that_fit_the_format_are_offered() {
         let mut state = AddTrackDialogState::open_for(0, false);
-        assert_eq!(state.input_label, FIRST_STEREO_PAIR_INPUT_LABEL);
-
-        state.input_label = "Input 2".to_string();
-        state.set_audio_format(AudioFormat::Mono);
-        assert_eq!(state.input_label, "Input 2");
+        state.audio_input_choices = vec![mic_choice(), stereo_choice()];
 
         state.set_audio_format(AudioFormat::Stereo);
-        state.input_label = FIRST_STEREO_PAIR_INPUT_LABEL.to_string();
+        let stereo: Vec<String> = state
+            .audio_input_option_labels()
+            .into_iter()
+            .map(|option| option.id)
+            .collect();
+        assert_eq!(
+            stereo,
+            vec![
+                NO_AUDIO_INPUT_LABEL.to_string(),
+                "Microphone".to_string(),
+                "Stereo Input".to_string(),
+            ]
+        );
+
         state.set_audio_format(AudioFormat::Mono);
-        assert_eq!(state.input_label, "Input 1");
+        let mono: Vec<String> = state
+            .audio_input_option_labels()
+            .into_iter()
+            .map(|option| option.id)
+            .collect();
+        assert_eq!(
+            mono,
+            vec![NO_AUDIO_INPUT_LABEL.to_string(), "Microphone".to_string()]
+        );
+    }
+
+    /// Switching to Mono drops a stereo selection to No Input rather than
+    /// silently substituting another bus.
+    #[test]
+    fn a_format_change_that_invalidates_the_selection_falls_back_to_no_input() {
+        let mut state = AddTrackDialogState::open_for(0, false);
+        state.audio_input_choices = vec![mic_choice(), stereo_choice()];
+
+        state.set_audio_format(AudioFormat::Stereo);
+        state.input_label = "Stereo Input".to_string();
+        state.set_audio_format(AudioFormat::Mono);
+        assert_eq!(state.input_label, NO_AUDIO_INPUT_LABEL);
+
+        // A mono selection survives the same change.
+        state.input_label = "Microphone".to_string();
+        state.set_audio_format(AudioFormat::Stereo);
+        assert_eq!(state.input_label, "Microphone");
     }
 
     #[test]
-    fn kind_round_trip_restores_a_format_compatible_audio_input() {
+    fn kind_round_trip_restores_the_audio_default() {
         let mut state = AddTrackDialogState::open_for(0, false);
+        state.audio_input_choices = vec![mic_choice()];
         state.set_audio_format(AudioFormat::Mono);
+        state.input_label = "Microphone".to_string();
+
         state.set_kind(AddTrackKind::Midi);
+        assert_eq!(state.input_label, "All MIDI Inputs");
         state.set_kind(AddTrackKind::Audio);
 
         assert_eq!(state.audio_format, AudioFormat::Mono);
-        assert_eq!(state.input_label, "Input 1");
+        assert_eq!(state.input_label, NO_AUDIO_INPUT_LABEL);
     }
 
     /// The Video track is created by dropping a video onto the arrangement, not

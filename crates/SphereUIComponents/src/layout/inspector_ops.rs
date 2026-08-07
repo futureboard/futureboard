@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use gpui::{App, Entity, Window};
 
-use crate::audio_connections::PhysicalInputChoice;
 use crate::components::edit::EditCommand;
 use crate::components::inspector_debug;
 use crate::components::panel::{InspectorCallbacks, InspectorRoutingCombo};
@@ -43,7 +42,9 @@ fn vsti_output_bus_pair_for_channel(bus_counts: &[u8], channel: u8) -> (u8, u8) 
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
-type InputRoutingCb = Arc<dyn Fn(&(String, PhysicalInputChoice), &mut Window, &mut App) + 'static>;
+type InputRoutingCb = Arc<
+    dyn Fn(&(String, crate::input_routing::TrackInputSelection), &mut Window, &mut App) + 'static,
+>;
 type OutputRoutingCb = Arc<dyn Fn(&(String, TrackOutputRouting), &mut Window, &mut App) + 'static>;
 type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut App) + 'static>;
 type MidiInputCb = Arc<dyn Fn(&(String, TrackMidiInputRouting), &mut Window, &mut App) + 'static>;
@@ -1306,26 +1307,36 @@ impl StudioLayout {
     }
 
     fn input_routing_cb(&self, owner: Entity<Self>) -> InputRoutingCb {
+        use crate::input_routing::TrackInputSelection;
+
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
         Arc::new(
-            move |(id, choice): &(String, PhysicalInputChoice), _w, cx| {
+            move |(id, selection): &(String, TrackInputSelection), _w, cx| {
                 let id = id.clone();
-                let choice = choice.clone();
+                // The selector offers logical connections only, so the value
+                // written to the track is an AudioConnectionId or nothing —
+                // no device, no channel, and no bus created as a side effect.
+                let assignment = match selection {
+                    TrackInputSelection::OpenAudioConnections => {
+                        StudioLayout::defer_update(&owner, cx, |this, cx| {
+                            this.open_audio_connections_window(None, cx);
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    TrackInputSelection::NoInput => None,
+                    TrackInputSelection::Connection(connection_id) => Some(connection_id.clone()),
+                };
                 let old = timeline
                     .read(cx)
                     .state
                     .find_track(&id)
                     .and_then(|track| track.routing.audio_input_connection_id.clone());
-                // Resolve the physical selection to a logical connection first, so
-                // only an AudioConnectionId is ever written to the track.
                 let changed = timeline.update(cx, |t, cx| {
-                    let ports = crate::audio_connections::current_available_ports();
-                    let connection_id = t
+                    let changed = t
                         .state
-                        .audio_connections
-                        .get_or_create_audio_connection_for_physical_input(&choice, &ports);
-                    let changed = t.state.set_track_audio_input_connection(&id, connection_id);
+                        .set_track_audio_input_connection(&id, assignment.clone());
                     if changed {
                         cx.notify();
                     }
@@ -1336,8 +1347,7 @@ impl StudioLayout {
                 }
 
                 inspector_debug(&format!(
-                    "routing audio input track={id} old={:?} new={:?}",
-                    old, choice
+                    "routing audio input track={id} old={old:?} new={assignment:?}"
                 ));
                 let connections = timeline.read(cx).state.audio_connections.clone();
                 let apply_error = audio_engine.as_ref().and_then(|engine| {
@@ -1359,7 +1369,9 @@ impl StudioLayout {
                 }
 
                 StudioLayout::defer_update(&owner, cx, |this, cx| {
-                    this.mark_dirty_view_only();
+                    // A track's input is project data, so this is a real edit.
+                    this.mark_dirty();
+                    this.publish_audio_connection_routing(cx);
                     cx.notify();
                 });
             },

@@ -3,10 +3,8 @@ use gpui::{App, Bounds, Context, Window};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::audio_connections::PhysicalInputChoice;
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat, InstrumentMode,
-    FIRST_STEREO_PAIR_INPUT_LABEL,
 };
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
@@ -56,49 +54,37 @@ fn dialog_audio_format(format: AudioFormat) -> TrackAudioFormat {
     }
 }
 
-/// Resolve an Add Track input label to a physical selection.
+/// Logical Input Audio Connections the Add Track dialog offers, as
+/// `(menu label, connection id)`.
 ///
-/// Returns a `PhysicalInputChoice`, which the caller converts to a logical
-/// `AudioConnectionId` via the registry bridge. The dialog never writes raw
-/// device/channel routing into the track.
-///
-/// `None` and any unsatisfiable selection (missing device, channel beyond the
-/// device) both yield `PhysicalInputChoice::None` — No Input — rather than
-/// guessing a different port.
-fn dialog_audio_input_choice(
-    label: &str,
-    format: AudioFormat,
-    input_device: Option<&(String, u32)>,
-) -> PhysicalInputChoice {
-    match label {
-        "Input 1" | "Input 2" => {
-            let Some((device_id, channels)) = input_device else {
-                return PhysicalInputChoice::None;
-            };
-            let channel = if label == "Input 2" { 1 } else { 0 };
-            if channel >= *channels {
-                return PhysicalInputChoice::None;
-            }
-            PhysicalInputChoice::Ports {
-                device_id: device_id.clone(),
-                channels: vec![channel],
-            }
-        }
-        FIRST_STEREO_PAIR_INPUT_LABEL if format == AudioFormat::Stereo => {
-            let Some((device_id, channels)) = input_device else {
-                return PhysicalInputChoice::None;
-            };
-            if *channels < 2 {
-                return PhysicalInputChoice::None;
-            }
-            PhysicalInputChoice::Ports {
-                device_id: device_id.clone(),
-                // Ordered: index 0 is Left.
-                channels: vec![0, 1],
-            }
-        }
-        _ => PhysicalInputChoice::None,
-    }
+/// Built from the project registry alone, so the dialog cannot expose a device
+/// or create a bus: a disconnected connection is still listed (marked
+/// unavailable) rather than dropped, because hiding it would silently change
+/// what a re-opened dialog offers.
+fn dialog_audio_input_choices(
+    state: &crate::components::timeline::timeline_state::TimelineState,
+) -> Vec<crate::components::add_track_dialog::AddTrackInputChoice> {
+    use crate::components::add_track_dialog::AddTrackInputChoice;
+
+    // Built once for the widest track format; the dialog re-filters by channel
+    // count when the user switches Mono/Stereo.
+    crate::input_routing::track_input_options(&state.audio_connections, 2, None)
+        .into_iter()
+        .filter_map(|choice| {
+            let label = choice.label();
+            let connection_id = choice.connection_id()?.clone();
+            let channels = state
+                .audio_connections
+                .get(&connection_id)?
+                .channel_layout
+                .channel_count();
+            Some(AddTrackInputChoice {
+                label,
+                connection_id,
+                channels,
+            })
+        })
+        .collect()
 }
 
 fn dialog_audio_output_routing(
@@ -274,10 +260,10 @@ impl StudioLayout {
         let timeline = self.timeline.read(cx);
         let registry = timeline.state.audio_connections.clone();
 
-        // Which tracks reference each connection, so a removal can describe
-        // its consequences before it happens. Keyed by connection id string so
-        // more reference kinds (Master/Monitor outputs) can be added later
-        // without changing the shape.
+        // What references each connection, so a removal can describe its
+        // consequences before it happens. Track inputs, the Master output, and
+        // the Monitor override all land in the same map: a bus used only by
+        // Master must not look unused.
         let mut references: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for track in &timeline.state.tracks {
@@ -287,6 +273,18 @@ impl StudioLayout {
                     .or_default()
                     .push(track.name.clone());
             }
+        }
+        if let Some(id) = timeline.state.master_output_connection_id.as_ref() {
+            references
+                .entry(id.as_str().to_string())
+                .or_default()
+                .push("Master".to_string());
+        }
+        if let Some(id) = timeline.state.monitor_output_connection_id.as_ref() {
+            references
+                .entry(id.as_str().to_string())
+                .or_default()
+                .push("Monitor".to_string());
         }
 
         // Device identity stays separate from bus identity: these two strings
@@ -396,6 +394,10 @@ impl StudioLayout {
                     // Affected tracks become No Input — never re-pointed at
                     // some other bus. MIDI routing is untouched.
                     timeline.state.unassign_audio_connection(id);
+                    // Same rule for the buses: Master loses its output and
+                    // Monitor returns to Follow Master Output. Neither picks a
+                    // replacement automatically.
+                    timeline.state.unassign_output_connection(id);
                     mutation
                 }
                 ConnectionEdit::ResetDefaults { direction } => {
@@ -425,6 +427,7 @@ impl StudioLayout {
                         .reset_defaults_for(*direction, &ports, &device_id, &affected);
                     for id in &removed {
                         timeline.state.unassign_audio_connection(id);
+                        timeline.state.unassign_output_connection(id);
                     }
                     mutation
                 }
@@ -435,6 +438,10 @@ impl StudioLayout {
                     crate::audio_connections::ConnectionMutation::default()
                 }
             };
+            // A rename changes only the chips; a removal may also have cleared
+            // a Master/Monitor assignment. Either way the labels are re-derived
+            // from the registry rather than cached at assignment time.
+            timeline.state.refresh_output_labels();
             cx.notify();
             mutation
         });
@@ -478,7 +485,7 @@ impl StudioLayout {
         use crate::components::audio_connections_window::ConnectionEdit;
         use crate::components::message_box_dialog::{MessageBoxKind, MessageBoxOptions};
 
-        let (name, affected) = {
+        let (name, affected, uses_master, uses_monitor) = {
             let timeline = self.timeline.read(cx);
             let name = timeline
                 .state
@@ -493,19 +500,40 @@ impl StudioLayout {
                 .filter(|track| track.routing.audio_input_connection_id.as_ref() == Some(&id))
                 .map(|track| track.name.clone())
                 .collect();
-            (name, affected)
+            (
+                name,
+                affected,
+                timeline.state.master_output_connection_id.as_ref() == Some(&id),
+                timeline.state.monitor_output_connection_id.as_ref() == Some(&id),
+            )
         };
 
-        if !removal_needs_confirmation(&affected) {
+        // A bus used only by Master or Monitor still needs the question — the
+        // track list alone would call it unused.
+        if !removal_needs_confirmation(&affected) && !uses_master && !uses_monitor {
             self.apply_audio_connection_edit(&ConnectionEdit::Remove { id }, cx);
             return;
         }
 
-        let detail = format!(
-            "{} track(s) use this connection and will be set to No Input: {}.",
-            affected.len(),
-            affected.join(", ")
-        );
+        let mut lines = Vec::new();
+        if !affected.is_empty() {
+            lines.push(format!(
+                "{} track(s) use this connection and will be set to No Input: {}.",
+                affected.len(),
+                affected.join(", ")
+            ));
+        }
+        if uses_master {
+            lines.push(format!(
+                "\"{name}\" is used by Master. Master will have no output."
+            ));
+        }
+        if uses_monitor {
+            lines.push(format!(
+                "\"{name}\" is used by Monitor. Monitor will follow the Master output."
+            ));
+        }
+        let detail = lines.join(" ");
         let options = MessageBoxOptions {
             kind: MessageBoxKind::Warning,
             title: "Remove Audio Connection".to_string(),
@@ -611,27 +639,84 @@ impl StudioLayout {
         use crate::audio_routing_compile::{compile_routing, RoutingCompileRequest};
 
         let ports = crate::audio_connections::current_available_ports();
-        let (registry, track_inputs) = {
+        let request = {
             let timeline = self.timeline.read(cx);
-            (
-                timeline.state.audio_connections.clone(),
-                timeline
+            RoutingCompileRequest {
+                track_inputs: timeline
                     .state
                     .tracks
                     .iter()
                     .map(|track| track.routing.audio_input_connection_id.clone())
                     .collect::<Vec<_>>(),
-            )
+                master_output: timeline.state.master_output_connection_id.clone(),
+                // `None` here is Follow Master Output; the compiler resolves it.
+                monitor_output_override: timeline.state.monitor_output_connection_id.clone(),
+                control_room_active: timeline.state.monitor.control_room_enabled,
+            }
         };
-        let request = RoutingCompileRequest {
-            track_inputs,
-            master_output: None,
-            monitor_output: None,
-        };
+        let registry = self.timeline.read(cx).state.audio_connections.clone();
         let publisher = crate::audio_routing_compile::global_routing_publisher();
         let generation = publisher.next_generation();
         let result = compile_routing(&registry, &ports, &request, generation);
         publisher.publish(result.snapshot);
+        // Hardware ownership is part of the same compile: publishing routing
+        // without it would leave the engine writing the previous destination.
+        self.push_output_routing_to_engine(cx);
+    }
+
+    /// Report routing warnings on the single project surface.
+    ///
+    /// Takes the registry's prose, classifies it, and aggregates: one clause per
+    /// condition, no matter how many connections or tracks it affects. The full
+    /// list stays in `audio_bridge.routing_warnings.details` for diagnostics.
+    pub(crate) fn push_routing_warnings(&mut self, warnings: Vec<String>, cx: &mut Context<Self>) {
+        use crate::layout::routing_warnings::RoutingWarning;
+
+        let classified: Vec<RoutingWarning> = warnings
+            .into_iter()
+            .map(RoutingWarning::from_registry_text)
+            .collect();
+        self.report_routing_warnings(classified, cx);
+    }
+
+    /// Report already-classified warnings. `Vec::new()` clears the surface, so a
+    /// condition that has been resolved stops being advertised.
+    pub(crate) fn report_routing_warnings(
+        &mut self,
+        warnings: Vec<crate::layout::routing_warnings::RoutingWarning>,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.audio_bridge.routing_warnings.report(warnings);
+        cx.notify();
+    }
+
+    /// Re-read the hardware inventory and revalidate every logical connection
+    /// against it, then publish **one** routing snapshot.
+    ///
+    /// Called after any change that can move the device inventory (backend or
+    /// device switch, reopen, disconnect/reconnect). Stable ids and port
+    /// bindings are preserved throughout: a missing device turns a connection
+    /// unavailable and reconnecting the same hardware restores it exactly.
+    /// Nothing is ever remapped onto a different device's channel.
+    pub(crate) fn refresh_audio_device_inventory(&mut self, cx: &mut Context<Self>) {
+        crate::device_registry::scan_audio();
+        let ports = crate::audio_connections::current_available_ports();
+
+        let mutation = self.timeline.update(cx, |timeline, cx| {
+            let mutation = timeline.state.audio_connections.validate_all(&ports);
+            // Master/Monitor assignments are untouched — only their labels move
+            // between available and unavailable.
+            timeline.state.refresh_output_labels();
+            cx.notify();
+            mutation
+        });
+
+        // One compile for the whole inventory change, never one per connection.
+        self.publish_audio_connection_routing(cx);
+        self.refresh_audio_connections_window(cx);
+        if !mutation.warnings.is_empty() {
+            self.push_routing_warnings(mutation.warnings, cx);
+        }
     }
 
     /// Push fresh project data into the open window, if any.
@@ -831,6 +916,7 @@ impl StudioLayout {
 
         if let Some(handle) = self.external_windows.add_track.clone() {
             let audio_output_targets = project_bus_output_targets(&self.timeline.read(cx).state);
+            let audio_input_choices = dialog_audio_input_choices(&self.timeline.read(cx).state);
             if handle
                 .update(cx, |win, window, cx| {
                     win.set_instrument_plugins(add_track_instrument_plugins_from_catalog(
@@ -839,6 +925,7 @@ impl StudioLayout {
                     win.set_midi_input_devices(midi_input_devices.clone());
                     win.set_context(kind, track_count, has_master_track, default_monitor_mode);
                     win.set_audio_output_targets(audio_output_targets);
+                    win.set_audio_input_choices(audio_input_choices);
                     window.activate_window();
                     cx.notify();
                 })
@@ -877,7 +964,6 @@ impl StudioLayout {
                 };
                 let _ = layout.update(cx, |this, cx| {
                     this.mark_dirty();
-                    let selected_input_device = this.selected_input_device_channels(cx);
                     let mut bridge_inserts = Vec::new();
                     let _ = this.timeline.update(cx, |timeline, cx| {
                         let route_selected_to_new_bus = dialog.selected_kind == AddTrackKind::Bus;
@@ -953,21 +1039,11 @@ impl StudioLayout {
                             }
                             if dialog.selected_kind == AddTrackKind::Audio {
                                 let audio_format = dialog_audio_format(dialog.audio_format);
-                                let choice = dialog_audio_input_choice(
-                                    &dialog.input_label,
-                                    dialog.audio_format,
-                                    selected_input_device.as_ref(),
-                                );
                                 timeline.state.set_track_audio_format(&id, audio_format);
-                                // Store only a logical connection id, creating
-                                // or reusing a project-local bus as needed.
-                                let ports = crate::audio_connections::current_available_ports();
-                                let connection_id = timeline
-                                    .state
-                                    .audio_connections
-                                    .get_or_create_audio_connection_for_physical_input(
-                                        &choice, &ports,
-                                    );
+                                // Only ever a logical connection id. No bus is
+                                // created here, and No Input stays No Input.
+                                let connection_id =
+                                    dialog.audio_input_connection_for_label(&dialog.input_label);
                                 timeline
                                     .state
                                     .set_track_audio_input_connection(&id, connection_id);
@@ -1108,6 +1184,7 @@ impl StudioLayout {
             instrument_plugins,
             midi_input_devices,
             audio_output_targets,
+            dialog_audio_input_choices(&self.timeline.read(cx).state),
             on_confirm_request,
             cx,
         ) {
@@ -2109,89 +2186,172 @@ impl StudioLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio_connections::{
+        AudioConnection, AudioConnectionDirection, AudioConnectionId, AvailablePorts, ChannelLayout,
+    };
+    use crate::components::timeline::timeline_state::TimelineState;
 
-    #[test]
-    fn dialog_input_number_always_maps_to_one_ordered_channel() {
-        let device = ("input-device".to_string(), 4);
-        for format in [AudioFormat::Mono, AudioFormat::Stereo] {
-            assert_eq!(
-                dialog_audio_input_choice("Input 2", format, Some(&device)),
-                PhysicalInputChoice::Ports {
-                    device_id: device.0.clone(),
-                    channels: vec![1],
-                }
-            );
-        }
+    fn project_with_inputs() -> TimelineState {
+        let ports = AvailablePorts::for_device("dev-1", "Interface", 4, 2);
+        let mut state = TimelineState::default();
+        state.audio_connections = crate::audio_connections::AudioConnectionRegistry::new();
+        state.audio_connections.add(
+            AudioConnection::new(
+                "Microphone",
+                AudioConnectionDirection::Input,
+                ChannelLayout::Mono,
+            )
+            .bind_consecutive("dev-1", 0, |i| format!("Input {}", i + 1)),
+        );
+        state.audio_connections.add(
+            AudioConnection::new(
+                "Stereo Input",
+                AudioConnectionDirection::Input,
+                ChannelLayout::Stereo,
+            )
+            .bind_consecutive("dev-1", 2, |i| format!("Input {}", i + 1)),
+        );
+        state.audio_connections.add(
+            AudioConnection::new(
+                "Main Output",
+                AudioConnectionDirection::Output,
+                ChannelLayout::Stereo,
+            )
+            .bind_consecutive("dev-1", 0, |i| format!("Output {}", i + 1)),
+        );
+        state.audio_connections.revalidate(&ports);
+        state
     }
 
+    /// Add Track offers logical buses, never devices or channels.
     #[test]
-    fn dialog_stereo_pair_label_maps_to_first_pair_only_for_stereo() {
-        let device = ("input-device".to_string(), 4);
-        assert_eq!(
-            dialog_audio_input_choice(
-                FIRST_STEREO_PAIR_INPUT_LABEL,
-                AudioFormat::Stereo,
-                Some(&device),
-            ),
-            PhysicalInputChoice::Ports {
-                device_id: device.0.clone(),
-                channels: vec![0, 1],
-            }
+    fn add_track_input_choices_come_from_the_registry_only() {
+        let state = project_with_inputs();
+        let labels: Vec<String> = dialog_audio_input_choices(&state)
+            .into_iter()
+            .map(|choice| choice.label)
+            .collect();
+
+        assert!(labels.contains(&"Stereo Input".to_string()));
+        assert!(labels.contains(&"Microphone".to_string()));
+        assert!(
+            !labels.iter().any(|label| label.contains("Interface")
+                || label.contains("Ch ")
+                || label.contains("dev-1")),
+            "no hardware identity may leak into Add Track: {labels:?}"
         );
-        assert_eq!(
-            dialog_audio_input_choice(
-                FIRST_STEREO_PAIR_INPUT_LABEL,
-                AudioFormat::Mono,
-                Some(&device),
-            ),
-            PhysicalInputChoice::None,
-            "a stereo pair on a mono track is No Input, never a guessed channel"
+        assert!(
+            !labels.contains(&"Main Output".to_string()),
+            "an output bus is never a track input"
         );
     }
 
+    /// A mono track is only offered mono buses; a stereo bus would have no
+    /// defined mapping into one channel.
     #[test]
-    fn dialog_none_and_missing_device_both_mean_no_input() {
-        assert_eq!(
-            dialog_audio_input_choice("None", AudioFormat::Mono, None),
-            PhysicalInputChoice::None
-        );
-        assert_eq!(
-            dialog_audio_input_choice("Input 1", AudioFormat::Mono, None),
-            PhysicalInputChoice::None
-        );
-        let tiny = ("input-device".to_string(), 1);
-        assert_eq!(
-            dialog_audio_input_choice("Input 2", AudioFormat::Mono, Some(&tiny)),
-            PhysicalInputChoice::None
-        );
+    fn add_track_input_choices_respect_the_track_channel_count() {
+        let state = project_with_inputs();
+        let mut dialog =
+            crate::components::add_track_dialog::AddTrackDialogState::open_for(0, false);
+        dialog.audio_input_choices = dialog_audio_input_choices(&state);
+
+        dialog.audio_format = AudioFormat::Mono;
+        let mono: Vec<String> = dialog
+            .audio_input_option_labels()
+            .into_iter()
+            .map(|option| option.id)
+            .collect();
+        assert_eq!(mono, vec!["No Input".to_string(), "Microphone".to_string()]);
+
+        dialog.audio_format = AudioFormat::Stereo;
+        let stereo: Vec<String> = dialog
+            .audio_input_option_labels()
+            .into_iter()
+            .map(|option| option.id)
+            .collect();
+        assert!(stereo.contains(&"Stereo Input".to_string()));
+        assert!(stereo.contains(&"Microphone".to_string()));
     }
 
-    /// The dialog choice must become a logical connection, and selecting the
-    /// same ports twice must reuse one connection rather than accumulating.
+    /// The dialog resolves a label to an id and nothing else; No Input and the
+    /// escape hatch both yield no assignment.
     #[test]
-    fn add_track_choice_resolves_to_a_reused_logical_connection() {
-        use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts};
+    fn add_track_resolves_a_label_to_a_connection_id_without_creating_one() {
+        let state = project_with_inputs();
+        let choices = dialog_audio_input_choices(&state);
+        let mut dialog =
+            crate::components::add_track_dialog::AddTrackDialogState::open_for(0, false);
+        dialog.audio_input_choices = choices.clone();
+        dialog.audio_format = AudioFormat::Stereo;
 
-        let ports = AvailablePorts::for_device("input-device", "Interface", 4, 2);
-        let mut registry = AudioConnectionRegistry::new();
-        let device = ("input-device".to_string(), 4);
-        let choice = dialog_audio_input_choice(
-            FIRST_STEREO_PAIR_INPUT_LABEL,
-            AudioFormat::Stereo,
-            Some(&device),
+        let stereo = choices
+            .iter()
+            .find(|choice| choice.label == "Stereo Input")
+            .expect("stereo bus");
+        assert_eq!(
+            dialog
+                .audio_input_connection_for_label(&stereo.label)
+                .as_ref(),
+            Some(&stereo.connection_id)
         );
-
-        let first = registry
-            .get_or_create_audio_connection_for_physical_input(&choice, &ports)
-            .expect("a real selection creates a connection");
-        let second = registry
-            .get_or_create_audio_connection_for_physical_input(&choice, &ports)
-            .expect("the same selection resolves again");
-        assert_eq!(first, second, "identical ordered mappings reuse one bus");
-        assert_eq!(registry.len(), 1);
-
-        assert!(registry
-            .get_or_create_audio_connection_for_physical_input(&PhysicalInputChoice::None, &ports)
+        assert!(dialog
+            .audio_input_connection_for_label(
+                crate::components::add_track_dialog::NO_AUDIO_INPUT_LABEL
+            )
             .is_none());
+
+        // A stereo bus is not offered to — and cannot be assigned to — a mono
+        // track.
+        dialog.audio_format = AudioFormat::Mono;
+        assert!(dialog
+            .audio_input_connection_for_label(&stereo.label)
+            .is_none());
+        assert_eq!(
+            state.audio_connections.len(),
+            3,
+            "listing and resolving must not create a bus"
+        );
+    }
+
+    /// A default Audio track captures nothing until the user picks a bus.
+    #[test]
+    fn a_new_audio_track_defaults_to_no_input() {
+        use crate::components::add_track_dialog::{AddTrackKind, NO_AUDIO_INPUT_LABEL};
+
+        let dialog = crate::components::add_track_dialog::AddTrackDialogState::open_for(0, false);
+        assert_eq!(dialog.input_label, NO_AUDIO_INPUT_LABEL);
+        assert!(dialog
+            .audio_input_connection_for_label(&dialog.input_label)
+            .is_none());
+    }
+
+    /// A stale label from a removed bus becomes No Input, never another bus.
+    #[test]
+    fn a_selection_whose_bus_disappeared_falls_back_to_no_input() {
+        use crate::components::add_track_dialog::{AddTrackKind, NO_AUDIO_INPUT_LABEL};
+
+        let mut dialog =
+            crate::components::add_track_dialog::AddTrackDialogState::open_for(0, false);
+        dialog.audio_input_choices =
+            vec![crate::components::add_track_dialog::AddTrackInputChoice {
+                label: "Microphone".to_string(),
+                connection_id: AudioConnectionId::from_stored("ac-mic"),
+                channels: 1,
+            }];
+        dialog.input_label = "Microphone".to_string();
+
+        dialog.audio_input_choices.clear();
+        assert!(dialog
+            .audio_input_connection_for_label(&dialog.input_label)
+            .is_none());
+        assert_eq!(
+            dialog.audio_input_option_labels().len(),
+            1,
+            "only No Input remains"
+        );
+        assert_eq!(
+            dialog.audio_input_option_labels()[0].id,
+            NO_AUDIO_INPUT_LABEL
+        );
     }
 }

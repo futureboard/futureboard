@@ -1,5 +1,5 @@
 use super::*;
-use crate::audio_connections::AudioConnectionId;
+use crate::audio_connections::{AudioConnectionId, AudioConnectionReference};
 
 pub use crate::project::InputMonitorMode;
 
@@ -43,6 +43,12 @@ pub enum TrackOutputRouting {
     Bus {
         bus_id: String,
     },
+    /// A **MIDI** hardware output port, set from the MIDI Out selector on a
+    /// MIDI track. Despite the name this is never an audio destination: audio
+    /// leaves through the Master / Monitor Output Audio Connections
+    /// ([`crate::output_routing`]), and no audio selector can produce this
+    /// variant. MIDI device routing is deliberately independent of the
+    /// Audio Connections registry.
     HardwareOutput {
         device_id: String,
         channel: u32,
@@ -85,6 +91,14 @@ impl TrackAudioFormat {
         match self {
             Self::Mono => "Mono",
             Self::Stereo => "Stereo",
+        }
+    }
+
+    /// Channel count this format needs from an Input Audio Connection.
+    pub fn channel_count(self) -> usize {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
         }
     }
 }
@@ -258,6 +272,101 @@ impl TimelineState {
             .filter(|track| track.routing.audio_input_connection_id.as_ref() == Some(connection_id))
             .map(|track| track.id.as_str())
             .collect()
+    }
+
+    // ── Master / Monitor output routing ──────────────────────────────────────
+
+    /// Assign the project's Master output. `None` is No Output — the project
+    /// then has no hardware destination at all, which is a valid state and not
+    /// a reason to substitute one.
+    pub fn set_master_output_connection(
+        &mut self,
+        connection_id: Option<AudioConnectionId>,
+    ) -> bool {
+        if self.master_output_connection_id == connection_id {
+            return false;
+        }
+        if routing_debug_enabled() {
+            eprintln!(
+                "[routing] master output old={:?} new={:?}",
+                self.master_output_connection_id, connection_id
+            );
+        }
+        self.master_output_connection_id = connection_id;
+        true
+    }
+
+    /// Assign the Monitor / Control Room output override. `None` is **Follow
+    /// Master Output**.
+    ///
+    /// Deliberately never touches the Master assignment: Source and Output are
+    /// independent concepts, and so are the two buses' destinations.
+    pub fn set_monitor_output_connection(
+        &mut self,
+        connection_id: Option<AudioConnectionId>,
+    ) -> bool {
+        if self.monitor_output_connection_id == connection_id {
+            return false;
+        }
+        if routing_debug_enabled() {
+            eprintln!(
+                "[routing] monitor output old={:?} new={:?}",
+                self.monitor_output_connection_id, connection_id
+            );
+        }
+        self.monitor_output_connection_id = connection_id;
+        true
+    }
+
+    /// The Output Audio Connection the Control Room actually feeds: the
+    /// override, else Master. `None` means silence.
+    pub fn effective_monitor_output_connection(&self) -> Option<AudioConnectionId> {
+        crate::output_routing::effective_monitor_output(
+            self.master_output_connection_id.as_ref(),
+            self.monitor_output_connection_id.as_ref(),
+        )
+    }
+
+    /// Everything in the project that points at `connection_id`, so a removal
+    /// can name all of its consequences — including a bus used only by Master.
+    pub fn audio_connection_references(
+        &self,
+        connection_id: &AudioConnectionId,
+    ) -> Vec<AudioConnectionReference> {
+        let mut references: Vec<AudioConnectionReference> = self
+            .tracks
+            .iter()
+            .filter(|track| track.routing.audio_input_connection_id.as_ref() == Some(connection_id))
+            .map(|track| AudioConnectionReference::TrackInput(track.id.clone()))
+            .collect();
+        if self.master_output_connection_id.as_ref() == Some(connection_id) {
+            references.push(AudioConnectionReference::MasterOutput);
+        }
+        if self.monitor_output_connection_id.as_ref() == Some(connection_id) {
+            references.push(AudioConnectionReference::MonitorOutput);
+        }
+        references
+    }
+
+    /// Clear the Master and Monitor references to `connection_id`.
+    ///
+    /// Clearing Monitor returns it to Follow Master Output; clearing Master
+    /// leaves the project with no output. Neither is re-pointed at some other
+    /// bus — choosing a replacement is the user's call.
+    pub fn unassign_output_connection(
+        &mut self,
+        connection_id: &AudioConnectionId,
+    ) -> Vec<AudioConnectionReference> {
+        let mut cleared = Vec::new();
+        if self.master_output_connection_id.as_ref() == Some(connection_id) {
+            self.master_output_connection_id = None;
+            cleared.push(AudioConnectionReference::MasterOutput);
+        }
+        if self.monitor_output_connection_id.as_ref() == Some(connection_id) {
+            self.monitor_output_connection_id = None;
+            cleared.push(AudioConnectionReference::MonitorOutput);
+        }
+        cleared
     }
 
     /// Resolve which track's plugin instance should actually receive a
@@ -678,6 +787,122 @@ mod tests {
                 .as_ref(),
             Some(&guitar),
             "an unrelated track keeps its assignment"
+        );
+    }
+
+    // ── Master / Monitor output routing ──────────────────────────────────────
+
+    #[test]
+    fn master_and_monitor_outputs_store_only_connection_ids_and_stay_independent() {
+        let mut state = TimelineState::default();
+        let main = AudioConnectionId::from_stored("ac-main");
+        let headphones = AudioConnectionId::from_stored("ac-headphones");
+
+        assert!(state.set_master_output_connection(Some(main.clone())));
+        assert_eq!(state.master_output_connection_id.as_ref(), Some(&main));
+        assert!(!state.set_master_output_connection(Some(main.clone())));
+
+        // Monitor's default is Follow Master Output, which resolves to Master.
+        assert!(state.monitor_output_connection_id.is_none());
+        assert_eq!(
+            state.effective_monitor_output_connection(),
+            Some(main.clone())
+        );
+
+        // Overriding Monitor must not disturb Master.
+        assert!(state.set_monitor_output_connection(Some(headphones.clone())));
+        assert_eq!(
+            state.effective_monitor_output_connection(),
+            Some(headphones.clone())
+        );
+        assert_eq!(
+            state.master_output_connection_id.as_ref(),
+            Some(&main),
+            "changing the Monitor output must never change Master"
+        );
+
+        // Back to Follow Master Output.
+        assert!(state.set_monitor_output_connection(None));
+        assert_eq!(state.effective_monitor_output_connection(), Some(main));
+    }
+
+    /// With no Master output and no override there is no destination at all —
+    /// the correct answer is silence, not a substituted one.
+    #[test]
+    fn no_master_output_and_no_override_resolves_to_nothing() {
+        let state = TimelineState::default();
+        assert!(state.master_output_connection_id.is_none());
+        assert!(state.monitor_output_connection_id.is_none());
+        assert!(state.effective_monitor_output_connection().is_none());
+    }
+
+    #[test]
+    fn references_name_track_master_and_monitor_users_of_a_connection() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = create_track(&mut state, TrackType::Audio, "Audio");
+        let main = AudioConnectionId::from_stored("ac-main");
+        let headphones = AudioConnectionId::from_stored("ac-headphones");
+
+        state.set_track_audio_input_connection(&track_id, Some(main.clone()));
+        state.set_master_output_connection(Some(main.clone()));
+        state.set_monitor_output_connection(Some(headphones.clone()));
+
+        assert_eq!(
+            state.audio_connection_references(&main),
+            vec![
+                AudioConnectionReference::TrackInput(track_id),
+                AudioConnectionReference::MasterOutput,
+            ]
+        );
+        assert_eq!(
+            state.audio_connection_references(&headphones),
+            vec![AudioConnectionReference::MonitorOutput]
+        );
+        assert!(state
+            .audio_connection_references(&AudioConnectionId::from_stored("ac-unused"))
+            .is_empty());
+    }
+
+    #[test]
+    fn removing_the_master_output_clears_master_and_leaves_monitor_alone() {
+        let mut state = TimelineState::default();
+        let main = AudioConnectionId::from_stored("ac-main");
+        let headphones = AudioConnectionId::from_stored("ac-headphones");
+        state.set_master_output_connection(Some(main.clone()));
+        state.set_monitor_output_connection(Some(headphones.clone()));
+
+        assert_eq!(
+            state.unassign_output_connection(&main),
+            vec![AudioConnectionReference::MasterOutput]
+        );
+        assert!(state.master_output_connection_id.is_none());
+        assert_eq!(
+            state.monitor_output_connection_id.as_ref(),
+            Some(&headphones),
+            "the Monitor override is untouched"
+        );
+    }
+
+    /// Removing the bus a Monitor override points at returns Monitor to Follow
+    /// Master Output — it never silently picks another output.
+    #[test]
+    fn removing_the_monitor_override_returns_monitor_to_follow_master() {
+        let mut state = TimelineState::default();
+        let main = AudioConnectionId::from_stored("ac-main");
+        let headphones = AudioConnectionId::from_stored("ac-headphones");
+        state.set_master_output_connection(Some(main.clone()));
+        state.set_monitor_output_connection(Some(headphones.clone()));
+
+        assert_eq!(
+            state.unassign_output_connection(&headphones),
+            vec![AudioConnectionReference::MonitorOutput]
+        );
+        assert!(state.monitor_output_connection_id.is_none());
+        assert_eq!(
+            state.effective_monitor_output_connection(),
+            Some(main),
+            "Follow Master Output, not a replacement bus"
         );
     }
 

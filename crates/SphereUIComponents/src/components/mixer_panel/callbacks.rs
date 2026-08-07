@@ -49,6 +49,10 @@ pub struct MixerCallbacks {
     /// rather than showing a control that does nothing.
     pub on_monitor_source_picker:
         Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>>,
+    /// Open the Master output picker at `(x, y)`. Lists Output Audio
+    /// Connections only — never an input bus and never a hardware port.
+    pub on_master_output_picker:
+        Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>>,
     /// Open the monitor output picker at `(x, y)`.
     pub on_monitor_output_picker:
         Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>>,
@@ -145,6 +149,7 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
         on_monitor_toggle_dim: noop_unit.clone(),
         on_monitor_toggle_mono: noop_unit,
         on_monitor_source_picker: None,
+        on_master_output_picker: None,
         on_monitor_output_picker: None,
         on_master_volume_drag_start: noop_master.clone(),
         on_master_volume_drag_preview: noop_master,

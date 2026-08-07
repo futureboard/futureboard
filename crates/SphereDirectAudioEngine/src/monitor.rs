@@ -104,6 +104,25 @@ impl MonitorSource {
     }
 }
 
+/// Which stage performs the physical output write.
+///
+/// Compiled on the control thread from the project's Master / Monitor output
+/// assignments and handed to the runtime already decided, so the callback never
+/// reasons about ownership — it just does what it was told. Exactly one stage
+/// writes, which is what keeps the master feed and its monitored copy from
+/// summing into one destination at +6 dB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HardwareOutputOwner {
+    /// The Control Room is out of the path; Master writes its own destination.
+    MasterDirect,
+    /// The Control Room owns the write. Master's direct feed is silenced on any
+    /// channel the monitoring destination does not cover.
+    #[default]
+    MonitorControlRoom,
+    /// Nothing resolves. The device buffer is silent — never a fallback pair.
+    None,
+}
+
 /// Per-channel Listen state. PFL and AFL differ only in where the tap sits
 /// relative to the channel fader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

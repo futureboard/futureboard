@@ -20,6 +20,23 @@ use crate::loading_session::{
 };
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{apply_to_timeline, now_secs};
+
+/// Map a project-load warning onto the aggregated routing surface.
+fn project_load_warning_to_routing_warning(
+    warning: &crate::project::ProjectLoadWarning,
+) -> crate::layout::routing_warnings::RoutingWarning {
+    use crate::layout::routing_warnings::{RoutingWarning, RoutingWarningKind};
+    use crate::project::ProjectLoadWarningKind;
+
+    let kind = match warning.kind {
+        ProjectLoadWarningKind::ConflictingLegacyMidiInput => {
+            RoutingWarningKind::LegacyMidiConflict
+        }
+        ProjectLoadWarningKind::MissingAudioConnection => RoutingWarningKind::LegacyAudioMigration,
+        ProjectLoadWarningKind::NoMasterOutput => RoutingWarningKind::MasterOutputUnavailable,
+    };
+    RoutingWarning::new(kind, warning.message.clone())
+}
 use crate::session_shutdown::{
     PluginUnloadTarget, SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot,
 };
@@ -705,15 +722,19 @@ impl StudioLayout {
 
         self.teardown_all_plugin_instances(cx, "project_load_replace");
 
-        let restored_tracks = self.timeline.update(cx, |timeline, cx| {
+        let (restored_tracks, load_warnings) = self.timeline.update(cx, |timeline, cx| {
             timeline.reset_input_state();
-            // Load warnings are returned but not yet surfaced — the toast
-            // path is Turn D work. Bound explicitly so the debt is visible
-            // rather than hidden behind an ignored return value.
-            let _load_warnings = apply_to_timeline(project, &mut timeline.state);
+            let warnings = apply_to_timeline(project, &mut timeline.state);
             cx.notify();
-            persisted_track_count(&timeline.state.tracks)
+            (persisted_track_count(&timeline.state.tracks), warnings)
         });
+        // Aggregated onto the one project surface. A project whose interface is
+        // unplugged reports a single line, not one dialog per track.
+        let classified = load_warnings
+            .iter()
+            .map(project_load_warning_to_routing_warning)
+            .collect::<Vec<_>>();
+        self.report_routing_warnings(classified, cx);
 
         if restored_tracks != expected_tracks {
             session_log!(
@@ -745,6 +766,9 @@ impl StudioLayout {
                 path.display()
             );
         }
+        // Compile the loaded project's routing — including Master/Monitor
+        // hardware ownership — before anything can play.
+        self.publish_audio_connection_routing(cx);
         self.sync_project_session_to_workspace(cx);
         self.recent_projects
             .push(&project.name, path.clone(), now_secs());

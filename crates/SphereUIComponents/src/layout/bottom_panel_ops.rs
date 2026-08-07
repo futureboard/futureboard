@@ -148,27 +148,13 @@ impl StudioLayout {
             status_bar_height: STATUS_BAR_HEIGHT,
         };
         let project_root = self.project_session.folder_path.clone();
-        // Control Room output pairs come from the real channel count of the
-        // configured output device, so the Output selector can never offer a
-        // pair the hardware does not have.
-        let output_channels = {
-            let device_out = {
-                let settings = self.settings.read(cx);
-                settings.current.hardware.audio.device_out.clone()
-            };
-            let snapshot = crate::device_registry::audio_snapshot();
-            snapshot
-                .outputs
-                .iter()
-                .find(|device| device.id == device_out || device.name == device_out)
-                .or_else(|| snapshot.outputs.iter().find(|device| device.is_default))
-                .map(|device| device.channels)
-                .unwrap_or(2)
-        };
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_chrome_metrics(metrics);
             timeline.set_project_root(project_root);
-            timeline.state.set_monitor_output_devices(output_channels);
+            // The Control Room's destination is an Output Audio Connection, so
+            // the device's channel count is validated by the registry rather
+            // than mirrored into a separate list of hardware pairs here.
+            timeline.state.refresh_output_labels();
         });
     }
 

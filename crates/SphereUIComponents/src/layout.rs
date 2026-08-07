@@ -59,6 +59,7 @@ mod plugin_restore;
 mod project_ops;
 mod project_switch;
 mod recording_ops;
+pub(crate) mod routing_warnings;
 mod sample_rate_ops;
 mod session_load;
 mod stretch_tempo_ops;
@@ -1516,6 +1517,20 @@ impl StudioLayout {
             cx.notify();
             return;
         }
+        if let Some(command) = crate::output_routing::parse_output_command(
+            crate::output_routing::MASTER_OUTPUT_COMMAND_PREFIX,
+            command_id,
+        ) {
+            self.apply_output_routing_command(command, true, cx);
+            return;
+        }
+        if let Some(command) = crate::output_routing::parse_output_command(
+            crate::output_routing::MONITOR_OUTPUT_COMMAND_PREFIX,
+            command_id,
+        ) {
+            self.apply_output_routing_command(command, false, cx);
+            return;
+        }
         if let Some((track_id, target)) =
             crate::components::timeline::timeline_state::parse_automation_target_menu_command(
                 command_id,
@@ -2495,6 +2510,11 @@ impl StudioLayout {
                         );
                         self.audio_bridge.project_dirty = true;
                         self.schedule_audio_project_sync(cx, true, "audio_settings_reopen");
+                        // The device inventory just moved: revalidate every
+                        // logical connection against it and publish one
+                        // snapshot. Ids and bindings survive, so reconnecting
+                        // the same hardware restores the routing exactly.
+                        self.refresh_audio_device_inventory(cx);
                     }
                     Err(error) => {
                         let message = error.to_string();

@@ -105,14 +105,15 @@ impl Render for StudioLayout {
 
         let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
 
-        // Enumerate the selected input device's channels only while the audio-input
-        // combo is open (avoids per-frame device enumeration).
-        let audio_input_device = if self.overlay.inspector_routing_combo
+        // The audio-input combo lists logical connections, so no device
+        // enumeration happens for it at all. The port inventory is read only
+        // while the combo is open, and only to describe the selected bus.
+        let audio_input_ports = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioInput)
         {
-            self.selected_input_device_model(cx)
+            crate::audio_connections::current_available_ports()
         } else {
-            None
+            crate::audio_connections::AvailablePorts::default()
         };
         let audio_output_buses: Vec<(String, String)> = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
@@ -215,7 +216,7 @@ impl Render for StudioLayout {
                             window,
                             &inspector_callbacks,
                             close,
-                            audio_input_device.clone(),
+                            audio_input_ports.clone(),
                             audio_output_buses.clone(),
                             audio_output_device.clone(),
                             instrument_targets.clone(),

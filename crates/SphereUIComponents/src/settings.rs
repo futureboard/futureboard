@@ -283,10 +283,85 @@ impl Default for SyncSettings {
     }
 }
 
+/// One logical bus in the application-level **Default Audio Connections**
+/// template (Audio Setup → Default Audio Connections).
+///
+/// The template is a *recipe*, not a live registry: it is copied into a new
+/// project, which then owns fresh project-local ids. Editing the template never
+/// reaches back into an existing project, and a project never writes back into
+/// it. Deliberately carries no window geometry and no runtime status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefaultAudioConnection {
+    pub name: String,
+    /// `"input"` / `"output"`.
+    pub direction: String,
+    /// `"mono"` / `"stereo"`.
+    pub channel_layout: String,
+    /// First device port index bound to logical channel 0. Ports are taken
+    /// consecutively from here, against whatever device the new project's
+    /// hardware actually exposes.
+    pub first_port_index: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// The application-level Default Audio Connections template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefaultAudioConnectionsSettings {
+    #[serde(default)]
+    pub inputs: Vec<DefaultAudioConnection>,
+    #[serde(default)]
+    pub outputs: Vec<DefaultAudioConnection>,
+}
+
+impl Default for DefaultAudioConnectionsSettings {
+    /// Mirrors the built-in template a first-run project gets: two mono inputs,
+    /// a stereo input pair, and a stereo main output. Rows whose ports the
+    /// hardware does not expose are skipped at copy time rather than created as
+    /// phantoms.
+    fn default() -> Self {
+        Self {
+            inputs: vec![
+                DefaultAudioConnection {
+                    name: "Mono Input 1".to_string(),
+                    direction: "input".to_string(),
+                    channel_layout: "mono".to_string(),
+                    first_port_index: 0,
+                    enabled: true,
+                },
+                DefaultAudioConnection {
+                    name: "Mono Input 2".to_string(),
+                    direction: "input".to_string(),
+                    channel_layout: "mono".to_string(),
+                    first_port_index: 1,
+                    enabled: true,
+                },
+                DefaultAudioConnection {
+                    name: "Stereo Input 1-2".to_string(),
+                    direction: "input".to_string(),
+                    channel_layout: "stereo".to_string(),
+                    first_port_index: 0,
+                    enabled: true,
+                },
+            ],
+            outputs: vec![DefaultAudioConnection {
+                name: "Main Output".to_string(),
+                direction: "output".to_string(),
+                channel_layout: "stereo".to_string(),
+                first_port_index: 0,
+                enabled: true,
+            }],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct HardwareSettings {
     #[serde(default)]
     pub audio: AudioHardwareSettings,
+    /// Copied into each new project; never linked to one afterwards.
+    #[serde(default)]
+    pub default_audio_connections: DefaultAudioConnectionsSettings,
     #[serde(default)]
     pub midi: MidiHardwareSettings,
     #[serde(default)]

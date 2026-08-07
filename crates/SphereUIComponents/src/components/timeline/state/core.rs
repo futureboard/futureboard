@@ -25,6 +25,11 @@ pub struct MasterBusState {
     pub meter_peak_hold_r: f32,
     /// Latched master clip indicator. UI-only.
     pub meter_clip: bool,
+    /// Display label for the assigned Master Output connection, resolved from
+    /// the registry by [`TimelineState::refresh_output_labels`]. UI-only: the
+    /// routing itself is the id in `master_output_connection_id`, so a rename
+    /// changes this string and nothing else.
+    pub output_label: String,
 }
 
 /// Which signal the Control Room monitors. Mirrors the engine's
@@ -82,12 +87,11 @@ pub struct MonitorBusState {
     /// Human-readable name of [`Self::source`], resolved against the project
     /// when the selection changes.
     pub source_display: String,
-    /// Name of the hardware output pair the Control Room feeds.
+    /// Display label for the Control Room's destination, resolved from the
+    /// registry by [`TimelineState::refresh_output_labels`]. UI-only: the
+    /// routing is `monitor_output_connection_id` (or Master, when that is
+    /// `None`), never a hardware pair held here.
     pub output_name: String,
-    /// 0-based left channel of that pair on the active output device.
-    pub output_left_channel: u16,
-    /// Output pairs the active device can offer.
-    pub available_outputs: Vec<(String, u16)>,
     /// Monitor level as a normalized fader position.
     pub volume: f32,
     pub mute: bool,
@@ -105,6 +109,14 @@ pub struct MonitorBusState {
     /// True while any channel has PFL/AFL engaged, so the strip can show that
     /// the Control Room is on a Listen tap rather than its selected source.
     pub listen_active: bool,
+    /// Whether the Control Room sits in the playback path.
+    ///
+    /// Compile input for hardware ownership, not a control: while true the
+    /// Control Room is the only stage writing hardware, and Master must not
+    /// also write its output directly. Studio keeps the Control Room in the
+    /// path, so this is `true`; the false branch exists because ownership is a
+    /// property of the routing, not an assumption baked into the callback.
+    pub control_room_enabled: bool,
 }
 
 impl MonitorBusState {
@@ -147,6 +159,17 @@ pub struct TimelineState {
     /// audio input/output buses. Tracks reference entries by stable id; nothing
     /// outside this registry maps a bus to physical ports.
     pub audio_connections: crate::audio_connections::AudioConnectionRegistry,
+    /// The project's main logical output. `None` means Master has no hardware
+    /// destination — never "the default device". Stores only the stable id, so
+    /// renaming or re-patching that bus flows through untouched.
+    pub master_output_connection_id: Option<crate::audio_connections::AudioConnectionId>,
+    /// Optional Monitor / Control Room output override. `None` means **Follow
+    /// Master Output**, which is a real selection rather than an empty one — see
+    /// [`crate::output_routing::effective_monitor_output`].
+    pub monitor_output_connection_id: Option<crate::audio_connections::AudioConnectionId>,
+    /// Latch for the one-time output-routing bootstrap. Persisted so a
+    /// deliberately deleted Master output is never recreated on the next launch.
+    pub output_routing_initialized: bool,
     /// Input-monitoring bus rendered as the pinned Monitor strip. Session
     /// state — see [`MonitorBusState`].
     pub monitor: MonitorBusState,
@@ -243,6 +266,9 @@ impl Default for TimelineState {
             },
             tracks: Vec::new(),
             audio_connections: crate::audio_connections::AudioConnectionRegistry::new(),
+            master_output_connection_id: None,
+            monitor_output_connection_id: None,
+            output_routing_initialized: false,
             master: MasterBusState {
                 volume: volume::db_to_norm(0.0),
                 inserts: Vec::new(),
@@ -251,13 +277,12 @@ impl Default for TimelineState {
                 meter_peak_hold_l: 0.0,
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
+                output_label: crate::output_routing::NO_OUTPUT_LABEL.to_string(),
             },
             monitor: MonitorBusState {
                 source: MonitorSourceKind::MasterBus,
                 source_display: "Master Bus".to_string(),
                 output_name: "Out 1-2".to_string(),
-                output_left_channel: 0,
-                available_outputs: vec![("Out 1-2".to_string(), 0)],
                 volume: volume::db_to_norm(0.0),
                 mute: false,
                 dim: false,
@@ -268,6 +293,7 @@ impl Default for TimelineState {
                 meter_peak_hold_r: 0.0,
                 meter_clip: false,
                 listen_active: false,
+                control_room_enabled: true,
             },
             selection: TimelineSelection {
                 selected_track_id: None,

@@ -415,6 +415,35 @@ impl ConnectionUsage {
     }
 }
 
+/// One place in the project that points at an Audio Connection.
+///
+/// Every referent is enumerated here so a removal can describe *all* of its
+/// consequences before it happens — a bus used only by Master must not look
+/// unused just because no track input references it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioConnectionReference {
+    /// A track's audio input, by track id.
+    TrackInput(String),
+    /// The project's Master output.
+    MasterOutput,
+    /// The Monitor / Control Room output override.
+    MonitorOutput,
+}
+
+impl AudioConnectionReference {
+    /// Sentence naming the referent, used in the removal confirmation.
+    /// `track_name` resolves a [`Self::TrackInput`]; the bus variants ignore it.
+    pub fn describe(&self, track_name: Option<&str>) -> String {
+        match self {
+            Self::TrackInput(track_id) => {
+                format!("{} (track input)", track_name.unwrap_or(track_id))
+            }
+            Self::MasterOutput => "Master".to_string(),
+            Self::MonitorOutput => "Monitor".to_string(),
+        }
+    }
+}
+
 /// The project's Audio Connections. Owns every logical bus and is the only
 /// layer that knows about physical ports.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -469,6 +498,61 @@ impl AudioConnectionRegistry {
             .bind_consecutive(device_id, 0, |i| format!("Output {}", i + 1));
             registry.connections.push(connection);
         }
+        registry.revalidate(ports);
+        registry
+    }
+
+    /// Copy the application-level **Default Audio Connections** template into a
+    /// fresh project registry.
+    ///
+    /// Every row gets a new project-local id, so the project is never linked to
+    /// the template afterwards: editing the template later cannot reach an
+    /// existing project, and a project edit cannot reach the template. Rows
+    /// whose ports the current hardware does not expose are skipped rather than
+    /// created as phantoms that would only ever read Port Missing.
+    pub fn from_default_template(
+        template: &crate::settings::DefaultAudioConnectionsSettings,
+        ports: &AvailablePorts,
+        input_device_id: &str,
+        output_device_id: &str,
+    ) -> Self {
+        let mut registry = Self::new();
+        let copy = |rows: &[crate::settings::DefaultAudioConnection],
+                    direction: AudioConnectionDirection,
+                    device_id: &str,
+                    registry: &mut Self| {
+            if device_id.trim().is_empty() {
+                return;
+            }
+            let available = ports.ports_for(device_id, direction).len() as u32;
+            let port_name = |index: u32| match direction {
+                AudioConnectionDirection::Input => format!("Input {}", index + 1),
+                AudioConnectionDirection::Output => format!("Output {}", index + 1),
+            };
+            for row in rows {
+                let layout = ChannelLayout::from_parts(&row.channel_layout, 2);
+                let needed = layout.channel_count() as u32;
+                if row.first_port_index + needed > available {
+                    continue;
+                }
+                let mut connection = AudioConnection::new(row.name.clone(), direction, layout)
+                    .bind_consecutive(device_id, row.first_port_index, port_name);
+                connection.enabled = row.enabled;
+                registry.add(connection);
+            }
+        };
+        copy(
+            &template.inputs,
+            AudioConnectionDirection::Input,
+            input_device_id,
+            &mut registry,
+        );
+        copy(
+            &template.outputs,
+            AudioConnectionDirection::Output,
+            output_device_id,
+            &mut registry,
+        );
         registry.revalidate(ports);
         registry
     }
@@ -1368,15 +1452,17 @@ mod tests {
     }
 }
 
-/// A physical input choice offered by the Inspector / Add Track *during the
-/// migration transition only*.
+/// A raw `(device, ordered channels)` selection, used **only** to convert legacy
+/// project routing into logical buses.
 ///
-/// These surfaces still enumerate hardware ports. Rather than let them write
-/// raw device/channel routing into `TrackState`, they hand one of these to
-/// [`AudioConnectionRegistry::get_or_create_audio_connection_for_physical_input`],
-/// which returns a stable [`AudioConnectionId`] — the only thing a track stores.
+/// No runtime UI produces one of these any more: Add Track and the Inspector
+/// both select an existing [`AudioConnection`] and store its id
+/// ([`crate::input_routing`]). This type survives because a pre-v34 project
+/// *does* store raw device/channel routing, and loading one has to turn that
+/// into connections exactly once — see [`crate::project::routing_migration`].
 ///
-/// Removed once the centralized Audio Connections selector UI lands.
+/// Do not reintroduce it into a selector: two competing input-selection systems
+/// is precisely what the centralization removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhysicalInputChoice {
     /// No Input.
@@ -1390,12 +1476,16 @@ pub enum PhysicalInputChoice {
 }
 
 impl AudioConnectionRegistry {
-    /// Resolve a raw physical input selection to a logical connection id,
+    /// Resolve a legacy raw input selection to a logical connection id,
     /// creating a project-local connection when none matches.
     ///
-    /// Matching is exact on `(device_id, ordered channel list)` — the same
-    /// reuse key the v33 migration uses — so selecting the same ports twice
-    /// yields the same connection instead of accumulating duplicates.
+    /// Matching is exact on `(device_id, ordered channel list)`, so a legacy
+    /// project whose tracks shared one physical input migrates onto one bus
+    /// instead of accumulating duplicates.
+    ///
+    /// **Migration only.** No selector may call this: a user picking an input
+    /// chooses an existing bus, and creating one is an explicit Audio
+    /// Connections action.
     pub fn get_or_create_audio_connection_for_physical_input(
         &mut self,
         choice: &PhysicalInputChoice,

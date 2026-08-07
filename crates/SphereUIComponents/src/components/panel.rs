@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::audio_connections::{AudioConnectionRegistry, PhysicalInputChoice};
+use crate::audio_connections::AudioConnectionRegistry;
 use crate::components::color_picker::{
     color_picker_field, default_presets, ColorPickerCallbacks, ColorPickerPlacement,
     ColorPickerState,
@@ -54,7 +54,9 @@ type RoutingComboToggleCb =
 
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 type StrF32Cb = Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>;
-type InputRoutingCb = Arc<dyn Fn(&(String, PhysicalInputChoice), &mut Window, &mut App) + 'static>;
+type InputRoutingCb = Arc<
+    dyn Fn(&(String, crate::input_routing::TrackInputSelection), &mut Window, &mut App) + 'static,
+>;
 type OutputRoutingCb = Arc<dyn Fn(&(String, TrackOutputRouting), &mut Window, &mut App) + 'static>;
 type AudioFormatCb = Arc<dyn Fn(&(String, TrackAudioFormat), &mut Window, &mut App) + 'static>;
 type MidiInputCb = Arc<dyn Fn(&(String, TrackMidiInputRouting), &mut Window, &mut App) + 'static>;
@@ -856,98 +858,6 @@ fn audio_format_options() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InspectorAudioInputChannel {
-    pub index: u32,
-    pub name: String,
-    pub active: bool,
-    pub sample_format: String,
-    pub stereo_pair: Option<u32>,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InspectorAudioInputDevice {
-    pub id: String,
-    pub display_name: String,
-    pub backend: String,
-    pub channels: Vec<InspectorAudioInputChannel>,
-}
-
-/// Build the Inspector audio-input options from the active backend's real
-/// channel model. Routing identity is always the stable device id plus numeric
-/// hardware channel index; translated/driver labels are display-only.
-fn build_input_routing_options(
-    track: &TrackState,
-    device: Option<&InspectorAudioInputDevice>,
-) -> Vec<(String, PhysicalInputChoice)> {
-    let mut out = vec![("No Input".to_string(), PhysicalInputChoice::None)];
-    if let Some(device) = device {
-        let device_label = format!("{} / {}", device.backend, device.display_name);
-        let channel_label = |channel: &InspectorAudioInputChannel| {
-            let base = if channel.label.trim().is_empty() {
-                channel.name.as_str()
-            } else {
-                channel.label.as_str()
-            };
-            if channel.sample_format == "Unknown" {
-                base.to_string()
-            } else {
-                format!("{base} [{}]", channel.sample_format)
-            }
-        };
-        for channel in device.channels.iter().filter(|channel| channel.active) {
-            out.push((
-                format!(
-                    "{device_label} — Mono {} (Ch {})",
-                    channel_label(channel),
-                    channel.index.saturating_add(1)
-                ),
-                PhysicalInputChoice::Ports {
-                    device_id: device.id.clone(),
-                    channels: vec![channel.index],
-                },
-            ));
-        }
-        if track.routing.audio_format == TrackAudioFormat::Stereo {
-            let mut pair_ids = device
-                .channels
-                .iter()
-                .filter(|channel| channel.active)
-                .filter_map(|channel| channel.stereo_pair)
-                .collect::<Vec<_>>();
-            pair_ids.sort_unstable();
-            pair_ids.dedup();
-            for pair_id in pair_ids {
-                let mut pair = device
-                    .channels
-                    .iter()
-                    .filter(|channel| channel.active && channel.stereo_pair == Some(pair_id))
-                    .collect::<Vec<_>>();
-                pair.sort_by_key(|channel| channel.index);
-                let [left, right] = pair.as_slice() else {
-                    continue;
-                };
-                out.push((
-                    format!(
-                        "{device_label} — Stereo {} + {} (Ch {}+{})",
-                        channel_label(left),
-                        channel_label(right),
-                        left.index.saturating_add(1),
-                        right.index.saturating_add(1)
-                    ),
-                    PhysicalInputChoice::Ports {
-                        device_id: device.id.clone(),
-                        // Ordered: index 0 is Left.
-                        channels: vec![left.index, right.index],
-                    },
-                ));
-            }
-        }
-    }
-    out
-}
-
 /// Display label for a track's audio input.
 ///
 /// Resolved from the Audio Connections registry, so renaming a connection
@@ -1210,8 +1120,9 @@ pub(crate) fn inspector_routing_combo_overlay(
     window: &Window,
     callbacks: &InspectorCallbacks,
     on_close: CloseRoutingComboCb,
-    // Active input device and its real backend channel topology.
-    audio_input_device: Option<InspectorAudioInputDevice>,
+    // Current hardware inventory, used only for the secondary detail line —
+    // never to build the list of choices.
+    available_ports: crate::audio_connections::AvailablePorts,
     // Available Bus/Return output targets as `(track_id, display_name)`.
     audio_output_buses: Vec<(String, String)>,
     // Selected output device `(name, channel_count)` for hardware output routes.
@@ -1248,9 +1159,20 @@ pub(crate) fn inspector_routing_combo_overlay(
             .into_any_element()
         }
         InspectorRoutingCombo::AudioInput => {
-            let routing_options = build_input_routing_options(track, audio_input_device.as_ref());
+            // Logical Input Audio Connections only. Physical devices and ports
+            // are never enumerated here — the footer action opens the window
+            // where hardware mapping actually lives.
+            let _ = &available_ports;
+            let routing_options = crate::input_routing::track_input_options(
+                connections,
+                track.routing.audio_format.channel_count(),
+                track.routing.audio_input_connection_id.as_ref(),
+            );
             let selected = audio_input_combo_label(track, connections);
-            let labels: Vec<String> = routing_options.iter().map(|(l, _)| l.clone()).collect();
+            let labels: Vec<String> = routing_options
+                .iter()
+                .map(crate::input_routing::InputChoice::label)
+                .collect();
             let cb = callbacks.on_set_input_routing.clone();
             let close = on_close.clone();
             combo_box_string_menu(
@@ -1259,12 +1181,12 @@ pub(crate) fn inspector_routing_combo_overlay(
                 &selected,
                 &labels,
                 Arc::new(move |value, window, cx| {
-                    let choice = routing_options
+                    let selection = routing_options
                         .iter()
-                        .find(|(l, _)| *l == value)
-                        .map(|(_, r)| r.clone())
-                        .unwrap_or(PhysicalInputChoice::None);
-                    cb(&(track_id.clone(), choice), window, cx);
+                        .find(|choice| choice.label() == value)
+                        .map(crate::input_routing::InputChoice::selection)
+                        .unwrap_or(crate::input_routing::TrackInputSelection::NoInput);
+                    cb(&(track_id.clone(), selection), window, cx);
                     close(cx);
                 }),
             )
@@ -3493,136 +3415,41 @@ mod input_routing_tests {
         track.clone()
     }
 
-    fn channel(index: u32, active: bool, stereo_pair: Option<u32>) -> InspectorAudioInputChannel {
-        InspectorAudioInputChannel {
-            index,
-            name: format!("Analog {}", index + 1),
-            active,
-            sample_format: "I32".to_string(),
-            stereo_pair,
-            label: format!("Analog {}", index + 1),
-        }
-    }
+    /// One mono input bus on `dev-1`, built the way the Audio Connections
+    /// window builds one — no migration bridge involved.
+    fn mono_input_registry(
+        ports: &crate::audio_connections::AvailablePorts,
+    ) -> (
+        AudioConnectionRegistry,
+        crate::audio_connections::AudioConnectionId,
+    ) {
+        use crate::audio_connections::{AudioConnection, AudioConnectionDirection, ChannelLayout};
 
-    fn device(channels: Vec<InspectorAudioInputChannel>) -> InspectorAudioInputDevice {
-        InspectorAudioInputDevice {
-            id: "asio:{driver-clsid}".to_string(),
-            display_name: "Interface ASIO".to_string(),
-            backend: "DAUx ASIO".to_string(),
-            channels,
-        }
-    }
-
-    #[test]
-    fn mono_routes_include_only_active_real_channels() {
-        let track = audio_track(TrackAudioFormat::Mono);
-        let device = device(vec![
-            channel(0, true, Some(0)),
-            channel(1, false, Some(0)),
-            channel(2, true, None),
-        ]);
-
-        let options = build_input_routing_options(&track, Some(&device));
-        assert_eq!(
-            options[0],
-            ("No Input".to_string(), PhysicalInputChoice::None)
-        );
-        assert_eq!(options.len(), 3);
-        assert!(options.iter().any(|(_, route)| {
-            matches!(
-                route,
-                PhysicalInputChoice::Ports { device_id, channels }
-                    if device_id == "asio:{driver-clsid}" && channels.as_slice() == [2]
+        let mut registry = AudioConnectionRegistry::new();
+        let id = registry.add(
+            AudioConnection::new(
+                "Mono Input 1",
+                AudioConnectionDirection::Input,
+                ChannelLayout::Mono,
             )
-        }));
-        assert!(!options.iter().any(|(_, route)| {
-            matches!(route, PhysicalInputChoice::Ports { channels, .. } if channels.as_slice() == [1])
-        }));
-    }
-
-    #[test]
-    fn duplicate_driver_channel_names_keep_unique_menu_identity() {
-        let track = audio_track(TrackAudioFormat::Mono);
-        let mut first = channel(0, true, None);
-        let mut second = channel(1, true, None);
-        first.name = "Mic".to_string();
-        first.label = "Mic".to_string();
-        second.name = "Mic".to_string();
-        second.label = "Mic".to_string();
-        let device = device(vec![first, second]);
-
-        let options = build_input_routing_options(&track, Some(&device));
-        let labels = options
-            .iter()
-            .map(|(label, _)| label)
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(labels.len(), options.len());
-        assert!(options.iter().any(|(label, route)| {
-            label.contains("(Ch 2)")
-                && matches!(route, PhysicalInputChoice::Ports { channels, .. } if channels.as_slice() == [1])
-        }));
-    }
-
-    #[test]
-    fn stereo_routes_include_active_mono_channels_and_valid_pairs() {
-        let track = audio_track(TrackAudioFormat::Stereo);
-        let device = device(vec![
-            channel(0, true, Some(0)),
-            channel(1, true, Some(0)),
-            channel(2, true, Some(1)),
-            channel(3, false, Some(1)),
-            channel(4, true, None),
-        ]);
-
-        let options = build_input_routing_options(&track, Some(&device));
-        let mono_channels = options
-            .iter()
-            .filter_map(|(_, route)| match route {
-                PhysicalInputChoice::Ports { channels, .. } if channels.len() == 1 => {
-                    Some(channels[0])
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(mono_channels, vec![0, 1, 2, 4]);
-
-        let stereo_routes = options
-            .iter()
-            .filter_map(|(_, route)| match route {
-                PhysicalInputChoice::Ports {
-                    device_id,
-                    channels,
-                } if channels.len() == 2 => Some((device_id, channels)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(stereo_routes.len(), 1);
-        assert_eq!(stereo_routes[0].0, "asio:{driver-clsid}");
-        assert_eq!(stereo_routes[0].1.as_slice(), &[0, 1]);
+            .bind_consecutive("dev-1", 0, |i| format!("Input {}", i + 1)),
+        );
+        registry.revalidate(ports);
+        (registry, id)
     }
 
     /// The Inspector label comes from the registry, so renaming a connection
     /// changes the display without touching the track's assignment.
     #[test]
     fn inspector_label_resolves_the_connection_name_and_survives_rename() {
-        use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts};
-
-        let ports = AvailablePorts::for_device("dev-1", "Interface", 2, 2);
-        let mut registry = AudioConnectionRegistry::new();
-        let id = registry
-            .get_or_create_audio_connection_for_physical_input(
-                &PhysicalInputChoice::Ports {
-                    device_id: "dev-1".to_string(),
-                    channels: vec![0],
-                },
-                &ports,
-            )
-            .expect("connection");
+        let ports =
+            crate::audio_connections::AvailablePorts::for_device("dev-1", "Interface", 2, 2);
+        let (mut registry, id) = mono_input_registry(&ports);
 
         let mut track = audio_track(TrackAudioFormat::Mono);
         track.routing.audio_input_connection_id = Some(id.clone());
         // A logical bus name; the endpoint lives in the Audio Device column.
-        assert_eq!(audio_input_combo_label(&track, &registry), "Input 1");
+        assert_eq!(audio_input_combo_label(&track, &registry), "Mono Input 1");
 
         assert!(registry.rename(&id, "Microphone"));
         assert_eq!(audio_input_combo_label(&track, &registry), "Microphone");
@@ -3636,20 +3463,10 @@ mod input_routing_tests {
     /// A disconnected device is shown as unavailable, never cleared.
     #[test]
     fn inspector_label_marks_an_unavailable_connection_without_clearing_it() {
-        use crate::audio_connections::{AudioConnectionRegistry, AvailablePorts};
-
-        let ports = AvailablePorts::for_device("dev-1", "Interface", 2, 2);
-        let mut registry = AudioConnectionRegistry::new();
-        let id = registry
-            .get_or_create_audio_connection_for_physical_input(
-                &PhysicalInputChoice::Ports {
-                    device_id: "dev-1".to_string(),
-                    channels: vec![0],
-                },
-                &ports,
-            )
-            .expect("connection");
-        registry.revalidate(&AvailablePorts::default());
+        let ports =
+            crate::audio_connections::AvailablePorts::for_device("dev-1", "Interface", 2, 2);
+        let (mut registry, id) = mono_input_registry(&ports);
+        registry.revalidate(&crate::audio_connections::AvailablePorts::default());
 
         let mut track = audio_track(TrackAudioFormat::Mono);
         track.routing.audio_input_connection_id = Some(id.clone());

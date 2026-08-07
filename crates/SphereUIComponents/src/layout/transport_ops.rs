@@ -657,6 +657,13 @@ impl StudioLayout {
             .is_some_and(|until| until > std::time::Instant::now())
             .then(|| self.audio_bridge.sample_rate_notice_text.clone())
             .filter(|text| !text.is_empty());
+        // Aggregated Audio Connections / routing warnings — one line for the
+        // whole project, never one dialog per affected track.
+        let routing_notice = self
+            .audio_bridge
+            .routing_warnings
+            .active_notice()
+            .map(str::to_string);
         let left = match (
             self.recording.ui_state.status_text(),
             &self.audio_bridge.last_error,
@@ -664,6 +671,9 @@ impl StudioLayout {
         ) {
             (Some(status), _, _) => status,
             (None, Some(error), _) => format!("Audio: {error}"),
+            (None, None, _) if routing_notice.is_some() => {
+                routing_notice.clone().unwrap_or_default()
+            }
             (None, None, _) if sample_rate_notice.is_some() => {
                 sample_rate_notice.clone().unwrap_or_default()
             }

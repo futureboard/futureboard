@@ -1469,6 +1469,49 @@ impl StudioLayout {
                 }
                 entries
             }
+            // Master / Monitor output pickers. Both list Output Audio
+            // Connections only — no input bus, no hardware port — and both end
+            // with the escape hatch into Audio Connections.
+            ContextTarget::MasterOutputPicker | ContextTarget::MonitorOutputPicker => {
+                use crate::output_routing::{
+                    is_current_choice, master_output_options, monitor_output_options,
+                    output_command_id, OutputChoice, MASTER_OUTPUT_COMMAND_PREFIX,
+                    MONITOR_OUTPUT_COMMAND_PREFIX,
+                };
+                let is_master = matches!(target, ContextTarget::MasterOutputPicker);
+                let state = &self.timeline.read(cx).state;
+                let current = if is_master {
+                    state.master_output_connection_id.as_ref()
+                } else {
+                    state.monitor_output_connection_id.as_ref()
+                };
+                let (prefix, options, header) = if is_master {
+                    (
+                        MASTER_OUTPUT_COMMAND_PREFIX,
+                        master_output_options(&state.audio_connections, current),
+                        "Master Output",
+                    )
+                } else {
+                    (
+                        MONITOR_OUTPUT_COMMAND_PREFIX,
+                        monitor_output_options(&state.audio_connections, current),
+                        "Monitor Output",
+                    )
+                };
+
+                let mut entries = vec![ContextMenuEntry::Header(header.to_string())];
+                for choice in &options {
+                    if matches!(choice, OutputChoice::OpenAudioConnections) {
+                        entries.push(ContextMenuEntry::Separator);
+                    }
+                    entries.push(ContextMenuEntry::checked_item(
+                        choice.label(),
+                        output_command_id(prefix, choice),
+                        is_current_choice(choice, current),
+                    ));
+                }
+                entries
+            }
             ContextTarget::AutomationTargetPicker { track_id } => {
                 use crate::components::timeline::timeline_state::{
                     automation_target_menu_command, AutomationTarget,

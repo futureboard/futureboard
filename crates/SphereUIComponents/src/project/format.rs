@@ -69,7 +69,16 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// reference plus the independent MIDI input field, and adds a project-level
 /// Audio Connections registry section at the body tail. v33 and older files
 /// still load: their combined field is migrated into generated connections.
-pub const PROJECT_VERSION: u32 = 34;
+/// v35 appends Master / Monitor output routing (two optional Audio Connection
+/// ids plus the one-time bootstrap latch) after the registry section.
+///
+/// This is a *version bump rather than an extension of v34* on purpose. The body
+/// is positional and a v34 file simply ends after the registry, so appending
+/// fields under the same version number would leave the decoder guessing whether
+/// trailing bytes are absent or truncated. A v34 file must decode as v34, with
+/// no output routing and the bootstrap latch clear — which is exactly what makes
+/// the compatibility bootstrap run once for it.
+pub const PROJECT_VERSION: u32 = 35;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -1200,6 +1209,13 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         encode_audio_connection(&mut w, connection);
     }
 
+    // Master / Monitor output routing (v35+). Ids only: the resolved route,
+    // runtime device index, hardware owner, and channel list are all recomputed
+    // from the current machine and are deliberately not persisted.
+    w.write_opt_str(&project.master_output_connection_id);
+    w.write_opt_str(&project.monitor_output_connection_id);
+    w.write_bool(project.output_routing_initialized);
+
     w.into_bytes()
 }
 
@@ -2157,8 +2173,21 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         Vec::new()
     };
 
+    // Master / Monitor output routing (v35+). A v34 file has no output routing
+    // and an unset bootstrap latch, so the compatibility bootstrap runs for it
+    // exactly once on load.
+    let (master_output_connection_id, monitor_output_connection_id, output_routing_initialized) =
+        if version >= 35 {
+            (r.read_opt_str()?, r.read_opt_str()?, r.read_bool()?)
+        } else {
+            (None, None, false)
+        };
+
     Ok(FutureboardProject {
         audio_connections,
+        master_output_connection_id,
+        monitor_output_connection_id,
+        output_routing_initialized,
         id,
         name,
         created_at,
@@ -2328,11 +2357,13 @@ mod tests {
 
     fn encode_legacy_song_text_project(version: u32, cues: &[LegacyProjectSongTextCue]) -> Vec<u8> {
         let mut body = encode_body(&FutureboardProject::new("Legacy Song Text"));
-        // `encode_body` now ends with the v34 Audio Connections count followed
-        // by nothing else, and the Song Text count sits just before it. A
-        // v24-v26 fixture reads neither, so drop both trailing counts before
-        // appending the legacy cue block in their place.
-        body.truncate(body.len() - 2 * std::mem::size_of::<u32>());
+        // `encode_body` ends with the Song Text count, the v34 Audio
+        // Connections count, and the v35 output-routing block (two absent
+        // optional strings plus the bootstrap latch). A v24-v26 fixture reads
+        // none of them, so drop the whole tail before appending the legacy cue
+        // block in its place.
+        let v35_output_routing_bytes = 1 + 1 + 1;
+        body.truncate(body.len() - 2 * std::mem::size_of::<u32>() - v35_output_routing_bytes);
 
         let mut tail = FbWriter::new();
         tail.write_u32(cues.len() as u32);

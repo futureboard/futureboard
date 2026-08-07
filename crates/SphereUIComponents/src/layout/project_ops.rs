@@ -138,17 +138,57 @@ impl StudioLayout {
         time_signature_den: u32,
         cx: &mut Context<Self>,
     ) {
+        // Copy the application-level Default Audio Connections template. The
+        // copy gets fresh project-local ids, so the new project is never linked
+        // back to the template.
+        let (connection_template, input_device, output_device) = {
+            let settings = self.settings.read(cx);
+            (
+                settings.current.hardware.default_audio_connections.clone(),
+                settings.current.hardware.audio.device_in.trim().to_string(),
+                settings
+                    .current
+                    .hardware
+                    .audio
+                    .device_out
+                    .trim()
+                    .to_string(),
+            )
+        };
+        let ports = crate::audio_connections::current_available_ports();
+
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.reset_input_state();
             timeline.state = TimelineState::default();
             timeline.state.bpm = bpm;
             timeline.state.time_signature_num = time_signature_num;
             timeline.state.time_signature_den = time_signature_den;
+            timeline.state.audio_connections =
+                crate::audio_connections::AudioConnectionRegistry::from_default_template(
+                    &connection_template,
+                    &ports,
+                    &input_device,
+                    &output_device,
+                );
+            // Give Master the copied output where that is unambiguous; Monitor
+            // stays on Follow Master Output. The latch then stops the
+            // compatibility bootstrap from running again on the first save.
+            let bootstrap = crate::output_routing::bootstrap_master_output(
+                &mut timeline.state.audio_connections,
+                &ports,
+                false,
+            );
+            if let Some(id) = bootstrap.assigned() {
+                timeline.state.master_output_connection_id = Some(id.clone());
+            }
+            timeline.state.output_routing_initialized = true;
+            timeline.state.refresh_output_labels();
             if let Some(template) = template {
                 Self::apply_template_tracks(timeline, template, cx);
             }
             cx.notify();
         });
+        self.publish_audio_connection_routing(cx);
     }
 
     fn show_project_lifecycle_error(&mut self, title: &str, message: &str, cx: &mut Context<Self>) {

@@ -27,6 +27,18 @@ pub enum EngineCommand {
     SetMonitorOutput {
         target: crate::monitor::MonitorOutputTarget,
     },
+    /// Publish the compiled hardware-output ownership: which stage writes the
+    /// device, Master's own destination pair, and the effective monitoring pair.
+    /// Fixed size and allocation-free, because ownership and port resolution
+    /// were both decided on the control thread.
+    SetHardwareOutputOwnership {
+        owner: crate::monitor::HardwareOutputOwner,
+        /// Master's own `(left, right)` device channels, or `None` when Master
+        /// has no output destination.
+        master: Option<(u16, u16)>,
+        /// The effective monitoring `(left, right)` device channels.
+        monitor: Option<(u16, u16)>,
+    },
     /// Set one channel's Pre/After-Fader Listen state. `track_index` is
     /// resolved by the control thread so the payload owns no allocation.
     SetTrackListen {
