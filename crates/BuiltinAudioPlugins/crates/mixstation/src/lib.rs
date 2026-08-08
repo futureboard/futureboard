@@ -4,8 +4,7 @@
 //! saturation → stereo width → output trim → zero-latency limiter.
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect,
-    db_to_linear, linear_to_db, time_constant,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, linear_to_db, time_constant,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,10 +14,19 @@ pub mod ui;
 
 pub use ipc::{UI_PARAM_IDS, ui_param_id, ui_param_index};
 
-use dsp::{DcBlocker, Filters, SmoothedGain, saturate, stereo_width};
+use dsp::{
+    DcBlocker, Filters, Limiter, Saturator, SmoothedGain, StripCompressor, proportional_q,
+    saturation_active, stereo_width,
+};
 
 pub const PLUGIN_ID: &str = "futureboard.mixstation";
 const CLIP_HOLD_SECONDS: f32 = 1.0;
+/// Bottom of the high-pass range; parked here the cut leaves the path.
+const HPF_OPEN_HZ: f32 = 20.0;
+/// Top of the low-pass range; parked here the cut leaves the path.
+const LPF_OPEN_HZ: f32 = 20_000.0;
+/// Drive percentage to waveshaper amount: 100 % reaches a hard knee.
+const SATURATION_DRIVE_SCALE: f32 = 0.06;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,14 +292,13 @@ pub struct Dsp {
     input_gain: SmoothedGain,
     output_gain: SmoothedGain,
     filters: Filters,
-    compressor: SoftKneeCompressor,
+    compressor: StripCompressor,
     saturation_drive: f32,
     saturation_character: f32,
+    saturation: Saturator,
     saturation_dc: DcBlocker,
     width: f32,
-    limiter_ceiling: f32,
-    limiter_gain: f32,
-    limiter_release_coeff: f32,
+    limiter: Limiter,
     meters: Meters,
 }
 
@@ -304,14 +311,13 @@ impl Dsp {
             input_gain: SmoothedGain::new(sample_rate, params.input_trim_db),
             output_gain: SmoothedGain::new(sample_rate, params.output_trim_db),
             filters: Filters::new(),
-            compressor: SoftKneeCompressor::new(sample_rate),
-            saturation_drive: 1.0,
+            compressor: StripCompressor::new(sample_rate),
+            saturation_drive: 0.0,
             saturation_character: 0.5,
+            saturation: Saturator::new(),
             saturation_dc: DcBlocker::new(sample_rate),
             width: 1.0,
-            limiter_ceiling: 1.0,
-            limiter_gain: 1.0,
-            limiter_release_coeff: 0.0,
+            limiter: Limiter::new(sample_rate),
             meters: Meters::new(sample_rate),
             params,
         };
@@ -354,7 +360,7 @@ impl Dsp {
             };
         let limiter_gr =
             if self.params.power && self.params.limiter_enabled && self.rack_contains(6) {
-                -linear_to_db(self.limiter_gain).min(0.0)
+                -linear_to_db(self.limiter.gain()).min(0.0)
             } else {
                 0.0
             };
@@ -380,29 +386,33 @@ impl Dsp {
         self.input_gain.set_db(p.input_trim_db);
         self.output_gain.set_db(p.output_trim_db);
         self.filters
-            .high_pass
-            .set_high_pass(self.sample_rate, p.hpf_hz);
+            .set_high_pass(self.sample_rate, p.hpf_hz, HPF_OPEN_HZ);
         self.filters
-            .low_pass
-            .set_low_pass(self.sample_rate, p.lpf_hz);
+            .set_low_pass(self.sample_rate, p.lpf_hz, LPF_OPEN_HZ);
         self.filters.eq[0].set_low_shelf(self.sample_rate, 100.0, p.low_gain_db);
-        self.filters.eq[1].set_peak(self.sample_rate, p.low_mid_freq_hz, p.low_mid_gain_db, 1.0);
+        self.filters.eq[1].set_peak(
+            self.sample_rate,
+            p.low_mid_freq_hz,
+            p.low_mid_gain_db,
+            proportional_q(p.low_mid_gain_db),
+        );
         self.filters.eq[2].set_peak(
             self.sample_rate,
             p.high_mid_freq_hz,
             p.high_mid_gain_db,
-            1.0,
+            proportional_q(p.high_mid_gain_db),
         );
         self.filters.eq[3].set_high_shelf(self.sample_rate, 10_000.0, p.high_gain_db);
         self.compressor
             .set_curve(p.comp_threshold_db, p.comp_ratio, 6.0, p.comp_makeup_db);
         self.compressor
             .set_timing(p.comp_attack_ms * 0.001, p.comp_release_ms * 0.001);
-        self.saturation_drive = db_to_linear(p.sat_drive_pct * 0.24);
+        self.saturation_drive = p.sat_drive_pct * SATURATION_DRIVE_SCALE;
         self.saturation_character = p.sat_character_pct * 0.01;
         self.width = p.width_pct * 0.01;
-        self.limiter_ceiling = db_to_linear(p.limiter_ceiling_db);
-        self.limiter_release_coeff = time_constant(self.sample_rate, p.limiter_release_ms * 0.001);
+        self.limiter.set_ceiling_db(p.limiter_ceiling_db);
+        self.limiter
+            .set_release(self.sample_rate, p.limiter_release_ms * 0.001);
     }
 
     fn rack_contains(&self, module: u8) -> bool {
@@ -427,18 +437,17 @@ impl Dsp {
             ipc::POWER_INDEX => {
                 self.filters.reset();
                 self.compressor.reset();
+                self.saturation.reset();
                 self.saturation_dc.reset();
-                self.limiter_gain = 1.0;
+                self.limiter.reset();
             }
             ipc::INPUT_TRIM_INDEX => self.input_gain.set_db(p.input_trim_db),
             ipc::HPF_INDEX => self
                 .filters
-                .high_pass
-                .set_high_pass(self.sample_rate, p.hpf_hz),
+                .set_high_pass(self.sample_rate, p.hpf_hz, HPF_OPEN_HZ),
             ipc::LPF_INDEX => self
                 .filters
-                .low_pass
-                .set_low_pass(self.sample_rate, p.lpf_hz),
+                .set_low_pass(self.sample_rate, p.lpf_hz, LPF_OPEN_HZ),
             ipc::LOW_GAIN_INDEX => {
                 self.filters.eq[0].set_low_shelf(self.sample_rate, 100.0, p.low_gain_db);
             }
@@ -447,7 +456,7 @@ impl Dsp {
                     self.sample_rate,
                     p.low_mid_freq_hz,
                     p.low_mid_gain_db,
-                    1.0,
+                    proportional_q(p.low_mid_gain_db),
                 );
             }
             ipc::HIGH_MID_FREQ_INDEX | ipc::HIGH_MID_GAIN_INDEX => {
@@ -455,7 +464,7 @@ impl Dsp {
                     self.sample_rate,
                     p.high_mid_freq_hz,
                     p.high_mid_gain_db,
-                    1.0,
+                    proportional_q(p.high_mid_gain_db),
                 );
             }
             ipc::HIGH_GAIN_INDEX => {
@@ -469,27 +478,29 @@ impl Dsp {
                 .compressor
                 .set_timing(p.comp_attack_ms * 0.001, p.comp_release_ms * 0.001),
             ipc::SAT_DRIVE_INDEX => {
-                let drive = db_to_linear(p.sat_drive_pct * 0.24);
-                if self.saturation_drive <= 1.000_001 && drive > 1.000_001 {
+                let drive = p.sat_drive_pct * SATURATION_DRIVE_SCALE;
+                if !saturation_active(self.saturation_drive) && saturation_active(drive) {
                     self.saturation_dc.reset();
                 }
                 self.saturation_drive = drive;
+                self.saturation.recurve();
             }
             ipc::SAT_CHARACTER_INDEX => {
                 self.saturation_character = p.sat_character_pct * 0.01;
+                self.saturation.recurve();
             }
-            ipc::SAT_ENABLED_INDEX => self.saturation_dc.reset(),
+            ipc::SAT_ENABLED_INDEX => {
+                self.saturation.reset();
+                self.saturation_dc.reset();
+            }
             ipc::WIDTH_INDEX => {
                 self.width = p.width_pct * 0.01;
             }
             ipc::OUTPUT_TRIM_INDEX => self.output_gain.set_db(p.output_trim_db),
-            ipc::LIMITER_CEILING_INDEX => {
-                self.limiter_ceiling = db_to_linear(p.limiter_ceiling_db);
-            }
-            ipc::LIMITER_RELEASE_INDEX => {
-                self.limiter_release_coeff =
-                    time_constant(self.sample_rate, p.limiter_release_ms * 0.001);
-            }
+            ipc::LIMITER_CEILING_INDEX => self.limiter.set_ceiling_db(p.limiter_ceiling_db),
+            ipc::LIMITER_RELEASE_INDEX => self
+                .limiter
+                .set_release(self.sample_rate, p.limiter_release_ms * 0.001),
             ipc::SLOT_1_INDEX
             | ipc::SLOT_2_INDEX
             | ipc::SLOT_3_INDEX
@@ -497,18 +508,17 @@ impl Dsp {
             | ipc::SLOT_5_INDEX
             | ipc::SLOT_6_INDEX => {
                 self.compressor.reset();
+                self.saturation.reset();
                 self.saturation_dc.reset();
-                self.limiter_gain = 1.0;
+                self.limiter.reset();
             }
             _ => {}
         }
     }
 
     #[inline]
-    fn process_filter_module(&mut self, channel: usize, mut sample: f32) -> f32 {
-        sample = self.filters.high_pass.process(channel, sample);
-        sample = self.filters.low_pass.process(channel, sample);
-        sample
+    fn process_filter_module(&mut self, channel: usize, sample: f32) -> f32 {
+        self.filters.process_cuts(channel, sample)
     }
 
     #[inline]
@@ -518,33 +528,15 @@ impl Dsp {
         }
         sample
     }
-
-    #[inline]
-    fn process_limiter(&mut self, mut left: f32, mut right: f32) -> (f32, f32) {
-        let peak = left.abs().max(right.abs());
-        let target = if peak > self.limiter_ceiling {
-            self.limiter_ceiling / peak
-        } else {
-            1.0
-        };
-        self.limiter_gain = if target < self.limiter_gain {
-            target
-        } else {
-            self.limiter_release_coeff * self.limiter_gain
-                + (1.0 - self.limiter_release_coeff) * target
-        };
-        left *= self.limiter_gain;
-        right *= self.limiter_gain;
-        (left, right)
-    }
 }
 
 impl StereoEffect for Dsp {
     fn reset(&mut self) {
         self.filters.reset();
         self.compressor.reset();
+        self.saturation.reset();
         self.saturation_dc.reset();
-        self.limiter_gain = 1.0;
+        self.limiter.reset();
         self.meters.reset();
         self.input_gain.snap_db(self.params.input_trim_db);
         self.output_gain.snap_db(self.params.output_trim_db);
@@ -594,21 +586,31 @@ impl StereoEffect for Dsp {
                 3 if self.params.comp_enabled => {
                     (l, r) = self.compressor.process_stereo_linked(l, r);
                 }
-                4 if self.params.sat_enabled && self.saturation_drive > 1.000_001 => {
+                4 if self.params.sat_enabled && saturation_active(self.saturation_drive) => {
                     l = self.saturation_dc.process(
                         0,
-                        saturate(l, self.saturation_drive, self.saturation_character),
+                        self.saturation.process(
+                            0,
+                            l,
+                            self.saturation_drive,
+                            self.saturation_character,
+                        ),
                     );
                     r = self.saturation_dc.process(
                         1,
-                        saturate(r, self.saturation_drive, self.saturation_character),
+                        self.saturation.process(
+                            1,
+                            r,
+                            self.saturation_drive,
+                            self.saturation_character,
+                        ),
                     );
                 }
                 5 if self.params.width_enabled => {
                     (l, r) = stereo_width(l, r, self.width);
                 }
                 6 if self.params.limiter_enabled => {
-                    (l, r) = self.process_limiter(l, r);
+                    (l, r) = self.limiter.process(l, r);
                     limiter_processed = true;
                 }
                 _ => {}
@@ -620,7 +622,7 @@ impl StereoEffect for Dsp {
         r *= output_gain;
 
         if !limiter_processed {
-            self.limiter_gain = 1.0;
+            self.limiter.reset();
         }
 
         self.meters.push(input, (l, r));
@@ -803,7 +805,7 @@ mod tests {
         p.limiter_enabled = true;
         p.slot1_module = 6;
         p.limiter_ceiling_db = -6.0;
-        let ceiling = db_to_linear(-6.0);
+        let ceiling = builtin_dsp_core::db_to_linear(-6.0);
         let mut dsp = Dsp::new(SR);
         dsp.set_params(p);
         let (l, r) = dsp.process_stereo(2.0, -1.5);

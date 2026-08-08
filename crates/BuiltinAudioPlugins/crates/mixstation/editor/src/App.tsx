@@ -36,60 +36,16 @@ type RackModule = {
   code: number
   id: RackModuleId
   name: string
-  shortName: string
-  category: string
-  className: string
+  hint: string
 }
 
 const RACK_MODULES: readonly RackModule[] = [
-  {
-    code: 1,
-    id: 'filtersEnabled',
-    name: 'Precision Filters',
-    shortName: 'Filters',
-    category: 'Utility',
-    className: 'filters-device',
-  },
-  {
-    code: 2,
-    id: 'eqEnabled',
-    name: 'Console EQ',
-    shortName: '4-Band EQ',
-    category: 'Equalizer',
-    className: 'eq-device',
-  },
-  {
-    code: 3,
-    id: 'compEnabled',
-    name: 'Rack Compressor',
-    shortName: 'Compressor',
-    category: 'Dynamics',
-    className: 'comp-device',
-  },
-  {
-    code: 4,
-    id: 'satEnabled',
-    name: 'Color Drive',
-    shortName: 'Saturation',
-    category: 'Color',
-    className: 'sat-device',
-  },
-  {
-    code: 5,
-    id: 'widthEnabled',
-    name: 'Stereo Field',
-    shortName: 'Stereo',
-    category: 'Imaging',
-    className: 'width-device',
-  },
-  {
-    code: 6,
-    id: 'limiterEnabled',
-    name: 'Safety Limiter',
-    shortName: 'Limiter',
-    category: 'Dynamics',
-    className: 'limiter-device',
-  },
+  { code: 1, id: 'filtersEnabled', name: 'Filters', hint: 'High / low cut' },
+  { code: 2, id: 'eqEnabled', name: 'EQ', hint: '4-band' },
+  { code: 3, id: 'compEnabled', name: 'Compressor', hint: 'Dynamics' },
+  { code: 4, id: 'satEnabled', name: 'Drive', hint: 'Saturation' },
+  { code: 5, id: 'widthEnabled', name: 'Width', hint: 'Stereo image' },
+  { code: 6, id: 'limiterEnabled', name: 'Limiter', hint: 'Ceiling' },
 ] as const
 
 const SLOT_IDS = [
@@ -101,62 +57,16 @@ const SLOT_IDS = [
   'slot6Module',
 ] as const satisfies readonly NumericParamId[]
 
-function Device({
-  title,
-  enabled,
-  onToggle,
-  onRemove,
-  children,
-  className = '',
-}: {
-  title: string
-  enabled: boolean
-  onToggle: () => void
-  onRemove: () => void
-  children: ReactNode
-  className?: string
-}) {
-  return (
-    <section
-      className={`rack-device ${className}${enabled ? '' : ' bypassed'}`}
-      aria-label={title}
-    >
-      <header className="device-head">
-        <button
-          type="button"
-          className={`device-power${enabled ? ' enabled' : ''}`}
-          role="switch"
-          aria-checked={enabled}
-          aria-label={`${title} ${enabled ? 'enabled' : 'bypassed'}`}
-          onClick={onToggle}
-        >
-          <span />
-        </button>
-        <h2>{title}</h2>
-        <button
-          type="button"
-          className="device-remove"
-          aria-label={`Remove ${title}`}
-          onClick={onRemove}
-        >
-          ×
-        </button>
-      </header>
-      <div className="device-face">{children}</div>
-      <footer className="device-foot">
-        <span>Fixed stage</span>
-        <i />
-        <strong>In</strong>
-      </footer>
-    </section>
-  )
-}
+const DRAG_TYPE = 'application/x-mixstation-module'
 
 export default function App() {
   const [params, setParams] = useState<MixStationParams>(defaults)
   const [connected, setConnected] = useState(false)
   const [meterLive, setMeterLive] = useState(false)
   const [presetIndex, setPresetIndex] = useState<number | null>(0)
+  const [dragOverSlot, setDragOverSlot] = useState<number | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [pickerSlot, setPickerSlot] = useState<number | null>(null)
   const metersRef = useRef<MeterFrame | null>(null)
 
   useEffect(
@@ -166,6 +76,7 @@ export default function App() {
           const clean = sanitizeParams(incoming)
           setParams(clean)
           setPresetIndex(matchingPresetIndex(clean))
+          setPickerSlot(null)
           metersRef.current = null
           setMeterLive(false)
         },
@@ -213,10 +124,12 @@ export default function App() {
     const next = sanitizeParams({ ...FACTORY_PRESETS[wrapped]!.params })
     setParams(next)
     setPresetIndex(wrapped)
+    setPickerSlot(null)
     postAllParams(next)
   }
 
   const slotValues = SLOT_IDS.map((id) => Math.round(params[id]))
+  const loadedCount = slotValues.filter((code) => code !== 0).length
 
   const commitRack = (next: MixStationParams) => {
     const clean = sanitizeParams(next)
@@ -228,13 +141,12 @@ export default function App() {
     }
   }
 
-  const installModule = (module: RackModule) => {
+  const installModule = (module: RackModule, slotIndex: number) => {
+    setPickerSlot(null)
     if (slotValues.includes(module.code)) return
-    const emptySlot = slotValues.indexOf(0)
-    if (emptySlot < 0) return
     commitRack({
       ...params,
-      [SLOT_IDS[emptySlot]!]: module.code,
+      [SLOT_IDS[slotIndex]!]: module.code,
       [module.id]: true,
     })
   }
@@ -247,24 +159,33 @@ export default function App() {
     })
   }
 
+  const endDrag = () => {
+    setDragging(false)
+    setDragOverSlot(null)
+  }
+
   const beginDrag = (
     event: DragEvent<HTMLElement>,
     module: RackModule,
-    sourceSlot: number | null,
+    sourceSlot: number,
   ) => {
-    event.dataTransfer.effectAllowed = sourceSlot === null ? 'copy' : 'move'
+    event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData(
-      'application/x-mixstation-module',
+      DRAG_TYPE,
       JSON.stringify({ code: module.code, sourceSlot }),
     )
+    setDragging(true)
+    setPickerSlot(null)
   }
 
+  /** Swap the dragged module with whatever occupies the target slot. */
   const dropIntoSlot = (event: DragEvent<HTMLElement>, targetSlot: number) => {
     event.preventDefault()
-    let payload: { code: number; sourceSlot: number | null }
+    endDrag()
+    let payload: { code: number; sourceSlot: number }
     try {
       payload = JSON.parse(
-        event.dataTransfer.getData('application/x-mixstation-module'),
+        event.dataTransfer.getData(DRAG_TYPE),
       ) as typeof payload
     } catch {
       return
@@ -272,89 +193,166 @@ export default function App() {
     const module = RACK_MODULES.find((item) => item.code === payload.code)
     if (!module || payload.sourceSlot === targetSlot) return
 
-    const next = { ...params }
-    const displacedCode = slotValues[targetSlot] ?? 0
-    if (payload.sourceSlot !== null) {
-      next[SLOT_IDS[payload.sourceSlot]!] = displacedCode
-    } else if (displacedCode !== 0) {
-      const displaced = RACK_MODULES.find((item) => item.code === displacedCode)
-      if (displaced) next[displaced.id] = false
-    }
-    next[SLOT_IDS[targetSlot]!] = module.code
-    next[module.id] = true
-    commitRack(next)
+    commitRack({
+      ...params,
+      [SLOT_IDS[payload.sourceSlot]!]: slotValues[targetSlot] ?? 0,
+      [SLOT_IDS[targetSlot]!]: module.code,
+    })
   }
 
   const renderDevice = (module: RackModule) => {
+    const on = params[module.id]
     switch (module.id) {
       case 'filtersEnabled':
         return (
           <>
-            <div className="device-mark">HP / LP</div>
-            {knob('hpfHz', params.filtersEnabled)}
-            {knob('lpfHz', params.filtersEnabled)}
+            {knob('hpfHz', on)}
+            {knob('lpfHz', on)}
           </>
         )
       case 'eqEnabled':
         return (
           <>
-            {knob('lowGainDb', params.eqEnabled)}
-            {knob('lowMidFreqHz', params.eqEnabled)}
-            {knob('lowMidGainDb', params.eqEnabled)}
-            {knob('highMidFreqHz', params.eqEnabled)}
-            {knob('highMidGainDb', params.eqEnabled)}
-            {knob('highGainDb', params.eqEnabled)}
+            {knob('lowGainDb', on)}
+            {knob('highGainDb', on)}
+            {knob('lowMidFreqHz', on)}
+            {knob('highMidFreqHz', on)}
+            {knob('lowMidGainDb', on)}
+            {knob('highMidGainDb', on)}
           </>
         )
       case 'compEnabled':
         return (
           <>
-            <div className="device-mark">Dynamics</div>
-            {knob('compThresholdDb', params.compEnabled)}
-            {knob('compRatio', params.compEnabled)}
-            {knob('compAttackMs', params.compEnabled)}
-            {knob('compReleaseMs', params.compEnabled)}
-            {knob('compMakeupDb', params.compEnabled)}
+            {knob('compThresholdDb', on)}
+            {knob('compRatio', on)}
+            {knob('compAttackMs', on)}
+            {knob('compReleaseMs', on)}
+            {knob('compMakeupDb', on)}
           </>
         )
       case 'satEnabled':
         return (
           <>
-            <div className="device-mark">COLOR</div>
-            {knob('satDrivePct', params.satEnabled)}
-            {knob('satCharacterPct', params.satEnabled)}
+            {knob('satDrivePct', on)}
+            {knob('satCharacterPct', on)}
           </>
         )
       case 'widthEnabled':
-        return (
-          <>
-            <div className="stereo-glyph" aria-hidden="true">
-              L <i /> R
-            </div>
-            {knob('widthPct', params.widthEnabled)}
-          </>
-        )
+        return <>{knob('widthPct', on)}</>
       case 'limiterEnabled':
         return (
           <>
-            <div className="device-mark">Zero latency</div>
-            {knob('limiterCeilingDb', params.limiterEnabled)}
-            {knob('limiterReleaseMs', params.limiterEnabled)}
+            {knob('limiterCeilingDb', on)}
+            {knob('limiterReleaseMs', on)}
           </>
         )
     }
   }
 
+  const loadedSlot = (module: RackModule, index: number): ReactNode => {
+    const on = params[module.id]
+    return (
+      <>
+        <header
+          className="slot-head"
+          draggable
+          onDragStart={(event) => beginDrag(event, module, index)}
+          title="Drag to reorder"
+        >
+          <span className="slot-no">{index + 1}</span>
+          <h2>{module.name}</h2>
+          <button
+            type="button"
+            className={`slot-bypass${on ? ' on' : ''}`}
+            role="switch"
+            aria-checked={on}
+            aria-label={`${module.name} ${on ? 'active' : 'bypassed'}`}
+            onClick={() => changeBoolean(module.id, !on)}
+          >
+            <span className="lamp" />
+            <span>{on ? 'On' : 'Off'}</span>
+          </button>
+          <button
+            type="button"
+            className="slot-x"
+            aria-label={`Remove ${module.name}`}
+            onClick={() => removeModule(index, module)}
+          >
+            ×
+          </button>
+        </header>
+        <div className={`slot-body${on ? '' : ' is-off'}`}>
+          {renderDevice(module)}
+        </div>
+      </>
+    )
+  }
+
+  const vacantSlot = (index: number): ReactNode => {
+    if (pickerSlot !== index) {
+      return (
+        <button
+          type="button"
+          className="slot-add"
+          onClick={() => setPickerSlot(index)}
+          aria-label={`Add a module at position ${index + 1}`}
+        >
+          <span className="slot-no">{index + 1}</span>
+          <span className="slot-plus" aria-hidden="true">
+            +
+          </span>
+          <span className="slot-add-label">Add</span>
+        </button>
+      )
+    }
+    const available = RACK_MODULES.filter(
+      (item) => !slotValues.includes(item.code),
+    )
+    return (
+      <div className="picker">
+        <div className="picker-head">
+          <span>Stage {index + 1}</span>
+          <button
+            type="button"
+            aria-label="Close module picker"
+            onClick={() => setPickerSlot(null)}
+          >
+            ×
+          </button>
+        </div>
+        {available.length === 0 ? (
+          <p className="picker-empty">Chain is full.</p>
+        ) : (
+          <ul className="picker-list">
+            {available.map((item) => (
+              <li key={item.id}>
+                <button type="button" onClick={() => installModule(item, index)}>
+                  <span className="picker-name">{item.name}</span>
+                  <span className="picker-hint">{item.hint}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    )
+  }
+
   return (
-    <main className={`rack${params.power ? '' : ' powered-off'}`}>
-      <header className="topbar">
-        <div className="identity">
-          <span className="rack-logo">M</span>
-          <h1>MixStation</h1>
-          <span className="descriptor">Virtual Mix Rack</span>
+    <main
+      className={`app${params.power ? '' : ' is-bypassed'}${dragging ? ' is-dragging' : ''}`}
+      onDragEnd={endDrag}
+    >
+      <header className="top">
+        <div className="brand">
+          <strong>MixStation</strong>
+          <span className={`host${connected ? ' live' : ''}`}>
+            {connected ? 'Linked' : 'Standby'}
+          </span>
         </div>
 
-        <div className="preset-control" aria-label="Factory preset">
+        <div className="preset" aria-label="Factory preset">
           <button
             type="button"
             aria-label="Previous preset"
@@ -362,20 +360,17 @@ export default function App() {
           >
             ‹
           </button>
-          <label>
-            <span>Preset</span>
-            <select
-              value={presetIndex ?? ''}
-              onChange={(event) => loadPreset(Number(event.target.value))}
-            >
-              {presetIndex === null ? <option value="">Modified</option> : null}
-              {FACTORY_PRESETS.map((preset, index) => (
-                <option key={preset.name} value={index}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <select
+            value={presetIndex ?? ''}
+            onChange={(event) => loadPreset(Number(event.target.value))}
+          >
+            {presetIndex === null ? <option value="">Modified</option> : null}
+            {FACTORY_PRESETS.map((preset, index) => (
+              <option key={preset.name} value={index}>
+                {preset.name}
+              </option>
+            ))}
+          </select>
           <button
             type="button"
             aria-label="Next preset"
@@ -385,130 +380,81 @@ export default function App() {
           </button>
         </div>
 
-        <div className="host-state" aria-live="polite">
-          <span className={connected ? 'linked' : ''} />
-          <div>
-            <small>Host</small>
-            <strong>{connected ? 'Linked' : 'Standby'}</strong>
-          </div>
+        <div className="top-meta">
+          <span className="count">
+            <em>{loadedCount}</em>
+            <span>/6</span>
+          </span>
+          <button
+            type="button"
+            className={`power${params.power ? ' on' : ''}`}
+            role="switch"
+            aria-checked={params.power}
+            aria-label={
+              params.power ? 'MixStation enabled' : 'MixStation bypassed'
+            }
+            onClick={() => changeBoolean('power', !params.power)}
+          >
+            <span className="lamp" />
+            {params.power ? 'On' : 'Off'}
+          </button>
         </div>
-
-        <button
-          type="button"
-          className={`power${params.power ? ' enabled' : ''}`}
-          role="switch"
-          aria-checked={params.power}
-          aria-label={params.power ? 'MixStation enabled' : 'MixStation bypassed'}
-          onClick={() => changeBoolean('power', !params.power)}
-        >
-          <span />
-          {params.power ? 'Active' : 'Bypass'}
-        </button>
       </header>
 
-      <div className="rack-workspace">
-        <aside className="module-browser" aria-label="Rack modules">
-          <div className="browser-tabs">
-            <button type="button" className="active">
-              Modules
-            </button>
-            <button type="button" disabled>
-              Macro
-            </button>
-          </div>
-          <label className="module-search">
-            <span>⌕</span>
-            <input aria-label="Search modules" placeholder="Search modules…" />
-          </label>
-          <div className="module-list">
-            {RACK_MODULES.map((module) => (
-              <button
-                type="button"
-                key={module.id}
-                className={slotValues.includes(module.code) ? 'installed' : ''}
-                onClick={() => installModule(module)}
-                disabled={slotValues.includes(module.code)}
-                draggable={!slotValues.includes(module.code)}
-                onDragStart={(event) => beginDrag(event, module, null)}
-              >
-                <span className={`module-thumb ${module.className}`}>M</span>
-                <span>
-                  <strong>{module.name}</strong>
-                  <small>{module.category} · drag to any slot</small>
-                </span>
-                <i>{slotValues.includes(module.code) ? 'In rack' : '+'}</i>
-              </button>
-            ))}
-          </div>
-        </aside>
+      <div className="body">
+        <div className="chain-label">
+          <span>Signal path</span>
+          <span className="path-hint">In → stages → Out</span>
+        </div>
 
-        <section className="rack-stage" aria-label="MixStation signal chain">
-          <div className="device-chain">
-            {SLOT_IDS.map((slotId, index) => {
-              const module = RACK_MODULES.find(
-                (item) => item.code === Math.round(params[slotId]),
-              )
-              return (
+        <section className="chain" aria-label="Signal chain">
+          {SLOT_IDS.map((slotId, index) => {
+            const module = RACK_MODULES.find(
+              (item) => item.code === Math.round(params[slotId]),
+            )
+            return (
               <div
-                className={`rack-slot${module ? ' loaded' : ''}`}
                 key={slotId}
-                draggable={Boolean(module)}
-                onDragStart={(event) => {
-                  if (module) beginDrag(event, module, index)
-                }}
+                className={`slot${module ? ' loaded' : ' vacant'}${
+                  dragOverSlot === index ? ' over' : ''
+                }`}
                 onDragOver={(event) => {
+                  if (!dragging) return
                   event.preventDefault()
-                  event.dataTransfer.dropEffect = module ? 'move' : 'copy'
+                  event.dataTransfer.dropEffect = 'move'
+                  setDragOverSlot(index)
+                }}
+                onDragLeave={(event) => {
+                  if (
+                    !event.currentTarget.contains(event.relatedTarget as Node)
+                  ) {
+                    setDragOverSlot((current) =>
+                      current === index ? null : current,
+                    )
+                  }
                 }}
                 onDrop={(event) => dropIntoSlot(event, index)}
               >
-                {module ? (
-                  <Device
-                    title={module.shortName}
-                    className={module.className}
-                    enabled={params[module.id]}
-                    onToggle={() =>
-                      changeBoolean(module.id, !params[module.id])
-                    }
-                    onRemove={() => removeModule(index, module)}
-                  >
-                    {renderDevice(module)}
-                  </Device>
-                ) : (
-                  <div
-                    className="empty-slot"
-                    aria-label={`Empty rack slot ${index + 1}; drop any module here`}
-                  >
-                    <span>+</span>
-                    <strong>Empty slot</strong>
-                    <small>{index + 1} · drop any module</small>
-                  </div>
-                )}
+                {module ? loadedSlot(module, index) : vacantSlot(index)}
               </div>
-              )
-            })}
-          </div>
+            )
+          })}
         </section>
-      </div>
 
-      <footer className="meter-dock">
-        <div className="trim-control">
-          <span>Input trim</span>
-          {knob('inputTrimDb')}
-        </div>
-        <div className="signal-caption">
-          <span>Input</span>
-          <i />
-          <span>{slotValues.filter((module) => module !== 0).length} modules</span>
-          <i />
-          <span>Output</span>
-        </div>
-        <Meters metersRef={metersRef} live={connected && meterLive} />
-        <div className="trim-control">
-          <span>Output trim</span>
-          {knob('outputTrimDb')}
-        </div>
-      </footer>
+        <footer className="floor">
+          <div className="trim">
+            <span className="trim-label">In</span>
+            {knob('inputTrimDb')}
+          </div>
+          <div className="floor-meters">
+            <Meters metersRef={metersRef} live={connected && meterLive} />
+          </div>
+          <div className="trim">
+            <span className="trim-label">Out</span>
+            {knob('outputTrimDb')}
+          </div>
+        </footer>
+      </div>
     </main>
   )
 }
