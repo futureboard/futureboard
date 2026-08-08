@@ -54,8 +54,14 @@ pub fn run_pre_studio_session_install(
 
     progress("Preparing session", ProgressBarValue::value(0.15));
 
-    let schema = SettingsSchema::load_from_disk();
+    let mut schema = SettingsSchema::load_from_disk();
     let output_device_name = schema.hardware.audio.device_out.clone();
+    // The saved project owns its nominal rate. Application defaults seed new
+    // projects only and must not replace a loaded session's audio timing.
+    schema.general.project_defaults.sample_rate = match package.project.settings.sample_rate {
+        44_100 | 48_000 | 88_200 | 96_000 | 192_000 => package.project.settings.sample_rate,
+        _ => 48_000,
+    };
     let (engine, stats) = crate::layout::build_and_warm_audio_engine(schema)?;
 
     let mut timeline_state = TimelineState::default();

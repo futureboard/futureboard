@@ -8,8 +8,8 @@
 //! Settings" open a dialog whose contents were mostly not about the project.
 //!
 //! The window renders a snapshot pushed by `StudioLayout` and sends edits back
-//! through callbacks, so `TimelineState` and the settings model remain the only
-//! owners of the values shown. Nothing here mutates project state directly and
+//! through callbacks, so `TimelineState` remains the owner of the project values
+//! shown. Nothing here mutates project state directly and
 //! nothing here caches an edit: a value changes on screen because the studio
 //! accepted it and pushed a new snapshot.
 
@@ -18,11 +18,13 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    div, px, size, App, AppContext, Bounds, Context, DragMoveEvent, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind,
 };
 
+use crate::components::app_chrome::{next_bpm_drag_id, BpmDrag, BpmDragSample};
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::form::{select, select_dismiss_backdrop, SelectOption};
 use crate::components::title_bar::external_window_titlebar;
@@ -48,11 +50,8 @@ const TIME_SIGNATURES: [(u32, u32); 8] = [
     (12, 8),
 ];
 
-/// Tempo nudge per stepper click, and the range the transport itself enforces.
-const BPM_STEP: f32 = 1.0;
-
 /// The live project state this window shows. Built by `StudioLayout` from
-/// `TimelineState` and the settings model.
+/// `TimelineState` plus the active engine-rate diagnostic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectSettingsSnapshot {
     pub name: String,
@@ -93,11 +92,11 @@ impl Default for ProjectSettingsSnapshot {
 
 /// Edits the window sends back to the studio. Each one is applied through the
 /// studio's existing command path (tempo → transport, meter → the time
-/// signature map, sample rate → the settings update that owns the engine
-/// restart confirmation), so this window adds no second way to change them.
+/// signature map, sample rate → the project-owned engine-reopen flow), so this
+/// window adds no second way to change them.
 #[derive(Clone)]
 pub struct ProjectSettingsCallbacks {
-    pub on_set_bpm: Arc<dyn Fn(f32, &mut App) + Send + Sync>,
+    pub on_bpm_drag: Arc<dyn Fn(BpmDragSample, &mut App) + Send + Sync>,
     pub on_set_time_signature: Arc<dyn Fn(u32, u32, &mut App) + Send + Sync>,
     pub on_set_sample_rate: Arc<dyn Fn(u32, &mut App) + Send + Sync>,
     pub on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
@@ -149,11 +148,6 @@ impl ProjectSettingsWindow {
         };
         cx.notify();
     }
-
-    fn nudge_bpm(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let next = self.snapshot.bpm + delta;
-        (self.callbacks.on_set_bpm)(next, cx);
-    }
 }
 
 impl Render for ProjectSettingsWindow {
@@ -194,9 +188,9 @@ impl Render for ProjectSettingsWindow {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
-                    .p(px(16.0))
-                    .gap(px(14.0))
-                    .child(self.project_section(&snapshot))
+                    .px(px(18.0))
+                    .py(px(12.0))
+                    .child(project_identity(&snapshot))
                     .child(self.tempo_section(&snapshot, cx))
                     .child(self.audio_section(&snapshot, cx)),
             )
@@ -218,37 +212,11 @@ impl Render for ProjectSettingsWindow {
 }
 
 impl ProjectSettingsWindow {
-    /// Identity of the open project. Read-only: a project is renamed and
-    /// relocated by saving it somewhere, not by editing a field here.
-    fn project_section(&self, snapshot: &ProjectSettingsSnapshot) -> impl IntoElement {
-        section("PROJECT")
-            .child(readonly_row("Name", snapshot.name.clone()))
-            .child(readonly_row(
-                "Location",
-                snapshot
-                    .path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Not saved yet".to_string()),
-            ))
-            .child(readonly_row(
-                "Status",
-                if snapshot.is_dirty {
-                    "Unsaved changes".to_string()
-                } else {
-                    "Saved".to_string()
-                },
-            ))
-            .child(readonly_row("Tracks", snapshot.track_count.to_string()))
-    }
-
     fn tempo_section(
         &self,
         snapshot: &ProjectSettingsSnapshot,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let dec_target = cx.entity().clone();
-        let inc_target = cx.entity().clone();
         let ts_toggle = cx.entity().clone();
         let ts_change = cx.entity().clone();
         let selected_ts = format!(
@@ -256,58 +224,23 @@ impl ProjectSettingsWindow {
             snapshot.time_signature.0, snapshot.time_signature.1
         );
 
-        section("TEMPO & METER")
-            .child(control_row(
+        settings_section("TEMPO & METER")
+            .child(settings_row(
                 "Tempo",
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(fb_button(
-                        "project-bpm-dec",
-                        "-",
-                        FbButtonKind::Default,
-                        true,
-                        move |_, _w, cx| {
-                            let _ = dec_target.update(cx, |this, cx| this.nudge_bpm(-BPM_STEP, cx));
-                        },
-                    ))
-                    .child(
-                        div()
-                            .w(px(70.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .border(px(1.0))
-                            .border_color(Colors::border_subtle())
-                            .bg(Colors::surface_input())
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(Colors::text_primary())
-                            .child(format!("{:.2} BPM", snapshot.bpm)),
-                    )
-                    .child(fb_button(
-                        "project-bpm-inc",
-                        "+",
-                        FbButtonKind::Default,
-                        true,
-                        move |_, _w, cx| {
-                            let _ = inc_target.update(cx, |this, cx| this.nudge_bpm(BPM_STEP, cx));
-                        },
-                    ))
-                    .into_any_element(),
+                if snapshot.has_tempo_markers {
+                    "Base tempo · Tempo map active"
+                } else {
+                    "Base tempo"
+                },
+                self.bpm_scrub_field(snapshot.bpm),
             ))
-            .when(snapshot.has_tempo_markers, |section| {
-                section.child(hint(
-                    "This project has tempo markers — the value above is the tempo at the \
-                     start of the arrangement. Edit later changes in the Tempo track.",
-                ))
-            })
-            .child(control_row(
-                "Time Signature",
+            .child(settings_row(
+                "Time signature",
+                if snapshot.has_time_signature_markers {
+                    "Base meter · Meter changes active"
+                } else {
+                    "Base meter"
+                },
                 div()
                     .w(px(150.0))
                     .child(select(
@@ -346,12 +279,78 @@ impl ProjectSettingsWindow {
                     ))
                     .into_any_element(),
             ))
-            .when(snapshot.has_time_signature_markers, |section| {
-                section.child(hint(
-                    "This project has meter changes — the value above is the signature at the \
-                     start of the arrangement.",
-                ))
+    }
+
+    fn bpm_scrub_field(&self, bpm: f32) -> gpui::AnyElement {
+        let on_bpm_drag = self.callbacks.on_bpm_drag.clone();
+
+        div()
+            .id("project-settings-bpm")
+            .w(px(100.0))
+            .h(px(28.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .px(px(8.0))
+            .rounded_md()
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .bg(Colors::surface_input())
+            .cursor(gpui::CursorStyle::ResizeUpDown)
+            .hover(|style| style.bg(Colors::surface_control_hover()))
+            .child(
+                div()
+                    .mr(px(6.0))
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_faint())
+                    .child("↕"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::text_primary())
+                    .child(format!("{bpm:.2}")),
+            )
+            .child(
+                div()
+                    .ml(px(5.0))
+                    .text_size(px(8.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(Colors::text_faint())
+                    .child("BPM"),
+            )
+            .occlude()
+            .on_drag(
+                BpmDrag {
+                    drag_id: 0,
+                    start_bpm: bpm,
+                },
+                move |drag, _offset, _window, cx| {
+                    cx.new(|_| BpmDrag {
+                        drag_id: next_bpm_drag_id(),
+                        start_bpm: drag.start_bpm,
+                    })
+                },
+            )
+            .on_drag_move::<BpmDrag>(move |event: &DragMoveEvent<BpmDrag>, _window, cx| {
+                let drag = event.drag(cx);
+                let modifiers = event.event.modifiers;
+                on_bpm_drag(
+                    BpmDragSample {
+                        drag_id: drag.drag_id,
+                        start_bpm: drag.start_bpm,
+                        cur_y: event.event.position.y.into(),
+                        shift: modifiers.shift,
+                        control: modifiers.control,
+                        platform: modifiers.platform,
+                        alt: modifiers.alt,
+                    },
+                    cx,
+                );
             })
+            .into_any_element()
     }
 
     fn audio_section(
@@ -368,9 +367,10 @@ impl ProjectSettingsWindow {
             .engine_sample_rate
             .is_some_and(|rate| rate != snapshot.sample_rate);
 
-        section("AUDIO")
-            .child(control_row(
-                "Sample Rate",
+        settings_section("AUDIO")
+            .child(settings_row(
+                "Project rate",
+                "Requested sample rate",
                 div()
                     .w(px(150.0))
                     .child(select(
@@ -379,7 +379,9 @@ impl ProjectSettingsWindow {
                         "-",
                         SAMPLE_RATES
                             .iter()
-                            .map(|rate| SelectOption::new(rate.to_string(), format!("{rate} Hz")))
+                            .map(|rate| {
+                                SelectOption::new(rate.to_string(), format_sample_rate(*rate))
+                            })
                             .collect(),
                         self.open_menu == Some(OpenMenu::SampleRate),
                         false,
@@ -401,37 +403,113 @@ impl ProjectSettingsWindow {
                     ))
                     .into_any_element(),
             ))
-            .child(readonly_row(
-                "Engine Running At",
-                snapshot
-                    .engine_sample_rate
-                    .map(|rate| format!("{rate} Hz"))
-                    .unwrap_or_else(|| "Engine not running".to_string()),
+            .child(settings_row(
+                "Active rate",
+                "Audio engine runtime",
+                readonly_value(
+                    snapshot
+                        .engine_sample_rate
+                        .map(format_sample_rate)
+                        .unwrap_or_else(|| "Engine stopped".to_string()),
+                ),
             ))
             .when(engine_mismatch, |section| {
-                section.child(hint(
-                    "Changing the sample rate restarts the audio engine and re-opens the \
-                     project, so the running rate follows once you confirm.",
-                ))
+                section.child(status_note("Restart audio to apply the project rate."))
             })
     }
 }
 
-fn section(title: &'static str) -> gpui::Div {
+fn project_identity(snapshot: &ProjectSettingsSnapshot) -> impl IntoElement {
+    let location = snapshot
+        .path
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Not saved".to_string());
+    let status = if snapshot.is_dirty {
+        "Unsaved changes"
+    } else if snapshot.path.is_none() {
+        "Not saved"
+    } else {
+        "Saved"
+    };
+    let status_color = if snapshot.is_dirty {
+        Colors::status_warning()
+    } else {
+        Colors::text_muted()
+    };
+    let tracks = match snapshot.track_count {
+        1 => "1 track".to_string(),
+        count => format!("{count} tracks"),
+    };
+
     div()
         .flex()
         .flex_col()
         .flex_shrink_0()
-        .gap(px(4.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_panel())
-        .px(px(12.0))
-        .py(px(10.0))
+        .gap(px(5.0))
+        .pb(px(13.0))
         .child(
             div()
-                .pb(px(2.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(14.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child(snapshot.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(9.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(status_color)
+                        .child(status),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(9.5))
+                        .text_color(Colors::text_faint())
+                        .child(location),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(9.5))
+                        .text_color(Colors::text_faint())
+                        .child(tracks),
+                ),
+        )
+}
+
+fn settings_section(title: &'static str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_shrink_0()
+        .border_t(px(1.0))
+        .border_color(Colors::border_subtle())
+        .child(
+            div()
+                .h(px(29.0))
+                .flex()
+                .items_center()
                 .text_size(px(9.0))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(Colors::text_faint())
@@ -439,57 +517,66 @@ fn section(title: &'static str) -> gpui::Div {
         )
 }
 
-fn control_row(label: &'static str, control: gpui::AnyElement) -> impl IntoElement {
+fn settings_row(
+    label: &'static str,
+    detail: &'static str,
+    control: gpui::AnyElement,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(12.0))
-        .min_h(px(30.0))
+        .gap(px(16.0))
+        .min_h(px(47.0))
+        .border_t(px(1.0))
+        .border_color(Colors::border_subtle())
         .child(
             div()
-                .flex_shrink_0()
-                .text_size(px(10.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_muted())
-                .child(label),
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_secondary())
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_faint())
+                        .child(detail),
+                ),
         )
         .child(control)
 }
 
-fn readonly_row(label: &'static str, value: String) -> impl IntoElement {
+fn readonly_value(value: String) -> gpui::AnyElement {
     div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(12.0))
-        .min_h(px(24.0))
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(10.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_muted())
-                .child(label),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(10.5))
-                .text_color(Colors::text_secondary())
-                .child(value),
-        )
+        .w(px(150.0))
+        .text_size(px(10.5))
+        .text_color(Colors::text_secondary())
+        .child(value)
+        .into_any_element()
 }
 
-fn hint(text: &'static str) -> impl IntoElement {
+fn status_note(text: &'static str) -> impl IntoElement {
     div()
-        .pt(px(2.0))
+        .min_h(px(29.0))
+        .flex()
+        .items_center()
+        .border_t(px(1.0))
+        .border_color(Colors::border_subtle())
         .text_size(px(9.5))
-        .text_color(Colors::text_faint())
+        .text_color(Colors::status_warning())
         .child(text)
+}
+
+fn format_sample_rate(rate: u32) -> String {
+    format!("{},{:03} Hz", rate / 1_000, rate % 1_000)
 }
 
 fn footer(on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>) -> impl IntoElement {

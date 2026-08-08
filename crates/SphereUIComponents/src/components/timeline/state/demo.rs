@@ -208,6 +208,7 @@ impl TimelineState {
 
         Self {
             bpm: 120.0,
+            project_sample_rate: 48_000,
             tempo_map: TempoMap::new(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),

@@ -196,6 +196,16 @@ fn generic_channel_info(kind: &str, count: u32) -> Vec<EngineAudioChannelInfo> {
 }
 
 #[cfg(target_os = "windows")]
+fn asio_session_matches_driver(
+    session_driver: &str,
+    descriptor: &crate::asio_registry::AsioDriverDescriptor,
+) -> bool {
+    session_driver.eq_ignore_ascii_case(&descriptor.stable_id)
+        || session_driver.eq_ignore_ascii_case(&descriptor.display_name)
+        || session_driver.eq_ignore_ascii_case(&descriptor.registry_key)
+}
+
+#[cfg(target_os = "windows")]
 fn asio_channel_info(
     channel: &crate::backend::AsioChannelInfo,
     direction: &str,
@@ -433,7 +443,7 @@ impl AudioEngine {
                 }
                 let active = session
                     .as_ref()
-                    .filter(|caps| caps.driver == descriptor.stable_id);
+                    .filter(|caps| asio_session_matches_driver(&caps.driver, &descriptor));
                 let make = |kind: &str,
                             channels: u32,
                             channel_info: Vec<EngineAudioChannelInfo>,

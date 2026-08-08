@@ -89,6 +89,130 @@ impl StudioLayout {
         });
     }
 
+    /// Change the open project's nominal rate without rewriting the application
+    /// default used by future projects.
+    pub(crate) fn request_project_sample_rate_change(
+        &mut self,
+        new_rate: u32,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(new_rate, 44_100 | 48_000 | 88_200 | 96_000 | 192_000) {
+            return;
+        }
+        let current = self.timeline.read(cx).state.project_sample_rate;
+        if current == new_rate {
+            return;
+        }
+        if self.audio_engine_stream_open() {
+            self.prompt_project_sample_rate_change(new_rate, cx);
+            return;
+        }
+
+        self.commit_project_sample_rate(new_rate, cx);
+        if self.audio_bridge.engine.is_some() {
+            self.audio_bridge
+                .sample_rate_deferred_target
+                .store(new_rate, Ordering::Relaxed);
+            self.restart_audio_for_sample_rate(new_rate, cx);
+        }
+    }
+
+    pub(crate) fn reopen_for_current_project_rate_if_needed(&mut self, cx: &mut Context<Self>) {
+        let project_rate = self.timeline.read(cx).state.project_sample_rate;
+        if self.audio_bridge.engine.is_some() && self.current_audio_sample_rate() != project_rate {
+            self.audio_bridge
+                .sample_rate_deferred_target
+                .store(project_rate, Ordering::Relaxed);
+            self.restart_audio_for_sample_rate(project_rate, cx);
+        }
+    }
+
+    fn commit_project_sample_rate(&mut self, rate: u32, cx: &mut Context<Self>) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.project_sample_rate == rate {
+                return false;
+            }
+            timeline.state.project_sample_rate = rate;
+            for track in &mut timeline.state.tracks {
+                for clip in &mut track.clips {
+                    if clip.stretch.original_sample_rate > 0 {
+                        clip.stretch.project_sample_rate = rate;
+                    }
+                }
+            }
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            self.audio_bridge.project_dirty = true;
+            self.push_project_settings_snapshot_to_window(cx);
+            cx.notify();
+        }
+    }
+
+    fn prompt_project_sample_rate_change(&mut self, new_rate: u32, cx: &mut Context<Self>) {
+        let current_active = self.current_audio_sample_rate();
+        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
+            None,
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Question,
+            title: "Change Project Sample Rate?".to_string(),
+            message: "The audio engine must reopen before playback can use the new project rate."
+                .to_string(),
+            detail: Some(format!(
+                "Active: {current_active} Hz\nProject: {new_rate} Hz"
+            )),
+            buttons: vec![
+                "Re-open Now".to_string(),
+                "Later".to_string(),
+                "Cancel".to_string(),
+            ],
+            default_id: 0,
+            cancel_id: Some(2),
+        };
+
+        let owner = cx.entity().clone();
+        let on_response: Arc<dyn Fn(MessageBoxResult, &mut Window, &mut App) + Send + Sync> =
+            Arc::new(move |result, _window, cx| {
+                StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                    this.resolve_project_sample_rate_change(result.response, new_rate, cx);
+                });
+            });
+
+        if let Err(error) = open_message_box_window(owner_bounds, options, on_response, cx) {
+            eprintln!("[project-settings] sample-rate dialog unavailable: {error}");
+            self.resolve_project_sample_rate_change(1, new_rate, cx);
+        }
+    }
+
+    fn resolve_project_sample_rate_change(
+        &mut self,
+        response: usize,
+        new_rate: u32,
+        cx: &mut Context<Self>,
+    ) {
+        match response {
+            0 => {
+                self.commit_project_sample_rate(new_rate, cx);
+                self.audio_bridge
+                    .sample_rate_deferred_target
+                    .store(new_rate, Ordering::Relaxed);
+                self.restart_audio_for_sample_rate(new_rate, cx);
+            }
+            1 => {
+                self.commit_project_sample_rate(new_rate, cx);
+                self.audio_bridge
+                    .sample_rate_deferred_target
+                    .store(new_rate, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
     fn prompt_sample_rate_change(&mut self, new_rate: u32, cx: &mut Context<Self>) {
         let current_active = self.current_audio_sample_rate();
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
@@ -209,7 +333,7 @@ impl StudioLayout {
     /// transport, plugin hosts / VST3 process setup, and MIDI/audio scheduling
     /// all adopt the *actual* active rate reported by the device. Surfaces a
     /// non-blocking warning if the device could not honor the requested rate.
-    fn reopen_audio_with_sample_rate(&mut self, new_rate: u32, cx: &mut Context<Self>) {
+    pub(crate) fn reopen_audio_with_sample_rate(&mut self, new_rate: u32, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
         let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
 

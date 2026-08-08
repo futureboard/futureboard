@@ -1129,6 +1129,7 @@ impl From<&TimelineState> for FutureboardProject {
             .collect();
         let mut project = FutureboardProject::new("Untitled Project");
         project.settings.bpm = tl.bpm as f64;
+        project.settings.sample_rate = tl.project_sample_rate;
         project.settings.tempo_points = tl
             .tempo_map
             .points
@@ -1302,6 +1303,10 @@ pub fn apply_to_timeline(
     };
 
     tl.bpm = project.settings.bpm as f32;
+    tl.project_sample_rate = match project.settings.sample_rate {
+        44_100 | 48_000 | 88_200 | 96_000 | 192_000 => project.settings.sample_rate,
+        _ => 48_000,
+    };
     tl.tempo_map = crate::components::timeline::timeline_state::TempoMap::with_points(
         project
             .settings
@@ -3102,6 +3107,36 @@ mod v33_routing_adapter_tests {
             track.routing.legacy_input.is_none(),
             "v34 never reconstructs the legacy combined union"
         );
+    }
+}
+
+#[cfg(test)]
+mod project_settings_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::TimelineState;
+
+    #[test]
+    fn project_sample_rate_survives_save_decode_and_timeline_restore() {
+        let mut timeline = TimelineState::default();
+        timeline.project_sample_rate = 96_000;
+
+        let encoded = crate::project::format::encode_project(&FutureboardProject::from(&timeline));
+        let decoded = crate::project::format::decode_project(&encoded).expect("decode project");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        assert_eq!(decoded.settings.sample_rate, 96_000);
+        assert_eq!(restored.project_sample_rate, 96_000);
+    }
+
+    #[test]
+    fn invalid_project_sample_rate_falls_back_without_changing_app_defaults() {
+        let mut project = FutureboardProject::new("invalid rate");
+        project.settings.sample_rate = 12_345;
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&project, &mut restored);
+
+        assert_eq!(restored.project_sample_rate, 48_000);
     }
 }
 

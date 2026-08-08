@@ -1472,13 +1472,7 @@ impl StudioLayout {
             time_signature: (base_ts.numerator as u32, base_ts.denominator as u32),
             has_tempo_markers: !timeline.state.tempo_map.points.is_empty(),
             has_time_signature_markers: timeline.state.time_signature_has_markers(),
-            sample_rate: self
-                .settings
-                .read(cx)
-                .current
-                .general
-                .project_defaults
-                .sample_rate,
+            sample_rate: timeline.state.project_sample_rate,
             engine_sample_rate,
             track_count: timeline.state.tracks.len(),
         }
@@ -1518,14 +1512,13 @@ impl StudioLayout {
         let snapshot = self.build_project_settings_snapshot(cx);
         let owner = cx.entity().clone();
         let callbacks = crate::components::project_settings_window::ProjectSettingsCallbacks {
-            on_set_bpm: {
+            on_bpm_drag: {
                 let owner = owner.clone();
-                Arc::new(move |bpm, cx| {
+                Arc::new(move |sample, cx| {
                     StudioLayout::defer_update(&owner, cx, move |this, cx| {
-                        // Same command the transport tempo display uses, so the
-                        // engine, tempo map, and dirty flag all follow.
-                        this.set_native_bpm(bpm, cx);
-                        this.mark_dirty();
+                        // Reuse the transport scrub path so tempo-map targeting,
+                        // fine/coarse modifiers, engine sync, and bounds match.
+                        this.apply_bpm_drag_sample(sample, cx);
                         this.push_project_settings_snapshot_to_window(cx);
                     });
                 })
@@ -1543,13 +1536,7 @@ impl StudioLayout {
                 let owner = owner.clone();
                 Arc::new(move |rate, cx| {
                     StudioLayout::defer_update(&owner, cx, move |this, cx| {
-                        // Routes through the settings path that owns the
-                        // engine-restart confirmation; the window never restarts
-                        // the engine itself.
-                        this.handle_setting_update(
-                            Arc::new(move |s| s.general.project_defaults.sample_rate = rate),
-                            cx,
-                        );
+                        this.request_project_sample_rate_change(rate, cx);
                         this.push_project_settings_snapshot_to_window(cx);
                     });
                 })

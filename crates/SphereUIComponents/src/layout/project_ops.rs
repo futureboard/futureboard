@@ -134,6 +134,7 @@ impl StudioLayout {
         &mut self,
         template: Option<ProjectTemplate>,
         bpm: f32,
+        sample_rate: u32,
         time_signature_num: u32,
         time_signature_den: u32,
         cx: &mut Context<Self>,
@@ -161,6 +162,7 @@ impl StudioLayout {
             timeline.reset_input_state();
             timeline.state = TimelineState::default();
             timeline.state.bpm = bpm;
+            timeline.state.project_sample_rate = sample_rate;
             timeline.state.time_signature_num = time_signature_num;
             timeline.state.time_signature_den = time_signature_den;
             timeline.state.audio_connections =
@@ -339,9 +341,20 @@ impl StudioLayout {
     /// blank arrangement that is marked dirty/unsaved.
     pub fn new_empty_project(&mut self, cx: &mut Context<Self>) {
         self.reset_project(cx);
+        let sample_rate = self
+            .settings
+            .read(cx)
+            .current
+            .general
+            .project_defaults
+            .sample_rate;
+        let _ = self.timeline.update(cx, |timeline, _cx| {
+            timeline.state.project_sample_rate = sample_rate;
+        });
         self.project_session
             .bind_untitled("Untitled Project", false);
         self.sync_project_session_to_workspace(cx);
+        self.reopen_for_current_project_rate_if_needed(cx);
         self.mark_engine_media_dirty();
         self.schedule_audio_project_sync(cx, true, "new_empty_project");
         cx.notify();
@@ -354,9 +367,17 @@ impl StudioLayout {
         self.reset_project(cx);
 
         let (ts_num, ts_den) = template.time_signature();
+        let sample_rate = self
+            .settings
+            .read(cx)
+            .current
+            .general
+            .project_defaults
+            .sample_rate;
         self.initialize_timeline_for_new_workspace(
             Some(template),
             template.default_bpm(),
+            sample_rate,
             ts_num,
             ts_den,
             cx,
@@ -365,6 +386,7 @@ impl StudioLayout {
         self.project_session
             .bind_untitled(format!("Untitled {} Project", template.label()), true);
         self.sync_project_session_to_workspace(cx);
+        self.reopen_for_current_project_rate_if_needed(cx);
         self.mark_engine_media_dirty();
         self.schedule_audio_project_sync(cx, true, "new_template_project");
         cx.notify();
@@ -417,6 +439,7 @@ impl StudioLayout {
         self.initialize_timeline_for_new_workspace(
             template,
             options.bpm,
+            options.sample_rate,
             options.time_signature_num,
             options.time_signature_den,
             cx,
@@ -454,6 +477,7 @@ impl StudioLayout {
                 );
                 return;
             }
+            self.reopen_for_current_project_rate_if_needed(cx);
             self.mark_engine_media_dirty();
             self.schedule_audio_project_sync(cx, true, "project_created");
         } else {
@@ -727,7 +751,6 @@ impl StudioLayout {
             let entity = cx.entity().clone();
             self.refresh_bridge_plugin_states(cx);
             let tl_state = self.timeline.read(cx).state.clone();
-            let sample_rate = self.current_audio_sample_rate();
             cx.spawn(async move |_this, cx| {
                 let result = rfd::AsyncFileDialog::new()
                     .set_title("Save Copy")
@@ -746,7 +769,6 @@ impl StudioLayout {
                 if let Some(handle) = result {
                     let path = handle.path().to_path_buf();
                     let mut project = FutureboardProject::from(&tl_state);
-                    project.settings.sample_rate = sample_rate;
                     let _ = entity.update(cx, |_this, _cx| {
                         if let Err(e) = save_project(&mut project, &path) {
                             eprintln!("[Project] save copy failed: {e}");
@@ -867,7 +889,6 @@ impl StudioLayout {
         project.name = self.project_session.name.clone();
         project.created_at = self.project_session.created_at;
         project.modified_at = self.project_session.modified_at;
-        project.settings.sample_rate = self.current_audio_sample_rate();
         project
     }
 

@@ -2459,6 +2459,7 @@ impl StudioLayout {
 
     fn sync_audio_engine_settings(&mut self, cx: &mut Context<Self>) {
         let schema = self.settings.read(cx).current.clone();
+        let project_sample_rate = self.timeline.read(cx).state.project_sample_rate;
         let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
 
         // Do not claim the first ASIO driver while Settings is still enumerating
@@ -2488,7 +2489,7 @@ impl StudioLayout {
             let sample_rate = if engine.stats().stream_open {
                 engine.config().sample_rate
             } else {
-                schema.general.project_defaults.sample_rate
+                project_sample_rate
             };
             let desired_config = DirectAudio::EngineConfig {
                 sample_rate,
@@ -2547,7 +2548,7 @@ impl StudioLayout {
 
             // Construct new config
             let config = DirectAudio::EngineConfig {
-                sample_rate: schema.general.project_defaults.sample_rate,
+                sample_rate: project_sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,
                 channels: 2,
                 backend,

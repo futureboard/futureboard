@@ -743,6 +743,13 @@ impl StudioLayout {
             return false;
         }
 
+        // Project rate is persisted independently of application defaults. The
+        // runtime must adopt it before restoring plugins for this session.
+        let project_rate = self.timeline.read(cx).state.project_sample_rate;
+        if self.current_audio_sample_rate() != project_rate {
+            self.reopen_audio_with_sample_rate(project_rate, cx);
+        }
+
         // A project imported from another DAW's file has no Futureboard file to
         // save back into: bind it untitled and dirty so the first save is a
         // Save As and the imported file is never overwritten.

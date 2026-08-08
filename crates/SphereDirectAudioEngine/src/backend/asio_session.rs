@@ -457,7 +457,14 @@ pub(crate) fn open_duplex(
     };
 
     let caps = AsioSessionCaps {
-        driver: driver_name.clone(),
+        // `Device::name()` is driver-defined and some ASIO implementations
+        // return a friendly name that differs from the asiolist id used to open
+        // them. Preserve the requested id so capability inventory can attach
+        // these channels to the same stable device exposed in Settings.
+        driver: config
+            .output_device_id
+            .clone()
+            .unwrap_or_else(|| driver_name.clone()),
         sample_rate,
         buffer_size: buffer_frames,
         input_channels: effective_in_channels,

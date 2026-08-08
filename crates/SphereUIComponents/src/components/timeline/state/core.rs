@@ -131,6 +131,10 @@ impl MonitorBusState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineState {
     pub bpm: f32,
+    /// Nominal sample rate stored with this project. The audio device may be
+    /// running at a different rate while a requested reopen is deferred or when
+    /// hardware falls back; runtime code reads the active engine rate separately.
+    pub project_sample_rate: u32,
     /// Project-level tempo automation. Always active and owned by the project;
     /// the TempoTrack (when shown) is only a view/editor over this. When empty
     /// the project plays at the static `bpm`.
@@ -233,6 +237,7 @@ impl Default for TimelineState {
     fn default() -> Self {
         Self {
             bpm: 120.0,
+            project_sample_rate: 48_000,
             tempo_map: TempoMap::new(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),

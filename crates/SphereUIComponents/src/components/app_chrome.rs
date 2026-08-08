@@ -35,7 +35,7 @@ pub const BPM_MAX: f32 = 999.0;
 
 static BPM_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_bpm_drag_id() -> u64 {
+pub(crate) fn next_bpm_drag_id() -> u64 {
     BPM_DRAG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
