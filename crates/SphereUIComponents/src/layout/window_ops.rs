@@ -1095,6 +1095,9 @@ impl StudioLayout {
                                                     .filter(|vendor| !vendor.trim().is_empty()),
                                                 reg.name.clone(),
                                             );
+                                            timeline
+                                                .state
+                                                .set_insert_plugin_role(&id, &slot_id, true);
                                             if format == InsertPluginFormat::Vst3 {
                                                 // Auto-open the editor for a freshly
                                                 // added instrument: mark the slot

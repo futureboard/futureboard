@@ -1794,7 +1794,11 @@ pub(crate) fn apply_external_bridge_insert_block(
         got
     };
 
-    if is_effect {
+    // A miss can mean the host still owns the previous request's input buffer.
+    // In that case bypass this callback but leave the in-flight block untouched;
+    // overwriting or publishing a second request would race the host's raw read.
+    let can_publish_request = got > 0 || !sink.request_in_flight();
+    if is_effect && can_publish_request {
         // Current dry (pre-apply). Host will process this after `request_block`.
         sink.write_input(&block_l[..frames], &block_r[..frames], frames);
     }
@@ -1907,19 +1911,21 @@ pub(crate) fn apply_external_bridge_insert_block(
         );
     }
 
-    // Publish the real transport ProcessContext for this block before kicking
-    // the host, so the bridged plugin sees true tempo/position/playing instead
-    // of the old hardcoded stub. Wait-free atomic stores.
-    sink.set_transport(&transport);
+    if can_publish_request {
+        // Publish the real transport ProcessContext for this block before kicking
+        // the host, so the bridged plugin sees true tempo/position/playing instead
+        // of the old hardcoded stub. Wait-free atomic stores.
+        sink.set_transport(&transport);
 
-    // Drive the host DSP handshake: MIDI was already pushed to the shared ring.
-    if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
-        eprintln!(
-            "[Bridge] request block instance_id={} frames={frames}",
-            insert.id
-        );
+        // Drive the host DSP handshake: MIDI was already pushed to the shared ring.
+        if plugin_restore_debug_enabled() && insert.bridge_missed_blocks == 0 {
+            eprintln!(
+                "[Bridge] request block instance_id={} frames={frames}",
+                insert.id
+            );
+        }
+        sink.request_block(frames as u32);
     }
-    sink.request_block(frames as u32);
 }
 
 /// Multi-out (Slice 2): after a bridged instrument's chain has run and read the

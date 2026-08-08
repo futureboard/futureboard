@@ -286,11 +286,20 @@ fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
     );
 }
 
-fn bridge_insert_role(track_type: TrackType, slot_index: usize) -> &'static str {
-    if matches!(track_type, TrackType::Instrument | TrackType::Midi) && slot_index == 0 {
-        "instrument"
-    } else {
-        "effect"
+fn bridge_insert_role(
+    track_type: TrackType,
+    slot_index: usize,
+    plugin_is_instrument: Option<bool>,
+) -> &'static str {
+    match plugin_is_instrument {
+        Some(true) => "instrument",
+        Some(false) => "effect",
+        None if matches!(track_type, TrackType::Instrument | TrackType::Midi)
+            && slot_index == 0 =>
+        {
+            "instrument"
+        }
+        None => "effect",
     }
 }
 
@@ -337,7 +346,7 @@ fn build_engine_inserts_for(
                         .filter(|p| !p.trim().is_empty())?
                 };
 
-                let role = bridge_insert_role(track_type, slot_index);
+                let role = bridge_insert_role(track_type, slot_index, slot.plugin_is_instrument);
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
@@ -2027,8 +2036,24 @@ mod tests {
         let track = state
             .find_track(&track_id)
             .expect("instrument track in state");
-        assert_eq!(bridge_insert_role(track.track_type, 0), "instrument");
-        assert_eq!(bridge_insert_role(track.track_type, 1), "effect");
+        assert_eq!(bridge_insert_role(track.track_type, 0, None), "instrument");
+        assert_eq!(bridge_insert_role(track.track_type, 1, None), "effect");
+
+        state.set_insert_plugin_role(&track_id, &slot_instrument, false);
+        let snapshot = build_engine_project_snapshot(&state, 48_000, None, None);
+        let track = snapshot
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("instrument track in engine snapshot");
+        assert_eq!(
+            track.inserts[0]
+                .params
+                .get("role")
+                .and_then(serde_json::Value::as_str),
+            Some("effect"),
+            "registry role must override the legacy slot-zero heuristic"
+        );
     }
 
     #[test]

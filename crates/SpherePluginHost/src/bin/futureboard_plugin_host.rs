@@ -2078,7 +2078,7 @@ fn service_audio_bridge(
                 playing: bt.playing,
                 recording: bt.recording,
             };
-            dsp.render_single_voice_interleaved(
+            let produced = dsp.render_single_voice_interleaved(
                 plugin_instance_id,
                 frames,
                 &in_l[..frames],
@@ -2086,9 +2086,23 @@ fn service_audio_bridge(
                 &mut interleaved[..len],
                 output_channels,
                 transport,
-            )
-            .max(1)
-            .min(output_channels)
+            );
+            if produced > 0 {
+                produced.min(output_channels)
+            } else {
+                // Missing instances and VST3 process failures are not valid wet
+                // blocks. Preserve the track's dry signal instead of publishing
+                // a fresh zero buffer that the engine would treat as success.
+                let channels = output_channels.min(2);
+                for frame in 0..frames {
+                    let base = frame * output_channels;
+                    interleaved[base] = in_l[frame];
+                    if channels > 1 {
+                        interleaved[base + 1] = in_r[frame];
+                    }
+                }
+                channels
+            }
         }
         BlockRuntime::Au(au) => {
             let bt = bridge.load_transport();

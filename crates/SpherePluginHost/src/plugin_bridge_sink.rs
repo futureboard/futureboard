@@ -125,6 +125,11 @@ impl PluginBridgeSink for SharedRegionSink {
         self.region.bridge().plugin_output_channels()
     }
 
+    fn request_in_flight(&self) -> bool {
+        let bridge = self.region.bridge();
+        bridge.request_seq.load(Ordering::Acquire) != bridge.done_seq.load(Ordering::Acquire)
+    }
+
     fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
         self.read_output_for_channels(out_l, out_r, frames, &[])
     }

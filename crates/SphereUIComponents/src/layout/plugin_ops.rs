@@ -2875,10 +2875,18 @@ impl StudioLayout {
                         format,
                         Some(reg.vendor.clone()).filter(|vendor| !vendor.trim().is_empty()),
                         reg.name.clone(),
+                        reg.kind == SpherePluginHost::PluginKind::Instrument,
                     )
                 })
         };
-        let Some((plugin_id_out, plugin_path, plugin_format, vendor, display_name)) = descriptor
+        let Some((
+            plugin_id_out,
+            plugin_path,
+            plugin_format,
+            vendor,
+            display_name,
+            plugin_is_instrument,
+        )) = descriptor
         else {
             eprintln!("[PluginAdd] plugin instance failed to create reason=plugin_not_in_registry id={plugin_id}");
             self.plugin_picker = PluginPickerState::closed();
@@ -2938,6 +2946,9 @@ impl StudioLayout {
                     vendor,
                     display_name,
                 );
+                timeline
+                    .state
+                    .set_insert_plugin_role(&track_id, &slot_id, plugin_is_instrument);
             });
             let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&bridge_class_id);
             let is_audio_unit = !is_builtin && plugin_format == InsertPluginFormat::Au;
@@ -3285,6 +3296,9 @@ impl StudioLayout {
                 vendor.clone(),
                 display_name.clone(),
             );
+            timeline
+                .state
+                .set_insert_plugin_role(track_id, &slot_id, false);
         });
 
         eprintln!(
@@ -3330,6 +3344,9 @@ impl StudioLayout {
                 vendor.clone(),
                 display_name.clone(),
             );
+            timeline
+                .state
+                .set_insert_plugin_role(&track_id, &slot_id, true);
             timeline.state.select_track(&track_id);
             Some((track_id, 0usize, slot_id))
         })?;

@@ -34,6 +34,14 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
         2
     }
 
+    /// True while the host still owns the input buffer for a previously
+    /// published request. The engine must not overwrite or republish that single
+    /// buffer until the request completes. Default sinks have no asynchronous
+    /// owner and therefore report no in-flight request.
+    fn request_in_flight(&self) -> bool {
+        false
+    }
+
     /// Read the host's most-recently produced block (deinterleaved) into
     /// `out_l` / `out_r` (each at least `frames` long). Returns the number of
     /// frames actually read. Each produced block is handed out **at most

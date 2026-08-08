@@ -71,6 +71,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// still load: their combined field is migrated into generated connections.
 /// v35 appends Master / Monitor output routing (two optional Audio Connection
 /// ids plus the one-time bootstrap latch) after the registry section.
+/// v36 persists each insert's registry-resolved instrument/effect role, so an
+/// effect in slot zero is never mistaken for an instrument after project load.
 ///
 /// This is a *version bump rather than an extension of v34* on purpose. The body
 /// is positional and a v34 file simply ends after the registry, so appending
@@ -78,7 +80,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// trailing bytes are absent or truncated. A v34 file must decode as v34, with
 /// no output routing and the bootstrap latch clear — which is exactly what makes
 /// the compatibility bootstrap run once for it.
-pub const PROJECT_VERSION: u32 = 35;
+pub const PROJECT_VERSION: u32 = 36;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -491,6 +493,13 @@ fn encode_insert(w: &mut FbWriter, ins: &ProjectInsert) {
     }
     // v19: mixer-only multi-out collapse flag (visual; never affects routing).
     w.write_bool(ins.multiout_collapsed);
+    // v36: authoritative registry role. Keep an explicit None tag so migrated
+    // legacy projects can continue using their positional fallback.
+    w.write_u8(match ins.plugin_is_instrument {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    });
     match &ins.plugin {
         None => w.write_u8(0),
         Some(inst) => {
@@ -1379,6 +1388,20 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
         Vec::new()
     };
     let multiout_collapsed = if version >= 19 { r.read_bool()? } else { false };
+    let plugin_is_instrument = if version >= 36 {
+        match r.read_u8()? {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            tag => {
+                return Err(ProjectError::Corrupted(format!(
+                    "bad insert role tag {tag}"
+                )))
+            }
+        }
+    } else {
+        None
+    };
     let plugin = match r.read_u8()? {
         0 => None,
         1 => Some(decode_plugin_instance(r)?),
@@ -1393,6 +1416,7 @@ fn decode_insert(r: &mut FbReader, version: u32) -> Result<ProjectInsert, Projec
         slot_index,
         bypassed,
         enabled_audio_output_channels,
+        plugin_is_instrument,
         multiout_collapsed,
         plugin,
     })
@@ -2607,6 +2631,7 @@ mod tests {
             slot_index: 0,
             bypassed: false,
             enabled_audio_output_channels: vec![1, 2, 3, 4],
+            plugin_is_instrument: Some(false),
             multiout_collapsed: true,
             plugin: None,
         });
@@ -2620,6 +2645,11 @@ mod tests {
         assert_eq!(
             decoded.mixer.master_inserts[0].enabled_audio_output_channels,
             vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            decoded.mixer.master_inserts[0].plugin_is_instrument,
+            Some(false),
+            "the registry-resolved effect role must roundtrip"
         );
     }
 

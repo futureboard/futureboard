@@ -269,6 +269,9 @@ pub struct InsertSlotState {
     pub plugin_id: Option<String>,
     pub plugin_path: Option<std::path::PathBuf>,
     pub plugin_format: Option<InsertPluginFormat>,
+    /// Registry-resolved plug-in role. `None` is retained only for legacy
+    /// projects, where the old track/slot heuristic remains the fallback.
+    pub plugin_is_instrument: Option<bool>,
     /// Plugin vendor from the registry, if available.
     pub vendor: Option<String>,
     /// Display label shown on the mixer strip. "Empty" when no plugin
@@ -322,6 +325,7 @@ impl InsertSlotState {
             plugin_id: None,
             plugin_path: None,
             plugin_format: None,
+            plugin_is_instrument: None,
             vendor: None,
             display_name: "Empty".to_string(),
             enabled: true,
@@ -464,6 +468,35 @@ impl TimelineState {
             if slots.iter().all(|slot| slot.id != candidate) {
                 return candidate;
             }
+        }
+    }
+
+    /// Record the registry-resolved role after assigning a plug-in. Keeping this
+    /// separate preserves the broad test/helper API while production insertion
+    /// paths can replace the old slot-position heuristic with authoritative data.
+    pub fn set_insert_plugin_role(&mut self, track_id: &str, insert_id: &str, is_instrument: bool) {
+        if track_id == MASTER_TRACK_ID {
+            if let Some(slot) = self
+                .master
+                .inserts
+                .iter_mut()
+                .find(|slot| slot.id == insert_id)
+            {
+                slot.plugin_is_instrument = Some(is_instrument);
+            }
+            return;
+        }
+        let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) else {
+            return;
+        };
+        let Some(slot) = track.inserts.iter_mut().find(|slot| slot.id == insert_id) else {
+            return;
+        };
+        slot.plugin_is_instrument = Some(is_instrument);
+        if is_instrument {
+            track.instrument_plugin_instance_id = Some(insert_id.to_string());
+        } else if track.instrument_plugin_instance_id.as_deref() == Some(insert_id) {
+            track.instrument_plugin_instance_id = None;
         }
     }
 

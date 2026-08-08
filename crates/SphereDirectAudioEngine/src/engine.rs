@@ -5515,6 +5515,44 @@ mod bridge_insert_tests {
         }
     }
 
+    #[test]
+    fn missed_bridge_effect_does_not_overwrite_an_in_flight_request() {
+        #[derive(Debug, Default)]
+        struct InFlightSink {
+            writes: AtomicU64,
+            requests: AtomicU64,
+        }
+
+        impl PluginBridgeSink for InFlightSink {
+            fn dsp_ready(&self) -> bool {
+                true
+            }
+            fn request_in_flight(&self) -> bool {
+                true
+            }
+            fn read_output(&self, _: &mut [f32], _: &mut [f32], _: usize) -> usize {
+                0
+            }
+            fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+            fn write_input(&self, _: &[f32], _: &[f32], _: usize) {
+                self.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            fn request_block(&self, _: u32) {
+                self.requests.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let mut track = bridge_effect_track(0.75);
+        let sink = Arc::new(InFlightSink::default());
+        track.inserts[0].bridge_sink = Some(sink.clone());
+
+        apply_track_chain_block(&mut track, 4, RuntimeTransportContext::default());
+
+        assert_eq!(track.block_l[0], 0.75, "a missed effect must bypass dry");
+        assert_eq!(sink.writes.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.requests.load(Ordering::Relaxed), 0);
+    }
+
     #[derive(Debug, Default)]
     struct ParamCaptureSink {
         last_param_id: AtomicU64,

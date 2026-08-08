@@ -58,6 +58,9 @@ impl PluginBridgeSink for OfflineBridgeSink {
     fn plugin_output_channels(&self) -> u32 {
         self.live.plugin_output_channels()
     }
+    fn request_in_flight(&self) -> bool {
+        self.live.request_in_flight()
+    }
     fn read_output(&self, l: &mut [f32], r: &mut [f32], frames: usize) -> usize {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {

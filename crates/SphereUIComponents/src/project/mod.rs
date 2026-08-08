@@ -259,6 +259,9 @@ pub struct ProjectInsert {
     pub slot_index: u32,
     pub bypassed: bool,
     pub enabled_audio_output_channels: Vec<u8>,
+    /// Registry-resolved plug-in role. `None` identifies a pre-v36 insert whose
+    /// role must use the legacy track/slot fallback during snapshot construction.
+    pub plugin_is_instrument: Option<bool>,
     /// Mixer-only collapsed/expanded view flag for this instrument's VSTi
     /// multi-out group. Visual state only — never affects routing.
     pub multiout_collapsed: bool,
@@ -807,6 +810,7 @@ fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInse
         slot_index: idx as u32,
         bypassed: slot.bypassed,
         enabled_audio_output_channels: slot.enabled_audio_output_channels.clone(),
+        plugin_is_instrument: slot.plugin_is_instrument,
         multiout_collapsed: slot.multiout_collapsed,
         plugin,
     }
@@ -867,6 +871,7 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 plugin_id: Some(plugin.plugin_uid.clone()),
                 plugin_path: plugin.plugin_path.clone(),
                 plugin_format: Some(plugin_format),
+                plugin_is_instrument: pi.plugin_is_instrument,
                 vendor: plugin
                     .state
                     .vendor
@@ -1666,7 +1671,15 @@ pub fn apply_to_timeline(
             let instrument_plugin_instance_id = match track_type {
                 crate::components::timeline::timeline_state::TrackType::Instrument
                 | crate::components::timeline::timeline_state::TrackType::Midi => inserts
-                    .first()
+                    .iter()
+                    .find(|slot| slot.plugin_is_instrument == Some(true))
+                    .or_else(|| {
+                        inserts
+                            .iter()
+                            .all(|slot| slot.plugin_is_instrument.is_none())
+                            .then(|| inserts.first())
+                            .flatten()
+                    })
                     .filter(|slot| slot.plugin_id.is_some())
                     .map(|slot| slot.id.clone()),
                 _ => None,
@@ -2570,10 +2583,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v35"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v36"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 35);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 35);
+        assert_eq!(version, 36);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 36);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────
