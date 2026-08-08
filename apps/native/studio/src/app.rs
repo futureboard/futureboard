@@ -450,17 +450,20 @@ fn schedule_auto_update_check(cx: &mut App) {
         return;
     }
 
+    // Go through the registered provider rather than calling the GitHub
+    // transport directly: a Professional build replaces it with the licensed R2
+    // one, and the automatic check must resolve the same release the menu
+    // command would.
+    let Some(provider) = sphere_ui_components::update_service::update_provider() else {
+        return;
+    };
     let channel = general.update_channel;
     let executor = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         executor.timer(Duration::from_secs(3)).await;
-        let result = executor
-            .spawn(
-                async move { crate::updater::check_for_update(channel, env!("CARGO_PKG_VERSION")) },
-            )
-            .await;
+        let result = executor.spawn(async move { provider.check(channel) }).await;
         match result {
-            Ok(Some(update)) => cx.update(|app| show_update_available(update, app)),
+            Ok(Some(candidate)) => cx.update(|app| show_update_available(candidate, app)),
             Ok(None) => {}
             Err(error) => boot::log(&format!("automatic update check unavailable: {error}")),
         }
@@ -468,9 +471,19 @@ fn schedule_auto_update_check(cx: &mut App) {
     .detach();
 }
 
-/// Register the GitHub-backed update transport with the UI crate so the
-/// Software Update dialog (Help → Check for Updates) can drive it.
+/// Register the update transport the Software Update dialog (Help → Check for
+/// Updates) drives.
+///
+/// Community resolves releases from the public GitHub list. A Professional
+/// build gets the licensed Cloudflare R2 transport instead — its installers are
+/// not published on GitHub, so falling back there would offer a Community build
+/// as an "update" to a paid one.
 fn register_update_provider() {
+    #[cfg(feature = "professional")]
+    if crate::professional_edition::register_update_provider() {
+        return;
+    }
+
     sphere_ui_components::update_service::set_update_provider(std::sync::Arc::new(
         crate::updater::GithubUpdateProvider,
     ));
@@ -478,8 +491,10 @@ fn register_update_provider() {
 
 /// The automatic check hands the release it found to the same Software Update
 /// window the menu command opens, so download / install has one surface.
-fn show_update_available(update: crate::updater::AvailableUpdate, cx: &mut App) {
-    let candidate = crate::updater::candidate_from(update);
+fn show_update_available(
+    candidate: sphere_ui_components::update_service::UpdateCandidate,
+    cx: &mut App,
+) {
     if let Err(error) =
         sphere_ui_components::components::update_dialog::open_update_dialog_for(candidate, cx)
     {

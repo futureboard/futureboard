@@ -576,7 +576,10 @@ impl UpdateProvider for GithubUpdateProvider {
     }
 }
 
-fn cache_root() -> PathBuf {
+/// Root of the update cache. Shared with the Professional transport, which
+/// stages its own downloads in the same place before reusing
+/// [`install_update`].
+pub(crate) fn cache_root() -> PathBuf {
     sphere_ui_components::paths::FutureboardPaths::resolve().app_cache
 }
 

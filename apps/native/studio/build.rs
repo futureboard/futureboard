@@ -279,6 +279,7 @@ fn stage_professional_sources() {
     stage_professional_source(&source_dir, &output_dir, "auth_dialog.rs");
     stage_professional_source(&source_dir, &output_dir, "eula.rs");
     stage_professional_source(&source_dir, &output_dir, "eula_dialog.rs");
+    stage_professional_source(&source_dir, &output_dir, "updates.rs");
 
     // The EULA text is embedded into the binary. Copy it beside the staged
     // source so `include_str!(concat!(env!("OUT_DIR"), ...))` finds it.

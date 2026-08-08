@@ -52,6 +52,13 @@ mod eula_dialog {
     ));
 }
 
+mod updates {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/futureboard-professional/updates.rs"
+    ));
+}
+
 #[cfg(target_os = "windows")]
 mod asio {
     include!(concat!(
@@ -168,6 +175,37 @@ pub fn install() -> Result<(), String> {
     // on the startup path.
     license::spawn_account_activation_if_needed();
     Ok(())
+}
+
+/// Point the shared Software Update dialog at the licensed R2 transport instead
+/// of the public GitHub release list.
+///
+/// Returns whether it took over. `false` means this build has no licensing
+/// endpoint baked in, and the caller keeps the Community transport — which is
+/// the only sane fallback: without an endpoint there is nothing to ask.
+///
+/// This must run *after* `app::setup` would otherwise register the GitHub
+/// provider, so the application calls it from there rather than from
+/// [`install`], which runs before GPUI starts.
+pub fn register_update_provider() -> bool {
+    let Some(provider) =
+        updates::configured_update_provider(env!("CARGO_PKG_VERSION"), install_staged_update)
+    else {
+        return false;
+    };
+    sphere_ui_components::update_service::set_update_provider(provider);
+    true
+}
+
+/// Hand a staged Professional download to the platform installer.
+///
+/// The hand-off (Inno `/SILENT` on Windows, bundle swap on macOS, AppImage
+/// replace on Linux) is edition-independent, so the licensed transport reuses
+/// the application's implementation rather than carrying a second copy.
+fn install_staged_update(
+    staged: &std::path::Path,
+) -> Result<sphere_ui_components::update_service::InstallOutcome, String> {
+    crate::updater::install_update(staged, &crate::updater::cache_root())
 }
 
 /// Snapshot of the signed-in user for the titlebar chip. Reads the in-memory
