@@ -90,6 +90,14 @@ jobs:
     needs: plan
     if: needs.plan.outputs.proceed == 'true'
     uses: ./.github/workflows/build-desktop.yml
+    # A called workflow can never hold more than its caller grants, and this
+    # repository's default GITHUB_TOKEN permission is read-only. `build-desktop`'s
+    # own `release` job asks for `contents: write`, so without this the whole run
+    # is rejected before any job starts — which is why this path failed the first
+    # time it was dispatched, while `build-desktop` kept working on push (there it
+    # is the top-level workflow, not a callee).
+    permissions:
+      contents: write
     with:
       app-version: ${{ needs.plan.outputs.app-version }}
 
