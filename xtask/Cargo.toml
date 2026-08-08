@@ -5,6 +5,9 @@ edition = "2024"
 description = "Futureboard workspace task runner — cross-edition build chaining and binary packaging/staging"
 license.workspace = true
 publish = false
+# Stages the Professional Edition build toolchain from the private checkout when
+# one is present (see build.rs and src/toolchain.rs).
+build = "build.rs"
 
 [[bin]]
 name = "xtask"
@@ -20,9 +23,9 @@ sphere-webview.workspace = true
 # Parse `cargo build --message-format=json` artifact messages to discover the
 # real executable path instead of guessing target/<profile>/FutureboardNative.
 cargo_metadata = "0.18"
-# Provision the Steinberg ASIO SDK for Professional builds: asio-sys downloads it
-# into %TEMP% and leaves an unusable skeleton behind when the archive layout
-# changes, so xtask fetches and verifies it instead.
+# Used by the Professional Edition build toolchain that `build.rs` stages from
+# the private checkout (`src/toolchain.rs`). Declared unconditionally so the
+# public manifest stays valid and identical whether or not that checkout exists.
 ureq.workspace = true
 zip.workspace = true
 

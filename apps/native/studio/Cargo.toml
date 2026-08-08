@@ -128,3 +128,7 @@ ureq.workspace = true
 zip.workspace = true
 flate2.workspace = true
 tar.workspace = true
+# Fail Professional builds that bake a non-verifying LICENSE_PUBLIC_KEY (e.g. the
+# issue secret hex mistaken for the Ed25519 public key) instead of shipping a
+# dialog that only says "Activation service is not configured".
+ed25519-dalek.workspace = true

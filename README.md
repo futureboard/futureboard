@@ -68,28 +68,27 @@ licensed under the [MIT License](LICENSE). A normal Community build does not
 contain the private Professional Edition crate, ASIO provider, license activation
 client, or other separately licensed commercial components.
 
-Authorized private checkouts may add the Git-ignored
-`crates/ExclusiveEdition` source and use [build-private.ps1](build-private.ps1).
+Authorized private checkouts add the Git-ignored `crates/ExclusiveEdition`
+source, which carries the Professional build scripts and its own documentation.
 The presence of shared extension hooks or the public `professional` build-feature
 name does not grant access to, a license for, or redistribution rights in
 Professional Edition.
+
+The ASIO build toolchain — Steinberg SDK provisioning, its licence gate, and the
+libclang lookup `asio-sys` needs — is part of that private tree. This repository
+contains none of it: `xtask/src/toolchain.rs` is a stub here, and a Community
+build never compiles ASIO support.
 
 ```bash
 # Public Community Edition
 cargo build -p futureboard_native
 
-# Authorized private checkout only (PowerShell)
-.\build-private.ps1
-
-# Equivalent direct Cargo command
-cargo build --release -p futureboard_native --features professional
-
-# Fully temporary LLVM + ASIO SDK setup (downloads about 822 MiB)
-python .\build-private-temporary.py --accept-asio-license
-
-# Build all default workspace targets with Professional enabled for Studio
-python .\build-private-temporary.py --accept-asio-license --workspace
+# Staged, runnable Community tree in out/release/community/<platform>
+cargo xtask package --profile release --edition community --plugin all
 ```
+
+Professional build and release instructions live in
+`crates/ExclusiveEdition/docs/RELEASE.md`, in the private checkout.
 
 ---
 
