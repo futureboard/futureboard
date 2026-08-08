@@ -4146,6 +4146,21 @@ sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor *processor) {
 #endif
 }
 
+// Process-wide transport-key counter shared by Win32 / AppKit / GTK editors and
+// the host's low-level keyboard filters. Host IPC drains this into
+// HostEvent::TransportToggleRequested; main app never touches it.
+namespace {
+std::atomic<unsigned int> g_transport_toggle_requests{0};
+} // namespace
+
+extern "C" void sphere_daux_vst3_claim_transport_toggle(void) {
+  g_transport_toggle_requests.fetch_add(1, std::memory_order_relaxed);
+}
+
+extern "C" unsigned int sphere_daux_vst3_take_transport_toggle_requests(void) {
+  return g_transport_toggle_requests.exchange(0, std::memory_order_relaxed);
+}
+
 extern "C" void
 sphere_daux_vst3_embed_set_waiting_stage(SphereDauxVst3Processor *processor,
                                          const char *stage) {

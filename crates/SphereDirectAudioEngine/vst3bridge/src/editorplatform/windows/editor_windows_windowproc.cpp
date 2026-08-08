@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 
+// Process-wide transport claim (same counter the host IPC loop drains).
+extern "C" void sphere_daux_vst3_claim_transport_toggle(void);
+
 namespace daux_editor_windows {
 
 LRESULT hit_test(HWND h, Context *c, LPARAM lp) {
@@ -126,6 +129,18 @@ LRESULT CALLBACK content_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     break;
+  case WM_KEYDOWN:
+  case WM_SYSKEYDOWN:
+    // Bare Space → DAW transport. Claims before DefWindowProc / plugin child
+    // can consume it when focus is on our content surface.
+    if (wp == VK_SPACE && (lp & (1u << 30)) == 0) {
+      if ((GetKeyState(VK_CONTROL) >= 0) && (GetKeyState(VK_MENU) >= 0) &&
+          (GetKeyState(VK_LWIN) >= 0) && (GetKeyState(VK_RWIN) >= 0)) {
+        sphere_daux_vst3_claim_transport_toggle();
+        return 0;
+      }
+    }
+    break;
   case WM_ERASEBKGND:
     return 1; // fully repainted in WM_PAINT (no flicker)
   case WM_PAINT: {
@@ -168,6 +183,16 @@ LRESULT CALLBACK top_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       c->window.shell_hwnd = ptr(h);
     return TRUE;
   }
+  case WM_KEYDOWN:
+  case WM_SYSKEYDOWN:
+    if (wp == VK_SPACE && (lp & (1u << 30)) == 0) {
+      if ((GetKeyState(VK_CONTROL) >= 0) && (GetKeyState(VK_MENU) >= 0) &&
+          (GetKeyState(VK_LWIN) >= 0) && (GetKeyState(VK_RWIN) >= 0)) {
+        sphere_daux_vst3_claim_transport_toggle();
+        return 0;
+      }
+    }
+    break;
   case WM_NCCALCSIZE:
     if (wp && borderless)
       return 0;
