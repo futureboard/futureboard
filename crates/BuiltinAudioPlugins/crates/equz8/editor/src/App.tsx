@@ -61,15 +61,32 @@ function App() {
     [],
   )
 
+  /// Apply a band edit, switching the band on if it was off.
+  ///
+  /// Every band opens inactive and flat (see `DEFAULT_PARAMS`), so the first
+  /// thing anyone does is reach for one. Dragging its node or turning one of
+  /// its knobs *is* the request to use it: shaping a band that stays silent
+  /// reads as a broken control, and the alternative is hunting for the chip
+  /// or the toggle before every first move. An explicit `active` in the patch
+  /// — the chip's double-click, the rack's switch — is left exactly as asked,
+  /// so turning a band off still turns it off.
   const updateBand = useCallback((index: number, patch: Partial<Band>) => {
-    setParams((current) => ({
-      ...current,
-      bands: current.bands.map((band, bandIndex) =>
-        bandIndex === index ? { ...band, ...patch } : band,
-      ),
-    }))
+    setParams((current) => {
+      const band = current.bands[index]
+      if (!band) return current
+      const effective =
+        patch.active === undefined && !band.active && Object.keys(patch).length > 0
+          ? { ...patch, active: true }
+          : patch
+      postBandPatch(index, effective)
+      return {
+        ...current,
+        bands: current.bands.map((entry, bandIndex) =>
+          bandIndex === index ? { ...entry, ...effective } : entry,
+        ),
+      }
+    })
     setPreset(null)
-    postBandPatch(index, patch)
   }, [])
 
   /// Audition one band's frequency region on its own, FabFilter-style.

@@ -41,6 +41,15 @@ export function rustScalar(source: string, name: string): number {
   return num(match[1])
 }
 
+/** `pub const NAME: u8 = 9;` */
+export function rustU8Scalar(source: string, name: string): number {
+  const match = new RegExp(
+    `(?:pub )?const ${name}\\s*:\\s*u8\\s*=\\s*([0-9_]+)\\s*;`,
+  ).exec(source)
+  if (!match?.[1]) throw new Error(`${name} not found in Rust source`)
+  return num(match[1])
+}
+
 export function rustFloatArray(source: string, name: string): number[] {
   return arrayBody(source, name)
     .split(',')

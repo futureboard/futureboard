@@ -6,6 +6,9 @@
     /** `warn` marks a hold/override state; `accent` marks ordinary engagement. */
     tone?: 'accent' | 'warn'
     disabled?: boolean
+    /** Rack-sized: the header has room for the full control, a group header
+     *  sitting above two knobs does not. */
+    compact?: boolean
   }
 
   const {
@@ -14,6 +17,7 @@
     onchange,
     tone = 'accent',
     disabled = false,
+    compact = false,
   }: Props = $props()
 </script>
 
@@ -21,6 +25,7 @@
   type="button"
   class="toggle {tone}"
   class:active={value}
+  class:compact
   role="switch"
   aria-checked={value}
   aria-label={label}
@@ -46,6 +51,19 @@
     font-size: 0.78rem;
     font-weight: 600;
     cursor: pointer;
+  }
+
+  .toggle.compact {
+    gap: 0.3rem;
+    min-height: 1.5rem;
+    padding: 0.2rem 0.55rem 0.2rem 0.45rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+  }
+
+  .toggle.compact .dot {
+    width: 0.4rem;
+    height: 0.4rem;
   }
 
   .toggle:hover:not(:disabled) {

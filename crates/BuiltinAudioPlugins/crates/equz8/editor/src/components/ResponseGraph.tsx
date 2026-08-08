@@ -495,8 +495,9 @@ export function ResponseGraph({
               </g>
             )}
             <title>
-              {`Band ${index + 1} — drag to move, wheel for Q, ` +
-                'hold right-button to sweep and listen, Alt-click to keep listening'}
+              {`Band ${index + 1} — drag to move${band.active ? '' : ' (switches it on)'}` +
+                ', wheel for Q, hold right-button to sweep and listen, ' +
+                'Alt-click to keep listening'}
             </title>
             <circle className="node-halo" r={isSelected ? 19 : 15} />
             <circle className="node-ring" r={isSelected ? 11 : 9} />

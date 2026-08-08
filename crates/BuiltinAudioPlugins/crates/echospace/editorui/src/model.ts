@@ -8,7 +8,7 @@
  * `model.test.ts` pins the constants against the Rust source.
  */
 
-import type { Mode } from './params'
+import { DEFAULT_TEMPO_BPM, divisionMs, type Mode } from './params'
 import type { EchoParams } from './bridge'
 
 /** `echospace::MAX_FEEDBACK`. */
@@ -54,10 +54,29 @@ export function filterMagnitude(params: EchoParams, hz: number): number {
   return highPass * lowPass
 }
 
+/**
+ * Delay time each side actually runs at, in ms — the tempo-derived division
+ * while synced, the free time otherwise. Mirrors `Params::effective_time_ms_*`.
+ */
+export function effectiveTimesMs(
+  params: EchoParams,
+  tempoBpm = DEFAULT_TEMPO_BPM,
+): { left: number; right: number } {
+  if (!params.sync) return { left: params.timeMsL, right: params.timeMsR }
+  return {
+    left: divisionMs(params.divisionL, tempoBpm),
+    right: divisionMs(params.divisionR, tempoBpm),
+  }
+}
+
 /** Delay time per channel in seconds, after the mode's routing. */
-export function tapTimes(params: EchoParams): { left: number; right: number } {
-  const left = params.timeMsL / 1000
-  const right = params.timeMsR / 1000
+export function tapTimes(
+  params: EchoParams,
+  tempoBpm = DEFAULT_TEMPO_BPM,
+): { left: number; right: number } {
+  const times = effectiveTimesMs(params, tempoBpm)
+  const left = times.left / 1000
+  const right = times.right / 1000
   // Mono collapses both lines onto the left time — the DSP sums the input to
   // mono and both rings read the same tap.
   if (params.mode === 'mono') return { left, right: left }
@@ -97,9 +116,10 @@ export function echoModel(
   params: EchoParams,
   floorDb = -60,
   maxPasses = 64,
+  tempoBpm = DEFAULT_TEMPO_BPM,
 ): EchoModel {
   const gain = loopGain(params)
-  const times = tapTimes(params)
+  const times = tapTimes(params, tempoBpm)
   const floor = 10 ** (floorDb / 20)
   const taps: Tap[] = []
   let lastTime = 0

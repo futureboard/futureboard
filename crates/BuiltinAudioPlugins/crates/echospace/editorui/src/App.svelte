@@ -6,7 +6,14 @@
     matchingPresetIndex,
     postAllParams,
   } from './presets'
-  import { PARAMS, modeToWire, type Mode, type ParamId } from './params'
+  import {
+    DEFAULT_TEMPO_BPM,
+    PARAMS,
+    modeToWire,
+    type Mode,
+    type ParamId,
+  } from './params'
+  import DivisionSelect from './lib/DivisionSelect.svelte'
   import EchoView from './lib/EchoView.svelte'
   import Knob from './lib/Knob.svelte'
   import ModeSelect from './lib/ModeSelect.svelte'
@@ -25,6 +32,14 @@
   let connected = $state(false)
   let preset = $state<number | null>(0)
 
+  /**
+   * Transport tempo, republished by the host about once a second. A synced
+   * delay time is a note length, so everything that prints milliseconds — the
+   * division readouts and the echo picture — is derived from this rather than
+   * from an assumed 120 BPM.
+   */
+  let tempoBpm = $state(DEFAULT_TEMPO_BPM)
+
   $effect(() =>
     connectBridge(
       (next) => {
@@ -34,12 +49,61 @@
       (isConnected) => {
         connected = isConnected
       },
+      (bpm) => {
+        tempoBpm = bpm
+      },
     ),
   )
 
   function set(id: ParamId, value: number) {
     params[id] = value
     postParam(id, value)
+    preset = null
+  }
+
+  /**
+   * Edit one side of the delay, carrying the other side with it while Link is
+   * on. Rust mirrors the same way on the wire index, so the two agree whether
+   * the edit arrives from here or from automation; posting both ids keeps this
+   * view honest rather than assuming what the DSP did with the first one.
+   */
+  function setSide(side: 'L' | 'R', value: number) {
+    const id: ParamId = side === 'L' ? 'timeMsL' : 'timeMsR'
+    const other: ParamId = side === 'L' ? 'timeMsR' : 'timeMsL'
+    set(id, value)
+    if (params.link) set(other, value)
+  }
+
+  function setDivision(side: 'L' | 'R', value: number) {
+    const id = side === 'L' ? 'divisionL' : 'divisionR'
+    const other = side === 'L' ? 'divisionR' : 'divisionL'
+    params[id] = value
+    postParam(id, value)
+    if (params.link) {
+      params[other] = value
+      postParam(other, value)
+    }
+    preset = null
+  }
+
+  function setSync(on: boolean) {
+    params.sync = on
+    postParam('sync', on ? 1 : 0)
+    preset = null
+  }
+
+  /**
+   * Turning Link on pulls the right side onto the left, the same snap
+   * `ipc::apply_link` does — otherwise the lit toggle would sit over two
+   * different times until the next edit.
+   */
+  function setLink(on: boolean) {
+    params.link = on
+    if (on) {
+      params.timeMsR = params.timeMsL
+      params.divisionR = params.divisionL
+    }
+    postParam('link', on ? 1 : 0)
     preset = null
   }
 
@@ -114,25 +178,61 @@
 
   <div class="body">
     <div class="stage" class:bypassed={!params.power}>
-      <EchoView {params} />
+      <EchoView {params} {tempoBpm} />
     </div>
 
     <div class="rack">
       <section class="group" aria-label="Timing">
-        <div class="group-title">Timing</div>
-        <div class="group-knobs">
-          <Knob
-            spec={PARAMS.timeMsL}
-            value={params.timeMsL}
-            onchange={(v) => set('timeMsL', v)}
-          />
-          <Knob
-            spec={PARAMS.timeMsR}
-            value={params.timeMsR}
-            onchange={(v) => set('timeMsR', v)}
-            disabled={monoCollapsed}
-          />
+        <div class="group-head">
+          <div class="group-title">Timing</div>
+          <div class="group-flags">
+            <Toggle
+              compact
+              label="Sync"
+              value={params.sync}
+              onchange={setSync}
+            />
+            <Toggle
+              compact
+              label="Link"
+              value={params.link}
+              onchange={setLink}
+              disabled={monoCollapsed}
+            />
+          </div>
         </div>
+        {#if params.sync}
+          <div class="group-knobs">
+            <DivisionSelect
+              label="Left"
+              value={params.divisionL}
+              {tempoBpm}
+              onchange={(v) => setDivision('L', v)}
+            />
+            <DivisionSelect
+              label="Right"
+              value={params.divisionR}
+              {tempoBpm}
+              onchange={(v) => setDivision('R', v)}
+              disabled={monoCollapsed}
+            />
+          </div>
+          <div class="group-note">{Math.round(tempoBpm)} BPM</div>
+        {:else}
+          <div class="group-knobs">
+            <Knob
+              spec={PARAMS.timeMsL}
+              value={params.timeMsL}
+              onchange={(v) => setSide('L', v)}
+            />
+            <Knob
+              spec={PARAMS.timeMsR}
+              value={params.timeMsR}
+              onchange={(v) => setSide('R', v)}
+              disabled={monoCollapsed}
+            />
+          </div>
+        {/if}
       </section>
 
       <section class="group" aria-label="Echoes">
@@ -314,6 +414,30 @@
     font-weight: 650;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+  }
+
+  .group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1);
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .group-flags {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .group-note {
+    padding: 0 var(--space-1);
+    color: var(--text-faint);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
   }
 
   .group-knobs {
