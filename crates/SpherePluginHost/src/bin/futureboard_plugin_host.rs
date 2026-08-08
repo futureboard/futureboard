@@ -5155,13 +5155,13 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, CallNextHookEx, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow,
         DispatchMessageW, EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW,
-        GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow, IsWindowVisible,
-        MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW, SetForegroundWindow,
-        SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+        GetForegroundWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, IsChild, IsDialogMessageW, IsWindow,
+        IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
+        SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
         WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWLP_HWNDPARENT, GWL_EXSTYLE,
-        GWL_STYLE, GW_CHILD, GW_OWNER, HHOOK, HOOKPROC, HWND_TOP, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-        MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
+        MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
         SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
         WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
         WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
@@ -5312,9 +5312,9 @@ mod platform {
                 match SetWindowsHookExW(WH_KEYBOARD_LL, Some(transport_ll_keyboard_proc), None, 0)
                 {
                     Ok(hook) if !hook.is_invalid() => {
-                        // Keep the hook alive for process lifetime. The OS unhooks
-                        // when the process exits; we deliberately leak the handle.
-                        std::mem::forget(hook);
+                        // Keep the hook alive for process lifetime: never call
+                        // UnhookWindowsHookEx. The OS unhooks on process exit.
+                        let _ = hook;
                         eprintln!("[PluginEditorInput] WH_KEYBOARD_LL transport hook installed");
                     }
                     Ok(_) | Err(_) => {
