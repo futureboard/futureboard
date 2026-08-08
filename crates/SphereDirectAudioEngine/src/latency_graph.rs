@@ -58,20 +58,37 @@ pub fn strip_plugin_latency_samples(track: &RuntimeTrack) -> u32 {
     from_inserts.max(track.plugin_latency_samples)
 }
 
-fn is_master_output(id: &str) -> bool {
-    id.is_empty() || id.eq_ignore_ascii_case("master")
+/// Resolve the routing indices latency planning reads: every track's
+/// main-output target and every send's return target.
+///
+/// Builds a track-id map, so this is a control-thread call — `RuntimeProject`
+/// runs it before the first plan and again from `resolve_indices` on every
+/// graph swap. Planning itself then works purely on indices, which is what lets
+/// the realtime refresh path recompute latency without hashing a track id.
+pub fn resolve_latency_routing_indices(tracks: &mut [RuntimeTrack]) {
+    let id_to_index: HashMap<String, usize> = tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| (track.id.clone(), index))
+        .collect();
+    for track in tracks.iter_mut() {
+        track.output_track_index = track
+            .output_track_id
+            .as_deref()
+            .filter(|id| !crate::engine::is_master_output(id))
+            .and_then(|id| id_to_index.get(id).copied());
+        for send in &mut track.sends {
+            send.return_track_index = id_to_index.get(&send.return_track_id).copied();
+        }
+    }
 }
 
-fn resolve_output_target_index(
-    track_index: usize,
-    tracks: &[RuntimeTrack],
-    id_to_index: &HashMap<String, usize>,
-) -> Option<usize> {
-    let output_id = tracks[track_index].output_track_id.as_deref()?;
-    if is_master_output(output_id) {
-        return None;
-    }
-    id_to_index.get(output_id).copied()
+/// The track a main output feeds, or `None` when it reaches the master sum
+/// directly. This is the same index the render path routes on, so compensation
+/// is planned against the routing that actually runs.
+#[inline]
+fn resolve_output_target_index(track_index: usize, tracks: &[RuntimeTrack]) -> Option<usize> {
+    tracks[track_index].output_track_index
 }
 
 /// Tail latency from a routing track's output toward the master summing bus,
@@ -80,14 +97,13 @@ fn routing_tail_to_master(
     mut track_index: usize,
     tracks: &[RuntimeTrack],
     plugin_latency: &[u32],
-    id_to_index: &HashMap<String, usize>,
     master_index: Option<usize>,
 ) -> u32 {
     let mut tail = 0u32;
     let mut hops = 0usize;
     while hops < tracks.len() {
         hops += 1;
-        let Some(next) = resolve_output_target_index(track_index, tracks, id_to_index) else {
+        let Some(next) = resolve_output_target_index(track_index, tracks) else {
             break;
         };
         if Some(next) == master_index {
@@ -107,7 +123,6 @@ fn path_to_master_sum(
     tracks: &[RuntimeTrack],
     output_latency: &[u32],
     plugin_latency: &[u32],
-    id_to_index: &HashMap<String, usize>,
     master_index: Option<usize>,
 ) -> u32 {
     if Some(track_index) == master_index {
@@ -121,7 +136,6 @@ fn path_to_master_sum(
             track_index,
             tracks,
             plugin_latency,
-            id_to_index,
             master_index,
         ))
 }
@@ -131,7 +145,6 @@ fn effective_path_to_master(
     tracks: &[RuntimeTrack],
     output_latency: &[u32],
     plugin_latency: &[u32],
-    id_to_index: &HashMap<String, usize>,
     master_index: Option<usize>,
 ) -> u32 {
     let mut path = main_path_to_master(
@@ -139,7 +152,6 @@ fn effective_path_to_master(
         tracks,
         output_latency,
         plugin_latency,
-        id_to_index,
         master_index,
     );
 
@@ -147,13 +159,12 @@ fn effective_path_to_master(
         if !send.enabled {
             continue;
         }
-        if let Some(&ret_idx) = id_to_index.get(&send.return_track_id) {
+        if let Some(ret_idx) = send.return_track_index {
             let via_return = path_to_master_sum(
                 ret_idx,
                 tracks,
                 output_latency,
                 plugin_latency,
-                id_to_index,
                 master_index,
             );
             path = path.max(via_return);
@@ -170,20 +181,12 @@ fn main_path_to_master(
     tracks: &[RuntimeTrack],
     output_latency: &[u32],
     plugin_latency: &[u32],
-    id_to_index: &HashMap<String, usize>,
     master_index: Option<usize>,
 ) -> u32 {
-    resolve_output_target_index(track_index, tracks, id_to_index)
+    resolve_output_target_index(track_index, tracks)
         .filter(|&target| is_routing_track_type(&tracks[target].track_type))
         .map(|target| {
-            path_to_master_sum(
-                target,
-                tracks,
-                output_latency,
-                plugin_latency,
-                id_to_index,
-                master_index,
-            )
+            path_to_master_sum(target, tracks, output_latency, plugin_latency, master_index)
         })
         .unwrap_or_else(|| {
             path_to_master_sum(
@@ -191,7 +194,6 @@ fn main_path_to_master(
                 tracks,
                 output_latency,
                 plugin_latency,
-                id_to_index,
                 master_index,
             )
         })
@@ -200,8 +202,13 @@ fn main_path_to_master(
 /// Build latency metadata and per-track PDC delays from runtime tracks and the
 /// audio graph plan. When `pdc_enabled` is false, delays are zeroed but path
 /// latencies are still computed for reporting.
+///
+/// Takes the tracks mutably because it resolves their routing indices first:
+/// planning reads those, and a caller that had to remember to resolve them
+/// separately would get a silently mis-planned graph for forgetting. Control
+/// thread only — allocates.
 pub fn plan_runtime_latency_graph(
-    tracks: &[RuntimeTrack],
+    tracks: &mut [RuntimeTrack],
     audio_graph: &RuntimeAudioGraph,
     pdc_enabled: bool,
 ) -> RuntimeLatencyGraph {
@@ -209,19 +216,70 @@ pub fn plan_runtime_latency_graph(
     if n == 0 {
         return RuntimeLatencyGraph::default();
     }
+    resolve_latency_routing_indices(tracks);
 
-    let mut id_to_index: HashMap<String, usize> = HashMap::new();
-    for (idx, track) in tracks.iter().enumerate() {
-        id_to_index.insert(track.id.clone(), idx);
+    let mut graph = RuntimeLatencyGraph {
+        track_plugin_latency: vec![0; n],
+        track_output_latency: vec![0; n],
+        track_pdc_delay: vec![0; n],
+        max_path_latency_samples: 0,
+        master_plugin_latency: 0,
+    };
+    recompute_runtime_latency_graph(&mut graph, tracks, audio_graph, pdc_enabled);
+    graph
+}
+
+/// Recompute `graph` in place from the tracks' current latencies.
+///
+/// This is the whole planning algorithm; [`plan_runtime_latency_graph`] is just
+/// this behind a fresh allocation. Splitting it out is what makes the realtime
+/// refresh path safe: routing comes from the resolved index fields and every
+/// vector is already sized for `tracks`, so a recompute triggered from the audio
+/// callback by a bridged plugin's reported latency moving does not allocate,
+/// hash a track id, or touch the environment.
+///
+/// Only the numbers change here. Topology changes go through a graph swap, which
+/// rebuilds on the control thread via [`plan_runtime_latency_graph`], so a
+/// mismatched vector length means the caller skipped that swap — the recompute
+/// is skipped rather than resized, since growing a vector is exactly what this
+/// path exists to avoid.
+pub fn recompute_runtime_latency_graph(
+    graph: &mut RuntimeLatencyGraph,
+    tracks: &[RuntimeTrack],
+    audio_graph: &RuntimeAudioGraph,
+    pdc_enabled: bool,
+) {
+    let n = tracks.len();
+    debug_assert_eq!(graph.track_plugin_latency.len(), n);
+    debug_assert_eq!(graph.track_output_latency.len(), n);
+    debug_assert_eq!(graph.track_pdc_delay.len(), n);
+    if n == 0
+        || graph.track_plugin_latency.len() != n
+        || graph.track_output_latency.len() != n
+        || graph.track_pdc_delay.len() != n
+    {
+        return;
     }
 
-    let plugin_latency: Vec<u32> = tracks.iter().map(strip_plugin_latency_samples).collect();
+    // Destructured so the passes below can read one vector while writing
+    // another without the borrow checker seeing the whole graph as borrowed.
+    let RuntimeLatencyGraph {
+        track_plugin_latency: plugin_latency,
+        track_output_latency: output_latency,
+        track_pdc_delay,
+        max_path_latency_samples,
+        master_plugin_latency,
+    } = graph;
+
+    for (idx, track) in tracks.iter().enumerate() {
+        plugin_latency[idx] = strip_plugin_latency_samples(track);
+    }
     let master_index = audio_graph.master_index;
-    let master_plugin_latency = master_index
+    *master_plugin_latency = master_index
         .and_then(|idx| plugin_latency.get(idx).copied())
         .unwrap_or(0);
 
-    let mut output_latency = plugin_latency.clone();
+    output_latency.copy_from_slice(plugin_latency);
 
     for &idx in &audio_graph.pass2_routing_indices {
         let mut feed_max = 0u32;
@@ -233,19 +291,19 @@ pub fn plan_runtime_latency_graph(
                 if !send.enabled {
                     continue;
                 }
-                if id_to_index.get(&send.return_track_id) == Some(&idx) {
+                if send.return_track_index == Some(idx) {
                     feed_max = feed_max.max(output_latency[src_idx]);
                 }
             }
             // Main-output → bus/return feeds also contribute upstream latency.
-            if resolve_output_target_index(src_idx, tracks, &id_to_index) == Some(idx) {
+            if resolve_output_target_index(src_idx, tracks) == Some(idx) {
                 feed_max = feed_max.max(output_latency[src_idx]);
             }
         }
         output_latency[idx] = plugin_latency[idx].saturating_add(feed_max);
     }
 
-    let mut max_path_latency_samples = 0u32;
+    *max_path_latency_samples = 0;
     for idx in 0..n {
         if Some(idx) == master_index {
             continue;
@@ -253,19 +311,15 @@ pub fn plan_runtime_latency_graph(
         if is_master_track_type(&tracks[idx].track_type) {
             continue;
         }
-        let path = effective_path_to_master(
-            idx,
-            tracks,
-            &output_latency,
-            &plugin_latency,
-            &id_to_index,
-            master_index,
-        );
-        max_path_latency_samples = max_path_latency_samples.max(path);
+        let path =
+            effective_path_to_master(idx, tracks, output_latency, plugin_latency, master_index);
+        *max_path_latency_samples = (*max_path_latency_samples).max(path);
     }
 
-    let mut track_pdc_delay = vec![0u32; n];
-    if pdc_enabled && max_path_latency_samples > 0 {
+    // A recompute reuses the previous plan's vector, so the delays every branch
+    // below skips have to be cleared rather than left at their old values.
+    track_pdc_delay.fill(0);
+    if pdc_enabled && *max_path_latency_samples > 0 {
         for idx in 0..n {
             if Some(idx) == master_index || is_master_track_type(&tracks[idx].track_type) {
                 continue;
@@ -277,31 +331,17 @@ pub fn plan_runtime_latency_graph(
             // late vs direct-to-master tracks by exactly that extra delay.
             // Send→return is different: the dry main still goes to master, so
             // the source keeps its delay (applied after the pre-PDC send tap).
-            if resolve_output_target_index(idx, tracks, &id_to_index)
+            if resolve_output_target_index(idx, tracks)
                 .is_some_and(|target| is_routing_track_type(&tracks[target].track_type))
             {
                 continue;
             }
             // PDC delay is relative to the *main/dry* path so return-FX latency
             // can pull dry forward without also delaying the send feed.
-            let path = main_path_to_master(
-                idx,
-                tracks,
-                &output_latency,
-                &plugin_latency,
-                &id_to_index,
-                master_index,
-            );
-            track_pdc_delay[idx] = max_path_latency_samples.saturating_sub(path);
+            let path =
+                main_path_to_master(idx, tracks, output_latency, plugin_latency, master_index);
+            track_pdc_delay[idx] = (*max_path_latency_samples).saturating_sub(path);
         }
-    }
-
-    RuntimeLatencyGraph {
-        track_plugin_latency: plugin_latency,
-        track_output_latency: output_latency,
-        track_pdc_delay,
-        max_path_latency_samples,
-        master_plugin_latency,
     }
 }
 
@@ -402,13 +442,13 @@ mod tests {
 
     #[test]
     fn pdc_delays_shorter_track_to_match_longer_path() {
-        let tracks = vec![
+        let mut tracks = vec![
             track("fast", "audio", 0, vec![]),
             track("slow", "audio", 512, vec![]),
             track("master", "master", 0, vec![]),
         ];
         let audio_graph = plan_runtime_audio_graph(&tracks).unwrap();
-        let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
+        let latency = plan_runtime_latency_graph(&mut tracks, &audio_graph, true);
         assert_eq!(latency.max_path_latency_samples, 512);
         assert_eq!(latency.track_pdc_delay[0], 512);
         assert_eq!(latency.track_pdc_delay[1], 0);
@@ -416,13 +456,13 @@ mod tests {
 
     #[test]
     fn return_feed_increases_path_latency() {
-        let tracks = vec![
+        let mut tracks = vec![
             track("src", "audio", 128, vec![send("s", "ret")]),
             track("ret", "return", 256, vec![]),
             track("master", "master", 0, vec![]),
         ];
         let audio_graph = plan_runtime_audio_graph(&tracks).unwrap();
-        let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
+        let latency = plan_runtime_latency_graph(&mut tracks, &audio_graph, true);
         assert_eq!(latency.track_output_latency[1], 128 + 256);
         assert_eq!(latency.max_path_latency_samples, 128 + 256);
         // Dry main path is 128; wet via return is 384. PDC delays dry by 256
@@ -439,14 +479,14 @@ mod tests {
         // master-bound hop) compensates.
         let mut src = track("src", "audio", 0, vec![]);
         src.output_track_id = Some("bus".to_string());
-        let tracks = vec![
+        let mut tracks = vec![
             src,
             track("bus", "bus", 0, vec![]),
             track("slow", "audio", 512, vec![]),
             track("master", "master", 0, vec![]),
         ];
         let audio_graph = plan_runtime_audio_graph(&tracks).unwrap();
-        let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
+        let latency = plan_runtime_latency_graph(&mut tracks, &audio_graph, true);
         assert_eq!(latency.max_path_latency_samples, 512);
         assert_eq!(
             latency.track_pdc_delay[0], 0,

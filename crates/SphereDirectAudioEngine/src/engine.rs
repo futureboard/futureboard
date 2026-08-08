@@ -5654,6 +5654,10 @@ mod bridge_insert_tests {
         // The block path reads the cached per-insert sink, exactly like the
         // SetPluginBridgeSink command handler.
         p.resolve_bridge_sinks();
+        // `build` plans and reserves before the callback ever runs; a
+        // hand-assembled project has to do the same or the realtime refresh has
+        // no sized plan to rewrite.
+        p.plan_latency_and_pdc();
 
         assert!(p.refresh_runtime_latency_graph(frames as u32));
         assert_eq!(p.latency_graph.track_plugin_latency[0], 0);
@@ -5661,6 +5665,126 @@ mod bridge_insert_tests {
         assert_eq!(p.latency_graph.track_pdc_delay[0], 32);
         assert_eq!(p.latency_graph.track_pdc_delay[1], 0);
         assert!(!p.refresh_runtime_latency_graph(frames as u32));
+    }
+
+    /// A bridged plugin whose reported latency moves while the graph stays put —
+    /// what a network plugin tracking its own jitter buffer looks like to the
+    /// host, as opposed to a fixed-latency effect.
+    #[derive(Debug, Default)]
+    struct DriftingLatencySink {
+        latency_samples: AtomicU32,
+    }
+
+    impl PluginBridgeSink for DriftingLatencySink {
+        fn dsp_ready(&self) -> bool {
+            true
+        }
+
+        fn read_output(&self, _: &mut [f32], _: &mut [f32], frames: usize) -> usize {
+            frames
+        }
+
+        fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+
+        fn write_input(&self, _: &[f32], _: &[f32], _: usize) {}
+
+        fn request_block(&self, _: u32) {}
+
+        fn reported_latency_samples(&self) -> u32 {
+            self.latency_samples.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn drifting_bridge_latency_refresh_matches_a_control_thread_replan() {
+        // The realtime refresh rewrites the plan in place instead of rebuilding
+        // it, so it has to land exactly where a fresh control-thread plan would
+        // — including on the way back down, where a stale value left in a reused
+        // vector would survive as phantom compensation.
+        let frames = 64u32;
+        let mut src = bridge_effect_track(1.0);
+        src.id = "src".to_string();
+        src.inserts[0].id = "src-insert".to_string();
+        src.sends = vec![crate::runtime::RuntimeSend {
+            id: "send-1".to_string(),
+            return_track_id: "ret".to_string(),
+            return_track_index: None,
+            level: 1.0,
+            enabled: true,
+            pre_fader: false,
+        }];
+        let mut ret = bridge_effect_track(1.0);
+        ret.id = "ret".to_string();
+        ret.track_type = "return".to_string();
+        ret.inserts.clear();
+        let mut master = bridge_effect_track(1.0);
+        master.id = "master".to_string();
+        master.track_type = "master".to_string();
+        master.inserts.clear();
+
+        let tracks = vec![src, ret, master];
+        let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
+        let mut p = RuntimeProject {
+            tracks,
+            audio_graph,
+            pdc_enabled: true,
+            ..Default::default()
+        };
+        let sink = Arc::new(DriftingLatencySink::default());
+        p.plugin_bridge_sinks
+            .insert("src-insert".to_string(), sink.clone());
+        p.resolve_bridge_sinks();
+        p.plan_latency_and_pdc();
+
+        // Up, further up, then back down — the drop is the case a rebuild used
+        // to get for free.
+        for latency in [64u32, 4096, 128] {
+            sink.latency_samples.store(latency, Ordering::Relaxed);
+            assert!(
+                p.refresh_runtime_latency_graph(frames),
+                "latency {latency} should be observed as a change"
+            );
+
+            let observed = p.latency_graph.clone();
+            let expected = crate::latency_graph::plan_runtime_latency_graph(
+                &mut p.tracks,
+                &p.audio_graph,
+                p.pdc_enabled,
+            );
+            assert_eq!(
+                observed.track_plugin_latency, expected.track_plugin_latency,
+                "strip latency at {latency}"
+            );
+            assert_eq!(
+                observed.track_output_latency, expected.track_output_latency,
+                "output latency at {latency}"
+            );
+            assert_eq!(
+                observed.track_pdc_delay, expected.track_pdc_delay,
+                "pdc delays at {latency}"
+            );
+            assert_eq!(
+                observed.max_path_latency_samples, expected.max_path_latency_samples,
+                "max path at {latency}"
+            );
+
+            // Refitting inside the reserved capacity has to leave every ring
+            // long enough to actually serve its delay — `apply_pdc_delay_block`
+            // bypasses a track whose ring is too short.
+            for (idx, track) in p.tracks.iter().enumerate() {
+                let delay = observed.track_pdc_delay[idx] as usize;
+                assert!(
+                    delay == 0 || track.pdc_delay_l.len() > delay,
+                    "track {idx} ring {} cannot serve delay {delay} at latency {latency}",
+                    track.pdc_delay_l.len()
+                );
+            }
+
+            assert!(
+                !p.refresh_runtime_latency_graph(frames),
+                "a settled latency must not keep re-planning"
+            );
+        }
     }
 
     #[test]
