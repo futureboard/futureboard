@@ -306,7 +306,9 @@ fn copy_professional_asset(assets_dir: &Path, output_dir: &Path, file_name: &str
 /// Bake the account endpoint and the license signing key for `option_env!` in
 /// the staged private sources. Source precedence: an explicit build-environment
 /// value wins (CI/distribution), otherwise the repo `.env` is read so a plain
-/// `cargo build` produces a working Professional build.
+/// `cargo build` produces a working Professional build. An *invalid* environment
+/// override is ignored with a warning so a stale shell export of the issue
+/// secret cannot silence a correct `.env` public key.
 ///
 /// Both values baked here are public by construction:
 /// - the account API URL, which the app's sign-in opens in a browser;
@@ -321,7 +323,20 @@ fn copy_professional_asset(assets_dir: &Path, output_dir: &Path, file_name: &str
 /// of them: it proves who it is with the user's own session, and verifies
 /// licenses with a public key.
 fn bake_service_config() {
-    let dotenv = read_dotenv("../../../.env");
+    let dotenv_path = {
+        let manifest_dir = PathBuf::from(
+            std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+        );
+        // apps/native/studio → workspace root `.env` (absolute so CWD never matters).
+        manifest_dir
+            .join("../../..")
+            .join(".env")
+            .canonicalize()
+            .unwrap_or_else(|_| manifest_dir.join("../../../.env"))
+    };
+    println!("cargo:rerun-if-changed={}", dotenv_path.display());
+    let dotenv = read_dotenv(&dotenv_path);
+
     let resolve = |build_key: &str, dotenv_key: &str| -> Option<String> {
         std::env::var(build_key)
             .ok()
@@ -338,15 +353,106 @@ fn bake_service_config() {
     if let Some(url) = resolve("FUTUREBOARD_AUTH_API_URL", "AUTH_API_URL") {
         println!("cargo:rustc-env=FUTUREBOARD_AUTH_API_URL={url}");
     }
-    if let Some(key) = resolve("FUTUREBOARD_LICENSE_PUBLIC_KEY", "LICENSE_PUBLIC_KEY") {
-        println!("cargo:rustc-env=FUTUREBOARD_LICENSE_PUBLIC_KEY={key}");
+
+    let key = resolve_license_public_key(&dotenv);
+    match key {
+        Some(key) => {
+            // Prefix only — full key is public anyway, but keeps logs compact.
+            let prefix: String = key.chars().take(16).collect();
+            println!("cargo:warning=baking license public key {prefix}…");
+            println!("cargo:rustc-env=FUTUREBOARD_LICENSE_PUBLIC_KEY={key}");
+        }
+        None => {
+            panic!(
+                "Professional Edition requires a valid Ed25519 LICENSE_PUBLIC_KEY \
+                 (64 hex chars, curve point). Set FUTUREBOARD_LICENSE_PUBLIC_KEY or \
+                 LICENSE_PUBLIC_KEY in {}. \
+                 `licensetool pubkey -key <signing.key>` prints the correct value. \
+                 Do NOT paste ACTIVATION_ISSUE_SECRET / issue.secret — that is a \
+                 different 64-hex token and produces \
+                 \"Activation service is not configured for this build\".",
+                dotenv_path.display()
+            );
+        }
     }
+}
+
+/// Prefer a valid env override, otherwise a valid `.env` value. Invalid hex /
+/// non-curve values are skipped so a mistaken shell export cannot brick the build
+/// when `.env` is correct.
+fn resolve_license_public_key(dotenv: &[(String, String)]) -> Option<String> {
+    let candidates = [
+        (
+            "FUTUREBOARD_LICENSE_PUBLIC_KEY",
+            std::env::var("FUTUREBOARD_LICENSE_PUBLIC_KEY")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        ),
+        (
+            "LICENSE_PUBLIC_KEY (.env)",
+            dotenv
+                .iter()
+                .find(|(k, _)| k == "LICENSE_PUBLIC_KEY")
+                .map(|(_, v)| v.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        ),
+    ];
+
+    for (source, value) in candidates {
+        let Some(value) = value else {
+            continue;
+        };
+        match validate_license_public_key(&value) {
+            Ok(()) => return Some(value),
+            Err(reason) => {
+                println!(
+                    "cargo:warning=ignoring license public key from {source}: {reason}"
+                );
+            }
+        }
+    }
+    None
+}
+
+/// Accept only what `ed25519-dalek::VerifyingKey` will accept at runtime. A seed
+/// or issue secret is 64 hex chars too — and is exactly what shows up as
+/// "Activation service is not configured for this build" if we bake it.
+fn validate_license_public_key(hex: &str) -> Result<(), String> {
+    let bytes = hex_decode_32(hex).ok_or_else(|| {
+        format!(
+            "expected 64 hex characters, got {} chars",
+            hex.chars().count()
+        )
+    })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "not a valid Ed25519 public key ({error}); \
+                 often this is issue.secret / ACTIVATION_ISSUE_SECRET pasted by mistake"
+            )
+        })
+}
+
+fn hex_decode_32(hex: &str) -> Option<[u8; 32]> {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        out[index] = ((high << 4) | low) as u8;
+    }
+    Some(out)
 }
 
 /// Minimal `KEY=VALUE` parser for the repo `.env`. Ignores blanks and `#`
 /// comments; does not expand or unquote — the values used here are plain tokens.
-fn read_dotenv(relative: &str) -> Vec<(String, String)> {
-    let Ok(contents) = std::fs::read_to_string(relative) else {
+fn read_dotenv(path: &Path) -> Vec<(String, String)> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     contents
