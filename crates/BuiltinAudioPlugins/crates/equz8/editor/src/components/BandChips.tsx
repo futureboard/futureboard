@@ -32,7 +32,7 @@ export function BandChips({
             band.freq,
           )} Hz — click to select, double-click to ${
             band.active ? 'disable' : 'enable'
-          }`}
+          }${band.active ? '' : '. Moving the band switches it on too.'}`}
           onClick={() => onSelect(index)}
           onDoubleClick={() => onToggle(index)}
         >

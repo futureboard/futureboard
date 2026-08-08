@@ -1,9 +1,17 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  DEFAULT_DIVISION_L,
+  DEFAULT_DIVISION_R,
+  DEFAULT_TEMPO_BPM,
+  DIVISION_BEATS,
+  DIVISION_LABELS,
+  MAX_TEMPO_BPM,
+  MIN_TEMPO_BPM,
   MODES,
   MODE_LABELS,
   PARAMS,
+  divisionMs,
   format,
   fromNorm,
   modeFromWire,
@@ -12,7 +20,16 @@ import {
   unitFor,
   type ParamId,
 } from './params'
-import { IPC_RS, rustModeOrder, rustRanges, rustStringArray } from './rust'
+import {
+  IPC_RS,
+  LIB_RS,
+  rustFloatArray,
+  rustModeOrder,
+  rustRanges,
+  rustScalar,
+  rustStringArray,
+  rustU8Scalar,
+} from './rust'
 
 const rustIds = rustStringArray(IPC_RS, 'UI_PARAM_IDS')
 const rustRangeTable = rustRanges('RANGES')
@@ -37,12 +54,20 @@ describe('the schema mirrors echospace::ipc', () => {
   })
 
   /**
-   * `power`, `mode` and `freeze` are not knobs, so they are absent from
-   * `PARAMS` on purpose — but nothing else may be.
+   * The flags, the mode and the two note divisions are not knobs, so they are
+   * absent from `PARAMS` on purpose — but nothing else may be.
    */
   test('only the non-continuous params are missing from the knob table', () => {
     const missing = rustIds.filter((id) => !(id in PARAMS))
-    expect(missing.sort()).toEqual(['freeze', 'mode', 'power'])
+    expect(missing.sort()).toEqual([
+      'divisionL',
+      'divisionR',
+      'freeze',
+      'link',
+      'mode',
+      'power',
+      'sync',
+    ])
   })
 
   test('mode order is the wire contract', () => {
@@ -57,6 +82,84 @@ describe('the schema mirrors echospace::ipc', () => {
   test('an unknown mode wire value falls back to ping-pong, as Rust does', () => {
     expect(modeFromWire(99)).toBe('pingpong')
     expect(modeFromWire(-1)).toBe('pingpong')
+  })
+})
+
+describe('note divisions mirror echospace::DIVISION_*', () => {
+  test('the label table matches the Rust table entry for entry', () => {
+    expect(DIVISION_LABELS.map(String)).toEqual(
+      rustStringArray(LIB_RS, 'DIVISION_LABELS'),
+    )
+  })
+
+  /** The index is the wire value, so a beat count that drifts would silently
+   *  play a different note than the one the control reads out. */
+  test('the beat counts match the Rust table entry for entry', () => {
+    const rustBeats = rustFloatArray(LIB_RS, 'DIVISION_BEATS')
+    expect(DIVISION_BEATS).toHaveLength(rustBeats.length)
+    for (const [index, beats] of DIVISION_BEATS.entries()) {
+      expect(beats).toBeCloseTo(rustBeats[index]!, 6)
+    }
+  })
+
+  test('the tables are the same length and the wire ceiling is the last index', () => {
+    expect(DIVISION_LABELS).toHaveLength(DIVISION_BEATS.length)
+    expect(rustScalar(LIB_RS, 'MAX_DIVISION_WIRE')).toBe(
+      DIVISION_BEATS.length - 1,
+    )
+  })
+
+  test('durations rise monotonically, so stepping sweeps the range', () => {
+    for (let i = 1; i < DIVISION_BEATS.length; i++) {
+      expect(DIVISION_BEATS[i]!).toBeGreaterThan(DIVISION_BEATS[i - 1]!)
+    }
+  })
+
+  test('the tempo window and the defaults match Rust', () => {
+    expect(MIN_TEMPO_BPM).toBe(rustScalar(LIB_RS, 'MIN_TEMPO_BPM'))
+    expect(MAX_TEMPO_BPM).toBe(rustScalar(LIB_RS, 'MAX_TEMPO_BPM'))
+    expect(DEFAULT_TEMPO_BPM).toBe(rustScalar(LIB_RS, 'DEFAULT_TEMPO_BPM'))
+    expect(DEFAULT_DIVISION_L).toBe(rustU8Scalar(LIB_RS, 'DEFAULT_DIVISION_L'))
+    expect(DEFAULT_DIVISION_R).toBe(rustU8Scalar(LIB_RS, 'DEFAULT_DIVISION_R'))
+  })
+
+  test('a quarter note is one beat and the dotted forms are 1.5x', () => {
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/4'), 120)).toBeCloseTo(500, 6)
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/8'), 120)).toBeCloseTo(250, 6)
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/8.'), 120)).toBeCloseTo(375, 6)
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/4T'), 120)).toBeCloseTo(
+      1000 / 3,
+      6,
+    )
+    // Halving the tempo doubles every length.
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/4'), 60)).toBeCloseTo(1000, 6)
+  })
+
+  /** The defaults are chosen so switching Sync on at 120 BPM lands on the same
+   *  figure the free-time defaults describe. */
+  test('the default divisions restate the default free times at 120 BPM', () => {
+    expect(divisionMs(DEFAULT_DIVISION_L, 120)).toBeCloseTo(
+      PARAMS.timeMsL.default,
+      6,
+    )
+    expect(divisionMs(DEFAULT_DIVISION_R, 120)).toBeCloseTo(500, 6)
+  })
+
+  test('a garbage index or tempo clamps instead of producing NaN', () => {
+    const longest = DIVISION_BEATS.length - 1
+    expect(divisionMs(-5, 120)).toBe(divisionMs(0, 120))
+    expect(divisionMs(999, 120)).toBe(divisionMs(longest, 120))
+    expect(divisionMs(10, Number.NaN)).toBe(divisionMs(10, DEFAULT_TEMPO_BPM))
+    expect(divisionMs(10, 0)).toBe(divisionMs(10, MIN_TEMPO_BPM))
+    expect(divisionMs(10, 1e9)).toBe(divisionMs(10, MAX_TEMPO_BPM))
+  })
+
+  /** The longest divisions run past the delay line's ceiling at slow tempos;
+   *  the readout has to show the length that is actually reachable. */
+  test('a division longer than the line clamps to its maximum', () => {
+    expect(divisionMs(DIVISION_LABELS.indexOf('1/1.'), 40)).toBe(
+      PARAMS.timeMsL.max,
+    )
   })
 })
 

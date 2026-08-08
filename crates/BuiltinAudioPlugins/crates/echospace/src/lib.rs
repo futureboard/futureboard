@@ -28,6 +28,75 @@ pub const MAX_DELAY_MS: f32 = 4_000.0;
 /// by the saturator — which the user is allowed to turn off.
 const MAX_FEEDBACK: f32 = 0.9995;
 
+/// Tempo window a synced delay time is derived from. The transport publishes a
+/// real tempo every block, but a region read before the engine's first publish —
+/// or a project with a nonsense tempo — must not turn into an infinite or
+/// zero-length delay, so the conversion clamps rather than trusts.
+pub const MIN_TEMPO_BPM: f32 = 20.0;
+pub const MAX_TEMPO_BPM: f32 = 999.0;
+
+/// Tempo assumed until the host publishes a transport block.
+pub const DEFAULT_TEMPO_BPM: f32 = 120.0;
+
+/// Note divisions a synced line can lock to, shortest first. Straight, dotted
+/// and triplet forms are interleaved in duration order so stepping the control
+/// sweeps the musical range monotonically instead of jumping between families.
+///
+/// Index *is* the wire value for `divisionL` / `divisionR`, so this table is
+/// part of the persisted contract — append only, and only at the end.
+pub const DIVISION_LABELS: [&str; DIVISION_COUNT] = [
+    "1/32T", "1/32", "1/16T", "1/32.", "1/16", "1/8T", "1/16.", "1/8", "1/4T", "1/8.", "1/4",
+    "1/2T", "1/4.", "1/2", "1/1T", "1/2.", "1/1", "1/1.",
+];
+
+/// Quarter notes each entry of [`DIVISION_LABELS`] spans. A dotted note is
+/// 1.5x its straight form, a triplet 2/3 of it.
+pub const DIVISION_BEATS: [f32; DIVISION_COUNT] = [
+    0.083_333_336,
+    0.125,
+    0.166_666_67,
+    0.1875,
+    0.25,
+    0.333_333_34,
+    0.375,
+    0.5,
+    0.666_666_7,
+    0.75,
+    1.0,
+    1.333_333_4,
+    1.5,
+    2.0,
+    2.666_666_7,
+    3.0,
+    4.0,
+    6.0,
+];
+
+pub const DIVISION_COUNT: usize = 18;
+
+/// Highest valid `divisionL` / `divisionR` wire value.
+pub const MAX_DIVISION_WIRE: f32 = 17.0;
+
+/// Default division per side, chosen so switching Sync on from the factory
+/// settings lands on the same dotted-eighth / quarter pattern the free times
+/// describe at 120 BPM.
+pub const DEFAULT_DIVISION_L: u8 = 9;
+pub const DEFAULT_DIVISION_R: u8 = 10;
+
+/// Delay time one division spans at `tempo_bpm`, already inside the line's
+/// reachable range. Allocation-free and total: an out-of-table index saturates
+/// and the tempo is clamped, so this can be called from the producer thread.
+#[inline]
+pub fn division_ms(division: u8, tempo_bpm: f32) -> f32 {
+    let beats = DIVISION_BEATS[(division as usize).min(DIVISION_COUNT - 1)];
+    let bpm = if tempo_bpm.is_finite() {
+        clamp(tempo_bpm, MIN_TEMPO_BPM, MAX_TEMPO_BPM)
+    } else {
+        DEFAULT_TEMPO_BPM
+    };
+    clamp(beats * 60_000.0 / bpm, 1.0, MAX_DELAY_MS)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DelayMode {
@@ -86,6 +155,34 @@ pub struct Params {
     pub mix: f32,
     pub output_db: f32,
     pub freeze: bool,
+    /// Derive both delay times from the host tempo and the divisions below,
+    /// instead of from `time_ms_l` / `time_ms_r`.
+    ///
+    /// The free times are kept untouched while this is on, so switching back
+    /// returns the line to exactly where it was rather than to a default.
+    #[serde(default)]
+    pub sync: bool,
+    /// Note division per side while `sync` is on; an index into
+    /// [`DIVISION_BEATS`].
+    #[serde(default = "default_division_l")]
+    pub division_l: u8,
+    #[serde(default = "default_division_r")]
+    pub division_r: u8,
+    /// Both sides move together: an edit to either time or division is applied
+    /// to the other as well.
+    #[serde(default)]
+    pub link: bool,
+}
+
+/// Serde fallbacks for the tempo-sync fields, which projects written before
+/// EchoSpace had them do not carry. Without these the whole blob would be
+/// rejected and the insert would silently open at factory settings.
+fn default_division_l() -> u8 {
+    DEFAULT_DIVISION_L
+}
+
+fn default_division_r() -> u8 {
+    DEFAULT_DIVISION_R
 }
 
 pub fn default_params() -> Params {
@@ -102,6 +199,32 @@ pub fn default_params() -> Params {
         mix: 20.0,
         output_db: 0.0,
         freeze: false,
+        sync: false,
+        division_l: DEFAULT_DIVISION_L,
+        division_r: DEFAULT_DIVISION_R,
+        link: false,
+    }
+}
+
+impl Params {
+    /// Delay time the left line actually runs at: the tempo-derived division
+    /// while synced, the free time otherwise.
+    #[inline]
+    pub fn effective_time_ms_l(&self, tempo_bpm: f32) -> f32 {
+        if self.sync {
+            division_ms(self.division_l, tempo_bpm)
+        } else {
+            self.time_ms_l
+        }
+    }
+
+    #[inline]
+    pub fn effective_time_ms_r(&self, tempo_bpm: f32) -> f32 {
+        if self.sync {
+            division_ms(self.division_r, tempo_bpm)
+        } else {
+            self.time_ms_r
+        }
     }
 }
 
@@ -209,6 +332,38 @@ pub fn descriptor() -> PluginDescriptor {
                 max: 1.0,
                 unit: "bool",
             },
+            ParamDescriptor {
+                id: "sync",
+                name: "Tempo Sync",
+                default_value: 0.0,
+                min: 0.0,
+                max: 1.0,
+                unit: "bool",
+            },
+            ParamDescriptor {
+                id: "divisionL",
+                name: "Division L",
+                default_value: DEFAULT_DIVISION_L as f32,
+                min: 0.0,
+                max: MAX_DIVISION_WIRE,
+                unit: "note",
+            },
+            ParamDescriptor {
+                id: "divisionR",
+                name: "Division R",
+                default_value: DEFAULT_DIVISION_R as f32,
+                min: 0.0,
+                max: MAX_DIVISION_WIRE,
+                unit: "note",
+            },
+            ParamDescriptor {
+                id: "link",
+                name: "Link L/R",
+                default_value: 0.0,
+                min: 0.0,
+                max: 1.0,
+                unit: "bool",
+            },
         ],
     }
 }
@@ -253,6 +408,9 @@ impl DelayLine {
 pub struct Dsp {
     sample_rate: f32,
     params: Params,
+    /// Latest transport tempo, republished by the host each block. Only the
+    /// synced delay times read it; the free times ignore it entirely.
+    tempo_bpm: f32,
     delay_l: DelayLine,
     delay_r: DelayLine,
     delay_samples_l: usize,
@@ -280,6 +438,7 @@ impl Dsp {
         let mut dsp = Self {
             sample_rate: sr,
             params: default_params(),
+            tempo_bpm: DEFAULT_TEMPO_BPM,
             delay_l: DelayLine::new(capacity),
             delay_r: DelayLine::new(capacity),
             delay_samples_l: 1,
@@ -304,6 +463,24 @@ impl Dsp {
         self.apply_params();
     }
 
+    /// Publish the block's transport tempo. Called from the host producer
+    /// before `process_stereo`, so it must stay allocation-free: it is a
+    /// compare plus, at most, the same two integer conversions a time edit
+    /// already does, and only while a synced line is actually reading it.
+    pub fn set_tempo_bpm(&mut self, tempo_bpm: f32) {
+        if !tempo_bpm.is_finite() || (tempo_bpm - self.tempo_bpm).abs() < 1.0e-4 {
+            return;
+        }
+        self.tempo_bpm = tempo_bpm;
+        if self.params.sync {
+            self.apply_scalars();
+        }
+    }
+
+    pub fn tempo_bpm(&self) -> f32 {
+        self.tempo_bpm
+    }
+
     /// Apply a compact wire update already resolved by the UI/control thread.
     ///
     /// The audio path never parses JSON or looks up string parameter ids. Every
@@ -316,7 +493,13 @@ impl Dsp {
         }
         match wire_index {
             ipc::LOW_CUT_INDEX | ipc::HIGH_CUT_INDEX => self.rebuild_filters(),
-            ipc::TIME_L_INDEX | ipc::TIME_R_INDEX | ipc::OUTPUT_INDEX => self.apply_scalars(),
+            ipc::TIME_L_INDEX
+            | ipc::TIME_R_INDEX
+            | ipc::OUTPUT_INDEX
+            | ipc::SYNC_INDEX
+            | ipc::DIVISION_L_INDEX
+            | ipc::DIVISION_R_INDEX
+            | ipc::LINK_INDEX => self.apply_scalars(),
             // Feedback, cross, saturation, mix, mode and the two flags are read
             // straight off `params` in `process_stereo`; nothing to recompute.
             _ => {}
@@ -345,10 +528,10 @@ impl Dsp {
 
     fn apply_scalars(&mut self) {
         let max_delay = self.delay_l.buffer.len().saturating_sub(2).max(1);
-        self.delay_samples_l =
-            ((self.params.time_ms_l * 0.001 * self.sample_rate) as usize).clamp(1, max_delay);
-        self.delay_samples_r =
-            ((self.params.time_ms_r * 0.001 * self.sample_rate) as usize).clamp(1, max_delay);
+        let time_l = self.params.effective_time_ms_l(self.tempo_bpm);
+        let time_r = self.params.effective_time_ms_r(self.tempo_bpm);
+        self.delay_samples_l = ((time_l * 0.001 * self.sample_rate) as usize).clamp(1, max_delay);
+        self.delay_samples_r = ((time_r * 0.001 * self.sample_rate) as usize).clamp(1, max_delay);
         self.output_gain = db_to_linear(self.params.output_db);
     }
 
@@ -719,6 +902,87 @@ mod tests {
         for _ in 0..4_410 {
             let (l, r) = dsp.process_stereo(0.3, -0.3);
             assert!(l.is_finite() && r.is_finite());
+        }
+    }
+
+    /// A synced line's spacing is a note length: it has to come out of the
+    /// transport tempo, not out of the free `time_ms_*` the control still
+    /// holds.
+    #[test]
+    fn a_synced_line_takes_its_delay_from_the_tempo() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.time_ms_l = 12.0;
+        params.time_ms_r = 12.0;
+        params.sync = true;
+        params.division_l = DIVISION_LABELS.iter().position(|l| *l == "1/4").unwrap() as u8;
+        params.division_r = params.division_l;
+        dsp.set_params(params);
+        dsp.set_tempo_bpm(120.0);
+
+        // A quarter note at 120 BPM is 500 ms.
+        assert_eq!(dsp.delay_samples_l, 24_000);
+        assert_eq!(dsp.delay_samples_r, 24_000);
+
+        // Half the tempo, twice the spacing — without any parameter edit.
+        dsp.set_tempo_bpm(60.0);
+        assert_eq!(dsp.delay_samples_l, 48_000);
+
+        // ...and switching sync off returns the line to the time the control
+        // was holding all along.
+        assert!(dsp.apply_ui_param("sync", 0.0));
+        assert_eq!(dsp.delay_samples_l, 576);
+    }
+
+    #[test]
+    fn a_free_line_ignores_the_tempo() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.time_ms_l = 250.0;
+        params.sync = false;
+        dsp.set_params(params);
+        let before = dsp.delay_samples_l;
+        dsp.set_tempo_bpm(174.0);
+        assert_eq!(dsp.delay_samples_l, before);
+        assert_eq!(dsp.tempo_bpm(), 174.0);
+    }
+
+    /// A nonsense tempo — a region read before the engine's first publish, or a
+    /// project with a zero in it — must not turn into a zero-length or infinite
+    /// delay.
+    #[test]
+    fn a_nonsense_tempo_cannot_break_the_delay_line() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut params = default_params();
+        params.sync = true;
+        dsp.set_params(params);
+        for bpm in [0.0, -240.0, f32::NAN, f32::INFINITY, 1.0e12] {
+            dsp.set_tempo_bpm(bpm);
+            assert!(dsp.delay_samples_l >= 1);
+            assert!(dsp.delay_samples_l < dsp.delay_l.buffer.len());
+            let (l, r) = dsp.process_stereo(0.4, -0.4);
+            assert!(l.is_finite() && r.is_finite(), "diverged at {bpm} BPM");
+        }
+    }
+
+    #[test]
+    fn every_division_stays_inside_the_line_at_any_tempo() {
+        let mut dsp = Dsp::new(48_000.0);
+        for bpm in [MIN_TEMPO_BPM, 60.0, 120.0, 174.0, MAX_TEMPO_BPM] {
+            for division in 0..DIVISION_COUNT as u8 {
+                let mut params = default_params();
+                params.sync = true;
+                params.division_l = division;
+                params.division_r = division;
+                dsp.set_params(params);
+                dsp.set_tempo_bpm(bpm);
+                assert!(
+                    dsp.delay_samples_l >= 1 && dsp.delay_samples_l < dsp.delay_l.buffer.len(),
+                    "division {division} at {bpm} BPM left the ring"
+                );
+                let ms = division_ms(division, bpm);
+                assert!((1.0..=MAX_DELAY_MS).contains(&ms));
+            }
         }
     }
 

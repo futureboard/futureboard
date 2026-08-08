@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DelayMode, MAX_DELAY_MS, Params, clamp, default_params};
+use crate::{DelayMode, MAX_DELAY_MS, MAX_DIVISION_WIRE, Params, clamp, default_params};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const STATE_VERSION: u32 = 1;
@@ -24,8 +24,12 @@ pub const SATURATION_INDEX: u32 = 8;
 pub const MIX_INDEX: u32 = 9;
 pub const OUTPUT_INDEX: u32 = 10;
 pub const FREEZE_INDEX: u32 = 11;
+pub const SYNC_INDEX: u32 = 12;
+pub const DIVISION_L_INDEX: u32 = 13;
+pub const DIVISION_R_INDEX: u32 = 14;
+pub const LINK_INDEX: u32 = 15;
 
-pub const PARAM_COUNT: usize = 12;
+pub const PARAM_COUNT: usize = 16;
 
 /// Wire index *is* the position in this table; the editor and the host both
 /// resolve through it, so the order is part of the persisted contract. Append
@@ -43,6 +47,10 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "mix",
     "outputDb",
     "freeze",
+    "sync",
+    "divisionL",
+    "divisionR",
+    "link",
 ];
 
 /// Inclusive `(min, max)` for every continuous parameter, indexed by wire
@@ -50,24 +58,47 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
 /// own arms in [`apply_wire_param`]. Single source of truth for clamping, so
 /// [`sanitize_params`] and the wire path cannot drift apart.
 const RANGES: [(f32, f32); PARAM_COUNT] = [
-    (0.0, 0.0),          // power
-    (0.0, 0.0),          // mode
-    (1.0, MAX_DELAY_MS), // timeMsL
-    (1.0, MAX_DELAY_MS), // timeMsR
-    (0.0, 98.0),         // feedback
-    (0.0, 100.0),        // crossFeedback
-    (20.0, 2_000.0),     // lowCutHz
-    (1_000.0, 20_000.0), // highCutHz
-    (0.0, 100.0),        // saturation
-    (0.0, 100.0),        // mix
-    (-24.0, 12.0),       // outputDb
-    (0.0, 0.0),          // freeze
+    (0.0, 0.0),               // power
+    (0.0, 0.0),               // mode
+    (1.0, MAX_DELAY_MS),      // timeMsL
+    (1.0, MAX_DELAY_MS),      // timeMsR
+    (0.0, 98.0),              // feedback
+    (0.0, 100.0),             // crossFeedback
+    (20.0, 2_000.0),          // lowCutHz
+    (1_000.0, 20_000.0),      // highCutHz
+    (0.0, 100.0),             // saturation
+    (0.0, 100.0),             // mix
+    (-24.0, 12.0),            // outputDb
+    (0.0, 0.0),               // freeze
+    (0.0, 0.0),               // sync
+    (0.0, MAX_DIVISION_WIRE), // divisionL
+    (0.0, MAX_DIVISION_WIRE), // divisionR
+    (0.0, 0.0),               // link
 ];
 
 #[inline]
 fn clamp_wire(index: u32, value: f32) -> f32 {
     let (min, max) = RANGES[index as usize];
     clamp(value, min, max)
+}
+
+/// A division travels as its table index. Rounded rather than truncated so a
+/// host that steps the control in normalised units cannot land one entry short.
+#[inline]
+fn wire_to_division(value: f32) -> u8 {
+    clamp(value, 0.0, MAX_DIVISION_WIRE).round() as u8
+}
+
+/// `link` is a promise that the two sides agree, so enabling it — or restoring
+/// it from a blob — pulls the right side onto the left. Every path that can set
+/// the flag goes through this, so a lit Link can never sit over two different
+/// times.
+#[inline]
+fn apply_link(params: &mut Params) {
+    if params.link {
+        params.time_ms_r = params.time_ms_l;
+        params.division_r = params.division_l;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +154,9 @@ pub fn sanitize_params(params: &mut Params) {
     params.saturation = clamp_wire(SATURATION_INDEX, params.saturation);
     params.mix = clamp_wire(MIX_INDEX, params.mix);
     params.output_db = clamp_wire(OUTPUT_INDEX, params.output_db);
+    params.division_l = params.division_l.min(MAX_DIVISION_WIRE as u8);
+    params.division_r = params.division_r.min(MAX_DIVISION_WIRE as u8);
+    apply_link(params);
 }
 
 /// Apply one compact UI/control update. Allocation-free and total: invalid
@@ -136,8 +170,38 @@ pub fn apply_wire_param(params: &mut Params, index: u32, value: f32) -> bool {
         POWER_INDEX => params.power = value >= 0.5,
         MODE_INDEX => params.mode = DelayMode::from_wire(value),
         FREEZE_INDEX => params.freeze = value >= 0.5,
-        TIME_L_INDEX => params.time_ms_l = clamp_wire(index, value),
-        TIME_R_INDEX => params.time_ms_r = clamp_wire(index, value),
+        SYNC_INDEX => params.sync = value >= 0.5,
+        LINK_INDEX => {
+            params.link = value >= 0.5;
+            apply_link(params);
+        }
+        // While linked, either side's control drives both — the edit is made on
+        // the side the user touched and mirrored onto the other, rather than the
+        // right side being a read-only shadow of the left.
+        TIME_L_INDEX => {
+            params.time_ms_l = clamp_wire(index, value);
+            if params.link {
+                params.time_ms_r = params.time_ms_l;
+            }
+        }
+        TIME_R_INDEX => {
+            params.time_ms_r = clamp_wire(index, value);
+            if params.link {
+                params.time_ms_l = params.time_ms_r;
+            }
+        }
+        DIVISION_L_INDEX => {
+            params.division_l = wire_to_division(value);
+            if params.link {
+                params.division_r = params.division_l;
+            }
+        }
+        DIVISION_R_INDEX => {
+            params.division_r = wire_to_division(value);
+            if params.link {
+                params.division_l = params.division_r;
+            }
+        }
         FEEDBACK_INDEX => params.feedback = clamp_wire(index, value),
         CROSS_INDEX => params.cross_feedback = clamp_wire(index, value),
         LOW_CUT_INDEX => params.low_cut_hz = clamp_wire(index, value),
@@ -174,6 +238,14 @@ pub fn ui_values(params: &Params) -> Vec<(&'static str, f32)> {
         ("mix", params.mix),
         ("outputDb", params.output_db),
         ("freeze", f32::from(params.freeze)),
+        ("sync", f32::from(params.sync)),
+        ("divisionL", f32::from(params.division_l)),
+        ("divisionR", f32::from(params.division_r)),
+        // Replayed last, after both sides carry their own restored values.
+        // `link` only ever pulls right onto left, and a blob that had it lit was
+        // sanitized with the two sides already equal, so this is a no-op on a
+        // consistent project and a repair on a hand-edited one.
+        ("link", f32::from(params.link)),
     ]
 }
 
@@ -252,6 +324,165 @@ mod tests {
         assert_eq!(params.feedback, 98.0);
         assert_eq!(params.high_cut_hz, 20_000.0);
         assert_eq!(params.output_db, 12.0);
+    }
+
+    /// Link is the "both sides at once" promise: whichever control the user
+    /// touched drives both, and the other is never left behind.
+    #[test]
+    fn link_carries_an_edit_from_either_side_to_the_other() {
+        let mut params = default_params();
+        assert!(apply_ui_param(&mut params, "link", 1.0));
+
+        assert!(apply_ui_param(&mut params, "timeMsL", 250.0));
+        assert_eq!(params.time_ms_r, 250.0);
+        assert!(apply_ui_param(&mut params, "timeMsR", 800.0));
+        assert_eq!(params.time_ms_l, 800.0);
+
+        assert!(apply_ui_param(&mut params, "divisionL", 7.0));
+        assert_eq!(params.division_r, 7);
+        assert!(apply_ui_param(&mut params, "divisionR", 12.0));
+        assert_eq!(params.division_l, 12);
+
+        // Unlinked, the two sides go back to moving on their own.
+        assert!(apply_ui_param(&mut params, "link", 0.0));
+        assert!(apply_ui_param(&mut params, "timeMsL", 100.0));
+        assert_eq!(params.time_ms_r, 800.0);
+        assert!(apply_ui_param(&mut params, "divisionL", 3.0));
+        assert_eq!(params.division_r, 12);
+    }
+
+    /// Turning Link on has to reconcile the two sides immediately — a lit
+    /// toggle over two different times would be a lie until the next edit.
+    #[test]
+    fn enabling_link_pulls_the_right_side_onto_the_left() {
+        let mut params = default_params();
+        params.time_ms_l = 375.0;
+        params.time_ms_r = 900.0;
+        params.division_l = 4;
+        params.division_r = 15;
+        assert!(apply_ui_param(&mut params, "link", 1.0));
+        assert_eq!(params.time_ms_r, 375.0);
+        assert_eq!(params.division_r, 4);
+    }
+
+    #[test]
+    fn division_wire_values_are_rounded_and_clamped() {
+        let mut params = default_params();
+        assert!(apply_ui_param(&mut params, "divisionL", 6.6));
+        assert_eq!(params.division_l, 7);
+        assert!(apply_ui_param(&mut params, "divisionL", -12.0));
+        assert_eq!(params.division_l, 0);
+        assert!(apply_ui_param(&mut params, "divisionL", 9_000.0));
+        assert_eq!(params.division_l, MAX_DIVISION_WIRE as u8);
+        assert!(!apply_ui_param(&mut params, "divisionL", f32::NAN));
+    }
+
+    #[test]
+    fn sync_and_link_are_flags_like_power_and_freeze() {
+        let mut params = default_params();
+        assert!(!params.sync);
+        assert!(apply_ui_param(&mut params, "sync", 1.0));
+        assert!(params.sync);
+        assert!(apply_ui_param(&mut params, "sync", 0.0));
+        assert!(!params.sync);
+    }
+
+    /// A project written before EchoSpace had tempo sync carries none of the
+    /// new fields. It must open at the documented defaults rather than being
+    /// rejected whole, which would silently reset the whole insert.
+    #[test]
+    fn a_blob_written_before_tempo_sync_still_loads() {
+        let legacy = r#"{
+            "version": 1,
+            "params": {
+                "power": true,
+                "mode": "stereo",
+                "timeMsL": 320.0,
+                "timeMsR": 340.0,
+                "feedback": 52.0,
+                "crossFeedback": 25.0,
+                "lowCutHz": 260.0,
+                "highCutHz": 4200.0,
+                "saturation": 62.0,
+                "mix": 30.0,
+                "outputDb": -1.5,
+                "freeze": false
+            }
+        }"#;
+        let decoded = EchospaceState::from_json(legacy).expect("legacy blob must still decode");
+        assert_eq!(decoded.params.time_ms_l, 320.0);
+        assert!(!decoded.params.sync);
+        assert!(!decoded.params.link);
+        assert_eq!(decoded.params.division_l, crate::DEFAULT_DIVISION_L);
+        assert_eq!(decoded.params.division_r, crate::DEFAULT_DIVISION_R);
+    }
+
+    /// `link` is an invariant, not just a flag, so a hand-edited blob that
+    /// claims it while carrying two different sides is repaired on the way in.
+    #[test]
+    fn sanitize_reconciles_a_linked_blob_whose_sides_disagree() {
+        let mut params = default_params();
+        params.link = true;
+        params.time_ms_l = 250.0;
+        params.time_ms_r = 900.0;
+        params.division_l = 5;
+        params.division_r = 200;
+        sanitize_params(&mut params);
+        assert_eq!(params.time_ms_r, 250.0);
+        assert_eq!(params.division_r, 5);
+    }
+
+    #[test]
+    fn sanitize_clamps_an_out_of_table_division() {
+        let mut params = default_params();
+        params.division_l = 250;
+        params.division_r = 99;
+        sanitize_params(&mut params);
+        assert_eq!(params.division_l, MAX_DIVISION_WIRE as u8);
+        assert_eq!(params.division_r, MAX_DIVISION_WIRE as u8);
+    }
+
+    /// Replay walks `ui_values` in wire order, and `link` only ever pulls right
+    /// onto left — so it has to land after both sides have been restored.
+    #[test]
+    fn a_linked_state_survives_a_replay_through_the_wire() {
+        let mut saved = default_params();
+        saved.link = true;
+        saved.sync = true;
+        saved.time_ms_l = 250.0;
+        saved.division_l = 7;
+        sanitize_params(&mut saved);
+
+        let mut rebuilt = default_params();
+        for (id, value) in ui_values(&saved) {
+            assert!(
+                apply_ui_param(&mut rebuilt, id, value),
+                "`{id}` was rejected"
+            );
+        }
+        assert_eq!(rebuilt.time_ms_l, saved.time_ms_l);
+        assert_eq!(rebuilt.time_ms_r, saved.time_ms_r);
+        assert_eq!(rebuilt.division_l, saved.division_l);
+        assert_eq!(rebuilt.division_r, saved.division_r);
+        assert!(rebuilt.link && rebuilt.sync);
+    }
+
+    /// The same replay for an *unlinked* project: the two sides are different
+    /// on purpose, and nothing on the way in may reconcile them.
+    #[test]
+    fn an_unlinked_replay_keeps_the_two_sides_apart() {
+        let mut saved = default_params();
+        saved.time_ms_l = 250.0;
+        saved.time_ms_r = 900.0;
+        saved.division_l = 7;
+        saved.division_r = 12;
+
+        let mut rebuilt = default_params();
+        for (id, value) in ui_values(&saved) {
+            assert!(apply_ui_param(&mut rebuilt, id, value));
+        }
+        assert_eq!(rebuilt.time_ms_r, 900.0);
+        assert_eq!(rebuilt.division_r, 12);
     }
 
     #[test]

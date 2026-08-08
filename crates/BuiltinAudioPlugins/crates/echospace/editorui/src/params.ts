@@ -87,6 +87,77 @@ export const PARAMS: Record<ParamId, ParamSpec> = {
   outputDb: spec('outputDb', 'Output', -24, 12, 0, 'dB', 'lin', 1, 0.5, 0),
 }
 
+/**
+ * Note divisions a synced line can lock to, mirroring `echospace::DIVISION_*`.
+ * The index is the wire value, so the order is the contract — `params.test.ts`
+ * pins both the labels and the beat counts against the Rust table.
+ */
+export const DIVISION_LABELS = [
+  '1/32T',
+  '1/32',
+  '1/16T',
+  '1/32.',
+  '1/16',
+  '1/8T',
+  '1/16.',
+  '1/8',
+  '1/4T',
+  '1/8.',
+  '1/4',
+  '1/2T',
+  '1/4.',
+  '1/2',
+  '1/1T',
+  '1/2.',
+  '1/1',
+  '1/1.',
+] as const
+
+/** Quarter notes each division spans. `echospace::DIVISION_BEATS`. */
+export const DIVISION_BEATS = [
+  1 / 12,
+  0.125,
+  1 / 6,
+  0.1875,
+  0.25,
+  1 / 3,
+  0.375,
+  0.5,
+  2 / 3,
+  0.75,
+  1,
+  4 / 3,
+  1.5,
+  2,
+  8 / 3,
+  3,
+  4,
+  6,
+] as const
+
+/** `echospace::DEFAULT_DIVISION_L` / `DEFAULT_DIVISION_R` — dotted eighth and
+ *  quarter, the same pattern the free-time defaults describe at 120 BPM. */
+export const DEFAULT_DIVISION_L = 9
+export const DEFAULT_DIVISION_R = 10
+
+/** `echospace::MIN_TEMPO_BPM` / `MAX_TEMPO_BPM` / `DEFAULT_TEMPO_BPM`. */
+export const MIN_TEMPO_BPM = 20
+export const MAX_TEMPO_BPM = 999
+export const DEFAULT_TEMPO_BPM = 120
+
+/**
+ * Delay time a division spans at `tempoBpm`, in ms — the same conversion (and
+ * the same clamps) `echospace::division_ms` does, so the readout under a synced
+ * control is the length the delay line is actually running at.
+ */
+export function divisionMs(division: number, tempoBpm: number): number {
+  const index = clamp(Math.round(division), 0, DIVISION_BEATS.length - 1)
+  const bpm = Number.isFinite(tempoBpm)
+    ? clamp(tempoBpm, MIN_TEMPO_BPM, MAX_TEMPO_BPM)
+    : DEFAULT_TEMPO_BPM
+  return clamp((DIVISION_BEATS[index]! * 60_000) / bpm, 1, PARAMS.timeMsL.max)
+}
+
 export const MODES = ['stereo', 'pingpong', 'mono'] as const
 export type Mode = (typeof MODES)[number]
 

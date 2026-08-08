@@ -4,12 +4,14 @@ import type { EchoParams } from './bridge'
 import {
   MAX_FEEDBACK,
   echoModel,
+  effectiveTimesMs,
   envelopeAt,
   filterMagnitude,
   laneFor,
   loopGain,
   tapTimes,
 } from './model'
+import { DIVISION_LABELS } from './params'
 import { DEFAULT_PARAMS } from './presets'
 import { LIB_RS, rustScalar } from './rust'
 
@@ -94,6 +96,61 @@ describe('tap layout', () => {
     expect(passes).toBe(32)
     expect(taps).toHaveLength(64)
     expect(taps.every((tap) => tap.amplitude > 0.9)).toBe(true)
+  })
+})
+
+describe('tempo sync', () => {
+  const quarter = DIVISION_LABELS.indexOf('1/4')
+  const dottedEighth = DIVISION_LABELS.indexOf('1/8.')
+
+  test('a free line ignores the tempo entirely', () => {
+    const free = { ...defaults, sync: false }
+    expect(effectiveTimesMs(free, 90)).toEqual(
+      effectiveTimesMs(free, 174),
+    )
+    expect(effectiveTimesMs(free, 90).left).toBe(defaults.timeMsL)
+  })
+
+  test('a synced line takes its spacing from the tempo, not the free times', () => {
+    const synced = {
+      ...defaults,
+      sync: true,
+      divisionL: quarter,
+      divisionR: dottedEighth,
+      timeMsL: 12,
+      timeMsR: 12,
+    }
+    const times = effectiveTimesMs(synced, 120)
+    expect(times.left).toBeCloseTo(500, 6)
+    expect(times.right).toBeCloseTo(375, 6)
+    // Half the tempo, twice the spacing.
+    expect(effectiveTimesMs(synced, 60).left).toBeCloseTo(1000, 6)
+  })
+
+  /** The picture is the reason the times exist here at all: a synced delay must
+   *  redraw when the project tempo moves, not only when a control does. */
+  test('the echo picture follows the tempo while synced', () => {
+    const synced = { ...defaults, sync: true, mode: 'stereo' as const }
+    const fast = echoModel(synced, -60, 64, 160)
+    const slow = echoModel(synced, -60, 64, 80)
+    expect(slow.lastTime).toBeCloseTo(fast.lastTime * 2, 6)
+    expect(tapTimes(synced, 80).left).toBeCloseTo(
+      tapTimes(synced, 160).left * 2,
+      9,
+    )
+  })
+
+  test('mono still collapses both lanes onto the left division', () => {
+    const synced = {
+      ...defaults,
+      sync: true,
+      mode: 'mono' as const,
+      divisionL: quarter,
+      divisionR: dottedEighth,
+    }
+    const times = tapTimes(synced, 120)
+    expect(times.right).toBe(times.left)
+    expect(times.left).toBeCloseTo(0.5, 9)
   })
 })
 

@@ -1,10 +1,14 @@
 <script lang="ts">
   import type { EchoParams } from '../bridge'
   import { echoModel, envelopeAt, filterMagnitude, tapTimes } from '../model'
-  import { MODE_HINTS } from '../params'
+  import { DEFAULT_TEMPO_BPM, DIVISION_LABELS, MODE_HINTS } from '../params'
 
-  type Props = { params: EchoParams }
-  const { params }: Props = $props()
+  type Props = {
+    params: EchoParams
+    /** Transport tempo the synced tap times are derived from. */
+    tempoBpm?: number
+  }
+  const { params, tempoBpm = DEFAULT_TEMPO_BPM }: Props = $props()
 
   let canvas: HTMLCanvasElement | undefined = $state()
   let host: HTMLDivElement | undefined = $state()
@@ -19,8 +23,8 @@
   /** Number echo marks 1..N so the first hits read as a countable sequence. */
   const NUMBERED_PASSES = 4
 
-  const model = $derived(echoModel(params))
-  const times = $derived(tapTimes(params))
+  const model = $derived(echoModel(params, -60, 64, tempoBpm))
+  const times = $derived(tapTimes(params, tempoBpm))
 
   const windowSec = $derived.by(() => {
     const floor = 10 ** (WINDOW_FLOOR_DB / 20)
@@ -250,6 +254,7 @@
 
   $effect(() => {
     void params
+    void tempoBpm
     void windowSec
     void cssWidth
     void cssHeight
@@ -274,6 +279,17 @@
 
   const mono = $derived(params.mode === 'mono')
   const story = $derived(MODE_HINTS[params.mode])
+
+  /** Note name in front of a synced side's time, so the legend says *why* the
+   *  spacing is what it is. Empty while the line runs on free time. */
+  function note(division: number): string {
+    if (!params.sync) return ''
+    const index = Math.min(
+      Math.max(Math.round(division), 0),
+      DIVISION_LABELS.length - 1,
+    )
+    return `${DIVISION_LABELS[index]} · `
+  }
 </script>
 
 <div class="view" bind:this={host} class:frozen={params.freeze}>
@@ -289,7 +305,7 @@
         <span class="swatch left"></span>
         <div class="copy">
           <span class="key">{mono ? 'Delay' : 'Left'}</span>
-          <span class="val">{ms(times.left)}</span>
+          <span class="val">{note(params.divisionL)}{ms(times.left)}</span>
         </div>
       </div>
       {#if !mono}
@@ -297,7 +313,7 @@
           <span class="swatch right"></span>
           <div class="copy">
             <span class="key">Right</span>
-            <span class="val">{ms(times.right)}</span>
+            <span class="val">{note(params.divisionR)}{ms(times.right)}</span>
           </div>
         </div>
       {/if}

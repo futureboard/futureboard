@@ -9,7 +9,13 @@
  * against a torn-down instance can never land on its replacement.
  */
 
-import { MODES, type Mode } from './params'
+import {
+  DEFAULT_DIVISION_L,
+  DEFAULT_DIVISION_R,
+  DIVISION_BEATS,
+  MODES,
+  type Mode,
+} from './params'
 
 export const BRIDGE_PROTOCOL_VERSION = 1
 export const PLUGIN_ID = 'echospace'
@@ -28,6 +34,13 @@ export type EchoParams = {
   mix: number
   outputDb: number
   freeze: boolean
+  /** Delay times follow the host tempo and the divisions below. */
+  sync: boolean
+  /** Index into `DIVISION_LABELS`, used while `sync` is on. */
+  divisionL: number
+  divisionR: number
+  /** Both sides move together. */
+  link: boolean
 }
 
 type Binding = {
@@ -50,6 +63,22 @@ type InstanceRemovedMessage = {
   type: 'futureboard.instanceRemoved'
   protocolVersion: number
   instanceId: string
+}
+
+/**
+ * Low-rate (~1 Hz) host telemetry. Only `tempoBpm` is consumed here: a synced
+ * delay time is a note length, and the editor cannot turn that into the
+ * milliseconds it prints — or into the echo picture — without the tempo the
+ * DSP is actually running against.
+ */
+type HostStatusMessage = {
+  type: 'futureboard.hostStatus'
+  protocolVersion: number
+  instanceId: string
+  sampleRate: number
+  blockSize: number
+  latencySamples: number
+  tempoBpm: number
 }
 
 let binding: Binding | null = null
@@ -108,10 +137,21 @@ const NUMERIC_KEYS = [
   'outputDb',
 ] as const
 
+/** Clamp a division index out of a blob onto the table Rust indexes with. */
+function parseDivision(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(Math.max(Math.round(value), 0), DIVISION_BEATS.length - 1)
+}
+
 /**
  * Accept a host state blob only when every field is present and of the right
  * type. A partial blob is rejected whole rather than merged: a half-applied
  * state would show values the DSP does not have.
+ *
+ * The tempo-sync fields are the exception, and deliberately so: projects saved
+ * before EchoSpace had them carry no `sync`/`division*`/`link`, and Rust
+ * restores those blobs with the same defaults rather than rejecting them.
+ * Rejecting here would blank an editor over state the DSP accepted.
  */
 function parseParams(state: unknown): EchoParams | null {
   if (!state || typeof state !== 'object') return null
@@ -128,12 +168,19 @@ function parseParams(state: unknown): EchoParams | null {
     const value = params[key]
     if (typeof value !== 'number' || !Number.isFinite(value)) return null
   }
-  return params as unknown as EchoParams
+  return {
+    ...(params as unknown as EchoParams),
+    sync: params.sync === true,
+    link: params.link === true,
+    divisionL: parseDivision(params.divisionL, DEFAULT_DIVISION_L),
+    divisionR: parseDivision(params.divisionR, DEFAULT_DIVISION_R),
+  }
 }
 
 export function connectBridge(
   onParams: (params: EchoParams) => void,
   onConnection: (connected: boolean) => void,
+  onTempo?: (tempoBpm: number) => void,
 ) {
   post({
     type: 'futureboard.bridgeReady',
@@ -146,8 +193,17 @@ export function connectBridge(
     const message = event.data as
       | SelectInstanceMessage
       | InstanceRemovedMessage
+      | HostStatusMessage
       | undefined
     if (!message || typeof message !== 'object') return
+
+    if (message.type === 'futureboard.hostStatus') {
+      if (binding?.instanceId !== message.instanceId) return
+      if (typeof message.tempoBpm === 'number' && message.tempoBpm > 0) {
+        onTempo?.(message.tempoBpm)
+      }
+      return
+    }
 
     if (message.type === 'futureboard.selectInstance') {
       binding = {

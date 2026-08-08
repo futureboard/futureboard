@@ -822,8 +822,12 @@ impl PluginBridgeRuntime {
     }
 
     /// Region-header status for the footer: (sample_rate, block_frames,
-    /// latency_samples). `None` when no region is mapped.
-    pub fn builtin_host_status(&self, instance_id: &str) -> Option<(u32, u32, u32)> {
+    /// latency_samples, tempo_bpm). `None` when no region is mapped.
+    ///
+    /// The tempo comes from the same transport block the DSP is processing
+    /// against, so an editor that shows a musical time (EchoSpace's note
+    /// divisions) cannot print a length the delay line is not running at.
+    pub fn builtin_host_status(&self, instance_id: &str) -> Option<(u32, u32, u32, f64)> {
         use std::sync::atomic::Ordering;
         let region = self.shared_audio.get(instance_id)?;
         let bridge = region.bridge();
@@ -831,6 +835,7 @@ impl PluginBridgeRuntime {
             bridge.sample_rate.load(Ordering::Relaxed),
             bridge.max_block_size.load(Ordering::Relaxed),
             bridge.latency_samples.load(Ordering::Relaxed),
+            bridge.load_transport().tempo_bpm,
         ))
     }
 

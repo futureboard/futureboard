@@ -734,6 +734,21 @@ impl BuiltinHostProcessor {
         }
     }
 
+    /// Hand the block's transport tempo to the cores that derive a musical time
+    /// from it. Producer thread only, same exclusivity contract as
+    /// [`Self::process_block`].
+    ///
+    /// Only the tempo-synced delay reads it today, so the other variants fall
+    /// through without touching their DSP: this costs a discriminant test per
+    /// block, and inside EchoSpace a float compare that exits early unless the
+    /// tempo actually moved.
+    fn set_transport_tempo(&self, tempo_bpm: f32) {
+        // SAFETY: the dedicated producer thread is the sole DSP accessor.
+        if let BuiltinDsp::Echospace(dsp) = unsafe { &mut *self.dsp.get() } {
+            dsp.set_tempo_bpm(tempo_bpm);
+        }
+    }
+
     /// Capture one block into the analyser. Producer thread only. Cheap by
     /// construction — a mono sum into a preallocated ring, no transform.
     fn capture_spectrum(&self, left: &[f32], right: &[f32]) {
@@ -2037,8 +2052,11 @@ fn service_audio_bridge(
             .read_deinterleaved(&mut in_l[..frames], &mut in_r[..frames], frames);
     }
     // Analyser capture, before the DSP touches anything: the editor's spectrum
-    // overlay shows the signal arriving at the insert.
+    // overlay shows the signal arriving at the insert. The transport tempo the
+    // engine published for this block goes in at the same point, so a built-in
+    // that locks to the grid uses the real project tempo rather than a stub.
     if let BlockRuntime::Builtin(b) = runtime {
+        b.set_transport_tempo(bridge.load_transport().tempo_bpm as f32);
         b.capture_spectrum(&in_l[..frames], &in_r[..frames]);
     }
     let output_channels = match runtime {

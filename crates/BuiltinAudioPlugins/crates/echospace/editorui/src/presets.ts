@@ -7,7 +7,13 @@
  */
 
 import { postParam, type EchoParams } from './bridge'
-import { PARAMS, modeToWire, type ParamId } from './params'
+import {
+  DEFAULT_DIVISION_L,
+  DEFAULT_DIVISION_R,
+  PARAMS,
+  modeToWire,
+  type ParamId,
+} from './params'
 
 export const DEFAULT_PARAMS: EchoParams = {
   power: true,
@@ -22,6 +28,10 @@ export const DEFAULT_PARAMS: EchoParams = {
   mix: PARAMS.mix.default,
   outputDb: PARAMS.outputDb.default,
   freeze: false,
+  sync: false,
+  divisionL: DEFAULT_DIVISION_L,
+  divisionR: DEFAULT_DIVISION_R,
+  link: false,
 }
 
 export type FactoryPreset = {
@@ -49,6 +59,9 @@ export const FACTORY_PRESETS: FactoryPreset[] = [
     saturation: 18,
     mix: 24,
   }),
+  // The two note-named presets ride the project tempo: a "Quarter Ping" pinned
+  // to 500 ms is only a quarter note at 120 BPM. Their free times still hold
+  // the same figure at 120, so switching Sync off lands where the name says.
   preset('Quarter Ping', {
     mode: 'pingpong',
     timeMsL: 500,
@@ -59,6 +72,10 @@ export const FACTORY_PRESETS: FactoryPreset[] = [
     highCutHz: 10000,
     saturation: 6,
     mix: 26,
+    sync: true,
+    divisionL: 10,
+    divisionR: 10,
+    link: true,
   }),
   preset('Dotted Eighth', {
     mode: 'pingpong',
@@ -70,6 +87,9 @@ export const FACTORY_PRESETS: FactoryPreset[] = [
     highCutHz: 11000,
     saturation: 4,
     mix: 22,
+    sync: true,
+    divisionL: 9,
+    divisionR: 7,
   }),
   preset('Tape Echo', {
     mode: 'stereo',
@@ -125,7 +145,11 @@ export function paramsMatch(left: EchoParams, right: EchoParams) {
   if (
     left.power !== right.power ||
     left.freeze !== right.freeze ||
-    left.mode !== right.mode
+    left.mode !== right.mode ||
+    left.sync !== right.sync ||
+    left.link !== right.link ||
+    left.divisionL !== right.divisionL ||
+    left.divisionR !== right.divisionR
   ) {
     return false
   }
@@ -152,6 +176,14 @@ export function matchingPresetIndex(params: EchoParams) {
 export function postAllParams(params: EchoParams) {
   postParam('power', params.power ? 1 : 0)
   postParam('mode', modeToWire(params.mode))
+  // `link` leads the batch: while it is on, Rust mirrors a time or division
+  // edit onto the other side, so a preset that turns it *off* has to say so
+  // before its two sides arrive — otherwise the left value would be copied
+  // over the right on the way in.
+  postParam('link', params.link ? 1 : 0)
+  postParam('sync', params.sync ? 1 : 0)
+  postParam('divisionL', params.divisionL)
+  postParam('divisionR', params.divisionR)
   for (const id of NUMERIC_IDS) {
     postParam(id, params[id])
   }

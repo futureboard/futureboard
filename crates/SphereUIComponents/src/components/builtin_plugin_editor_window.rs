@@ -244,6 +244,9 @@ struct HostStatusMsg {
     sample_rate: u32,
     block_size: u32,
     latency_samples: u32,
+    /// Transport tempo the DSP is processing against, for editors that show a
+    /// musical time rather than milliseconds.
+    tempo_bpm: f64,
 }
 
 /// Native -> React: DAW transport state. Pushed on change only (and once when
@@ -545,9 +548,10 @@ pub type BuiltinMeterSource = std::sync::Arc<
     dyn Fn(&PluginInstanceKey) -> Option<SpherePluginHost::audio_bridge::BuiltinMeterFrame>,
 >;
 
-/// Polls (sample_rate, block_frames, latency_samples) from the region header.
+/// Polls (sample_rate, block_frames, latency_samples, tempo_bpm) from the
+/// region header.
 pub type BuiltinHostStatusSource =
-    std::sync::Arc<dyn Fn(&PluginInstanceKey) -> Option<(u32, u32, u32)>>;
+    std::sync::Arc<dyn Fn(&PluginInstanceKey) -> Option<(u32, u32, u32, f64)>>;
 
 /// Polls the latest analyser frame for an instance's shared region, as
 /// `(publish sequence, dB bins)`. UI thread, ~30 Hz.
@@ -591,6 +595,11 @@ impl BuiltinEditorHostOps {
 /// CEF pump interval. 8 ms keeps the editor responsive without spinning the UI
 /// thread; CEF coalesces its own work internally.
 const PUMP_INTERVAL: Duration = Duration::from_millis(8);
+
+/// Pump ticks between `futureboard.hostStatus` pushes — ~1 Hz at
+/// [`PUMP_INTERVAL`]. Sample rate, block size and tempo all change rarely
+/// enough that a footer reading them does not need a faster leg.
+const HOST_STATUS_TICKS: u32 = 128;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Status {
@@ -865,6 +874,10 @@ impl BuiltinPluginEditorWindow {
         // Sequences are per-region, so the new instance's current frame could
         // collide with the old one's and be suppressed as "unchanged".
         self.spectrum_seq = 0;
+        // Status lands on the *next* pump tick rather than up to a second later.
+        // An editor that reads the transport tempo (EchoSpace's note divisions)
+        // would otherwise open showing lengths for the wrong tempo.
+        self.telemetry_tick = HOST_STATUS_TICKS - 1;
         self.push_selected_instance();
         cx.notify();
     }
@@ -1399,9 +1412,10 @@ impl BuiltinPluginEditorWindow {
                 }
             }
         }
-        if self.telemetry_tick % 128 == 0 {
+        if self.telemetry_tick % HOST_STATUS_TICKS == 0 {
             if let Some(source) = self.host_ops.host_status_source.as_ref() {
-                if let Some((sample_rate, block_size, latency_samples)) = source(active) {
+                if let Some((sample_rate, block_size, latency_samples, tempo_bpm)) = source(active)
+                {
                     self.post_to_view(&HostStatusMsg {
                         r#type: "futureboard.hostStatus",
                         protocol_version: BRIDGE_PROTOCOL_VERSION,
@@ -1409,6 +1423,7 @@ impl BuiltinPluginEditorWindow {
                         sample_rate,
                         block_size,
                         latency_samples,
+                        tempo_bpm,
                     });
                 }
             }
