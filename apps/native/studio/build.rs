@@ -242,16 +242,24 @@ fn lib_matches(entry_name: &str, lib_name: &str) -> bool {
 /// inside the application's bridge module, so those comments become ordinary
 /// comments in the generated copies.
 fn stage_professional_sources() {
-    // The account endpoint and the license signing key are baked in via
-    // `option_env!`, from the build environment or the repo `.env`. Rebuild when
-    // either changes so a build never keeps stale config and never silently
-    // ships without it.
+    // The account endpoint, the activation endpoint, and the license signing key
+    // are baked in via `option_env!`, from the build environment or the repo
+    // `.env`. Rebuild when any of them changes so a build never keeps stale
+    // config and never silently ships without it.
     //
-    // The *activation* endpoint is deliberately not among them: it is a constant
-    // in `license.rs`, so no build flag can point licensing at another service.
+    // The activation endpoint used to be described here as a constant in
+    // `license.rs`. It is not — it is `option_env!("FUTUREBOARD_LICENSE_API_URL")`,
+    // and this script never supplied it. The only thing that ever did was an
+    // ambient `FUTUREBOARD_LICENSE_API_URL` export in a maintainer's shell, so
+    // builds on that machine worked while every build without it — CI, a fresh
+    // clone, another machine — silently produced a Professional binary whose
+    // Activate button is disabled ("Activation is not configured for this
+    // build"). Reading it from `.env` here removes that dependency on one
+    // developer's environment.
     println!("cargo:rerun-if-changed=../../../.env");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_PUBLIC_KEY");
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_AUTH_API_URL");
+    println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_API_URL");
     // The EULA is embedded (include_str!) from the staged copies below; rebuild
     // when the source text changes.
     println!("cargo:rerun-if-changed=../../../crates/ExclusiveEdition/assets/EULA.EN.txt");
@@ -355,6 +363,37 @@ fn bake_service_config() {
         println!("cargo:rustc-env=FUTUREBOARD_AUTH_API_URL={url}");
     }
 
+    // The activation service. Without it `license::activation_endpoint()` is
+    // `None`, the dialog disables Activate, and a paying customer is told
+    // "Activation is not configured for this build" — which is exactly what
+    // shipped before this was baked at all.
+    //
+    // A release build must not be pointed at a plaintext host: the license key
+    // is sent to this URL. `license.rs` enforces the same rule at runtime; this
+    // just refuses to bake a value that would be ignored there anyway.
+    match resolve("FUTUREBOARD_LICENSE_API_URL", "LICENSE_API_URL") {
+        Some(url) if is_acceptable_endpoint(&url) => {
+            println!("cargo:rustc-env=FUTUREBOARD_LICENSE_API_URL={url}");
+        }
+        Some(url) => {
+            println!(
+                "cargo:warning=ignoring LICENSE_API_URL {url:?}: activation requires https \
+                 (or a debug-only http://127.0.0.1 / http://localhost endpoint). \
+                 This build cannot activate a license."
+            );
+        }
+        None => {
+            println!(
+                "cargo:warning=LICENSE_API_URL is not set, so this Professional build \
+                 CANNOT ACTIVATE A LICENSE (the dialog will say \"Activation is not \
+                 configured for this build\"). Set FUTUREBOARD_LICENSE_API_URL or \
+                 LICENSE_API_URL in {} — for Futureboard's own service that is \
+                 https://avtlic.futureboard.studio/v1",
+                dotenv_path.display()
+            );
+        }
+    }
+
     let key = resolve_license_public_key(&dotenv);
     match key {
         Some(key) => {
@@ -376,6 +415,21 @@ fn bake_service_config() {
             );
         }
     }
+}
+
+/// Mirrors `license.rs::is_acceptable_endpoint`: TLS is mandatory, and only a
+/// debug build may talk to a plaintext loopback service. Kept in step with it
+/// so a value that bakes cleanly is one the runtime will actually accept.
+fn is_acceptable_endpoint(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    // `debug_assertions` here describes *this* build script, not the target
+    // profile, so also accept loopback when an explicit debug profile is being
+    // built — the runtime check is the authority either way.
+    let debug_profile = std::env::var("PROFILE").as_deref() == Ok("debug");
+    (cfg!(debug_assertions) || debug_profile)
+        && (url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost"))
 }
 
 /// Prefer a valid env override, otherwise a valid `.env` value. Invalid hex /
