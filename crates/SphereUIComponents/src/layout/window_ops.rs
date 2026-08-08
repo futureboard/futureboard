@@ -699,7 +699,11 @@ impl StudioLayout {
     /// unavailable and reconnecting the same hardware restores it exactly.
     /// Nothing is ever remapped onto a different device's channel.
     pub(crate) fn refresh_audio_device_inventory(&mut self, cx: &mut Context<Self>) {
-        crate::device_registry::scan_audio();
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            crate::device_registry::scan_audio_for_engine(engine);
+        } else {
+            crate::device_registry::scan_audio();
+        }
         let ports = crate::audio_connections::current_available_ports();
 
         let mutation = self.timeline.update(cx, |timeline, cx| {

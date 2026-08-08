@@ -166,20 +166,22 @@ fn to_entry(info: DirectAudio::types::JsAudioDeviceInfo) -> AudioDeviceEntry {
     }
 }
 
-/// Run a real audio device scan via the engine's cpal enumeration, replace the
-/// cache, bump the revision, and return the new revision.
-pub fn scan_audio() -> u64 {
-    use DirectAudio::device::{list_input_devices, list_output_devices};
-    let start = Instant::now();
-    let raw_in = list_input_devices();
-    let raw_out = list_output_devices();
-    let backend = raw_out
-        .first()
-        .or_else(|| raw_in.first())
-        .map(|d| d.backend.clone())
-        .unwrap_or_default();
-    let inputs: Vec<AudioDeviceEntry> = raw_in.into_iter().map(to_entry).collect();
-    let outputs: Vec<AudioDeviceEntry> = raw_out.into_iter().map(to_entry).collect();
+fn engine_entry(info: DirectAudio::EngineDeviceInfo) -> AudioDeviceEntry {
+    AudioDeviceEntry {
+        id: info.id,
+        name: info.name,
+        channels: info.channels,
+        default_sample_rate: info.default_sample_rate,
+        is_default: info.is_default,
+    }
+}
+
+fn commit_audio_scan(
+    inputs: Vec<AudioDeviceEntry>,
+    outputs: Vec<AudioDeviceEntry>,
+    backend: String,
+    start: Instant,
+) -> u64 {
     let default_input = inputs.iter().find(|d| d.is_default).map(|d| d.name.clone());
     let default_output = outputs
         .iter()
@@ -205,6 +207,44 @@ pub fn scan_audio() -> u64 {
         start.elapsed().as_secs_f32() * 1000.0
     );
     revision
+}
+
+/// Run a real audio device scan via the default cpal host, replace the cache,
+/// bump the revision, and return the new revision.
+pub fn scan_audio() -> u64 {
+    use DirectAudio::device::{list_input_devices, list_output_devices};
+    let start = Instant::now();
+    let raw_in = list_input_devices();
+    let raw_out = list_output_devices();
+    let backend = raw_out
+        .first()
+        .or_else(|| raw_in.first())
+        .map(|d| d.backend.clone())
+        .unwrap_or_default();
+    let inputs = raw_in.into_iter().map(to_entry).collect();
+    let outputs = raw_out.into_iter().map(to_entry).collect();
+    commit_audio_scan(inputs, outputs, backend, start)
+}
+
+/// Refresh the shared inventory from the engine's active backend. This is the
+/// authoritative path after opening or switching a device: unlike the generic
+/// cpal scan it includes backend-specific endpoints such as licensed ASIO
+/// drivers and their channel counts.
+pub fn scan_audio_for_engine(engine: &DirectAudio::AudioEngine) -> u64 {
+    let start = Instant::now();
+    let inputs = engine.list_input_devices();
+    let outputs = engine.list_output_devices();
+    let backend = outputs
+        .first()
+        .or_else(|| inputs.first())
+        .map(|device| device.backend.clone())
+        .unwrap_or_else(|| engine.config().backend.display_name().to_string());
+    commit_audio_scan(
+        inputs.into_iter().map(engine_entry).collect(),
+        outputs.into_iter().map(engine_entry).collect(),
+        backend,
+        start,
+    )
 }
 
 /// Cached audio snapshot. Lazily scans once if startup never did.

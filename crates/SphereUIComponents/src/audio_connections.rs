@@ -363,6 +363,24 @@ impl AvailablePorts {
             .map(|port| port.device_name.as_str())
     }
 
+    /// Resolve a persisted device selection, which is historically a display
+    /// name, to the stable id used by Audio Connections. Backend-specific
+    /// devices such as ASIO expose a registry id that intentionally differs
+    /// from the name shown in Audio Device Setup.
+    pub fn matching_device_id(
+        &self,
+        selected: &str,
+        direction: AudioConnectionDirection,
+    ) -> Option<&str> {
+        self.ports
+            .iter()
+            .find(|port| {
+                port.direction == direction
+                    && (port.device_id == selected || port.device_name == selected)
+            })
+            .map(|port| port.device_id.as_str())
+    }
+
     pub fn ports_for(
         &self,
         device_id: &str,
@@ -519,11 +537,14 @@ impl AudioConnectionRegistry {
         let mut registry = Self::new();
         let copy = |rows: &[crate::settings::DefaultAudioConnection],
                     direction: AudioConnectionDirection,
-                    device_id: &str,
+                    selected_device: &str,
                     registry: &mut Self| {
-            if device_id.trim().is_empty() {
+            if selected_device.trim().is_empty() {
                 return;
             }
+            let Some(device_id) = ports.matching_device_id(selected_device, direction) else {
+                return;
+            };
             let available = ports.ports_for(device_id, direction).len() as u32;
             let port_name = |index: u32| match direction {
                 AudioConnectionDirection::Input => format!("Input {}", index + 1),
@@ -1055,6 +1076,23 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].name, "Main Output 1-2");
         assert_eq!(outputs[0].status, AudioConnectionStatus::Active);
+    }
+
+    #[test]
+    fn default_connections_resolve_selected_device_name_to_stable_id() {
+        let ports = AvailablePorts::for_device("asio:{6f1c}", "Studio USB ASIO Driver", 2, 2);
+        let registry = AudioConnectionRegistry::from_default_template(
+            &crate::settings::DefaultAudioConnectionsSettings::default(),
+            &ports,
+            "Studio USB ASIO Driver",
+            "Studio USB ASIO Driver",
+        );
+
+        assert!(!registry.is_empty());
+        assert!(registry.all().iter().all(|connection| {
+            connection.device_id.as_deref() == Some("asio:{6f1c}")
+                && connection.status == AudioConnectionStatus::Active
+        }));
     }
 
     #[test]
@@ -1862,7 +1900,7 @@ impl AudioConnectionRegistry {
         &mut self,
         direction: AudioConnectionDirection,
         ports: &AvailablePorts,
-        device_id: &str,
+        selected_device: &str,
         referencing_tracks: &[String],
     ) -> ConnectionMutation {
         let removed: Vec<AudioConnectionId> = self
@@ -1873,6 +1911,9 @@ impl AudioConnectionRegistry {
         for id in &removed {
             self.remove(id);
         }
+        let device_id = ports
+            .matching_device_id(selected_device, direction)
+            .unwrap_or(selected_device);
         let template = Self::default_template(ports, device_id);
         let added: Vec<AudioConnection> = template
             .all()

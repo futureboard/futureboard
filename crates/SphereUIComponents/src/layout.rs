@@ -355,22 +355,26 @@ pub(crate) fn build_and_warm_audio_engine(
 
     engine.set_pdc_enabled(schema.playback.latency_compensation);
     engine.set_dropout_protection_mode(engine_dropout_mode(schema.playback.dropout_protection));
-    match engine.start() {
+    let stats = match engine.start() {
         Ok(()) => {
             let stats = engine.stats();
             eprintln!(
                 "[audio] stream warmed: backend={} sr={} buf={}",
                 stats.backend_name, stats.sample_rate, stats.buffer_size
             );
-            Ok((engine, stats))
+            stats
         }
         Err(error) => {
             let message = format!("warm-up failed; will retry on first Play: {error}");
             eprintln!("[audio] {message}");
-            let stats = engine.stats();
-            Ok((engine, stats))
+            engine.stats()
         }
-    }
+    };
+    // Audio Connections must see the same backend-scoped inventory as Audio
+    // Device Setup. The generic registry scan cannot enumerate Professional
+    // Edition ASIO drivers or their active-session channel counts.
+    crate::device_registry::scan_audio_for_engine(&engine);
+    Ok((engine, stats))
 }
 
 /// Per-track clip id for the temporary live-recording preview clip (one
