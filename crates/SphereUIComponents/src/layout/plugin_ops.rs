@@ -81,6 +81,13 @@ pub(crate) struct PluginEditorWindows {
     pub flush_attempts: std::collections::HashMap<String, u32>,
 }
 
+impl PluginEditorWindows {
+    fn discard_pending_open(&mut self, instance_id: &str) {
+        self.deferred_opens.retain(|(_, _, id)| id != instance_id);
+        self.flush_attempts.remove(instance_id);
+    }
+}
+
 /// `FUTUREBOARD_PLUGIN_EDITOR_DEBUG=1` gates the structured editor-lifecycle
 /// logs (open request / result / failure / timing). These fire only on state
 /// transitions — never from the paint loop or the audio callback.
@@ -2373,6 +2380,11 @@ impl StudioLayout {
         // 1. Editor window (native main-owned bridge shell + legacy GPUI) —
         //    disconnects the editor from the instance and releases its clone.
         self.close_insert_editor(track_id, insert_id, cx);
+        // An editor request may have been queued while the bridge instance was
+        // still loading. Instance removal is authoritative: discard every
+        // deferred/open-loop reference before a late PluginLoaded event can
+        // resurrect an editor for a slot that no longer exists.
+        self.plugin_editors.discard_pending_open(insert_id);
         eprintln!("[PluginUnload] editor_closed track={track_id} instance={insert_id}");
 
         // 2. External bridge host: real UnloadPlugin (host closes the editor,
@@ -2466,6 +2478,12 @@ impl StudioLayout {
             .keys()
             .chain(self.plugin_editors.bridge.keys())
             .any(|(_, id)| id == insert_id);
+        let editor_deferred = self
+            .plugin_editors
+            .deferred_opens
+            .iter()
+            .any(|(_, _, id)| id == insert_id)
+            || self.plugin_editors.flush_attempts.contains_key(insert_id);
         let bridge_loaded = self
             .plugin_editors
             .bridge_runtime
@@ -2475,7 +2493,7 @@ impl StudioLayout {
         eprintln!(
             "[PluginUnload] invariants track={track_id} instance={insert_id} \
              slot_present={slot_present} instrument_ptr={instrument_ptr} \
-             editor_open={editor_open} bridge_loaded={bridge_loaded}"
+             editor_open={editor_open} editor_deferred={editor_deferred} bridge_loaded={bridge_loaded}"
         );
         debug_assert!(!slot_present, "insert slot still present after removal");
         debug_assert!(
@@ -2483,6 +2501,7 @@ impl StudioLayout {
             "instrument pointer still set after removal"
         );
         debug_assert!(!editor_open, "editor still open after removal");
+        debug_assert!(!editor_deferred, "editor open still deferred after removal");
         debug_assert!(!bridge_loaded, "bridge instance still loaded after removal");
     }
 
@@ -2563,9 +2582,13 @@ impl StudioLayout {
         };
         for (track_id, insert_id) in stale {
             eprintln!(
-                "[PluginUnload] track_id={track_id} insert_id={insert_id} action=close_editor reason=stale_reference"
+                "[PluginUnload] track_id={track_id} insert_id={insert_id} action=teardown_instance reason=stale_reference"
             );
-            self.close_insert_editor(&track_id, &insert_id, cx);
+            // This path runs after a direct model mutation (track-header delete,
+            // undo/redo, or programmatic replacement), so closing only the
+            // window is insufficient. Remove the host instance and engine sink
+            // by the same stable instance id used by explicit remove flows.
+            self.teardown_insert_instance(&track_id, &insert_id, cx, "stale_reference");
         }
     }
 
@@ -4530,7 +4553,7 @@ fn log_bridge_paint_stats(session: &BridgeEditorSession) {
 mod tests {
     use super::{
         bridge_editor_is_open, bridge_editor_is_terminal, editor_reopen_action, BridgeEditorState,
-        EditorReopenAction,
+        EditorReopenAction, PluginEditorWindows,
     };
 
     // Every non-terminal, non-Loading state. These are "live or in flight" and
@@ -4544,6 +4567,26 @@ mod tests {
         BridgeEditorState::Visible,
         BridgeEditorState::Ready,
     ];
+
+    #[test]
+    fn removed_instance_discards_only_its_deferred_editor_open() {
+        let mut windows = PluginEditorWindows::default();
+        windows.deferred_opens = vec![
+            ("track-a".into(), 0, "instance-a".into()),
+            ("track-b".into(), 1, "instance-b".into()),
+        ];
+        windows.flush_attempts.insert("instance-a".into(), 3);
+        windows.flush_attempts.insert("instance-b".into(), 1);
+
+        windows.discard_pending_open("instance-a");
+
+        assert_eq!(
+            windows.deferred_opens,
+            vec![("track-b".into(), 1, "instance-b".into())]
+        );
+        assert!(!windows.flush_attempts.contains_key("instance-a"));
+        assert_eq!(windows.flush_attempts.get("instance-b"), Some(&1));
+    }
 
     #[test]
     fn terminal_states_drop_and_retry() {

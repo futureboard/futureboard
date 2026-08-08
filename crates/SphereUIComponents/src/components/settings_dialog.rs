@@ -132,12 +132,15 @@ impl SettingsTab {
             ("settings.nav.general", &[Self::General]),
             (
                 "settings.nav.studio",
-                &[Self::Audio, Self::Midi, Self::Recording, Self::Playback],
+                &[
+                    Self::Audio,
+                    Self::Midi,
+                    Self::Plugins,
+                    Self::Recording,
+                    Self::Playback,
+                ],
             ),
-            (
-                "settings.nav.workflow",
-                &[Self::Editing, Self::Plugins, Self::FilesMedia],
-            ),
+            ("settings.nav.workflow", &[Self::Editing, Self::FilesMedia]),
             (
                 "settings.nav.interface",
                 &[Self::Appearance, Self::Shortcuts],
@@ -165,6 +168,28 @@ impl SettingsTab {
             Self::Advanced,
             Self::About,
         ]
+    }
+}
+
+#[cfg(test)]
+mod settings_navigation_tests {
+    use super::SettingsTab;
+
+    #[test]
+    fn primary_device_and_plugin_categories_are_adjacent() {
+        let tabs: Vec<SettingsTab> = SettingsTab::nav_groups()
+            .iter()
+            .flat_map(|(_, tabs)| tabs.iter().copied())
+            .collect();
+        assert_eq!(
+            &tabs[..4],
+            &[
+                SettingsTab::General,
+                SettingsTab::Audio,
+                SettingsTab::Midi,
+                SettingsTab::Plugins,
+            ]
+        );
     }
 }
 
@@ -210,6 +235,10 @@ pub type AudioDeviceListsProvider =
 /// menu command opens. Owned by the studio window that opened Settings, since
 /// only it holds the live `KeymapManager`.
 pub type OnOpenKeyboardShortcuts = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
+/// Opens the existing external Plug-in Manager window. Settings remains an
+/// information-architecture entry point; scanning and scan status stay owned by
+/// the manager rather than being duplicated here.
+pub type OnOpenPluginManager = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 #[derive(Debug, Clone, Default)]
 pub struct SettingsAudioDeviceLists {
@@ -388,6 +417,8 @@ pub struct SettingsDialogCallbacks {
     /// Opens the real Keyboard Shortcuts editor window. `None` for surfaces
     /// that don't have a studio window to own the `KeymapManager`.
     pub on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
+    /// Opens the existing Plug-in Manager for Scan / Rescan and scan status.
+    pub on_open_plugin_manager: Option<OnOpenPluginManager>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2024,8 +2055,14 @@ fn build_settings_content(
             && (is_match("VST3 CLAP Formats", &["vst3", "clap", "plugins"])
                 || is_match("Paths Directories", &["paths", "directories", "folders"])))
     {
-        sections
-            .push(plugins_section(schema, callbacks.on_update_setting.clone()).into_any_element());
+        sections.push(
+            plugins_section(
+                schema,
+                callbacks.on_update_setting.clone(),
+                callbacks.on_open_plugin_manager.clone(),
+            )
+            .into_any_element(),
+        );
     }
 
     // Files & Media Panel
@@ -2293,6 +2330,7 @@ pub struct SettingsWindow {
     midi_refresh_in_flight: bool,
     on_update: OnSettingUpdate,
     on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
+    on_open_plugin_manager: Option<OnOpenPluginManager>,
     focus_handle: FocusHandle,
 }
 

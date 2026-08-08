@@ -47,7 +47,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::i18n::I18n;
 use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
-use crate::theme::Colors;
+use crate::theme::{typography, Colors};
 
 type RoutingComboToggleCb =
     Arc<dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>;
@@ -454,7 +454,7 @@ fn inspector_shell(active: bool, i18n: I18n) -> gpui::Div {
                         } else {
                             Colors::tab_text()
                         })
-                        .text_size(px(10.0))
+                        .text_size(px(typography::DENSE_LABEL))
                         .font_weight(gpui::FontWeight::BOLD)
                         .child(i18n.tr("panel.inspector")),
                 ),
@@ -600,7 +600,7 @@ fn inspector_header(
                 .py(px(2.0))
                 .rounded_sm()
                 .bg(Colors::with_alpha(accent, 0.14))
-                .text_size(px(9.0))
+                .text_size(px(typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::BOLD)
                 .text_color(Colors::with_alpha(accent, 0.92))
                 .child(badge),
@@ -649,7 +649,7 @@ fn toggle_badge(
         .rounded_sm()
         .bg(bg)
         .text_color(fg)
-        .text_size(px(9.5))
+        .text_size(px(typography::DENSE_LABEL))
         .font_weight(gpui::FontWeight::BOLD)
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.opacity(0.85))
@@ -1405,7 +1405,7 @@ fn format_chip(label: &'static str) -> impl IntoElement {
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .text_size(px(9.0))
+        .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(Colors::text_secondary())
         .child(label)
@@ -1565,7 +1565,7 @@ fn plugin_slot_row(
                 .child(
                     div()
                         .w(px(18.0))
-                        .text_size(px(10.0))
+                        .text_size(px(typography::DENSE_LABEL))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(Colors::text_faint())
                         .child(display_index.to_string()),
@@ -1787,7 +1787,7 @@ fn track_inspector(
                 } else {
                     Colors::with_alpha(Colors::surface_canvas(), 0.3)
                 })
-                .text_size(px(9.0))
+                .text_size(px(typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(if on {
                     Colors::accent_primary()
@@ -1825,7 +1825,7 @@ fn track_inspector(
                     .flex_col()
                     .items_end()
                     .min_w(px(48.0))
-                    .text_size(px(10.0))
+                    .text_size(px(typography::DENSE_LABEL))
                     .text_color(Colors::text_secondary())
                     .child({
                         let mut label = i18n.tr_vars(
@@ -1879,7 +1879,7 @@ fn track_inspector(
                 div()
                     .flex_shrink_0()
                     .min_w(px(40.0))
-                    .text_size(px(10.0))
+                    .text_size(px(typography::DENSE_LABEL))
                     .text_color(Colors::text_secondary())
                     .child(format_pan(i18n, track.pan)),
             )
@@ -2261,7 +2261,7 @@ fn stretch_field_block(label: impl Into<String>, control: impl IntoElement) -> i
         .py(px(2.0))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_muted())
                 .child(label.into()),
@@ -2279,7 +2279,7 @@ fn stretch_metric_row(label: impl Into<String>, value: impl Into<String>) -> imp
         .min_w(px(0.0))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .text_color(Colors::text_muted())
                 .child(label.into()),
         )
@@ -2390,7 +2390,7 @@ fn stretch_section_body(
         ))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_muted())
                 .child("Tempo"),
@@ -2522,7 +2522,7 @@ fn stretch_section_body(
                         .gap(px(3.0))
                         .child(
                             div()
-                                .text_size(px(9.5))
+                                .text_size(px(typography::DENSE_LABEL))
                                 .text_color(Colors::text_faint())
                                 .child("Alternatives"),
                         )
@@ -2605,7 +2605,7 @@ fn stretch_section_body(
         ))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_muted())
                 .child("Pitch"),
@@ -2690,7 +2690,7 @@ fn stretch_section_body(
                 .border_color(Colors::divider())
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(typography::DENSE_LABEL))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(Colors::text_muted())
                         .child("Result"),
@@ -3015,7 +3015,7 @@ fn clip_inspector(
                                     .py(px(2.0))
                                     .rounded_sm()
                                     .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
-                                    .text_size(px(9.0))
+                                    .text_size(px(typography::DENSE_CAPTION))
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(Colors::accent_primary())
                                     .child("Audio Clip"),

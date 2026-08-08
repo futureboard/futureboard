@@ -72,6 +72,11 @@ pub mod typography {
     pub const UI_MD: f32 = 13.0;
     /// Semibold section / panel titles.
     pub const UI_TITLE: f32 = 13.0;
+    /// Dense captions used only where 11 px cannot fit without increasing a
+    /// compact control's height (meter legends, narrow strip metadata).
+    pub const DENSE_CAPTION: f32 = 9.5;
+    /// Dense interactive labels in fixed-height mixer/inspector controls.
+    pub const DENSE_LABEL: f32 = 10.5;
     /// Native plugin editor wrapper titlebar (Pro-C 3, etc.).
     pub const PLUGIN_TITLE: f32 = 12.0;
     /// Default line-height ratio for single-line chrome text.

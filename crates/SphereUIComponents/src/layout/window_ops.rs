@@ -1322,6 +1322,15 @@ impl StudioLayout {
                 this.open_keymap_window(owner_bounds, cx);
             });
         }));
+        let plugin_manager_owner = cx.entity().clone();
+        let on_open_plugin_manager: Option<
+            crate::components::settings_dialog::OnOpenPluginManager,
+        > = Some(Arc::new(move |window, cx| {
+            let owner_bounds = Some(window.bounds());
+            let _ = plugin_manager_owner.update(cx, |this, cx| {
+                this.open_plugin_manager_external_window(owner_bounds, cx);
+            });
+        }));
 
         let engine_for_latency = self.audio_bridge.engine.clone();
         let deferred_rate = self.audio_bridge.sample_rate_deferred_target.clone();
@@ -1376,6 +1385,7 @@ impl StudioLayout {
             input_test_level,
             on_update,
             on_open_keyboard_shortcuts,
+            on_open_plugin_manager,
             cx,
         ) {
             Ok(handle) => self.external_windows.settings = Some(handle),

@@ -15,7 +15,7 @@ use crate::components::settings_layout::{
     settings_value_readout, SETTINGS_LABEL_WIDTH, SETTINGS_ROW_GAP,
 };
 use crate::overlay::{form_combo_trigger_bounds, OverlayAnchor, COMBO_TRIGGER_HEIGHT};
-use crate::theme::Colors;
+use crate::theme::{typography, Colors};
 
 pub use crate::components::box_list_view::{
     box_list_empty_state, box_list_group_label, box_list_icon_button, box_list_item,
@@ -48,7 +48,7 @@ pub fn settings_restart_label(label: impl Into<String>, restart_required: bool) 
 pub fn settings_restart_footer() -> impl IntoElement {
     div()
         .pt(px(8.0))
-        .text_size(px(10.0))
+        .text_size(px(typography::UI_XS))
         .text_color(Colors::text_faint())
         .child(RESTART_FOOTER_TEXT)
 }

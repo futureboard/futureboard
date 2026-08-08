@@ -471,14 +471,14 @@ fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoE
                 .gap(px(8.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(theme::typography::UI_XS))
                         .text_color(Colors::text_secondary())
                         .truncate()
                         .child(label),
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(theme::typography::UI_XS))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::accent_primary())
                         .child(format!("{pct}%")),
@@ -518,7 +518,7 @@ fn status_badge(label: impl Into<String>, ready: bool) -> impl IntoElement {
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(bg)
-        .text_size(px(10.0))
+        .text_size(px(theme::typography::UI_XS))
         .font_weight(if ready {
             gpui::FontWeight::SEMIBOLD
         } else {
@@ -564,7 +564,7 @@ fn sidebar_section(label: impl Into<String>, children: Vec<impl IntoElement>) ->
                 .px(px(12.0))
                 .pt(px(8.0))
                 .pb(px(2.0))
-                .text_size(px(9.0))
+                .text_size(px(theme::typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_faint())
                 .child(label),
@@ -612,7 +612,7 @@ fn sidebar_item(
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(theme::typography::UI_XS))
                 .text_color(if active {
                     Colors::accent_primary()
                 } else {
@@ -640,7 +640,7 @@ fn col_header(
         .gap(px(4.0))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |_, window, cx| on_sort(&key, window, cx))
-        .text_size(px(10.0))
+        .text_size(px(theme::typography::UI_XS))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(if active {
             Colors::accent_primary()
@@ -648,14 +648,18 @@ fn col_header(
             Colors::text_faint()
         })
         .child(label)
-        .child(div().text_size(px(9.0)).child(if active {
-            match state.sort_dir {
-                SortDir::Asc => "▲",
-                SortDir::Desc => "▼",
-            }
-        } else {
-            "⇅"
-        }))
+        .child(
+            div()
+                .text_size(px(theme::typography::DENSE_CAPTION))
+                .child(if active {
+                    match state.sort_dir {
+                        SortDir::Asc => "▲",
+                        SortDir::Desc => "▼",
+                    }
+                } else {
+                    "⇅"
+                }),
+        )
 }
 
 fn details_panel(
@@ -803,7 +807,7 @@ fn details_panel(
                 .when(!editor_enabled, |this| {
                     this.child(
                         div()
-                            .text_size(px(9.5))
+                            .text_size(px(theme::typography::DENSE_LABEL))
                             .text_color(Colors::text_faint())
                             .child(i18n.tr("plugin-manager.editor.hint")),
                     )
@@ -819,7 +823,7 @@ fn detail_row(label: impl Into<String>, value: &str) -> impl IntoElement {
         .gap(px(2.0))
         .child(
             div()
-                .text_size(px(9.0))
+                .text_size(px(theme::typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_faint())
                 .child(label),
@@ -1300,7 +1304,7 @@ pub fn plugin_manager_panel(
                                                                     vec![div()
                                                                         .px(px(10.0))
                                                                         .py(px(4.0))
-                                                                        .text_size(px(10.0))
+                                                                        .text_size(px(theme::typography::UI_XS))
                                                                         .text_color(Colors::text_faint())
                                                                         .child(i18n.tr("plugin-manager.scan-locations.empty"))
                                                                         .into_any_element()]
@@ -1325,7 +1329,7 @@ pub fn plugin_manager_panel(
                                                                                 ))
                                                                                 .child(
                                                                                     div()
-                                                                                        .text_size(px(10.0))
+                                                                                        .text_size(px(theme::typography::UI_XS))
                                                                                         .text_color(Colors::text_faint())
                                                                                         .truncate()
                                                                                         .child(path.display().to_string()),
@@ -1411,7 +1415,7 @@ pub fn plugin_manager_panel(
                                         .child(
                                             div()
                                                 .w(px(88.0))
-                                                .text_size(px(10.0))
+                                                .text_size(px(theme::typography::UI_XS))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .text_color(Colors::text_faint())
                                                 .child(i18n.tr("plugin-manager.column.status")),
@@ -1454,7 +1458,7 @@ pub fn plugin_manager_panel(
                                 .flex_row()
                                 .items_center()
                                 .gap(px(8.0))
-                                .text_size(px(10.0))
+                                .text_size(px(theme::typography::UI_XS))
                                 .text_color(Colors::text_faint())
                                 .child(state.status_text.clone())
                                 .when(state.failed_count > 0, |el| {
@@ -1481,7 +1485,7 @@ pub fn plugin_manager_panel(
                                 .flex_row()
                                 .items_center()
                                 .gap(px(10.0))
-                                .text_size(px(10.0))
+                                .text_size(px(theme::typography::UI_XS))
                                 .text_color(Colors::text_faint())
                                 .child(
                                     div()

@@ -1,6 +1,6 @@
 [package]
 name = "futureboard_native"
-version = "2026.8.8-beta1"
+version = "2026.8.9-beta1"
 edition = "2021"
 build = "build.rs"
 license.workspace = true

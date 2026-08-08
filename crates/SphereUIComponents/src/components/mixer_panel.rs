@@ -47,7 +47,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::i18n::I18n;
-use crate::theme::Colors;
+use crate::theme::{typography, Colors};
 
 mod callbacks;
 mod drag;
@@ -99,7 +99,7 @@ pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
                 .child(i18n.tr("mixer.title")),
@@ -114,7 +114,7 @@ pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
                 .bg(Colors::button_bg())
                 .border(px(1.0))
                 .border_color(Colors::border_default())
-                .text_size(px(9.0))
+                .text_size(px(typography::DENSE_CAPTION))
                 .text_color(Colors::text_secondary())
                 .child(format!("{} ch", track_count)),
         )
@@ -245,7 +245,7 @@ fn msri_button(
         .h(px(16.0))
         .flex_1()
         .rounded_sm()
-        .text_size(px(9.0))
+        .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::BOLD)
         .id(id)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -400,7 +400,7 @@ fn strip_header(
                         .min_w(px(0.0))
                         .flex_1()
                         .truncate()
-                        .text_size(px(10.0))
+                        .text_size(px(typography::DENSE_LABEL))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child(track.name.clone()),
@@ -678,7 +678,7 @@ fn insert_chip(
         .h(px(18.0))
         .rounded_sm()
         .bg(bg)
-        .text_size(px(9.0))
+        .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -723,7 +723,7 @@ fn insert_chip(
                     "insert-remove-{}",
                     remove_pair.1
                 )))
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .text_color(Colors::text_muted())
                 .px(px(2.0))
                 .cursor(gpui::CursorStyle::PointingHand)
@@ -797,7 +797,7 @@ fn add_insert_button(
         .border_dashed()
         .border_color(Colors::border_default())
         .bg(Colors::button_bg())
-        .text_size(px(9.0))
+        .text_size(px(typography::DENSE_CAPTION))
         .text_color(Colors::text_muted())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
@@ -1048,7 +1048,7 @@ fn send_chip(
         .h(px(26.0))
         .rounded_sm()
         .bg(bg)
-        .text_size(px(8.5))
+        .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -1101,7 +1101,7 @@ fn send_chip(
         .child(
             div()
                 .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .text_color(Colors::text_muted())
                 .px(px(2.0))
                 .child("×")
@@ -1161,7 +1161,7 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
         .border_dashed()
         .border_color(Colors::border_default())
         .bg(Colors::button_bg())
-        .text_size(px(9.0))
+        .text_size(px(typography::DENSE_CAPTION))
         .text_color(Colors::text_muted())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
@@ -1434,7 +1434,7 @@ fn strip_footer(name: &str) -> impl IntoElement {
                 .w_full()
                 .min_w(px(0.0))
                 .truncate()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_secondary())
                 .child(name.to_string()),
@@ -1503,7 +1503,7 @@ fn output_button(
                     div()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(8.5))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_muted())
                         .child(label),
@@ -2070,7 +2070,7 @@ impl gpui::Render for StripTooltip {
             .bg(Colors::surface_raised())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
-            .text_size(px(10.0))
+            .text_size(px(typography::DENSE_LABEL))
             .text_color(Colors::text_secondary())
             .child(self.0.clone())
     }
@@ -2091,7 +2091,7 @@ fn strip_caption(text: String) -> impl IntoElement {
         .items_center()
         .justify_center()
         .w_full()
-        .text_size(px(8.5))
+        .text_size(px(typography::DENSE_CAPTION))
         .line_height(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .truncate()
@@ -2161,7 +2161,7 @@ fn control_room_selector(
                         .flex_1()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(8.5))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .line_height(px(11.0))
                         .text_color(Colors::text_primary())
                         .child(value),
@@ -2240,7 +2240,7 @@ fn control_room_output_button(
                     div()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(8.5))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .line_height(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_muted())
@@ -2300,7 +2300,7 @@ fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> i
                         .w_full()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(10.0))
+                        .text_size(px(typography::DENSE_LABEL))
                         .line_height(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())

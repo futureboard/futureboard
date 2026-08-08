@@ -5,7 +5,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window,
 };
 
-use crate::theme::Colors;
+use crate::theme::{typography, Colors};
 
 pub const SETTINGS_WINDOW_WIDTH: f32 = 880.0;
 pub const SETTINGS_WINDOW_HEIGHT: f32 = 600.0;
@@ -26,7 +26,7 @@ pub fn settings_nav_group_header(title: impl Into<String>) -> impl IntoElement {
         .pt(px(12.0))
         .pb(px(5.0))
         .px(px(12.0))
-        .text_size(px(8.5))
+        .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_faint())
         .child(title.to_uppercase())
@@ -57,7 +57,7 @@ pub fn settings_nav_item(
         } else {
             gpui::transparent_black().into()
         })
-        .text_size(px(10.5))
+        .text_size(px(typography::DENSE_LABEL))
         .font_weight(if active {
             gpui::FontWeight::SEMIBOLD
         } else {
@@ -112,7 +112,7 @@ pub fn settings_page_header(
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::UI_XS))
                 .text_color(Colors::text_muted())
                 .child(description),
         )
@@ -138,7 +138,7 @@ pub fn settings_section_title(title: impl Into<String>) -> impl IntoElement {
         .pb(px(4.0))
         .border_b(px(1.0))
         .border_color(Colors::divider())
-        .text_size(px(10.5))
+        .text_size(px(typography::UI_XS))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_primary())
         .child(title)
@@ -147,7 +147,7 @@ pub fn settings_section_title(title: impl Into<String>) -> impl IntoElement {
 pub fn settings_section_hint(text: impl Into<String>) -> impl IntoElement {
     let text = text.into();
     div()
-        .text_size(px(9.5))
+        .text_size(px(typography::DENSE_LABEL))
         .text_color(Colors::text_faint())
         .child(text)
 }
@@ -157,7 +157,7 @@ pub fn settings_field_label(label: impl Into<String>) -> impl IntoElement {
     div()
         .w(px(SETTINGS_LABEL_WIDTH))
         .flex_shrink_0()
-        .text_size(px(10.0))
+        .text_size(px(typography::UI_XS))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(Colors::text_muted())
         .child(label)
@@ -197,14 +197,14 @@ pub fn settings_daw_row_with_description(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(typography::UI_XS))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(Colors::text_muted())
                         .child(label),
                 )
                 .children(description.map(|d| {
                     div()
-                        .text_size(px(9.0))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .text_color(Colors::text_faint())
                         .child(d)
                 })),
@@ -214,7 +214,7 @@ pub fn settings_daw_row_with_description(
 
 pub fn settings_value_readout(text: impl Into<String>) -> impl IntoElement {
     div()
-        .text_size(px(10.0))
+        .text_size(px(typography::UI_XS))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(Colors::text_secondary())
         .child(text.into())
@@ -230,7 +230,7 @@ pub fn settings_status_badge(label: impl Into<String>, ok: bool) -> impl IntoEle
         } else {
             Colors::surface_control_hover()
         })
-        .text_size(px(9.5))
+        .text_size(px(typography::DENSE_LABEL))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(if ok {
             Colors::status_success()

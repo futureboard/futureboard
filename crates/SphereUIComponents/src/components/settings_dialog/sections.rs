@@ -49,7 +49,7 @@ pub(crate) fn settings_path_list(paths: &[String]) -> impl IntoElement {
                         .flex()
                         .items_center()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(px(theme::typography::DENSE_LABEL))
                         .text_color(Colors::text_secondary())
                         .child(path_string.clone()),
                 )
@@ -138,7 +138,7 @@ pub(crate) fn settings_labeled_checkbox(
         .child(fb_checkbox(id, checked, on_click))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(theme::typography::UI_XS))
                 .text_color(Colors::text_muted())
                 .child(label),
         )
@@ -167,6 +167,7 @@ pub(crate) fn selected_locale_label(i18n: I18n, language_code: &str) -> String {
 pub(crate) fn plugins_section(
     schema: &SettingsSchema,
     on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+    on_open_plugin_manager: Option<OnOpenPluginManager>,
 ) -> impl IntoElement {
     let vst3_enabled = schema.plugins.vst3.enabled;
     let clap_enabled = schema.plugins.clap.enabled;
@@ -224,9 +225,23 @@ pub(crate) fn plugins_section(
             "CLAP Folders",
             settings_path_list(&schema.plugins.clap.paths),
         ))
+        .child(settings_row("Scan / Rescan", {
+            let open = on_open_plugin_manager.clone();
+            fb_button(
+                "settings-open-plugin-manager",
+                "Open Plug-in Manager…",
+                FbButtonKind::Primary,
+                open.is_some(),
+                move |_, window, cx| {
+                    if let Some(open) = open.as_ref() {
+                        open(window, cx);
+                    }
+                },
+            )
+        }))
         .child(settings_row(
-            "Failed Plugins",
-            settings_readout(format!("{failed_count} quarantined")),
+            "Scan Status",
+            settings_readout(format!("{failed_count} failed or ignored")),
         ))
 }
 
