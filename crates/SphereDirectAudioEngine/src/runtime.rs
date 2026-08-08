@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use crate::audio_graph::{plan_runtime_audio_graph, GraphValidationError, RuntimeAudioGraph};
 use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
-use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
+use crate::latency_graph::{
+    plan_runtime_latency_graph, recompute_runtime_latency_graph, resolve_latency_routing_indices,
+    RuntimeLatencyGraph,
+};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
 use sphere_soundfont_player::{
@@ -38,6 +41,17 @@ pub fn midi_engine_debug_enabled() -> bool {
     *FLAG.get_or_init(|| {
         std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
             || std::env::var_os("FUTUREBOARD_MIDI_ENGINE_DEBUG").is_some()
+    })
+}
+
+/// `FUTUREBOARD_PDC_DEBUG=1` (or `FUTUREBOARD_ROUTING_DEBUG=1`) enables the
+/// latency-refresh traces. Cached on first read: the refresh runs per block on
+/// the audio thread, and `std::env::var_os` there takes the environment lock.
+pub fn pdc_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_PDC_DEBUG").is_some()
+            || std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some()
     })
 }
 
@@ -1197,19 +1211,11 @@ impl RuntimeProject {
             self.monitor.source_track_index = index;
             self.monitor.source_stage = stage.filter(|_| index.is_some());
         }
+        // Main-output and send-return targets. Shared with latency planning,
+        // which routes on these indices, so both see one rule for which id means
+        // "straight to master" and which resolves to a track.
+        resolve_latency_routing_indices(&mut self.tracks);
         for i in 0..self.tracks.len() {
-            let out_ix = self.tracks[i]
-                .output_track_id
-                .as_deref()
-                .filter(|id| !crate::engine::is_master_output(id))
-                .and_then(|id| track_indices.get(id).copied());
-            self.tracks[i].output_track_index = out_ix;
-            for s in 0..self.tracks[i].sends.len() {
-                let target_ix = track_indices
-                    .get(&self.tracks[i].sends[s].return_track_id)
-                    .copied();
-                self.tracks[i].sends[s].return_track_index = target_ix;
-            }
             // Multi-out (Slice 1): resolve each bridged instrument insert's child
             // "Out Ch" route destination track. Almost always empty.
             for n in 0..self.tracks[i].inserts.len() {
@@ -1358,14 +1364,33 @@ impl RuntimeProject {
             }
         }
 
-        self.latency_graph =
-            plan_runtime_latency_graph(&self.tracks, &self.audio_graph, self.pdc_enabled);
-        self.ensure_pdc_delay_capacity();
+        self.plan_latency_and_pdc();
         self.reset_pdc_delay_lines();
     }
 
+    /// Plan latency and size the PDC rings on the control thread.
+    ///
+    /// `build` runs this as part of constructing a project; anything that
+    /// assembles a `RuntimeProject` field by field has to run it before the
+    /// audio thread can refresh the plan, since
+    /// [`Self::refresh_runtime_latency_graph`] rewrites the plan in place and
+    /// takes the ring capacity as already reserved.
+    pub fn plan_latency_and_pdc(&mut self) {
+        self.latency_graph =
+            plan_runtime_latency_graph(&mut self.tracks, &self.audio_graph, self.pdc_enabled);
+        self.ensure_pdc_delay_capacity();
+    }
+
+    /// Latency the track's own strip contributes, observed from the live
+    /// processors (bridged inserts add the one-block handshake on top of what
+    /// the host reports).
+    ///
+    /// Reads nothing but `track`, so the refresh path can call it while holding
+    /// a mutable borrow of `self.tracks` — that is what lets the observed values
+    /// be written straight back into each track instead of through a scratch
+    /// `Vec` allocated on the audio thread.
     #[inline]
-    fn track_insert_latency_samples(&self, track: &RuntimeTrack, bridge_block_frames: u32) -> u32 {
+    fn track_insert_latency_samples(track: &RuntimeTrack, bridge_block_frames: u32) -> u32 {
         // The built-in Soundfont Player sits ahead of the inserts, so its
         // decimation delay is part of the track's path either way.
         let instrument = track
@@ -1396,29 +1421,76 @@ impl RuntimeProject {
         samples
     }
 
-    fn ensure_pdc_delay_capacity(&mut self) {
-        let pdc_buffer_frames = self.latency_graph.max_path_latency_samples.max(1) as usize
-            + DEFAULT_AUDIO_BLOCK_CAPACITY;
-        for track in &mut self.tracks {
-            let old_len = track.pdc_delay_l.len();
-            if old_len < pdc_buffer_frames {
-                // Growing the ring invalidates the write cursor — reset so we
-                // never read uninitialized slots. Same-size refreshes (common
-                // when bridge latency reports tick) must leave the cursor alone
-                // or mid-playback compensation clicks.
-                track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
-                track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
+    /// Ring length one track needs to serve the planned compensation.
+    #[inline]
+    fn pdc_buffer_frames(max_path_latency_samples: u32) -> usize {
+        max_path_latency_samples.max(1) as usize + DEFAULT_AUDIO_BLOCK_CAPACITY
+    }
+
+    /// Fit one track's rings to `frames`. Allocates only when `frames` exceeds
+    /// the vectors' capacity, so callers that have checked capacity first can
+    /// use it on the audio thread.
+    fn fit_track_pdc_len(track: &mut RuntimeTrack, frames: usize) {
+        let old_len = track.pdc_delay_l.len();
+        if old_len < frames {
+            // Growing the ring invalidates the write cursor — reset so we
+            // never read uninitialized slots. Same-size refreshes (common
+            // when bridge latency reports tick) must leave the cursor alone
+            // or mid-playback compensation clicks.
+            track.pdc_delay_l.resize(frames, 0.0);
+            track.pdc_delay_r.resize(frames, 0.0);
+            track.pdc_write_pos = 0;
+        } else if old_len > frames {
+            track.pdc_delay_l.truncate(frames);
+            track.pdc_delay_r.truncate(frames);
+            if frames > 0 {
+                track.pdc_write_pos %= frames;
+            } else {
                 track.pdc_write_pos = 0;
-            } else if old_len > pdc_buffer_frames {
-                track.pdc_delay_l.truncate(pdc_buffer_frames);
-                track.pdc_delay_r.truncate(pdc_buffer_frames);
-                if pdc_buffer_frames > 0 {
-                    track.pdc_write_pos %= pdc_buffer_frames;
-                } else {
-                    track.pdc_write_pos = 0;
-                }
             }
         }
+    }
+
+    /// Control-thread PDC ring sizing. Allocates.
+    ///
+    /// Capacity is reserved to the next power of two above what the plan needs
+    /// while the length stays exact. Later growth — a bridged plugin reporting
+    /// more latency mid-session — is then a length change inside memory this
+    /// thread already reserved, which is what lets
+    /// [`Self::fit_pdc_delay_capacity_realtime`] run without an allocator.
+    fn ensure_pdc_delay_capacity(&mut self) {
+        let frames = Self::pdc_buffer_frames(self.latency_graph.max_path_latency_samples);
+        let reserved = frames.next_power_of_two();
+        for track in &mut self.tracks {
+            let extra_l = reserved.saturating_sub(track.pdc_delay_l.len());
+            let extra_r = reserved.saturating_sub(track.pdc_delay_r.len());
+            track.pdc_delay_l.reserve_exact(extra_l);
+            track.pdc_delay_r.reserve_exact(extra_r);
+            Self::fit_track_pdc_len(track, frames);
+        }
+    }
+
+    /// Realtime PDC ring sizing: fits the rings to a freshly recomputed plan
+    /// without ever reaching the allocator.
+    ///
+    /// Returns `false` when the plan now needs more than the capacity the
+    /// control thread reserved. The rings are then left as they are instead of
+    /// grown; `apply_pdc_delay_block` passes a track whose ring cannot hold its
+    /// delay through undelayed, so the cost is a track that is briefly
+    /// uncompensated rather than an allocation inside the audio callback. The
+    /// next graph swap reserves the larger buffer on the control thread.
+    fn fit_pdc_delay_capacity_realtime(&mut self) -> bool {
+        let frames = Self::pdc_buffer_frames(self.latency_graph.max_path_latency_samples);
+        let fits = self.tracks.iter().all(|track| {
+            frames <= track.pdc_delay_l.capacity() && frames <= track.pdc_delay_r.capacity()
+        });
+        if !fits {
+            return false;
+        }
+        for track in &mut self.tracks {
+            Self::fit_track_pdc_len(track, frames);
+        }
+        true
     }
 
     /// Clear every track's PDC delay-line ring and rewind its write cursor.
@@ -1474,10 +1546,22 @@ impl RuntimeProject {
         }
     }
 
-    /// Refresh PDC planning when runtime-only bridge latency changes. The
-    /// steady-state path scans existing tracks/inserts without allocation; graph
-    /// rebuild + delay-line resize only happens when an observed latency differs
-    /// from the active plan.
+    /// Refresh PDC planning when runtime-only bridge latency changes.
+    ///
+    /// Runs per block from the audio callback, so both halves are realtime-safe.
+    /// The steady-state half scans a bounded slice of tracks and only reads
+    /// atomics. The recompute half — reached whenever an observed latency differs
+    /// from the active plan — rewrites the existing plan in place through
+    /// [`recompute_runtime_latency_graph`] and refits the delay lines inside the
+    /// capacity the control thread reserved.
+    ///
+    /// It used to rebuild instead: a `Vec` of observed values, a fresh plan
+    /// behind `HashMap<String, usize>` with a cloned id per track, a delay-line
+    /// resize, and two `std::env::var_os` calls — every one of them on the audio
+    /// thread. Plugins that report a fixed latency never reached it, but a
+    /// bridged plugin whose reported latency tracks something live (a network
+    /// jitter buffer, say) re-entered it as often as its latency moved, and every
+    /// visit was an allocation and an environment lock inside the callback.
     pub fn refresh_runtime_latency_graph(&mut self, bridge_block_frames: u32) -> bool {
         const TRACKS_PER_CALLBACK: usize = 64;
         let track_count = self.tracks.len();
@@ -1490,8 +1574,8 @@ impl RuntimeProject {
         let mut scanned = 0usize;
         for offset in 0..scan_count {
             let idx = (scan_start + offset) % track_count;
-            let track = &self.tracks[idx];
-            let observed = self.track_insert_latency_samples(track, bridge_block_frames);
+            let observed =
+                Self::track_insert_latency_samples(&self.tracks[idx], bridge_block_frames);
             changed = self
                 .latency_graph
                 .track_plugin_latency
@@ -1509,21 +1593,26 @@ impl RuntimeProject {
             return false;
         }
 
-        let observed: Vec<u32> = self
-            .tracks
-            .iter()
-            .map(|track| self.track_insert_latency_samples(track, bridge_block_frames))
-            .collect();
-        for (track, samples) in self.tracks.iter_mut().zip(observed) {
-            track.plugin_latency_samples = samples;
+        for track in &mut self.tracks {
+            track.plugin_latency_samples =
+                Self::track_insert_latency_samples(track, bridge_block_frames);
         }
-        self.latency_graph =
-            plan_runtime_latency_graph(&self.tracks, &self.audio_graph, self.pdc_enabled);
-        self.ensure_pdc_delay_capacity();
+        recompute_runtime_latency_graph(
+            &mut self.latency_graph,
+            &self.tracks,
+            &self.audio_graph,
+            self.pdc_enabled,
+        );
+        let refitted = self.fit_pdc_delay_capacity_realtime();
 
-        if std::env::var_os("FUTUREBOARD_PDC_DEBUG").is_some()
-            || std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some()
-        {
+        if pdc_debug_enabled() {
+            if !refitted {
+                eprintln!(
+                    "[pdc] delay-line capacity short for max_path={} — tracks stay uncompensated \
+                     until the next graph swap",
+                    self.latency_graph.max_path_latency_samples
+                );
+            }
             eprintln!(
                 "[pdc] refreshed max_path={} pdc_enabled={}",
                 self.latency_graph.max_path_latency_samples, self.pdc_enabled
@@ -2036,16 +2125,7 @@ impl RuntimeProject {
 
         let pdc_active = pdc_enabled
             && !std::env::var_os("FUTUREBOARD_PDC").is_some_and(|v| v == "0" || v == "false");
-        let latency_graph = plan_runtime_latency_graph(&tracks, &audio_graph, pdc_active);
-
-        let pdc_buffer_frames =
-            latency_graph.max_path_latency_samples.max(1) as usize + DEFAULT_AUDIO_BLOCK_CAPACITY;
-        for (idx, track) in tracks.iter_mut().enumerate() {
-            track.pdc_delay_l.resize(pdc_buffer_frames, 0.0);
-            track.pdc_delay_r.resize(pdc_buffer_frames, 0.0);
-            track.pdc_write_pos = 0;
-            let _ = idx;
-        }
+        let latency_graph = plan_runtime_latency_graph(&mut tracks, &audio_graph, pdc_active);
 
         if std::env::var_os("FUTUREBOARD_ROUTING_DEBUG").is_some() {
             eprintln!(
@@ -2098,6 +2178,11 @@ impl RuntimeProject {
         // Resolve cross-entity indices once, on this worker thread, so the
         // audio callback never does an id lookup per block.
         project.resolve_indices();
+        // Size the PDC rings here rather than inline above, so a freshly built
+        // project starts with the same reserved headroom every other
+        // control-thread path leaves behind — without it the first bridge
+        // latency the callback observes would have nowhere to grow into.
+        project.ensure_pdc_delay_capacity();
         Ok(project)
     }
 
