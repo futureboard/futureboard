@@ -1,4 +1,5 @@
 import type { CSSProperties, Ref } from 'react'
+import { HeadphonesIcon } from '@phosphor-icons/react'
 import type { Band, EqParams } from '../bridge'
 import {
   BAND_COLORS,
@@ -52,40 +53,55 @@ export function ControlRack({
   const kind = filterKind(band.bandType)
   const canGain = bandHasGain(band.bandType)
   const canDynamic = canGain
+  const accent = BAND_COLORS[selected] ?? 'var(--color-signal)'
 
   return (
     <section
       ref={rackRef}
-      className="control-rack"
-      style={{ '--band': BAND_COLORS[selected] } as CSSProperties}
+      className="control-rack plane mx-3 mb-3 grid grid-cols-[minmax(11rem,1fr)_auto_auto_auto] items-center gap-x-4 gap-y-3 rounded-b-md border border-hairline bg-slot px-4 py-3 max-[780px]:grid-cols-[minmax(10rem,1fr)_auto]"
+      style={{ '--band': accent } as CSSProperties}
     >
-      <div className="filter-section">
-        <div className="filter-heading">
-          <span className="band-badge">{selected + 1}</span>
-          <div>
-            <strong>Band {selected + 1}</strong>
-            <span>{kind.label}</span>
+      <div className="filter-section flex min-w-0 flex-col gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className="grid h-6 w-6 shrink-0 place-items-center rounded text-[11px] font-bold tabular-nums"
+            style={{
+              color: accent,
+              background: `color-mix(in srgb, ${accent} 20%, transparent)`,
+              boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${accent} 40%, transparent)`,
+            }}
+          >
+            {selected + 1}
+          </span>
+          <div className="min-w-0">
+            <strong className="block text-[12px] font-semibold text-ink">
+              Band {selected + 1}
+            </strong>
+            <span className="label-cap">{kind.label}</span>
           </div>
           <button
             type="button"
-            className={`band-solo${soloed ? ' is-on' : ''}`}
+            className="ml-auto grid h-[22px] w-[22px] shrink-0 cursor-pointer place-items-center rounded border transition-colors duration-120"
+            style={{
+              borderColor: soloed ? accent : 'var(--color-hairline-hi)',
+              background: soloed ? accent : 'transparent',
+              color: soloed ? '#071014' : 'var(--color-ink-dim)',
+            }}
             aria-pressed={soloed}
             aria-label={`Listen to band ${selected + 1} alone`}
-            title={
-              soloed
-                ? 'Stop listening (Esc)'
-                : "Listen to this band's frequency range alone"
-            }
+            title={soloed ? 'Stop listening (Esc)' : "Listen to this band alone"}
             onClick={onToggleSolo}
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 14v-2a8 8 0 0 1 16 0v2" />
-              <path d="M4 14h3v5H5a1 1 0 0 1-1-1zM20 14h-3v5h2a1 1 0 0 0 1-1z" />
-            </svg>
+            <HeadphonesIcon size={12} weight="bold" />
           </button>
           <button
             type="button"
-            className={`band-dyn${band.dynamic ? ' is-on' : ''}${canDynamic ? '' : ' is-disabled'}`}
+            className="h-[22px] shrink-0 cursor-pointer rounded border px-1.5 text-[9px] font-bold tracking-[0.1em] uppercase transition-colors duration-120 disabled:cursor-not-allowed disabled:opacity-35"
+            style={{
+              borderColor: band.dynamic ? accent : 'var(--color-hairline-hi)',
+              background: band.dynamic ? accent : 'transparent',
+              color: band.dynamic ? '#071014' : 'var(--color-ink-dim)',
+            }}
             aria-pressed={band.dynamic}
             disabled={!canDynamic}
             aria-label={`Band ${selected + 1} dynamic EQ`}
@@ -93,7 +109,7 @@ export function ControlRack({
               canDynamic
                 ? band.dynamic
                   ? 'Disable dynamic EQ'
-                  : 'Enable dynamic EQ (Pro-Q style)'
+                  : 'Enable dynamic EQ'
                 : `${kind.label} has no gain stage for dynamic EQ`
             }
             onClick={() => {
@@ -105,40 +121,64 @@ export function ControlRack({
           </button>
           <button
             type="button"
-            className={`band-toggle${band.active ? ' is-on' : ''}`}
             role="switch"
             aria-checked={band.active}
             aria-label={`Band ${selected + 1} enabled`}
             title={band.active ? 'Disable band' : 'Enable band'}
+            className="h-2.5 w-2.5 shrink-0 cursor-pointer rounded-full border transition-colors duration-120"
+            style={{
+              borderColor: band.active ? accent : 'var(--color-ink-dim)',
+              background: band.active ? accent : 'transparent',
+              boxShadow: band.active
+                ? `0 0 8px color-mix(in srgb, ${accent} 55%, transparent)`
+                : undefined,
+            }}
             onClick={() => onBandChange({ active: !band.active })}
           />
         </div>
 
-        <div className="filter-types">
-          {FILTER_KINDS.map((item) => (
-            <button
-              key={item.type}
-              type="button"
-              className={`filter-type${band.bandType === item.type ? ' is-active' : ''}`}
-              aria-pressed={band.bandType === item.type}
-              title={item.label}
-              aria-label={item.label}
-              onClick={() =>
-                onBandChange({
-                  bandType: item.type,
-                  ...(bandHasGain(item.type) ? {} : { dynamic: false }),
-                })
-              }
-            >
-              <svg viewBox="0 0 32 20" aria-hidden="true">
-                <path d={item.glyph} />
-              </svg>
-            </button>
-          ))}
+        <div className="grid grid-cols-6 gap-0.5">
+          {FILTER_KINDS.map((item) => {
+            const active = band.bandType === item.type
+            return (
+              <button
+                key={item.type}
+                type="button"
+                className="grid h-[30px] min-w-0 cursor-pointer place-items-center rounded border bg-black/20 transition-colors duration-120 hover:border-hairline-hi hover:bg-white/4"
+                style={{
+                  borderColor: active
+                    ? `color-mix(in srgb, ${accent} 42%, transparent)`
+                    : 'transparent',
+                  background: active
+                    ? `color-mix(in srgb, ${accent} 14%, transparent)`
+                    : undefined,
+                }}
+                aria-pressed={active}
+                title={item.label}
+                aria-label={item.label}
+                onClick={() =>
+                  onBandChange({
+                    bandType: item.type,
+                    ...(bandHasGain(item.type) ? {} : { dynamic: false }),
+                  })
+                }
+              >
+                <svg viewBox="0 0 32 20" className="h-4 w-[82%]" aria-hidden="true">
+                  <path
+                    d={item.glyph}
+                    fill="none"
+                    stroke={active ? accent : 'var(--color-ink-dim)'}
+                    strokeWidth="1.45"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            )
+          })}
         </div>
       </div>
 
-      <div className="band-controls">
+      <div className="band-controls grid grid-cols-3 justify-center gap-1">
         <Knob
           variant="band"
           label="Freq"
@@ -183,8 +223,14 @@ export function ControlRack({
         />
       </div>
 
-      <div className={`dyn-controls${band.dynamic && canDynamic ? ' is-open' : ''}`}>
-        <span className="dyn-label">Dynamic</span>
+      <div
+        className={`dyn-controls grid grid-cols-4 justify-center gap-1 transition-opacity duration-150 ${
+          band.dynamic && canDynamic
+            ? 'opacity-100'
+            : 'pointer-events-none opacity-35'
+        }`}
+      >
+        <span className="label-cap col-span-4 text-center">Dynamic</span>
         <Knob
           variant="band"
           label="Thresh"
@@ -246,9 +292,9 @@ export function ControlRack({
         />
       </div>
 
-      <div className="master-section">
-        <span className="master-label">Output</span>
-        <div className="master-controls">
+      <div className="master-section flex flex-col justify-center gap-2 self-stretch border-l border-hairline-hi pl-4 max-[780px]:col-span-2 max-[780px]:flex-row max-[780px]:items-center max-[780px]:border-t max-[780px]:border-l-0 max-[780px]:pt-3 max-[780px]:pl-0">
+        <span className="label-cap">Output</span>
+        <div className="master-controls grid grid-cols-2 justify-center gap-1">
           <Knob
             variant="master"
             label="Level"

@@ -50,6 +50,7 @@ export type KnobProps = {
   onChange: (value: number) => void
 }
 
+/** Serum-ish metallic dial on MixStation graphite chrome. */
 export function Knob({
   variant = 'band',
   label,
@@ -160,13 +161,21 @@ export function Knob({
 
   return (
     <div
-      className={`knob is-${variant}${dragging ? ' is-dragging' : ''}${disabled ? ' is-disabled' : ''}`}
+      className={`knob is-${variant} flex min-w-0 flex-col items-center gap-1 ${
+        dragging ? 'is-dragging' : ''
+      } ${disabled ? 'pointer-events-none opacity-30' : ''}`}
+      style={
+        {
+          '--control-accent':
+            variant === 'master' ? 'var(--color-signal)' : 'var(--band)',
+        } as Record<string, string>
+      }
       title={disabled ? disabledHint : undefined}
     >
-      <span className="knob-label">{label}</span>
+      <span className="label-cap">{label}</span>
       <div
         ref={dialRef}
-        className="knob-dial"
+        className="knob-dial h-14 w-14 cursor-ns-resize touch-none outline-none sm:h-16 sm:w-16"
         role="slider"
         tabIndex={disabled ? -1 : 0}
         aria-label={label}
@@ -210,7 +219,7 @@ export function Knob({
           }
         }}
       >
-        <svg viewBox="0 0 100 100" aria-hidden="true">
+        <svg viewBox="0 0 100 100" className="block h-full w-full overflow-visible" aria-hidden="true">
           <defs>
             <linearGradient id={bodyGradientId} x1="0" x2="0" y1="0" y2="1">
               <stop offset="0" stopColor="#323b48" />
@@ -222,13 +231,7 @@ export function Knob({
               <stop offset=".4" stopColor="#222a36" />
               <stop offset="1" stopColor="#10151c" />
             </radialGradient>
-            <filter
-              id={shadowId}
-              x="-30%"
-              y="-30%"
-              width="160%"
-              height="170%"
-            >
+            <filter id={shadowId} x="-30%" y="-30%" width="160%" height="170%">
               <feDropShadow
                 dx="0"
                 dy="3"
@@ -277,7 +280,7 @@ export function Knob({
 
       {editing ? (
         <input
-          className="knob-input"
+          className="h-5 w-16 rounded border border-hairline-hi bg-well text-center text-[11px] text-ink outline-none"
           autoFocus
           value={draft}
           aria-label={`${label} value`}
@@ -291,7 +294,7 @@ export function Knob({
       ) : (
         <button
           type="button"
-          className="knob-value"
+          className="readout flex min-h-5 min-w-14 cursor-text items-baseline justify-center gap-1 rounded px-1 hover:bg-white/5"
           disabled={disabled}
           title="Click to type a value"
           onClick={() => {
@@ -300,7 +303,7 @@ export function Knob({
           }}
         >
           <span>{format(value)}</span>
-          {unit ? <i>{unit}</i> : null}
+          {unit ? <i className="label-cap not-italic opacity-70">{unit}</i> : null}
         </button>
       )}
     </div>

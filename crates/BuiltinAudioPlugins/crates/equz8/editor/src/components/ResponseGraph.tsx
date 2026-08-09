@@ -301,9 +301,9 @@ export function ResponseGraph({
           <stop offset="1" stopColor="#140e12" stopOpacity=".35" />
         </linearGradient>
         <linearGradient id="curve-fill" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="var(--accent)" stopOpacity="0.32" />
-          <stop offset="0.48" stopColor="var(--accent)" stopOpacity="0.06" />
-          <stop offset="1" stopColor="var(--accent)" stopOpacity="0.2" />
+          <stop offset="0" stopColor="var(--color-signal)" stopOpacity="0.32" />
+          <stop offset="0.48" stopColor="var(--color-signal)" stopOpacity="0.06" />
+          <stop offset="1" stopColor="var(--color-signal)" stopOpacity="0.2" />
         </linearGradient>
         <filter id="curve-glow" x="-4%" y="-30%" width="108%" height="160%">
           <feGaussianBlur stdDeviation="3.5" />
