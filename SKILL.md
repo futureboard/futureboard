@@ -1,5 +1,9 @@
 # Futureboard Native Studio
 
+---
+Read @.claude/skills too
+---
+
 Use this skill to make controlled, production-real changes to Futureboard
 Studio. Read `CLAUDE.md` first, then read `DESIGN.md` for any UI-facing task.
 
