@@ -2680,11 +2680,20 @@ impl EngineInner {
         let session = self
             .find_input_device_for_active_backend(config.input_device_id.as_deref())
             .and_then(|device| {
+                let preferred_period = {
+                    let st = self.status.lock();
+                    if st.buffer_size > 0 {
+                        Some(st.buffer_size)
+                    } else {
+                        self.daux_config.lock().buffer_size.filter(|&p| p > 0)
+                    }
+                };
                 recording::start_recording_with_device(
                     config,
                     Arc::clone(&self.shared),
                     monitor_mix,
                     device,
+                    preferred_period,
                 )
             });
         match session {
@@ -3262,43 +3271,52 @@ impl EngineInner {
         let default_cfg = device.default_input_config().map_err(|e| {
             SphereAudioError::NativeError(format!("Input device config error: {e}"))
         })?;
-        let stream_config = cpal::StreamConfig {
-            channels: default_cfg.channels(),
-            sample_rate: default_cfg.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
+        let preferred_period = {
+            let st = self.status.lock();
+            if st.buffer_size > 0 {
+                Some(st.buffer_size)
+            } else {
+                self.daux_config.lock().buffer_size.filter(|&p| p > 0)
+            }
         };
-        let channel_count = stream_config.channels.max(1) as usize;
-        let input_sr = stream_config.sample_rate.0;
+        let preferred_sample_rate = {
+            let out_sr = self.shared.sample_rate.load(Ordering::Relaxed);
+            (out_sr > 0).then_some(out_sr)
+        };
+        let candidates = crate::device::input_stream_config_candidates(
+            &default_cfg,
+            preferred_period,
+            preferred_sample_rate,
+        );
         let device_label = device
             .name()
             .unwrap_or_else(|_| desired_device.clone().unwrap_or_else(|| "default".into()));
 
-        eprintln!(
-            "[AudioDevice] opening input stream: device='{device_label}' sample_rate={input_sr} \
-             channels={channel_count} buffer=default monitor_channels=({mon_l_ch},{mon_r_ch})"
-        );
-        eprintln!(
-            "[WASAPI] input sample_rate={input_sr} channels={channel_count} format={:?}",
-            default_cfg.sample_format()
-        );
-        let output_sr = self.shared.sample_rate.load(Ordering::Relaxed);
-        if output_sr != 0 && input_sr != 0 && output_sr != input_sr {
-            eprintln!(
-                "[WASAPI] ⚠ input sample_rate ({input_sr}) != output sample_rate ({output_sr}); \
-                 monitored audio will be pitch-shifted until resampling is added (Layer 9 TODO)"
-            );
-        }
+        // Try ALSA multi-period / matched-rate candidates first so live monitor
+        // shares geometry with the open output stream.
+        let mut last_error = None;
+        let mut opened: Option<(cpal::StreamConfig, cpal::Stream)> = None;
+        for (label, stream_config) in candidates {
+            let channel_count = stream_config.channels.max(1) as usize;
+            let input_sr = stream_config.sample_rate.0;
+            self.shared
+                .input_ring
+                .set_active(true, channel_count as u32, input_sr);
 
-        // Reset and arm the input ring for this stream's format.
-        self.shared
-            .input_ring
-            .set_active(true, channel_count as u32, input_sr);
+            let shared = Arc::clone(&self.shared);
+            #[cfg(target_os = "linux")]
+            let rt_announcer = crate::backend::cpal_backend::spawn_capture_rt_promoter();
+            #[cfg(target_os = "linux")]
+            let mut rt_announced = false;
 
-        let shared = Arc::clone(&self.shared);
-        let stream = device
-            .build_input_stream::<f32, _, _>(
+            match device.build_input_stream::<f32, _, _>(
                 &stream_config,
                 move |data: &[f32], _info| {
+                    #[cfg(target_os = "linux")]
+                    if !rt_announced {
+                        rt_announcer.announce_current_thread();
+                        rt_announced = true;
+                    }
                     let frames = data.len() / channel_count.max(1);
                     shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
                     shared
@@ -3312,8 +3330,6 @@ impl EngineInner {
                     let mut last_l = 0.0f32;
                     let mut last_r = 0.0f32;
                     for frame in data.chunks(channel_count) {
-                        // Pick this block's monitor channels; fall back to the
-                        // first sample when a channel index is out of range.
                         let first = frame.first().copied().unwrap_or(0.0);
                         let l = frame
                             .get(mon_l_ch)
@@ -3325,7 +3341,6 @@ impl EngineInner {
                         last_r = r;
                         peak_l = peak_l.max(l.abs());
                         peak_r = peak_r.max(r.abs());
-                        // Layer 4: publish the actual samples to the output side.
                         shared.input_ring.write_stereo(l, r);
                     }
                     shared
@@ -3340,14 +3355,44 @@ impl EngineInner {
                 },
                 |err| eprintln!("[SphereAudio] Live input stream error: {err}"),
                 None,
-            )
-            .map_err(|e| {
-                self.shared.input_ring.set_active(false, 0, 0);
-                SphereAudioError::NativeError(format!("Cannot open live input stream: {e}"))
-            })?;
-        stream
-            .play()
-            .map_err(|e| SphereAudioError::NativeError(format!("Live input play failed: {e}")))?;
+            ) {
+                Ok(stream) => {
+                    if let Err(e) = stream.play() {
+                        last_error = Some(format!("{label} play failed: {e}"));
+                        self.shared.input_ring.set_active(false, 0, 0);
+                        continue;
+                    }
+                    eprintln!(
+                        "[AudioDevice] opening input stream: device='{device_label}' \
+                         candidate='{label}' sample_rate={input_sr} channels={channel_count} \
+                         buffer={:?} monitor_channels=({mon_l_ch},{mon_r_ch})",
+                        stream_config.buffer_size
+                    );
+                    let output_sr = self.shared.sample_rate.load(Ordering::Relaxed);
+                    if output_sr != 0 && input_sr != 0 && output_sr != input_sr {
+                        eprintln!(
+                            "[AudioDevice] ⚠ input sample_rate ({input_sr}) != output sample_rate \
+                             ({output_sr}); monitored audio will be pitch-shifted until resampling \
+                             is added"
+                        );
+                    }
+                    opened = Some((stream_config, stream));
+                    break;
+                }
+                Err(e) => {
+                    last_error = Some(format!("{label}: {e}"));
+                    self.shared.input_ring.set_active(false, 0, 0);
+                }
+            }
+        }
+
+        let (_stream_config, stream) = opened.ok_or_else(|| {
+            self.shared.input_ring.set_active(false, 0, 0);
+            SphereAudioError::NativeError(format!(
+                "Cannot open live input stream: {}",
+                last_error.unwrap_or_else(|| "no candidates".into())
+            ))
+        })?;
         eprintln!("[AudioDevice] input stream started: device='{device_label}'");
 
         *self.live_input.lock() = Some(LiveInputHandle {
@@ -3561,18 +3606,41 @@ impl EngineInner {
         let default_cfg = device.default_input_config().map_err(|e| {
             SphereAudioError::NativeError(format!("Input device config error: {e}"))
         })?;
-        let stream_config = cpal::StreamConfig {
-            channels: default_cfg.channels(),
-            sample_rate: default_cfg.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
+        let preferred_period = {
+            let st = self.status.lock();
+            if st.buffer_size > 0 {
+                Some(st.buffer_size)
+            } else {
+                self.daux_config.lock().buffer_size.filter(|&p| p > 0)
+            }
         };
+        let preferred_sample_rate = {
+            let out_sr = self.shared.sample_rate.load(Ordering::Relaxed);
+            (out_sr > 0).then_some(out_sr)
+        };
+        let candidates = crate::device::input_stream_config_candidates(
+            &default_cfg,
+            preferred_period,
+            preferred_sample_rate,
+        );
 
         let peak = Arc::new(AtomicU32::new(0));
-        let cb_peak = Arc::clone(&peak);
-        let stream = device
-            .build_input_stream::<f32, _, _>(
+        let mut last_error = None;
+        let mut opened = None;
+        for (label, stream_config) in candidates {
+            let cb_peak = Arc::clone(&peak);
+            #[cfg(target_os = "linux")]
+            let rt_announcer = crate::backend::cpal_backend::spawn_capture_rt_promoter();
+            #[cfg(target_os = "linux")]
+            let mut rt_announced = false;
+            match device.build_input_stream::<f32, _, _>(
                 &stream_config,
                 move |data: &[f32], _info| {
+                    #[cfg(target_os = "linux")]
+                    if !rt_announced {
+                        rt_announcer.announce_current_thread();
+                        rt_announced = true;
+                    }
                     let mut block_peak = 0.0f32;
                     for &s in data {
                         let a = s.abs();
@@ -3599,13 +3667,28 @@ impl EngineInner {
                 },
                 |err| eprintln!("[SphereAudio] Input test stream error: {err}"),
                 None,
-            )
-            .map_err(|e| {
-                SphereAudioError::NativeError(format!("Cannot open input test stream: {e}"))
-            })?;
-        stream
-            .play()
-            .map_err(|e| SphereAudioError::NativeError(format!("Input test play failed: {e}")))?;
+            ) {
+                Ok(stream) => {
+                    if let Err(e) = stream.play() {
+                        last_error = Some(format!("{label} play failed: {e}"));
+                        continue;
+                    }
+                    eprintln!(
+                        "[SphereAudio] input test open via '{label}' buffer={:?}",
+                        stream_config.buffer_size
+                    );
+                    opened = Some(stream);
+                    break;
+                }
+                Err(e) => last_error = Some(format!("{label}: {e}")),
+            }
+        }
+        let stream = opened.ok_or_else(|| {
+            SphereAudioError::NativeError(format!(
+                "Cannot open input test stream: {}",
+                last_error.unwrap_or_else(|| "no candidates".into())
+            ))
+        })?;
 
         *self.input_test.lock() = Some(InputTestHandle {
             _stream: stream,

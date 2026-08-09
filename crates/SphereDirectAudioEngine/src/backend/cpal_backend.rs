@@ -188,7 +188,7 @@ pub(crate) fn open_on_host(
 /// `BufferSize::Fixed` it is handed, so a 4-period ring is what makes the
 /// callback block come back equal to the requested period.
 #[cfg(target_os = "linux")]
-const ALSA_PERIODS_PER_BUFFER: u32 = 4;
+pub(crate) const ALSA_PERIODS_PER_BUFFER: u32 = 4;
 
 /// Translate a requested *period* (callback block size, which is what the UI
 /// and every other platform mean by "buffer size") into the `BufferSize::Fixed`
@@ -201,8 +201,11 @@ const ALSA_PERIODS_PER_BUFFER: u32 = 4;
 /// period as a quarter of it. Requesting 256 there therefore produced 64-frame
 /// wakeups backed by only 5.3 ms of headroom at 48 kHz, roughly a quarter of
 /// the safety margin the same setting buys on WASAPI Shared or CoreAudio.
+///
+/// Shared by output open and **input** open so capture does not fall back to
+/// ALSA's default 100 ms ring while playback runs at the UI buffer size.
 #[cfg(target_os = "linux")]
-fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
+pub(crate) fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
     // The callback is handed everything available, which after a late wakeup is
     // the *entire* ring — measured, not assumed: a 4096-frame ring delivers
     // 4096-frame blocks. `request_block` clamps at `MAX_BRIDGE_BLOCK_FRAMES`,
@@ -229,8 +232,15 @@ fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
+pub(crate) fn period_candidates(period: u32) -> Vec<(&'static str, u32, u32)> {
     vec![("requested", period, period)]
+}
+
+/// Promote a cpal ALSA capture thread the same way output is promoted.
+/// Callers announce from the first callback (see `rt_priority::Announcer`).
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_capture_rt_promoter() -> rt_priority::Announcer {
+    rt_priority::spawn_promoter()
 }
 
 // ── Stream builders ───────────────────────────────────────────────────────────
