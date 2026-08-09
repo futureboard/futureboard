@@ -129,7 +129,9 @@ pub(crate) fn windows_key_code(key: &str) -> Option<i32> {
         "alt" => 0x12,
         "capslock" => 0x14,
         "escape" => 0x1B,
-        "space" => 0x20,
+        // Linux/XKB and some IMs emit bare space as `" "` / `"Spacebar"`.
+        // Without this mapping CEF never sees a RAWKEYDOWN Space for transport.
+        "space" | " " | "spacebar" | "Space" | "Spacebar" | "kp-space" => 0x20,
         "pageup" => 0x21,
         "pagedown" => 0x22,
         "end" => 0x23,
@@ -228,6 +230,9 @@ mod tests {
         assert_eq!(windows_key_code("backspace"), Some(0x08));
         assert_eq!(windows_key_code("left"), Some(0x25));
         assert_eq!(windows_key_code("delete"), Some(0x2E));
+        assert_eq!(windows_key_code("space"), Some(0x20));
+        assert_eq!(windows_key_code(" "), Some(0x20));
+        assert_eq!(windows_key_code("Spacebar"), Some(0x20));
     }
 
     #[test]

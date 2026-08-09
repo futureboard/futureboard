@@ -8,6 +8,7 @@ import {
 import {
   connectBridge,
   defaults,
+  postGlobalCommand,
   postParam,
   type MeterFrame,
   type MixStationParams,
@@ -68,6 +69,29 @@ export default function App() {
   const [dragging, setDragging] = useState(false)
   const [pickerSlot, setPickerSlot] = useState<number | null>(null)
   const metersRef = useRef<MeterFrame | null>(null)
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return
+      if (e.key !== ' ' && e.code !== 'Space') return
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      // DAW transport owns bare Space on the editor surface. Forward when the
+      // native claim path misses an OSR/focus edge case.
+      e.preventDefault()
+      postGlobalCommand('transport:play-pause')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   useEffect(
     () =>

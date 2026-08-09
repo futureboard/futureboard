@@ -1854,11 +1854,9 @@ impl Render for BuiltinPluginEditorWindow {
             if !Self::is_transport_toggle_keystroke(&event.keystroke) || event.is_held {
                 return;
             }
-            if let Some(dispatch) = this.host_ops.dispatch_global_command.as_ref() {
-                window.prevent_default();
-                cx.stop_propagation();
-                dispatch("transport:play-pause", cx);
-            }
+            window.prevent_default();
+            cx.stop_propagation();
+            this.dispatch_transport_play_pause(cx);
         });
 
         div()
@@ -2001,7 +1999,8 @@ impl BuiltinPluginEditorWindow {
 
     /// Window-space logical point → view-space logical point. CEF lays the page
     /// out in the same logical pixels GPUI reports, offset by the chrome this
-    /// window reserves (see `content_rect`).
+    /// window reserves (see `content_rect`). Verified by `osr_editor_probe`:
+    /// a click at window chrome+view landing maps 1:1 into page coordinates.
     fn to_view_point(&self, position: Point<Pixels>) -> (i32, i32) {
         let x: f32 = position.x.into();
         let y: f32 = position.y.into();
@@ -2154,26 +2153,44 @@ impl BuiltinPluginEditorWindow {
     /// owns this, not the page. Matches the CEF `OnPreKeyEvent` contract used
     /// by the windowed Windows path.
     fn is_transport_toggle_keystroke(keystroke: &gpui::Keystroke) -> bool {
+        let mods = keystroke.modifiers;
+        if mods.control || mods.alt || mods.platform || mods.secondary() {
+            return false;
+        }
         let key = keystroke.key.as_str();
         // Linux/XKB and some IMs emit bare `" "` or `"Spacebar"` rather than `"space"`.
-        if !matches!(
+        if matches!(
             key,
             "space" | " " | "spacebar" | "Space" | "Spacebar" | "kp-space"
         ) {
-            return false;
+            return true;
         }
-        let mods = keystroke.modifiers;
-        !(mods.control || mods.alt || mods.platform || mods.secondary())
+        // Some platforms put the only Space marker in `key_char`.
+        keystroke.key_char.as_deref() == Some(" ")
+    }
+
+    /// Run the same transport command the chrome Play button uses.
+    fn dispatch_transport_play_pause(&self, cx: &mut Context<Self>) {
+        if let Some(dispatch) = self.host_ops.dispatch_global_command.as_ref() {
+            dispatch("transport:play-pause", cx);
+        }
     }
 
     fn on_surface_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Bare Space is claimed on the shell (`capture_key_down` in `render`) so
-        // it never lands here as character input into the page.
+        // Belt-and-suspenders with shell `capture_key_down`: if Space reaches
+        // the surface (capture miss, focus edge, IM quirks) still own transport
+        // and never inject a page-level Space that CEF would handle twice.
+        if Self::is_transport_toggle_keystroke(&event.keystroke) && !event.is_held {
+            window.prevent_default();
+            cx.stop_propagation();
+            self.dispatch_transport_play_pause(cx);
+            return;
+        }
 
         let modifiers = self.surface.modifiers(event.keystroke.modifiers);
         if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Down, modifiers) {
