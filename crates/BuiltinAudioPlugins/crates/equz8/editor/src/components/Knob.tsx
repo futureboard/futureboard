@@ -7,6 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { clamp } from '../lib/eq'
+import { snapKnobDial } from '../lib/motion'
 
 const ANGLE_START = 135
 const ANGLE_SWEEP = 270
@@ -94,8 +95,8 @@ export function Knob({
   const progress = asProgress(value)
   const defaultProgress = asProgress(defaultValue)
   const fillOrigin = originAtDefault ? defaultProgress : 0
-  const pointerStart = polar(13, progress)
-  const pointerEnd = polar(28, progress)
+  const pointerStart = polar(14, progress)
+  const pointerEnd = polar(27, progress)
 
   useEffect(() => {
     const dial = dialRef.current
@@ -112,6 +113,14 @@ export function Knob({
     dial.addEventListener('wheel', onWheel, { passive: false })
     return () => dial.removeEventListener('wheel', onWheel)
   }, [asValue, disabled, onChange, progress])
+
+  const commitValue = useCallback(
+    (next: number, animateSnap = false) => {
+      onChange(next)
+      if (animateSnap) snapKnobDial(dialRef.current)
+    },
+    [onChange],
+  )
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (disabled || editing) return
@@ -145,7 +154,7 @@ export function Knob({
 
   const commitEdit = () => {
     const parsed = Number(draft.replace(/[^\d.+-]/g, ''))
-    if (Number.isFinite(parsed)) onChange(clamp(parsed, min, max))
+    if (Number.isFinite(parsed)) commitValue(clamp(parsed, min, max), true)
     setEditing(false)
   }
 
@@ -175,10 +184,10 @@ export function Knob({
         onPointerMove={onPointerMove}
         onPointerUp={endGesture}
         onPointerCancel={endGesture}
-        onDoubleClick={() => !disabled && onChange(defaultValue)}
+        onDoubleClick={() => !disabled && commitValue(defaultValue, true)}
         onContextMenu={(event) => {
           event.preventDefault()
-          if (!disabled) onChange(defaultValue)
+          if (!disabled) commitValue(defaultValue, true)
         }}
         onKeyDown={(event) => {
           if (disabled) return
@@ -193,36 +202,25 @@ export function Knob({
           }
           if (event.key === 'Home') {
             event.preventDefault()
-            onChange(min)
+            commitValue(min, true)
           }
           if (event.key === 'End') {
             event.preventDefault()
-            onChange(max)
+            commitValue(max, true)
           }
         }}
       >
         <svg viewBox="0 0 100 100" aria-hidden="true">
           <defs>
-            <linearGradient
-              id={bodyGradientId}
-              x1="0"
-              x2="0"
-              y1="0"
-              y2="1"
-            >
-              <stop offset="0" stopColor="#252c36" />
-              <stop offset=".52" stopColor="#171c23" />
-              <stop offset="1" stopColor="#0d1015" />
+            <linearGradient id={bodyGradientId} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0" stopColor="#323b48" />
+              <stop offset=".45" stopColor="#1a212c" />
+              <stop offset="1" stopColor="#0a0d12" />
             </linearGradient>
-            <radialGradient
-              id={capGradientId}
-              cx=".34"
-              cy=".26"
-              r=".82"
-            >
-              <stop offset="0" stopColor="#313945" />
-              <stop offset=".36" stopColor="#222832" />
-              <stop offset="1" stopColor="#11151b" />
+            <radialGradient id={capGradientId} cx=".32" cy=".28" r=".8">
+              <stop offset="0" stopColor="#3a4454" />
+              <stop offset=".4" stopColor="#222a36" />
+              <stop offset="1" stopColor="#10151c" />
             </radialGradient>
             <filter
               id={shadowId}
@@ -233,30 +231,28 @@ export function Knob({
             >
               <feDropShadow
                 dx="0"
-                dy="4"
-                stdDeviation="4"
+                dy="3"
+                stdDeviation="3.5"
                 floodColor="#000"
-                floodOpacity=".5"
+                floodOpacity=".55"
               />
             </filter>
           </defs>
-          <path className="knob-track" d={arc(0, 1, 43)} />
-          <path
-            className="knob-fill"
-            d={arc(fillOrigin, progress, 43)}
-          />
+          <circle className="knob-tick-ring" cx="50" cy="50" r="44" />
+          <path className="knob-track" d={arc(0, 1, 42)} />
+          <path className="knob-fill" d={arc(fillOrigin, progress, 42)} />
           <line
             className="knob-default"
-            x1={polar(46, defaultProgress)[0]}
-            y1={polar(46, defaultProgress)[1]}
-            x2={polar(50, defaultProgress)[0]}
-            y2={polar(50, defaultProgress)[1]}
+            x1={polar(45, defaultProgress)[0]}
+            y1={polar(45, defaultProgress)[1]}
+            x2={polar(49, defaultProgress)[0]}
+            y2={polar(49, defaultProgress)[1]}
           />
           <circle
             className="knob-body"
             cx="50"
             cy="50"
-            r="34"
+            r="33"
             fill={`url(#${bodyGradientId})`}
             filter={`url(#${shadowId})`}
           />
@@ -264,13 +260,10 @@ export function Knob({
             className="knob-cap"
             cx="50"
             cy="50"
-            r="29"
+            r="28"
             fill={`url(#${capGradientId})`}
           />
-          <path
-            className="knob-highlight"
-            d="M31 38 A 23 23 0 0 1 68 32"
-          />
+          <path className="knob-highlight" d="M32 37 A 22 22 0 0 1 67 31" />
           <line
             className="knob-pointer"
             x1={pointerStart[0]}
@@ -278,6 +271,7 @@ export function Knob({
             x2={pointerEnd[0]}
             y2={pointerEnd[1]}
           />
+          <circle className="knob-center" cx="50" cy="50" r="4.5" />
         </svg>
       </div>
 

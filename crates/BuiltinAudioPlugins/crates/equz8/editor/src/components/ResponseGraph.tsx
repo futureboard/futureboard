@@ -29,11 +29,13 @@ import {
   frequencyToX,
   gainToY,
   scaleQ,
+  sumCurveAreaPath,
   sumCurvePath,
   sumDbAt,
   xToFrequency,
   yToGain,
 } from '../lib/eq'
+import { pulseBandNode } from '../lib/motion'
 
 const READOUT_WIDTH = 148
 const READOUT_HEIGHT = 30
@@ -116,8 +118,18 @@ export function ResponseGraph({
   }, [])
 
   const { width, height } = size
+  const nodeRefs = useRef<Array<SVGGElement | null>>([])
+
+  useEffect(() => {
+    pulseBandNode(nodeRefs.current[selected] ?? null)
+  }, [selected])
+
   const sumPath = useMemo(
     () => sumCurvePath(bands, width, height, sampleRate),
+    [bands, height, width, sampleRate],
+  )
+  const sumArea = useMemo(
+    () => sumCurveAreaPath(bands, width, height, sampleRate),
     [bands, height, width, sampleRate],
   )
   const perBandPaths = useMemo(
@@ -250,7 +262,6 @@ export function ResponseGraph({
   }, [dragBand, endGesture])
 
   const cursorFreq = cursor ? xToFrequency(cursor.x, width) : null
-  const zeroY = gainToY(0, height)
 
   return (
     <div className="response-stack">
@@ -283,19 +294,19 @@ export function ResponseGraph({
       onPointerCancel={() => setCursor(null)}
     >
       <defs>
-        <linearGradient id="graph-shade" x1="0" x2="1" y1="0" y2="0">
-          <stop offset="0" stopColor="#101a26" stopOpacity=".42" />
-          <stop offset=".22" stopColor="#0c1118" stopOpacity=".08" />
-          <stop offset=".72" stopColor="#0c1017" stopOpacity=".04" />
-          <stop offset="1" stopColor="#151226" stopOpacity=".32" />
+        <linearGradient id="graph-shade" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stopColor="#0b1520" stopOpacity=".55" />
+          <stop offset=".35" stopColor="#070b10" stopOpacity=".12" />
+          <stop offset=".7" stopColor="#080a0e" stopOpacity=".08" />
+          <stop offset="1" stopColor="#140e12" stopOpacity=".35" />
         </linearGradient>
         <linearGradient id="curve-fill" x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0" stopColor="var(--accent)" stopOpacity="0.26" />
-          <stop offset="0.5" stopColor="var(--accent)" stopOpacity="0.05" />
-          <stop offset="1" stopColor="var(--accent)" stopOpacity="0.18" />
+          <stop offset="0" stopColor="var(--accent)" stopOpacity="0.32" />
+          <stop offset="0.48" stopColor="var(--accent)" stopOpacity="0.06" />
+          <stop offset="1" stopColor="var(--accent)" stopOpacity="0.2" />
         </linearGradient>
         <filter id="curve-glow" x="-4%" y="-30%" width="108%" height="160%">
-          <feGaussianBlur stdDeviation="4" />
+          <feGaussianBlur stdDeviation="3.5" />
         </filter>
       </defs>
 
@@ -393,11 +404,7 @@ export function ResponseGraph({
         />
       )}
 
-      <path
-        className="curve-fill"
-        d={`${sumPath} L${width},${zeroY} L0,${zeroY} Z`}
-        fill="url(#curve-fill)"
-      />
+      <path className="curve-fill" d={sumArea} fill="url(#curve-fill)" />
       <path d={sumPath} className="curve-glow" filter="url(#curve-glow)" />
       <path d={sumPath} className="curve-line" />
 
@@ -412,6 +419,9 @@ export function ResponseGraph({
         return (
           <g
             key={index}
+            ref={(element) => {
+              nodeRefs.current[index] = element
+            }}
             className={`node${isSelected ? ' is-selected' : ''}${band.active ? '' : ' is-off'}${soloBand === index ? ' is-soloed' : ''}`}
             transform={`translate(${x} ${y})`}
             style={{ '--band': BAND_COLORS[index] } as CSSProperties}

@@ -26,7 +26,11 @@ export function Header({
   return (
     <header className="editor-header">
       <div className="brand">
-        <img src={logo} alt="Futureboard EQ8" />
+        <img src={logo} alt="Futureboard EQUZ8" />
+        <div className="brand-mark">
+          <span className="brand-title">EQUZ8</span>
+          <span className="brand-sub">Dynamic EQ</span>
+        </div>
         <span
           className="connection"
           data-live={connected}

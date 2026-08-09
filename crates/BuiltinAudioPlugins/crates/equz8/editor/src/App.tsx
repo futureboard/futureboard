@@ -8,6 +8,11 @@ import {
   type SpectrumFrame,
 } from './bridge'
 import { DEFAULT_SAMPLE_RATE } from './lib/eq'
+import {
+  flashControlRack,
+  playEditorIntro,
+  tweenBypass,
+} from './lib/motion'
 import { BandChips } from './components/BandChips'
 import { ControlRack } from './components/ControlRack'
 import { Header } from './components/Header'
@@ -29,16 +34,22 @@ function App() {
   const [showBandCurves, setShowBandCurves] = useState(true)
   const [showSpectrum, setShowSpectrum] = useState(true)
   const [preset, setPreset] = useState<number | null>(0)
-  /// The rate the host is actually running at, threaded into the curve maths.
-  /// Drawing at a fixed 48 kHz made the picture disagree with what you hear on
-  /// any other rate, most visibly at the top of the range where the bilinear
-  /// transform warps hardest.
   const [sampleRate, setRate] = useState(DEFAULT_SAMPLE_RATE)
-
-  /// Analyser frames land in a ref, never in state: at ~30 Hz a `setState` per
-  /// frame would rerender every curve, node and label in the editor to repaint
-  /// one canvas that reads the value itself.
   const spectrum = useRef<SpectrumFrame | null>(null)
+  const rootRef = useRef<HTMLElement>(null)
+  const rackRef = useRef<HTMLElement>(null)
+  const stageRef = useRef<HTMLElement>(null)
+  const introPlayed = useRef(false)
+
+  useEffect(() => {
+    if (introPlayed.current) return
+    introPlayed.current = true
+    playEditorIntro(rootRef.current)
+  }, [])
+
+  useEffect(() => {
+    tweenBypass(stageRef.current, !params.power)
+  }, [params.power])
 
   useEffect(
     () =>
@@ -49,8 +60,6 @@ function App() {
         },
         (isConnected) => {
           setConnected(isConnected)
-          // Nothing is measuring any more — drop the last frame so the overlay
-          // does not sit frozen on a picture of audio that stopped.
           if (!isConnected) spectrum.current = null
         },
         (frame) => {
@@ -61,15 +70,6 @@ function App() {
     [],
   )
 
-  /// Apply a band edit, switching the band on if it was off.
-  ///
-  /// Every band opens inactive and flat (see `DEFAULT_PARAMS`), so the first
-  /// thing anyone does is reach for one. Dragging its node or turning one of
-  /// its knobs *is* the request to use it: shaping a band that stays silent
-  /// reads as a broken control, and the alternative is hunting for the chip
-  /// or the toggle before every first move. An explicit `active` in the patch
-  /// — the chip's double-click, the rack's switch — is left exactly as asked,
-  /// so turning a band off still turns it off.
   const updateBand = useCallback((index: number, patch: Partial<Band>) => {
     setParams((current) => {
       const band = current.bands[index]
@@ -89,11 +89,6 @@ function App() {
     setPreset(null)
   }, [])
 
-  /// Audition one band's frequency region on its own, FabFilter-style.
-  ///
-  /// Soloing is exclusive and self-clearing: clicking the lit band turns it
-  /// off, and clicking another moves the audition rather than stacking. It is
-  /// deliberately kept out of `updateGlobal`/preset state — see `presets.ts`.
   const toggleSolo = useCallback((index: number) => {
     setParams((current) => {
       const next = current.soloBand === index ? SOLO_NONE : index
@@ -102,12 +97,6 @@ function App() {
     })
   }, [])
 
-  /// Set solo outright rather than toggling.
-  ///
-  /// The momentary right-drag audition needs this: it has to force solo on at
-  /// gesture start and put back whatever was there on release, neither of which
-  /// a toggle can express. No-ops when already on the requested band so a drag
-  /// does not post a parameter per frame.
   const setSolo = useCallback((index: number) => {
     setParams((current) => {
       if (current.soloBand === index) return current
@@ -116,10 +105,6 @@ function App() {
     })
   }, [])
 
-  /// Solo is an audition, not a setting: leaving the EQ silently stuck
-  /// bandpassing one band would be a nasty surprise, so it drops on Escape and
-  /// on unmount (closing the editor window) alike. The ref exists purely so the
-  /// unmount cleanup can see the latest value without resubscribing per change.
   const soloRef = useRef(params.soloBand)
   useEffect(() => {
     soloRef.current = params.soloBand
@@ -140,7 +125,6 @@ function App() {
     window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
-      // The component is going away, so only the DSP-side release matters here.
       if (soloRef.current !== SOLO_NONE) postParam('soloBand', SOLO_NONE)
     }
   }, [clearSolo])
@@ -156,6 +140,13 @@ function App() {
     [],
   )
 
+  const selectBand = useCallback((index: number) => {
+    setSelected((current) => {
+      if (current !== index) flashControlRack(rackRef.current)
+      return index
+    })
+  }, [])
+
   const loadPreset = useCallback((index: number) => {
     const wrapped = (index + FACTORY_PRESETS.length) % FACTORY_PRESETS.length
     const entry = FACTORY_PRESETS[wrapped]
@@ -164,6 +155,7 @@ function App() {
     setParams(next)
     setPreset(wrapped)
     postAllParams(next)
+    flashControlRack(rackRef.current)
   }, [])
 
   const band = params.bands[selected]
@@ -173,7 +165,10 @@ function App() {
   if (!defaults) return null
 
   return (
-    <main className={`editor${params.power ? '' : ' is-bypassed'}`}>
+    <main
+      ref={rootRef}
+      className={`editor${params.power ? '' : ' is-bypassed'}`}
+    >
       <Header
         connected={connected}
         power={params.power}
@@ -186,7 +181,7 @@ function App() {
         onPowerChange={(power) => updateGlobal({ power })}
       />
 
-      <section className="stage">
+      <section ref={stageRef} className="stage">
         <ResponseGraph
           sampleRate={sampleRate}
           bands={params.bands}
@@ -196,7 +191,7 @@ function App() {
           showSpectrum={showSpectrum}
           spectrumRef={spectrum}
           soloBand={params.soloBand}
-          onSelect={setSelected}
+          onSelect={selectBand}
           onBandChange={updateBand}
           onToggleSolo={toggleSolo}
           onSetSolo={setSolo}
@@ -206,7 +201,7 @@ function App() {
           <BandChips
             bands={params.bands}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={selectBand}
             onToggle={(index) =>
               updateBand(index, { active: !params.bands[index]?.active })
             }
@@ -242,6 +237,7 @@ function App() {
       </section>
 
       <ControlRack
+        rackRef={rackRef}
         band={band}
         defaultBand={defaults}
         selected={selected}
