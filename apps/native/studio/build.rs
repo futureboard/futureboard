@@ -461,9 +461,7 @@ fn resolve_license_public_key(dotenv: &[(String, String)]) -> Option<String> {
         match validate_license_public_key(&value) {
             Ok(()) => return Some(value),
             Err(reason) => {
-                println!(
-                    "cargo:warning=ignoring license public key from {source}: {reason}"
-                );
+                println!("cargo:warning=ignoring license public key from {source}: {reason}");
             }
         }
     }

@@ -260,8 +260,9 @@ fn query_refresh_hz_os() -> Option<u32> {
             display_id: CGDirectDisplayID,
             display_link_out: *mut CVDisplayLinkRef,
         ) -> i32;
-        fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(display_link: CVDisplayLinkRef)
-        -> CVTime;
+        fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(
+            display_link: CVDisplayLinkRef,
+        ) -> CVTime;
         fn CVDisplayLinkRelease(display_link: CVDisplayLinkRef);
     }
 
@@ -356,7 +357,8 @@ unsafe fn refresh_hz_from_xrandr_resources(
 
     let mut chosen_mode: RRMode = 0;
     // Prefer primary when connected; otherwise first connected output with a CRTC.
-    let order = std::iter::once(primary).chain((0..noutput).map(|i| unsafe { *outputs.add(i as usize) }));
+    let order =
+        std::iter::once(primary).chain((0..noutput).map(|i| unsafe { *outputs.add(i as usize) }));
     for output in order {
         if output == 0 {
             continue;
