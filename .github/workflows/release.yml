@@ -14,11 +14,11 @@ name: Release Build
 
 on:
   schedule:
-    - cron: "30 7 8 8 *" # 07:30 UTC on 8 August == 14:30 GMT+7, 90 min before release
+    - cron: "30 7 9 8 *" # 07:30 UTC on 9 August == 14:30 GMT+7, 90 min before release
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to attach the build to (e.g. 2026.8.8-beta1).
+        description: Release tag to attach the build to (e.g. beta, or 2026.8.9-beta1).
         type: string
         required: true
       app-version:
@@ -50,10 +50,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Target of the scheduled run. The cron fires every 8 August, so the date
+  # Target of the scheduled run. The cron fires every 9 August, so the date
   # guard in `plan` keeps it a one-shot for this release.
-  SCHEDULED_TAG: 2026.8.8-beta1
-  SCHEDULED_DATE: 2026-08-08
+  #
+  # 2026.8.9-beta1 is a hotfix on top of 2026.8.8-beta1. The beta channel
+  # publishes through the moving `beta` tag, so the scheduled run uploads onto
+  # that existing release rather than cutting a new version tag; `version.json`
+  # still carries the real version and names every asset.
+  SCHEDULED_TAG: beta
+  SCHEDULED_DATE: 2026-08-09
 
 jobs:
   plan:
