@@ -10,7 +10,7 @@ use crate::cef;
 use crate::metadata::{BuildInfo, MetadataInputs};
 use crate::platform::{Edition, platform_folder};
 use crate::plugins;
-use crate::staging::{self, StagingPlan};
+use crate::staging::{self, BIN_DIR, StagingPlan};
 use crate::validation::{self, ValidationInputs};
 
 /// Which Built-in Plugins to build and stage.
@@ -169,6 +169,13 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         sidecar_names.push(name);
     }
 
+    let mut apak_tool_names = Vec::with_capacity(build.apak_executables.len());
+    for tool in &build.apak_executables {
+        let relative = staging::stage_executable_into(&plan.staging_dir, BIN_DIR, tool)?;
+        eprintln!("[xtask] staged APAK tool: {relative}");
+        apak_tool_names.push(relative);
+    }
+
     let siblings = staging::stage_runtime_siblings(&plan.staging_dir, executable)?;
     for lib in &siblings {
         eprintln!("[xtask] staged runtime library: {lib}");
@@ -268,6 +275,7 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         staging_dir: &plan.staging_dir,
         binary_name: &binary_name,
         sidecars: &sidecar_names,
+        tools: &apak_tool_names,
         symbols_enabled: options.symbols,
         triple: &target_triple,
         cef_staged,

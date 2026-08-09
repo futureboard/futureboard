@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use crate::platform::Edition;
 
 /// Directory names created inside every staged application.
+pub const BIN_DIR: &str = "bin";
 pub const PLUGINS_DIR: &str = "Plugins";
 pub const RESOURCES_DIR: &str = "Resources";
 /// Where optional `--symbols` output lands (kept out of the runtime layout).
@@ -97,13 +98,29 @@ impl StagingPlan {
 /// Copy the executable into staging under its own file name (keeping the
 /// platform-correct extension) and return the staged binary's file name.
 pub fn stage_executable(staging_dir: &Path, executable: &Path) -> Result<String> {
-    let file_name = executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("executable path has no file name: {}", executable.display()))?
-        .to_string();
+    let file_name = executable_file_name(executable)?;
     copy_into(staging_dir, &file_name, executable)?;
     Ok(file_name)
+}
+
+/// Copy an executable into a child directory and return its staged relative path.
+pub fn stage_executable_into(
+    staging_dir: &Path,
+    directory: &str,
+    executable: &Path,
+) -> Result<String> {
+    let file_name = executable_file_name(executable)?;
+    let relative = format!("{directory}/{file_name}");
+    copy_into(staging_dir, &relative, executable)?;
+    Ok(relative)
+}
+
+fn executable_file_name(executable: &Path) -> Result<String> {
+    executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("executable path has no file name: {}", executable.display()))
+        .map(str::to_string)
 }
 
 /// Copy any known runtime sibling libraries found next to the executable.
@@ -123,9 +140,9 @@ pub fn stage_runtime_siblings(staging_dir: &Path, executable: &Path) -> Result<V
     Ok(staged)
 }
 
-/// Create the empty application directories (`Plugins/`, `Resources/`).
+/// Create the application directories (`bin/`, `Plugins/`, `Resources/`).
 pub fn create_layout_dirs(staging_dir: &Path) -> Result<()> {
-    for dir in [PLUGINS_DIR, RESOURCES_DIR] {
+    for dir in [BIN_DIR, PLUGINS_DIR, RESOURCES_DIR] {
         let path = safe_join(staging_dir, Path::new(dir))?;
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
@@ -311,6 +328,22 @@ mod tests {
             safe_join(root, Path::new("./build-info.json")).unwrap(),
             Path::new("stage/build-info.json")
         );
+    }
+
+    #[test]
+    fn stage_executable_into_places_tool_under_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("artifacts");
+        let staging_dir = temp.path().join("stage");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&staging_dir).unwrap();
+        let source = source_dir.join("apak.exe");
+        fs::write(&source, b"MZ").unwrap();
+
+        let relative = stage_executable_into(&staging_dir, BIN_DIR, &source).unwrap();
+
+        assert_eq!(relative, "bin/apak.exe");
+        assert_eq!(fs::read(staging_dir.join(&relative)).unwrap(), b"MZ");
     }
 
     #[test]

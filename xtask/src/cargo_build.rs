@@ -9,8 +9,9 @@
 //! `FutureboardNative.exe` spawns two sidecar processes it resolves *next to
 //! itself* — the out-of-process plugin/editor host (`FutureboardPluginHostX64`)
 //! and the isolated plugin scanner (`FutureboardPluginScanner`). Both are
-//! `[[bin]]` targets of the `sphere-plugin-host` package, so we build all three
-//! bins in one invocation and stage them together.
+//! `[[bin]]` targets of the `sphere-plugin-host` package. The distributable also
+//! carries the APAK installer and CLI tools under `bin/`, so all required
+//! executables are built in one invocation and discovered from Cargo messages.
 
 use std::collections::BTreeMap;
 use std::io::BufReader;
@@ -45,12 +46,16 @@ pub const APP_BINARY: &str = "FutureboardNative";
 /// Package that owns the runtime sidecar executables.
 const SIDECAR_PACKAGE: &str = "sphere-plugin-host";
 const CEF_HELPER_PACKAGE: &str = "futureboard_cef_helper";
+const APAK_PACKAGE: &str = "apakinstaller";
 pub const CEF_HELPER_BINARY: &str = "futureboard_cef_helper";
 
 /// Sidecar binaries `FutureboardNative` spawns from its own directory. These are
 /// separate `[[bin]]` targets, so building the app package alone does not
 /// produce them — they must be requested explicitly.
 pub const SIDECAR_BINARIES: &[&str] = &["FutureboardPluginHostX64", "FutureboardPluginScanner"];
+
+/// APAK tools shipped under the staged application's `bin/` directory.
+pub const APAK_BINARIES: &[&str] = &["apakinstaller", "apak", "makeapak"];
 
 /// Feature flags that unlock the sidecar `[[bin]]` targets (their
 /// `required-features`).
@@ -70,6 +75,8 @@ pub struct BuildOutput {
     pub sidecar_executables: Vec<PathBuf>,
     /// Dedicated CEF subprocess entry point, built only for macOS packages.
     pub cef_helper_executable: Option<PathBuf>,
+    /// APAK GUI/CLI executables, in the order of [`APAK_BINARIES`].
+    pub apak_executables: Vec<PathBuf>,
 }
 
 /// Build the application and its sidecars for the requested profile / target /
@@ -91,11 +98,15 @@ pub fn build(
         .arg("--message-format=json-render-diagnostics")
         .args(["--package", APP_PACKAGE])
         .args(["--package", SIDECAR_PACKAGE])
+        .args(["--package", APAK_PACKAGE])
         .args(["--bin", APP_BINARY])
         .args(["--profile", profile])
         .args(["--target-dir", edition.target_dir()]);
 
     for bin in SIDECAR_BINARIES {
+        command.args(["--bin", bin]);
+    }
+    for bin in APAK_BINARIES {
         command.args(["--bin", bin]);
     }
     if target_is_macos {
@@ -130,7 +141,7 @@ pub fn build(
     }
 
     eprintln!(
-        "[xtask] building {APP_BINARY} + sidecars (edition={edition}, profile={profile}, target={})",
+        "[xtask] building {APP_BINARY} + sidecars + APAK tools (edition={edition}, profile={profile}, target={})",
         target.unwrap_or("<host>")
     );
 
@@ -189,11 +200,21 @@ pub fn build(
     } else {
         None
     };
+    let mut apak_executables = Vec::with_capacity(APAK_BINARIES.len());
+    for bin in APAK_BINARIES {
+        let path = executables.remove(*bin).ok_or_else(|| {
+            anyhow!(
+                "cargo build succeeded but emitted no executable artifact for APAK tool `{bin}`"
+            )
+        })?;
+        apak_executables.push(path);
+    }
 
     Ok(BuildOutput {
         app_executable,
         sidecar_executables,
         cef_helper_executable,
+        apak_executables,
     })
 }
 
@@ -212,13 +233,15 @@ fn merged_features(edition: Edition) -> String {
 /// executables we asked Cargo to build.
 fn wanted_executable(artifact: &Artifact) -> Option<(String, PathBuf)> {
     let name = artifact.target.name.as_str();
-    let is_wanted =
-        (name == APP_BINARY || name == CEF_HELPER_BINARY || SIDECAR_BINARIES.contains(&name))
-            && artifact
-                .target
-                .kind
-                .iter()
-                .any(|kind| kind.as_str() == "bin");
+    let is_wanted = (name == APP_BINARY
+        || name == CEF_HELPER_BINARY
+        || SIDECAR_BINARIES.contains(&name)
+        || APAK_BINARIES.contains(&name))
+        && artifact
+            .target
+            .kind
+            .iter()
+            .any(|kind| kind.as_str() == "bin");
     if !is_wanted {
         return None;
     }

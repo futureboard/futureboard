@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cef::{LOCALES_DIR, required_runtime_files};
 use crate::platform::dynamic_library_extension;
-use crate::staging::{BUILD_INFO_FILE, PLUGINS_DIR, RESOURCES_DIR, SYMBOLS_DIR};
+use crate::staging::{BIN_DIR, BUILD_INFO_FILE, PLUGINS_DIR, RESOURCES_DIR, SYMBOLS_DIR};
 
 /// File extensions that must never appear in a distributable package — Cargo
 /// intermediates and dev-only artifacts. `.lib`/`.pdb` are still allowed only
@@ -34,6 +34,8 @@ pub struct ValidationInputs<'a> {
     pub staging_dir: &'a Path,
     pub binary_name: &'a str,
     pub sidecars: &'a [String],
+    /// Required executables staged at relative paths such as `bin/apak.exe`.
+    pub tools: &'a [String],
     pub symbols_enabled: bool,
     /// Effective target triple (drives dynamic-library and CEF file names).
     pub triple: &'a str,
@@ -48,6 +50,10 @@ pub fn validate_staging(inputs: &ValidationInputs<'_>) -> Result<()> {
     for sidecar in inputs.sidecars {
         check_executable(staging_dir, sidecar)
             .with_context(|| format!("required sidecar `{sidecar}` missing or empty"))?;
+    }
+    for tool in inputs.tools {
+        check_executable(staging_dir, tool)
+            .with_context(|| format!("required staged tool `{tool}` missing or empty"))?;
     }
     check_required_dirs(staging_dir)?;
     check_build_info(staging_dir)?;
@@ -148,7 +154,7 @@ fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
     Ok(())
 }
 
-/// The main executable exists and is non-empty.
+/// A required executable exists at its staged relative path and is non-empty.
 fn check_executable(staging_dir: &Path, binary_name: &str) -> Result<()> {
     let exe = staging_dir.join(binary_name);
     let meta = fs::metadata(&exe)
@@ -164,7 +170,7 @@ fn check_executable(staging_dir: &Path, binary_name: &str) -> Result<()> {
 
 /// The expected application directories exist.
 fn check_required_dirs(staging_dir: &Path) -> Result<()> {
-    for dir in [PLUGINS_DIR, RESOURCES_DIR] {
+    for dir in [BIN_DIR, PLUGINS_DIR, RESOURCES_DIR] {
         let path = staging_dir.join(dir);
         if !path.is_dir() {
             bail!(
@@ -272,6 +278,7 @@ mod tests {
     /// Build a minimally valid staged package for the happy-path checks.
     fn valid_package(dir: &Path) {
         fs::write(dir.join("FutureboardNative.exe"), b"MZ binary").unwrap();
+        fs::create_dir_all(dir.join(BIN_DIR)).unwrap();
         fs::create_dir_all(dir.join(PLUGINS_DIR)).unwrap();
         fs::create_dir_all(dir.join(RESOURCES_DIR)).unwrap();
         fs::write(dir.join(BUILD_INFO_FILE), "{\"schemaVersion\":1}").unwrap();
@@ -297,6 +304,7 @@ mod tests {
             staging_dir: dir,
             binary_name: binary,
             sidecars,
+            tools: &[],
             symbols_enabled: symbols,
             triple: TRIPLE,
             cef_staged: cef,
@@ -351,6 +359,32 @@ mod tests {
             false,
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn required_apak_tools_must_exist_under_bin() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        fs::write(temp.path().join("bin/apakinstaller.exe"), b"MZ").unwrap();
+        fs::write(temp.path().join("bin/apak.exe"), b"MZ").unwrap();
+        let tools = [
+            "bin/apakinstaller.exe".to_string(),
+            "bin/apak.exe".to_string(),
+            "bin/makeapak.exe".to_string(),
+        ];
+        let inputs = ValidationInputs {
+            staging_dir: temp.path(),
+            binary_name: "FutureboardNative.exe",
+            sidecars: &[],
+            tools: &tools,
+            symbols_enabled: false,
+            triple: TRIPLE,
+            cef_staged: false,
+        };
+
+        assert!(validate_staging(&inputs).is_err());
+        fs::write(temp.path().join("bin/makeapak.exe"), b"MZ").unwrap();
+        validate_staging(&inputs).unwrap();
     }
 
     #[test]
