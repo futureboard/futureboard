@@ -1,5 +1,4 @@
-import { scaleLinear, scaleLog } from 'd3-scale'
-import { curveMonotoneX, line } from 'd3-shape'
+import { area, curveMonotoneX, line, scaleLinear, scaleLog } from 'd3'
 import type { Band, FilterType } from '../bridge'
 
 export const MIN_FREQ = 20
@@ -109,17 +108,17 @@ export const FILTER_KINDS: FilterKind[] = [
   },
 ]
 
-/// Frequency-shaped band identity, cool at the bottom of the spectrum to warm
-/// at the top, so a node's colour hints at where it sits before it is read.
+/// Pro-Q-style band identity — saturated spectrum markers so each handle reads
+/// instantly against the dark analyser floor (cool lows → warm highs).
 export const BAND_COLORS = [
-  '#5cb8e6',
-  '#57c9bd',
-  '#77c97f',
-  '#c9c164',
-  '#e0a463',
-  '#e07f86',
-  '#b184d6',
-  '#8fa4e8',
+  '#3ec7ff',
+  '#2ad4c1',
+  '#5adf7a',
+  '#d4d04a',
+  '#ff9a3c',
+  '#ff6b6b',
+  '#c084fc',
+  '#7aa2ff',
 ] as const
 
 export function filterKind(type: FilterType): FilterKind {
@@ -332,7 +331,7 @@ const curveBuilder = line<[number, number]>()
   .y((point) => point[1])
   .curve(curveMonotoneX)
 
-function tracePath(
+function sampleCurvePoints(
   width: number,
   height: number,
   dbAt: (frequency: number) => number,
@@ -344,7 +343,41 @@ function tracePath(
     const db = clamp(dbAt(xToFrequency(x, width)), -GAIN_RANGE - 6, GAIN_RANGE + 6)
     points[index] = [x, gainToY(db, height)]
   }
-  return curveBuilder(points) ?? ''
+  return points
+}
+
+function tracePath(
+  width: number,
+  height: number,
+  dbAt: (frequency: number) => number,
+) {
+  return curveBuilder(sampleCurvePoints(width, height, dbAt)) ?? ''
+}
+
+/// Filled response under the sum curve (Pro-Q area shade), closed on the 0 dB
+/// line via d3.area so the SVG fill stays in register with the stroked path.
+export function sumCurveAreaPath(
+  bands: Band[],
+  width: number,
+  height: number,
+  sampleRate: number,
+) {
+  const active = bands
+    .filter((band) => band.active)
+    .map((band) => bandCoefficients(band, sampleRate))
+  const zeroY = gainToY(0, height)
+  const points = sampleCurvePoints(width, height, (frequency) =>
+    active.reduce(
+      (sum, coeff) => sum + magnitudeDb(coeff, frequency, sampleRate),
+      0,
+    ),
+  )
+  const areaBuilder = area<[number, number]>()
+    .x((point) => point[0])
+    .y0(zeroY)
+    .y1((point) => point[1])
+    .curve(curveMonotoneX)
+  return areaBuilder(points) ?? ''
 }
 
 export function sumCurvePath(

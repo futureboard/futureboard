@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import type { CSSProperties, Ref } from 'react'
 import type { Band, EqParams } from '../bridge'
 import {
   BAND_COLORS,
@@ -23,6 +23,7 @@ import {
 import { Knob } from './Knob'
 
 export type ControlRackProps = {
+  rackRef?: Ref<HTMLElement>
   band: Band
   defaultBand: Band
   selected: number
@@ -37,6 +38,7 @@ export type ControlRackProps = {
 }
 
 export function ControlRack({
+  rackRef,
   band,
   defaultBand,
   selected,
@@ -53,6 +55,7 @@ export function ControlRack({
 
   return (
     <section
+      ref={rackRef}
       className="control-rack"
       style={{ '--band': BAND_COLORS[selected] } as CSSProperties}
     >
