@@ -327,6 +327,7 @@ impl StudioLayout {
         let detected = crate::device_registry::cached_midi_devices();
         let resolved = sphere_midi_service::resolve_midi_devices(&devices, &detected);
         self.hardware_midi_input.sync_enabled_devices(&resolved);
+        log_hardware_midi_diagnostics();
     }
 
     pub(super) fn drain_hardware_midi_input(&mut self, cx: &mut Context<Self>) -> bool {
@@ -368,18 +369,36 @@ impl StudioLayout {
             channel,
             cx,
         );
+        sphere_midi_service::note_midi_input_routed(!targets.is_empty());
         if targets.is_empty() {
+            if hardware_midi_debug() {
+                eprintln!(
+                    "[MIDI input] {} ({}) event={:?} channel={channel:?} -> no target \
+                     (no armed/selected instrument track accepts this device)",
+                    message.device_name, message.device_id, message.event
+                );
+            }
             return;
         }
         for resolved in targets {
-            let _ = self.route_midi_input_event_with_capture(
+            let status = self.route_midi_input_event_with_capture(
                 MidiInputSource::Hardware,
-                resolved.target,
+                resolved.target.clone(),
                 message.event.clone(),
                 Some(&resolved.capture_track_id),
                 capture_beat,
                 cx,
             );
+            if hardware_midi_debug() {
+                eprintln!(
+                    "[MIDI input] {} ({}) event={:?} -> track={} instance={:?} status={status:?}",
+                    message.device_name,
+                    message.device_id,
+                    message.event,
+                    resolved.target.track_id,
+                    resolved.target.plugin_instance_id
+                );
+            }
         }
     }
 
@@ -525,6 +544,59 @@ impl StudioLayout {
 fn virtual_keyboard_debug() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_VIRTUAL_KEYBOARD_DEBUG").is_some())
+}
+
+/// `FUTUREBOARD_MIDI_INPUT_DEBUG=1` traces each drained hardware MIDI event
+/// through routing: the device it came from, the target track and plugin
+/// instance it landed on, and the dispatch status — or why nothing claimed it.
+///
+/// Deliberately opt-in and off the MIDI callback thread: this runs on the
+/// control-thread drain, so a held key cannot turn into per-event stdout work
+/// on CoreMIDI's high-priority thread. Cached on first read.
+fn hardware_midi_debug() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_INPUT_DEBUG").is_some())
+}
+
+/// Print the hardware MIDI input counters when they move, from the 500 ms
+/// device sync (never from the MIDI callback).
+///
+/// These are what separate the failure modes that otherwise all look like
+/// "nothing happens when I press a key": `callbacks=0` means the backend never
+/// delivered anything, `messages>0 events=0` means bytes arrived but nothing
+/// decoded, and `events>0 routed=0` means decoding worked but no track claimed
+/// the event.
+fn log_hardware_midi_diagnostics() {
+    if !hardware_midi_debug() {
+        return;
+    }
+    use std::cell::Cell;
+    thread_local! {
+        static LAST: Cell<sphere_midi_service::MidiInputDiagnostics> =
+            const { Cell::new(sphere_midi_service::MidiInputDiagnostics {
+                callbacks: 0, messages: 0, events: 0, ignored: 0,
+                malformed: 0, dropped: 0, routed: 0, unrouted: 0,
+            }) };
+    }
+    let now = sphere_midi_service::midi_input_diagnostics();
+    LAST.with(|last| {
+        if last.get() == now {
+            return;
+        }
+        last.set(now);
+        eprintln!(
+            "[MIDI input] callbacks={} messages={} events={} ignored={} malformed={} \
+             dropped={} routed={} unrouted={}",
+            now.callbacks,
+            now.messages,
+            now.events,
+            now.ignored,
+            now.malformed,
+            now.dropped,
+            now.routed,
+            now.unrouted
+        );
+    });
 }
 
 fn route_result<E: std::fmt::Display>(result: Result<(), E>) -> MidiInputRouteStatus {

@@ -645,6 +645,14 @@ impl HardwareMidiInput {
         let (tx, rx) = std::sync::mpsc::channel();
         self.event_rx = Some(rx);
         self.connections = open_hardware_midi_inputs(enabled, tx);
+        if self.connections.is_empty() {
+            // Nothing opened: the platform backend may still be coming up (on
+            // macOS the CoreMIDI client is retried until it succeeds). Hold back
+            // the comparison key so the next sync tries again instead of
+            // treating this enabled set as done. Only when *nothing* connected,
+            // so a device that did open is never torn down to retry a sibling.
+            self.enabled_ids.clear();
+        }
     }
 
     /// Drain pending hardware MIDI messages (non-blocking). Bounded by caller.
@@ -717,6 +725,201 @@ pub(crate) fn decode_midi_bytes(bytes: &[u8]) -> Option<MidiInputEvent> {
     }
 }
 
+/// Number of data bytes that follow `status` in a MIDI 1.0 stream.
+fn midi_data_byte_count(status: u8) -> usize {
+    match status & 0xF0 {
+        0x80 | 0x90 | 0xA0 | 0xB0 | 0xE0 => 2,
+        0xC0 | 0xD0 => 1,
+        0xF0 => match status {
+            // MTC quarter frame, song select.
+            0xF1 | 0xF3 => 1,
+            // Song position pointer.
+            0xF2 => 2,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Split a raw MIDI byte stream into complete messages, calling `on_message`
+/// once per message. Returns the number of bytes that could not be framed.
+///
+/// `midir` (Windows/Linux) hands the app exactly one message per callback, but a
+/// CoreMIDI packet is a *stream*: messages that share a timestamp are coalesced
+/// into a single packet, and some class-compliant drivers pass running status
+/// through. Decoding only the first three bytes of a packet therefore drops
+/// every message after the first — a chord arrives as one note.
+///
+/// `running_status` is threaded through by the caller because a packet boundary
+/// does not reset it. Per MIDI 1.0, System Real-Time bytes are single-byte
+/// messages that may appear anywhere and never disturb running status, while
+/// System Common clears it.
+pub fn split_midi_messages(
+    bytes: &[u8],
+    running_status: &mut Option<u8>,
+    mut on_message: impl FnMut(&[u8]),
+) -> usize {
+    let mut malformed = 0usize;
+    let mut message = [0u8; 3];
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+
+        // System Real-Time: one byte, legal anywhere, leaves running status alone.
+        if byte >= 0xF8 {
+            on_message(&bytes[index..index + 1]);
+            index += 1;
+            continue;
+        }
+
+        // SysEx runs to EOX. We do not consume dumps, so the span is emitted
+        // whole (real-time bytes inside it included) for the decoder to ignore.
+        if byte == 0xF0 {
+            *running_status = None;
+            let mut end = index + 1;
+            while end < bytes.len() {
+                let byte = bytes[end];
+                if byte == 0xF7 {
+                    end += 1;
+                    break;
+                }
+                // A non-real-time status byte means the dump was truncated.
+                if byte >= 0x80 && byte < 0xF8 {
+                    break;
+                }
+                end += 1;
+            }
+            on_message(&bytes[index..end]);
+            index = end;
+            continue;
+        }
+
+        let (status, data_start) = if byte >= 0x80 {
+            if byte >= 0xF0 {
+                *running_status = None;
+            } else {
+                *running_status = Some(byte);
+            }
+            (byte, index + 1)
+        } else if let Some(status) = *running_status {
+            (status, index)
+        } else {
+            // A data byte with nothing to attach it to: the stream started
+            // mid-message. Drop it rather than guessing at a status.
+            malformed += 1;
+            index += 1;
+            continue;
+        };
+
+        let needed = midi_data_byte_count(status);
+        let end = data_start + needed;
+        if end > bytes.len() {
+            // Truncated tail. Neither backend splits a message across
+            // callbacks, so this is a malformed stream, not something to buffer.
+            malformed += bytes.len() - index;
+            break;
+        }
+        message[0] = status;
+        message[1..=needed].copy_from_slice(&bytes[data_start..end]);
+        on_message(&message[..=needed]);
+        index = end;
+    }
+
+    malformed
+}
+
+/// Counters for the hardware MIDI input boundary, so a silent keyboard can be
+/// diagnosed without a debugger: they separate "the backend never delivered
+/// anything" from "bytes arrived but did not decode" from "events decoded but
+/// no track claimed them".
+///
+/// Plain relaxed atomics — the native MIDI callback increments them without
+/// locking, allocating, or blocking, and readers only ever print them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MidiInputDiagnostics {
+    /// Native callbacks delivered by the platform backend.
+    pub callbacks: u64,
+    /// Complete MIDI messages framed out of those callbacks.
+    pub messages: u64,
+    /// Messages that became a [`MidiInputEvent`].
+    pub events: u64,
+    /// Messages deliberately not mapped (clock, sysex, aftertouch, ...).
+    pub ignored: u64,
+    /// Bytes that could not be framed into a message.
+    pub malformed: u64,
+    /// Events dropped because the queue receiver was gone.
+    pub dropped: u64,
+    /// Events the router delivered to at least one track.
+    pub routed: u64,
+    /// Events the router discarded because no track claimed them.
+    pub unrouted: u64,
+}
+
+mod input_counters {
+    use std::sync::atomic::AtomicU64;
+
+    pub(super) static CALLBACKS: AtomicU64 = AtomicU64::new(0);
+    pub(super) static MESSAGES: AtomicU64 = AtomicU64::new(0);
+    pub(super) static EVENTS: AtomicU64 = AtomicU64::new(0);
+    pub(super) static IGNORED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static MALFORMED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DROPPED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static ROUTED: AtomicU64 = AtomicU64::new(0);
+    pub(super) static UNROUTED: AtomicU64 = AtomicU64::new(0);
+}
+
+use std::sync::atomic::Ordering as AtomicOrdering;
+
+#[inline]
+fn bump(counter: &std::sync::atomic::AtomicU64, by: u64) {
+    if by > 0 {
+        counter.fetch_add(by, AtomicOrdering::Relaxed);
+    }
+}
+
+/// Record one native MIDI callback and what came out of it. Called from the
+/// platform MIDI thread, so it must stay allocation- and lock-free.
+#[inline]
+pub(crate) fn note_midi_input_callback(
+    messages: u64,
+    events: u64,
+    ignored: u64,
+    malformed: u64,
+    dropped: u64,
+) {
+    bump(&input_counters::CALLBACKS, 1);
+    bump(&input_counters::MESSAGES, messages);
+    bump(&input_counters::EVENTS, events);
+    bump(&input_counters::IGNORED, ignored);
+    bump(&input_counters::MALFORMED, malformed);
+    bump(&input_counters::DROPPED, dropped);
+}
+
+/// Record the routing verdict for one drained input event.
+#[inline]
+pub fn note_midi_input_routed(routed: bool) {
+    if routed {
+        bump(&input_counters::ROUTED, 1);
+    } else {
+        bump(&input_counters::UNROUTED, 1);
+    }
+}
+
+/// Snapshot of the hardware MIDI input counters.
+pub fn midi_input_diagnostics() -> MidiInputDiagnostics {
+    MidiInputDiagnostics {
+        callbacks: input_counters::CALLBACKS.load(AtomicOrdering::Relaxed),
+        messages: input_counters::MESSAGES.load(AtomicOrdering::Relaxed),
+        events: input_counters::EVENTS.load(AtomicOrdering::Relaxed),
+        ignored: input_counters::IGNORED.load(AtomicOrdering::Relaxed),
+        malformed: input_counters::MALFORMED.load(AtomicOrdering::Relaxed),
+        dropped: input_counters::DROPPED.load(AtomicOrdering::Relaxed),
+        routed: input_counters::ROUTED.load(AtomicOrdering::Relaxed),
+        unrouted: input_counters::UNROUTED.load(AtomicOrdering::Relaxed),
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn open_hardware_midi_inputs(
     enabled: Vec<(String, String)>,
@@ -757,13 +960,22 @@ fn open_hardware_midi_inputs(
             port,
             &format!("Futureboard listen ({device_name})"),
             move |_stamp, message, _| {
-                if let Some(event) = decode_midi_bytes(message) {
-                    let _ = tx.send(HardwareMidiInputMessage {
-                        device_id: id.clone(),
-                        device_name: name.clone(),
-                        event,
-                        received_at: Instant::now(),
-                    });
+                // midir delivers exactly one complete message per callback, so
+                // this stays a direct decode; only the diagnostic counters are
+                // shared with the CoreMIDI path.
+                match decode_midi_bytes(message) {
+                    Some(event) => {
+                        let sent = tx
+                            .send(HardwareMidiInputMessage {
+                                device_id: id.clone(),
+                                device_name: name.clone(),
+                                event,
+                                received_at: Instant::now(),
+                            })
+                            .is_ok();
+                        note_midi_input_callback(1, 1, 0, 0, u64::from(!sent));
+                    }
+                    None => note_midi_input_callback(1, 0, 1, 0, 0),
                 }
             },
             (),
@@ -1701,5 +1913,195 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Split `bytes` with a fresh running status and collect the messages.
+    fn split(bytes: &[u8]) -> (Vec<Vec<u8>>, usize) {
+        let mut messages = Vec::new();
+        let mut running = None;
+        let malformed = split_midi_messages(bytes, &mut running, |message| {
+            messages.push(message.to_vec());
+        });
+        (messages, malformed)
+    }
+
+    #[test]
+    fn a_single_message_packet_yields_one_message() {
+        let (messages, malformed) = split(&[0x90, 60, 100]);
+        assert_eq!(messages, vec![vec![0x90, 60, 100]]);
+        assert_eq!(malformed, 0);
+    }
+
+    #[test]
+    fn a_coalesced_packet_yields_every_message() {
+        // CoreMIDI packs messages that share a timestamp into one packet, so a
+        // chord arrives as a single payload. Decoding only the first three
+        // bytes would play one note out of three.
+        let (messages, malformed) = split(&[0x90, 60, 100, 0x90, 64, 100, 0x90, 67, 100]);
+        assert_eq!(
+            messages,
+            vec![
+                vec![0x90, 60, 100],
+                vec![0x90, 64, 100],
+                vec![0x90, 67, 100]
+            ]
+        );
+        assert_eq!(malformed, 0);
+
+        let events: Vec<_> = messages
+            .iter()
+            .filter_map(|message| decode_midi_bytes(message))
+            .collect();
+        assert_eq!(events.len(), 3, "every note in the chord must decode");
+    }
+
+    #[test]
+    fn running_status_reuses_the_previous_status_byte() {
+        let (messages, malformed) = split(&[0x90, 60, 100, 64, 100, 67, 0]);
+        assert_eq!(
+            messages,
+            vec![vec![0x90, 60, 100], vec![0x90, 64, 100], vec![0x90, 67, 0]]
+        );
+        assert_eq!(malformed, 0);
+        // Note On with velocity 0 is the usual Note Off from a keyboard.
+        assert_eq!(
+            decode_midi_bytes(&messages[2]),
+            Some(MidiInputEvent::NoteOff {
+                note: 67,
+                channel: 0
+            })
+        );
+    }
+
+    #[test]
+    fn realtime_bytes_do_not_break_the_surrounding_message() {
+        // Clock and active sensing are legal between the data bytes of another
+        // message. They must come out standalone and leave running status alone.
+        let (messages, malformed) = split(&[0xF8, 0x90, 60, 100, 0xFE, 64, 100]);
+        assert_eq!(
+            messages,
+            vec![
+                vec![0xF8],
+                vec![0x90, 60, 100],
+                vec![0xFE],
+                vec![0x90, 64, 100],
+            ]
+        );
+        assert_eq!(malformed, 0);
+        assert_eq!(decode_midi_bytes(&[0xF8]), None, "clock is not routed");
+    }
+
+    #[test]
+    fn system_common_clears_running_status() {
+        let (messages, malformed) = split(&[0x90, 60, 100, 0xF2, 0, 1, 64, 100]);
+        assert_eq!(
+            messages,
+            vec![vec![0x90, 60, 100], vec![0xF2, 0, 1]],
+            "song position must not be followed by a resurrected Note On"
+        );
+        // The trailing 64, 100 have no status to attach to once F2 cleared it.
+        assert_eq!(malformed, 2);
+    }
+
+    #[test]
+    fn channel_is_preserved_across_the_split() {
+        let (messages, _) = split(&[0x93, 60, 100, 0x8A, 60, 0]);
+        assert_eq!(
+            decode_midi_bytes(&messages[0]),
+            Some(MidiInputEvent::NoteOn {
+                note: 60,
+                velocity: 100,
+                channel: 3
+            })
+        );
+        assert_eq!(
+            decode_midi_bytes(&messages[1]),
+            Some(MidiInputEvent::NoteOff {
+                note: 60,
+                channel: 10
+            })
+        );
+    }
+
+    #[test]
+    fn control_change_and_two_byte_messages_frame_correctly() {
+        // Program change / channel pressure carry one data byte; getting the
+        // count wrong would shift every following message.
+        let (messages, malformed) = split(&[0xC0, 5, 0xD0, 64, 0xB0, 7, 100]);
+        assert_eq!(
+            messages,
+            vec![vec![0xC0, 5], vec![0xD0, 64], vec![0xB0, 7, 100]]
+        );
+        assert_eq!(malformed, 0);
+        assert_eq!(
+            decode_midi_bytes(&messages[2]),
+            Some(MidiInputEvent::ControlChange {
+                controller: 7,
+                value: 100,
+                channel: 0
+            })
+        );
+    }
+
+    #[test]
+    fn sysex_is_consumed_whole_and_does_not_swallow_the_next_message() {
+        let (messages, malformed) = split(&[0xF0, 0x7E, 0x00, 0x06, 0xF7, 0x90, 60, 100]);
+        assert_eq!(
+            messages,
+            vec![vec![0xF0, 0x7E, 0x00, 0x06, 0xF7], vec![0x90, 60, 100]]
+        );
+        assert_eq!(malformed, 0);
+        assert_eq!(decode_midi_bytes(&messages[0]), None);
+    }
+
+    #[test]
+    fn a_truncated_message_is_reported_not_guessed() {
+        let (messages, malformed) = split(&[0x90, 60]);
+        assert!(messages.is_empty());
+        assert_eq!(malformed, 2);
+    }
+
+    #[test]
+    fn a_packet_starting_mid_message_does_not_invent_a_status() {
+        let (messages, malformed) = split(&[60, 100]);
+        assert!(messages.is_empty());
+        assert_eq!(malformed, 2);
+    }
+
+    #[test]
+    fn running_status_carries_across_packet_boundaries() {
+        // The caller threads one running-status slot through every packet of a
+        // list, because a packet boundary is not a message boundary.
+        let mut running = None;
+        let mut messages = Vec::new();
+        split_midi_messages(&[0x90, 60, 100], &mut running, |m| {
+            messages.push(m.to_vec())
+        });
+        split_midi_messages(&[64, 100], &mut running, |m| messages.push(m.to_vec()));
+        assert_eq!(messages, vec![vec![0x90, 60, 100], vec![0x90, 64, 100]]);
+    }
+
+    #[test]
+    fn an_empty_payload_is_a_no_op() {
+        let (messages, malformed) = split(&[]);
+        assert!(messages.is_empty());
+        assert_eq!(malformed, 0);
+    }
+
+    #[test]
+    fn diagnostics_counters_are_monotonic() {
+        let before = midi_input_diagnostics();
+        note_midi_input_callback(3, 2, 1, 0, 0);
+        note_midi_input_routed(true);
+        note_midi_input_routed(false);
+        let after = midi_input_diagnostics();
+        // Process-wide statics with tests running in parallel: assert the
+        // deltas cover at least this call, not exact totals.
+        assert!(after.callbacks > before.callbacks);
+        assert!(after.messages - before.messages >= 3);
+        assert!(after.events - before.events >= 2);
+        assert!(after.ignored - before.ignored >= 1);
+        assert!(after.routed > before.routed);
+        assert!(after.unrouted > before.unrouted);
     }
 }
