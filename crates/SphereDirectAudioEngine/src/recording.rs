@@ -211,10 +211,12 @@ pub(crate) fn find_input_device_for_host(
     }
     if let Some(id) = device_id {
         if !id.is_empty() {
+            let open_id = crate::device::resolve_open_id(host, id, true);
             let mut devices = host
                 .input_devices()
                 .map_err(|e| SphereAudioError::NativeError(e.to_string()))?;
-            if let Some(dev) = devices.find(|d| d.name().as_deref().ok() == Some(id)) {
+            if let Some(dev) = devices.find(|d| d.name().as_deref().ok() == Some(open_id.as_str()))
+            {
                 return Ok(dev);
             }
             return Err(SphereAudioError::NativeError(format!(
@@ -501,10 +503,20 @@ fn build_f32_input_stream(
         })
         .collect();
 
+    #[cfg(target_os = "linux")]
+    let rt_announcer = crate::backend::cpal_backend::spawn_capture_rt_promoter();
+    #[cfg(target_os = "linux")]
+    let mut rt_announced = false;
+
     device
         .build_input_stream::<f32, _, _>(
             config,
             move |data: &[f32], info| {
+                #[cfg(target_os = "linux")]
+                if !rt_announced {
+                    rt_announcer.announce_current_thread();
+                    rt_announced = true;
+                }
                 let ch = channels.max(1);
                 let frames = data.len() / ch;
                 shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
@@ -691,7 +703,7 @@ pub fn start_recording(
     monitor_mix: bool,
 ) -> Result<RecordingSession, SphereAudioError> {
     let device = find_input_device(config.input_device_id.as_deref())?;
-    start_recording_with_device(config, shared, monitor_mix, device)
+    start_recording_with_device(config, shared, monitor_mix, device, None)
 }
 
 /// Create the `Recordings` folder and build one RAUF writer per armed track,
@@ -849,21 +861,56 @@ pub(crate) fn start_recording_with_device(
     shared: Arc<crate::engine::SharedState>,
     monitor_mix: bool,
     device: cpal::Device,
+    preferred_period: Option<u32>,
 ) -> Result<RecordingSession, SphereAudioError> {
     let default_cfg = device
         .default_input_config()
         .map_err(|e| SphereAudioError::NativeError(format!("Input device config error: {e}")))?;
 
-    let input_ch = default_cfg.channels() as usize;
-    let sample_rate = default_cfg.sample_rate().0;
-
-    let stream_config = cpal::StreamConfig {
-        channels: default_cfg.channels(),
-        sample_rate: default_cfg.sample_rate(),
-        buffer_size: cpal::BufferSize::Default,
+    let preferred_sample_rate = {
+        let out_sr = shared.sample_rate.load(Ordering::Relaxed);
+        (out_sr > 0).then_some(out_sr)
     };
+    let candidates = crate::device::input_stream_config_candidates(
+        &default_cfg,
+        preferred_period,
+        preferred_sample_rate,
+    );
 
-    let track_writers = build_track_writers(&config, &shared, input_ch, sample_rate)?;
+    let mut last_error = None;
+    for (label, stream_config) in candidates {
+        match start_recording_with_config(
+            &config,
+            Arc::clone(&shared),
+            monitor_mix,
+            &device,
+            stream_config.clone(),
+            label,
+        ) {
+            Ok(session) => return Ok(session),
+            Err(error) => {
+                last_error = Some(format!("{label}: {error}"));
+            }
+        }
+    }
+    Err(SphereAudioError::NativeError(format!(
+        "Cannot open input stream: {}",
+        last_error.unwrap_or_else(|| "no candidates".into())
+    )))
+}
+
+fn start_recording_with_config(
+    config: &JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
+    device: &cpal::Device,
+    stream_config: cpal::StreamConfig,
+    candidate_label: &str,
+) -> Result<RecordingSession, SphereAudioError> {
+    let input_ch = stream_config.channels as usize;
+    let sample_rate = stream_config.sample_rate.0;
+
+    let track_writers = build_track_writers(config, &shared, input_ch, sample_rate)?;
     let track_count = track_writers.len();
 
     let max_record_block_samples = input_ch.saturating_mul(8192).max(input_ch.max(1));
@@ -885,7 +932,6 @@ pub(crate) fn start_recording_with_device(
     let start_beat = config.start_beat;
     let capture_on_transport = config.capture_on_transport.unwrap_or(false);
 
-    // AtomicBool: the input callback checks this before sending.
     let recording_active = Arc::new(AtomicBool::new(true));
     let dropped_blocks = Arc::new(AtomicU64::new(0));
     shared.recording_active.store(true, Ordering::Relaxed);
@@ -905,11 +951,6 @@ pub(crate) fn start_recording_with_device(
         })
         .collect();
 
-    // ── Realtime preview + monitor setup (Parts 1 & 2) ────────────────────
-    // The recording stream is the single capture source during a take: it
-    // feeds the monitor ring, the preview ring, and the file writer. Monitoring
-    // is mixed by the output callback from the ring (clean), not by the old
-    // sample-and-hold path.
     const PREVIEW_PEAKS_PER_SEC: u32 = 150;
     let samples_per_bin = (sample_rate / PREVIEW_PEAKS_PER_SEC).max(1) as usize;
     let preview_channels = monitor_channels.len().max(1) as u32;
@@ -933,12 +974,6 @@ pub(crate) fn start_recording_with_device(
         .recording_preview_active
         .store(true, Ordering::Relaxed);
 
-    // ── Per-track preview setup (Part 1, multi-track) ──────────────────────
-    // Each armed track previews a mono mix of its *own* selected input
-    // channels — mirroring what `build_track_writers` already resolved for
-    // the disk-write path above — instead of everyone sharing the single
-    // global `monitor_channels` mix. `config.tracks` is still available here
-    // because `build_track_writers` only borrowed it.
     let preview_tracks: Vec<(String, usize, usize)> = config
         .tracks
         .iter()
@@ -963,9 +998,6 @@ pub(crate) fn start_recording_with_device(
         shared.preview_rings[slot].reset();
     }
 
-    // Arm the monitor ring for this stream's format and enable output monitoring
-    // when the user requested it. A dedicated capture stream does not share the
-    // output device's callback clock, even when both endpoints are WASAPI.
     shared.monitor_shared_clock.store(false, Ordering::Relaxed);
     shared
         .input_ring
@@ -974,9 +1006,8 @@ pub(crate) fn start_recording_with_device(
         .monitor_enabled_any
         .store(monitor_mix, Ordering::Relaxed);
 
-    // Build the input stream — `audio_tx` is moved into the closure.
     let input_stream = match build_f32_input_stream(
-        &device,
+        device,
         &stream_config,
         audio_tx,
         free_rx,
@@ -1007,8 +1038,9 @@ pub(crate) fn start_recording_with_device(
     }
 
     eprintln!(
-        "[SphereAudio] Recording started: {track_count} track(s), \
-         {input_ch}ch input @ {sample_rate} Hz"
+        "[SphereAudio] Recording started via '{candidate_label}': {track_count} track(s), \
+         {input_ch}ch input @ {sample_rate} Hz buffer={:?}",
+        stream_config.buffer_size
     );
 
     Ok(RecordingSession {
