@@ -3,10 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 #[cfg(target_os = "windows")]
 use crate::platform::show_startup_error;
 use crate::platform::{ELEVATED_WARNING_GUI, is_process_elevated};
-use apak::{
-    InstallOptions, InstallRoots, default_secret_file, ensure_secret_file, install_package,
-    read_package_info,
-};
+use apak::{InstallRoots, SignedInstallOptions, install_signed_package, read_signed_package_info};
 use gpui::{
     App, AppContext, Bounds, Context, IntoElement, ParentElement, PathPromptOptions, Point, Render,
     Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, div, px, size,
@@ -121,31 +118,15 @@ impl ApakInstallerWindow {
     }
 
     fn load_package(&mut self, path: PathBuf) {
-        let secret_file = default_secret_file();
-        let secret_generated = match ensure_secret_file(&secret_file) {
-            Ok(generated) => generated,
-            Err(error) => {
-                self.package_path = Some(path);
-                self.summary = None;
-                self.status = InstallStatus::Error;
-                self.detail = error.to_string();
-                return;
-            }
-        };
+        let result = crate::bundled_verifying_key()
+            .and_then(|verifying_key| read_signed_package_info(&path, &verifying_key));
 
-        match read_package_info(&path, &secret_file) {
+        match result {
             Ok(summary) => {
                 self.package_path = Some(path);
                 self.summary = Some(summary);
                 self.status = InstallStatus::Ready;
-                self.detail = if secret_generated {
-                    format!(
-                        "Generated local APAK secret at {}. Package is ready to install.",
-                        secret_file.display()
-                    )
-                } else {
-                    "Package is ready to install.".to_string()
-                };
+                self.detail = "Package signature verified. Ready to install.".to_string();
             }
             Err(error) => {
                 self.package_path = Some(path);
@@ -223,12 +204,11 @@ impl ApakInstallerWindow {
         self.detail = "Installing package...".to_string();
         cx.notify();
 
-        let secret_file = default_secret_file();
-        let result = ensure_secret_file(&secret_file).and_then(|_| {
+        let result = crate::bundled_verifying_key().and_then(|verifying_key| {
             InstallRoots::default_user().and_then(|roots| {
-                install_package(InstallOptions {
+                install_signed_package(SignedInstallOptions {
                     package_path: path,
-                    secret_file,
+                    verifying_key,
                     roots,
                 })
             })

@@ -23,6 +23,7 @@ gpui = { workspace = true, features = ["wayland", "x11"] }
 gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 
 [build-dependencies]
+apak = { path = "../../../crates/SpherePackageInstaller" }
 embed-resource.workspace = true
 
 [lints]

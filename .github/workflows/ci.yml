@@ -123,6 +123,7 @@ jobs:
     name: Rust clippy + tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
+      APAK_VERIFYING_KEY: ${{ secrets.APAK_VERIFYING_KEY }}
       CARGO_BUILD_JOBS: 2
     strategy:
       fail-fast: false

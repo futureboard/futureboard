@@ -34,6 +34,7 @@ jobs:
     needs: version
     runs-on: ${{ matrix.os }}
     env:
+      APAK_VERIFYING_KEY: ${{ secrets.APAK_VERIFYING_KEY }}
       CARGO_BUILD_JOBS: 2
     strategy:
       fail-fast: false

@@ -65,6 +65,8 @@ jobs:
       contents: write
     with:
       app-version: ${{ inputs.app-version }}
+    secrets:
+      APAK_VERIFYING_KEY: ${{ secrets.APAK_VERIFYING_KEY }}
 
   publish:
     name: Attach Release Assets

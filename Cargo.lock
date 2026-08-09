@@ -390,6 +390,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "dirs 5.0.1",
+ "ed25519-dalek",
  "lzma-rs",
  "pbkdf2",
  "serde",
