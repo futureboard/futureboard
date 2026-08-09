@@ -201,6 +201,19 @@ export function postParam(id: keyof MixStationParams, value: number) {
   requestAnimationFrame(flush)
 }
 
+/**
+ * Ask the DAW for a workspace command (e.g. transport play/pause). Independent
+ * of the param binding so Space still works before `selectInstance` arrives.
+ * When the native shell already claimed the key, this page path does not run.
+ */
+export function postGlobalCommand(commandId: string): void {
+  if (!commandId) return
+  post({
+    type: 'futureboard.globalCommand',
+    commandId,
+  })
+}
+
 export function parseParams(state: unknown): MixStationParams | null {
   if (!state || typeof state !== 'object') return null
   const candidate =
