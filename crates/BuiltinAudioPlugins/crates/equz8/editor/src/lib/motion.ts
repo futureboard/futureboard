@@ -77,7 +77,7 @@ export function snapKnobDial(dial: HTMLElement | null) {
   })
 }
 
-/** Brief brightness flash; steady bypass look is CSS `.is-bypassed`. */
+/** Power / bypass: brief brightness flash; steady look is CSS `.is-bypassed`. */
 export function tweenBypass(stage: HTMLElement | null, _bypassed: boolean) {
   if (!stage || reducedMotion) return null
   return animate(stage, {

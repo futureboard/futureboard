@@ -294,6 +294,17 @@
   opacity: 0.62;
 }
 
+.editor.is-bypassed .curve-line,
+.editor.is-bypassed .curve-glow,
+.editor.is-bypassed .curve-fill,
+.editor.is-bypassed .band-curve {
+  opacity: 0.18 !important;
+}
+
+.editor.is-bypassed .node {
+  opacity: 0.28 !important;
+}
+
 .knob-track {
   fill: none;
   stroke: rgb(255 255 255 / 0.08);
