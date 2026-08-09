@@ -9,8 +9,6 @@ export type BandChipsProps = {
   onToggle: (index: number) => void
 }
 
-/// Compact band picker for the cases the curve cannot serve: overlapping nodes,
-/// and switching a band off without hunting for its node.
 export function BandChips({
   bands,
   selected,
@@ -18,27 +16,42 @@ export function BandChips({
   onToggle,
 }: BandChipsProps) {
   return (
-    <div className="band-chips">
-      {bands.map((band, index) => (
-        <button
-          key={index}
-          type="button"
-          className={`band-chip${selected === index ? ' is-selected' : ''}${
-            band.active ? '' : ' is-off'
-          }`}
-          style={{ '--band': BAND_COLORS[index] } as CSSProperties}
-          aria-pressed={selected === index}
-          title={`${filterKind(band.bandType).label} at ${formatFrequency(
-            band.freq,
-          )} Hz — click to select, double-click to ${
-            band.active ? 'disable' : 'enable'
-          }${band.active ? '' : '. Moving the band switches it on too.'}`}
-          onClick={() => onSelect(index)}
-          onDoubleClick={() => onToggle(index)}
-        >
-          {index + 1}
-        </button>
-      ))}
+    <div className="band-chips flex gap-0.5 rounded border border-hairline bg-well/70 p-0.5 backdrop-blur-sm">
+      {bands.map((band, index) => {
+        const active = selected === index
+        return (
+          <button
+            key={index}
+            type="button"
+            className={`grid h-[22px] w-[22px] cursor-pointer place-items-center rounded text-[10px] font-semibold tabular-nums transition-colors duration-120 ${
+              band.active ? '' : 'line-through opacity-40'
+            }`}
+            style={
+              {
+                '--band': BAND_COLORS[index],
+                color: band.active ? BAND_COLORS[index] : 'var(--color-ink-dim)',
+                background: active
+                  ? `color-mix(in srgb, ${BAND_COLORS[index]} 22%, transparent)`
+                  : undefined,
+                boxShadow: active
+                  ? `inset 0 0 0 1px color-mix(in srgb, ${BAND_COLORS[index]} 45%, transparent)`
+                  : undefined,
+                opacity: active || !band.active ? undefined : 0.55,
+              } as CSSProperties
+            }
+            aria-pressed={active}
+            title={`${filterKind(band.bandType).label} at ${formatFrequency(
+              band.freq,
+            )} Hz — click to select, double-click to ${
+              band.active ? 'disable' : 'enable'
+            }`}
+            onClick={() => onSelect(index)}
+            onDoubleClick={() => onToggle(index)}
+          >
+            {index + 1}
+          </button>
+        )
+      })}
     </div>
   )
 }

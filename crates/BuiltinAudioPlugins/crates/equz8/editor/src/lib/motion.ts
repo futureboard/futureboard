@@ -4,13 +4,13 @@ const reducedMotion =
   typeof window !== 'undefined' &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-/** Soft entrance for the editor shell — Pro-Q calm, Serum presence. */
+/** Soft entrance for the editor shell. */
 export function playEditorIntro(root: HTMLElement | null) {
   if (!root || reducedMotion) return null
-  const header = root.querySelector('.editor-header')
+  const header = root.querySelector('header')
   const stage = root.querySelector('.stage')
   const rack = root.querySelector('.control-rack')
-  const chips = root.querySelectorAll('.band-chip')
+  const chips = root.querySelectorAll('.band-chips button')
   const knobs = root.querySelectorAll('.knob')
 
   const timeline = createTimeline({ defaults: { ease: 'outExpo' } })
@@ -50,7 +50,6 @@ export function playEditorIntro(root: HTMLElement | null) {
   return timeline
 }
 
-/** Pulse a selected band node the way Pro-Q flashes the active handle. */
 export function pulseBandNode(node: Element | null): JSAnimation | null {
   if (!node || reducedMotion) return null
   return animate(node.querySelectorAll('.node-halo, .node-ring'), {
@@ -60,7 +59,6 @@ export function pulseBandNode(node: Element | null): JSAnimation | null {
   })
 }
 
-/** Brief rack flash when switching bands or loading a preset. */
 export function flashControlRack(rack: HTMLElement | null) {
   if (!rack || reducedMotion) return null
   return animate(rack, {
@@ -70,7 +68,6 @@ export function flashControlRack(rack: HTMLElement | null) {
   })
 }
 
-/** Knob pointer snap when value jumps (preset / double-click reset). */
 export function snapKnobDial(dial: HTMLElement | null) {
   if (!dial || reducedMotion) return null
   return animate(dial, {
@@ -80,15 +77,12 @@ export function snapKnobDial(dial: HTMLElement | null) {
   })
 }
 
-/** Power / bypass: dim the stage without hiding structure. */
-export function tweenBypass(stage: HTMLElement | null, bypassed: boolean) {
-  if (!stage || reducedMotion) {
-    if (stage) stage.style.opacity = bypassed ? '0.55' : '1'
-    return null
-  }
+/** Brief brightness flash; steady bypass look is CSS `.is-bypassed`. */
+export function tweenBypass(stage: HTMLElement | null, _bypassed: boolean) {
+  if (!stage || reducedMotion) return null
   return animate(stage, {
-    opacity: bypassed ? 0.55 : 1,
+    filter: ['brightness(1.12)', 'brightness(1)'],
     duration: 280,
-    ease: 'inOutQuad',
+    ease: 'outQuad',
   })
 }
