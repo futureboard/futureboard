@@ -231,7 +231,14 @@ jobs:
 
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-24.04'
-        run: bash packaging/linux/bundle-appimage.sh "$FUTUREBOARD_PACKAGE_DIR" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
+        run: |
+          set -euo pipefail
+          # Same hazard as the Windows installer above: `target` is restored
+          # from the build cache and the image is named after the version, so
+          # yesterday's nightly survives under a name this run never overwrites
+          # and the `target/appimage/*.AppImage` upload glob sweeps it up.
+          rm -rf "$PWD/target/appimage"
+          bash packaging/linux/bundle-appimage.sh "$FUTUREBOARD_PACKAGE_DIR" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
 
       - name: Archive xtask runtime package
         shell: bash

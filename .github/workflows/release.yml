@@ -8,13 +8,15 @@ name: Release Build
 # (usually draft) release and leaves the body alone, so a curated changelog
 # survives the build.
 #
-# The schedule below starts the build 90 minutes before the planned release
-# moment; `publish-scheduled-release.yml` flips the finished draft to public.
-# The macOS leg builds and merges two architectures, so it needs the wider gap.
+# Dispatch only, on purpose. This used to carry a `schedule:` that started the
+# build 90 minutes ahead of a planned release moment, with a date guard making
+# it a one-shot and `publish-scheduled-release.yml` flipping the finished draft
+# to public. That companion workflow is gone, so a scheduled run could only ever
+# stage a draft nobody published — and on 2026-08-09 the cron and a manual
+# dispatch of the same release collided into two full builds of one hotfix.
+# Release moments are decided by hand; the trigger is too.
 
 on:
-  schedule:
-    - cron: "30 7 9 8 *" # 07:30 UTC on 9 August == 14:30 GMT+7, 90 min before release
   workflow_dispatch:
     inputs:
       tag:
@@ -46,54 +48,12 @@ on:
         default: false
 
 concurrency:
-  group: release-${{ inputs.tag || 'scheduled' }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
-env:
-  # Target of the scheduled run. The cron fires every 9 August, so the date
-  # guard in `plan` keeps it a one-shot for this release.
-  #
-  # 2026.8.9-beta1 is a hotfix on top of 2026.8.8-beta1. The beta channel
-  # publishes through the moving `beta` tag, so the scheduled run uploads onto
-  # that existing release rather than cutting a new version tag; `version.json`
-  # still carries the real version and names every asset.
-  SCHEDULED_TAG: beta
-  SCHEDULED_DATE: 2026-08-09
-
 jobs:
-  plan:
-    name: Resolve Target
-    runs-on: ubuntu-24.04
-    outputs:
-      tag: ${{ steps.resolve.outputs.tag }}
-      app-version: ${{ steps.resolve.outputs.app-version }}
-      proceed: ${{ steps.resolve.outputs.proceed }}
-    steps:
-      - name: Resolve tag and date guard
-        id: resolve
-        run: |
-          set -euo pipefail
-          TAG="${{ inputs.tag }}"
-          echo "tag=${TAG:-$SCHEDULED_TAG}" >> "$GITHUB_OUTPUT"
-          echo "app-version=${{ inputs.app-version }}" >> "$GITHUB_OUTPUT"
-
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          TODAY="$(date -u +%F)"
-          if [ "$TODAY" = "$SCHEDULED_DATE" ]; then
-            echo "Scheduled release day — building for ${TAG:-$SCHEDULED_TAG}."
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Today is $TODAY, planned date is $SCHEDULED_DATE — nothing to do."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build:
     name: Build Native
-    needs: plan
-    if: needs.plan.outputs.proceed == 'true'
     uses: ./.github/workflows/build-desktop.yml
     # A called workflow can never hold more than its caller grants, and this
     # repository's default GITHUB_TOKEN permission is read-only. `build-desktop`'s
@@ -104,18 +64,18 @@ jobs:
     permissions:
       contents: write
     with:
-      app-version: ${{ needs.plan.outputs.app-version }}
+      app-version: ${{ inputs.app-version }}
 
   publish:
     name: Attach Release Assets
-    needs: [plan, build]
+    needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ needs.plan.outputs.tag }}
+      TAG: ${{ inputs.tag }}
       APP_VERSION: ${{ needs.build.outputs.app-version }}
 
     steps:
@@ -170,8 +130,10 @@ jobs:
               --notes "Automated release build for \`$APP_VERSION\`. Release notes pending."
           fi
 
-      # A scheduled run only stages the assets; `publish-scheduled-release.yml`
-      # publishes at the planned moment.
+      # `draft` only means "do not flip the draft bit here". Uploading onto a tag
+      # that already points at a *published* release — the moving `beta` tag —
+      # puts the assets in front of users the moment they land, whatever this
+      # input says. The report step below states what is actually true.
       - name: Publish the release
         if: inputs.visibility == 'publish'
         run: |
@@ -186,5 +148,9 @@ jobs:
         if: inputs.visibility != 'publish'
         run: |
           set -euo pipefail
-          echo "Assets attached. Release $TAG stays a draft until it is published."
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "true" ]; then
+            echo "Assets attached. Release $TAG stays a draft until it is published."
+          else
+            echo "::warning::$TAG was already published — the uploaded assets are live now."
+          fi
           gh release view "$TAG" --json tagName,isDraft,isPrerelease

@@ -257,7 +257,16 @@ jobs:
       # so its hardcoded AppImage filename resolves against this release.
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-24.04'
-        run: bash packaging/linux/bundle-appimage.sh "$FUTUREBOARD_PACKAGE_DIR" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
+        run: |
+          set -euo pipefail
+          # Same hazard as the Windows installer above, and the reason the
+          # 2026.8.9-beta1 release shipped a stale 2026.8.8-beta1 AppImage
+          # beside it: `target` is restored from the build cache, the image is
+          # named after the version, so last release's file survives under a
+          # name this run never overwrites and the `target/appimage/*.AppImage`
+          # upload glob sweeps it into the release.
+          rm -rf "$PWD/target/appimage"
+          bash packaging/linux/bundle-appimage.sh "$FUTUREBOARD_PACKAGE_DIR" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
 
       - name: Archive xtask runtime package
         shell: bash
