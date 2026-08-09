@@ -522,6 +522,7 @@ plugin-manager.filter.kind = ປະເພດ
 plugin-manager.filter.library = ຄັງເກັບ
 plugin-manager.kind.effect = ເອັບເຟັກ
 plugin-manager.kind.instrument = ເຄື່ອງດົນຕີ
+plugin-manager.kind.unknown = ບໍ່ຮູ້ຈັກ
 plugin-manager.list.empty = ຍັງບໍ່ມີປລັກອິນໃນແຄຊ໌. ກະລຸນາສະແກນໃໝ່ເພື່ອສ້າງລາຍຊື່.
 plugin-manager.list.no-match = ບໍ່ພົບປລັກອິນທີ່ກົງກັບການກອງ.
 plugin-manager.list.scanning = ກຳລັງສະແກນ… ປລັກອິນຈະປາກົດຂຶ້ນເທື່ອລະອັນ.

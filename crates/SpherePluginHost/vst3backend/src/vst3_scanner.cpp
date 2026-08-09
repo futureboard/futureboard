@@ -97,9 +97,15 @@ struct ClassEntry {
   std::string sdk_version;
 };
 
+/// Emit an entry for a module whose metadata could not be read.
+///
+/// `sdkMetadataLoaded:false` plus `loadError` is what marks it: the Rust side
+/// turns these into scan *failures* rather than plug-in rows, so a broken or
+/// wrong-architecture module stays reportable by path and reason instead of
+/// appearing in the browser as a plug-in named after its file.
 void append_fallback_entry(std::string& json, bool& first,
                            const std::filesystem::path& plugin_path,
-                           const char* format) {
+                           const char* format, const std::string& load_error) {
   if (!first) {
     json += ",";
   }
@@ -114,7 +120,73 @@ void append_fallback_entry(std::string& json, bool& first,
   json += "\"path\":\"" + escape_json(full_path) + "\",";
   json += "\"modulePath\":\"" + escape_json(full_path) + "\",";
   json += "\"classId\":null,\"version\":\"\",\"sdkVersion\":\"\",";
+  json += "\"loadError\":\"" +
+          escape_json(load_error.empty() ? "Plug-in module could not be loaded"
+                                         : load_error) +
+          "\",";
   json += "\"isShellChild\":false,\"sdkMetadataLoaded\":false}";
+}
+
+/// Architecture sub-directory this build can load out of a VST3 bundle.
+/// A bundle that only ships the other word size is not broken — it just is not
+/// for this host, and reporting it as a load failure is more honest (and much
+/// faster) than letting `LoadLibrary` fail on it.
+constexpr const char* kHostArchDir =
+#if defined(_WIN32)
+#  if defined(_M_ARM64) || defined(__aarch64__)
+    "arm64-win";
+#  elif defined(_WIN64)
+    "x86_64-win";
+#  else
+    "x86-win";
+#  endif
+#elif defined(__APPLE__)
+    "MacOS";
+#elif defined(__aarch64__)
+    "aarch64-linux";
+#else
+    "x86_64-linux";
+#endif
+
+/// Empty when the bundle is loadable here. Otherwise a reason to report.
+///
+/// Only bundles that actually carry a `Contents/` directory are judged: the
+/// legacy single-DLL `.vst3` layout has no architecture folders, and the loader
+/// is left to decide.
+std::string vst3_arch_mismatch_reason(const std::filesystem::path& bundle) {
+  std::error_code ec;
+  const auto contents = bundle / "Contents";
+  if (!std::filesystem::is_directory(contents, ec)) {
+    return {};
+  }
+  bool saw_arch_dir = false;
+  std::string available;
+  for (const auto& entry : std::filesystem::directory_iterator(contents, ec)) {
+    if (ec) {
+      return {};
+    }
+    if (!entry.is_directory(ec)) {
+      continue;
+    }
+    const auto name = entry.path().filename().string();
+    // `Resources` / `moduleinfo.json` siblings are not architecture folders.
+    if (name == "Resources") {
+      continue;
+    }
+    if (name == kHostArchDir) {
+      return {};
+    }
+    saw_arch_dir = true;
+    if (!available.empty()) {
+      available += ", ";
+    }
+    available += name;
+  }
+  if (!saw_arch_dir) {
+    return {};
+  }
+  return std::string("Plug-in has no ") + kHostArchDir +
+         " build (found: " + available + ")";
 }
 
 std::string clap_feature_string(const char* const* features) {
@@ -241,6 +313,15 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
                    plugin_path.string().c_str());
     }
 
+    const auto arch_reason = vst3_arch_mismatch_reason(plugin_path);
+    if (!arch_reason.empty()) {
+      if (debug) {
+        std::fprintf(stderr, "[SpherePluginHost]   %s\n", arch_reason.c_str());
+      }
+      append_fallback_entry(json, first, plugin_path, "VST3", arch_reason);
+      return;
+    }
+
     std::string error;
     auto module = VST3::Hosting::Module::create(plugin_path.string(), error);
     if (!module) {
@@ -248,8 +329,8 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
         std::fprintf(stderr, "[SpherePluginHost]   VST3 module load failed: %s\n",
                      error.c_str());
       }
-      // Fallback: emit a single path-only entry so the module is not invisible.
-      append_fallback_entry(json, first, plugin_path, "VST3");
+      // Reported as a failure, not as a plug-in.
+      append_fallback_entry(json, first, plugin_path, "VST3", error);
       return;
     }
 
@@ -382,12 +463,21 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
   };
 
   if (is_vst3_bundle(root)) {
-      append(root);
-    } else if (std::filesystem::is_directory(root)) {
-      for (const auto& entry : std::filesystem::recursive_directory_iterator(
-             root, std::filesystem::directory_options::skip_permission_denied)) {
-      if (is_vst3_bundle(entry.path())) {
-        append(entry.path());
+    append(root);
+  } else if (std::filesystem::is_directory(root)) {
+    // A `.vst3` bundle is a leaf. `X.vst3/Contents/x86_64-win/X.vst3` matches
+    // the same extension as the bundle directory itself, so a plain recursive
+    // walk reported every bundle-format plug-in twice — under two different
+    // paths, which produced two different stable ids that dedup could not
+    // collapse. `disable_recursion_pending` prunes the subtree at the bundle.
+    std::error_code ec;
+    auto it = std::filesystem::recursive_directory_iterator(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+      if (is_vst3_bundle(it->path())) {
+        append(it->path());
+        it.disable_recursion_pending();
       }
     }
   }
@@ -421,7 +511,9 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
       if (debug) {
         std::fprintf(stderr, "[SpherePluginHost]   CLAP module load failed\n");
       }
-      append_fallback_entry(json, first, plugin_path, "CLAP");
+      append_fallback_entry(json, first, plugin_path, "CLAP",
+                            "CLAP module could not be loaded (wrong "
+                            "architecture or missing dependency)");
       return;
     }
 
@@ -430,7 +522,8 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
       if (debug) {
         std::fprintf(stderr, "[SpherePluginHost]   CLAP entry symbol invalid\n");
       }
-      append_fallback_entry(json, first, plugin_path, "CLAP");
+      append_fallback_entry(json, first, plugin_path, "CLAP",
+                            "CLAP entry point is missing or incomplete");
       return;
     }
 
@@ -439,7 +532,8 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
       if (debug) {
         std::fprintf(stderr, "[SpherePluginHost]   CLAP init failed\n");
       }
-      append_fallback_entry(json, first, plugin_path, "CLAP");
+      append_fallback_entry(json, first, plugin_path, "CLAP",
+                            "CLAP entry init() returned false");
       return;
     }
 
@@ -447,7 +541,8 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
         entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
     if (!factory || !factory->get_plugin_count || !factory->get_plugin_descriptor) {
       entry->deinit();
-      append_fallback_entry(json, first, plugin_path, "CLAP");
+      append_fallback_entry(json, first, plugin_path, "CLAP",
+                            "CLAP plug-in factory is unavailable");
       return;
     }
 
@@ -496,12 +591,18 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
   };
 
   if (is_clap_plugin(root)) {
-      append(root);
-    } else if (std::filesystem::is_directory(root)) {
-      for (const auto& entry : std::filesystem::recursive_directory_iterator(
-             root, std::filesystem::directory_options::skip_permission_denied)) {
-      if (is_clap_plugin(entry.path())) {
-        append(entry.path());
+    append(root);
+  } else if (std::filesystem::is_directory(root)) {
+    // Same leaf rule as VST3: a macOS `.clap` bundle contains an executable of
+    // the same name, so recursing into a matched bundle double-reports it.
+    std::error_code ec;
+    auto it = std::filesystem::recursive_directory_iterator(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+      if (is_clap_plugin(it->path())) {
+        append(it->path());
+        it.disable_recursion_pending();
       }
     }
   }

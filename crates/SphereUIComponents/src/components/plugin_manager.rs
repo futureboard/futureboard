@@ -331,10 +331,12 @@ impl PluginManagerDialogState {
                 .iter()
                 .filter(|p| p.kind == PluginKind::Instrument)
                 .count(),
+            // Matches the Effect rail below: a plug-in that declared no class is
+            // usable as an insert, so it is counted and listed with the effects.
             effects: self
                 .plugins
                 .iter()
-                .filter(|p| p.kind == PluginKind::Effect)
+                .filter(|p| p.kind.usable_as_effect())
                 .count(),
             vst3: self
                 .plugins
@@ -365,7 +367,7 @@ impl PluginManagerDialogState {
         result.retain(|p| match &self.sidebar_filter {
             SidebarFilter::All => true,
             SidebarFilter::Instrument => p.kind == PluginKind::Instrument,
-            SidebarFilter::Effect => p.kind == PluginKind::Effect,
+            SidebarFilter::Effect => p.kind.usable_as_effect(),
             SidebarFilter::Format(fmt) => p.format == *fmt,
         });
 
@@ -681,6 +683,7 @@ fn details_panel(
     let kind_label = match plugin.kind {
         PluginKind::Instrument => i18n.tr("plugin-manager.kind.instrument"),
         PluginKind::Effect => i18n.tr("plugin-manager.kind.effect"),
+        PluginKind::Unknown => i18n.tr("plugin-manager.kind.unknown"),
     };
     let status_label = match plugin.status {
         PluginStatus::PresetReady => i18n.tr("plugin-manager.status.available"),
@@ -935,11 +938,12 @@ pub fn plugin_manager_panel(
             let selected_row = state.selected_id.as_deref() == Some(pid.as_str());
             let kind_icon = match plugin.kind {
                 PluginKind::Instrument => assets::ICON_MUSIC_PATH,
-                PluginKind::Effect => assets::ICON_SLIDERS_HORIZONTAL_PATH,
+                PluginKind::Effect | PluginKind::Unknown => assets::ICON_SLIDERS_HORIZONTAL_PATH,
             };
             let kind_color = match plugin.kind {
                 PluginKind::Instrument => Colors::accent_primary(),
                 PluginKind::Effect => Colors::status_success(),
+                PluginKind::Unknown => Colors::text_faint(),
             };
             let reveal = callbacks.on_reveal_preset.clone();
             let reveal_id = plugin.id.clone();

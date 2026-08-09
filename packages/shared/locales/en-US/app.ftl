@@ -522,6 +522,7 @@ plugin-manager.filter.kind = Kind
 plugin-manager.filter.library = Library
 plugin-manager.kind.effect = Effect
 plugin-manager.kind.instrument = Instrument
+plugin-manager.kind.unknown = Unknown
 plugin-manager.list.empty = No cached plug-ins yet. Run Rescan to build the registry.
 plugin-manager.list.no-match = No plug-ins match the current filter.
 plugin-manager.list.scanning = Scanning… plug-ins will appear here one by one.

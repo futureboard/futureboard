@@ -61,11 +61,47 @@ impl PluginFormat {
     }
 }
 
-/// Effect vs instrument (heuristic classification; matches Electron).
+/// What a plug-in *is*, taken from its own declared metadata — never from its
+/// file or display name.
+///
+/// [`Self::Unknown`] is a real state, not a fallback for "we didn't look": it
+/// means the plug-in did not declare a usable class category (VST3
+/// `subCategories`, CLAP features, AU component type). Guessing from the name
+/// is what put 43 Waves effects (`Fx|Bass`, `Fx|Drums`, `Fx|Generator`) in the
+/// Instruments list, so an undeclared plug-in stays undeclared and is offered
+/// as a generic insert instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginKind {
     Effect,
     Instrument,
+    Unknown,
+}
+
+impl PluginKind {
+    /// Stable lowercase token used by the preset cache and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Effect => "effect",
+            Self::Instrument => "instrument",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Human label for pickers and the plug-in manager.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Effect => "Audio Effect",
+            Self::Instrument => "Instrument",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// Whether this plug-in may be inserted where an audio effect is expected.
+    /// Undeclared plug-ins are allowed: an effect that forgot to tag itself must
+    /// not become uninsertable.
+    pub fn usable_as_effect(self) -> bool {
+        !matches!(self, Self::Instrument)
+    }
 }
 
 /// Row status in the plug-in manager list.
@@ -240,23 +276,87 @@ pub fn display_category(
         .unwrap_or_else(|| "Uncategorized".to_string())
 }
 
-pub fn classify_kind(category: &str, name: &str, sub_categories: Option<&str>) -> PluginKind {
-    let haystack =
-        format!("{} {} {}", category, sub_categories.unwrap_or(""), name).to_ascii_lowercase();
-    if haystack.contains("instrument")
-        || haystack.contains("synth")
-        || haystack.contains("synthesizer")
-        || haystack.contains("sampler")
-        || haystack.contains("rompler")
-        || haystack.contains("drum")
-        || haystack.contains("piano")
-        || haystack.contains("organ")
-        || haystack.contains("bass")
-        || haystack.contains("generator")
-    {
-        PluginKind::Instrument
-    } else {
-        PluginKind::Effect
+/// Classify a plug-in from the metadata it declares itself.
+///
+/// The name is deliberately not an input. VST3 declares its role in
+/// `PClassInfo2::subCategories` as a `|`-separated tag list whose leading tag is
+/// `Instrument` or `Fx` (SDK `PlugType`); CLAP declares `instrument` /
+/// `audio-effect` / `note-effect` features; AU carries it in the component type
+/// the AU scanner already folds into `category`. A survey of the 972 VST3
+/// classes installed on the reference machine found every loaded class carries a
+/// tag, and that the previous name-substring heuristic mislabelled 43 of them —
+/// `Fx|Bass` ("bass"), `Fx|Drums` ("drum"), `Fx|Generator` ("generator") all
+/// read as instruments.
+///
+/// `metadata_loaded` is false when the module could not be opened, so nothing it
+/// says about itself was actually read: that is [`PluginKind::Unknown`], not an
+/// effect.
+pub fn classify_kind(
+    format: PluginFormat,
+    category: &str,
+    sub_categories: Option<&str>,
+    metadata_loaded: bool,
+) -> PluginKind {
+    if !metadata_loaded {
+        return PluginKind::Unknown;
+    }
+
+    let tags: Vec<&str> = sub_categories
+        .unwrap_or("")
+        .split('|')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    let has_tag = |needle: &str| tags.iter().any(|tag| tag.eq_ignore_ascii_case(needle));
+
+    match format {
+        PluginFormat::Vst3 => {
+            // `Instrument` wins over a co-declared `Fx` (e.g. `Instrument|Synth|Fx`
+            // on synths that also offer an FX mode).
+            if has_tag("Instrument") {
+                PluginKind::Instrument
+            } else if has_tag("Fx") {
+                PluginKind::Effect
+            } else {
+                PluginKind::Unknown
+            }
+        }
+        PluginFormat::Clap => {
+            if has_tag("instrument") {
+                PluginKind::Instrument
+            } else if has_tag("audio-effect")
+                || has_tag("audio effect")
+                || has_tag("note-effect")
+                || has_tag("note effect")
+                || category.eq_ignore_ascii_case("audio effect")
+                || category.eq_ignore_ascii_case("note effect")
+            {
+                PluginKind::Effect
+            } else if category.eq_ignore_ascii_case("instrument") {
+                PluginKind::Instrument
+            } else {
+                PluginKind::Unknown
+            }
+        }
+        // AU / LV2 / built-in: the scanner resolves the role into `category`
+        // before it reaches here (`aumu`/`augn` → Instrument, `aufx`/`aumf` →
+        // Effect), matching `au_scanner::descriptor_from_entry`.
+        _ => {
+            if category.eq_ignore_ascii_case("instrument")
+                || category.eq_ignore_ascii_case("generator")
+                || has_tag("Instrument")
+            {
+                PluginKind::Instrument
+            } else if category.eq_ignore_ascii_case("effect")
+                || category.eq_ignore_ascii_case("audio effect")
+                || category.eq_ignore_ascii_case("music effect")
+                || has_tag("Fx")
+            {
+                PluginKind::Effect
+            } else {
+                PluginKind::Unknown
+            }
+        }
     }
 }
 
@@ -425,7 +525,9 @@ fn preset_path_for_plugin(
     };
     let kind_dir = match kind {
         PluginKind::Instrument => "Instruments",
-        PluginKind::Effect => "Effects",
+        // An undeclared plug-in is offered as an insert, so it caches next to
+        // the effects rather than in a third folder no other build knows about.
+        PluginKind::Effect | PluginKind::Unknown => "Effects",
     };
     preset_root
         .join(fmt_dir)
@@ -468,16 +570,24 @@ fn resolve_unique_preset_path(
     }
 }
 
+/// Catalog display order: instruments first, then effects, then anything that
+/// never declared what it is. A total order (not the old pairwise match), so
+/// adding `Unknown` cannot make the comparator intransitive.
+fn kind_sort_rank(kind: PluginKind) -> u8 {
+    match kind {
+        PluginKind::Instrument => 0,
+        PluginKind::Effect => 1,
+        PluginKind::Unknown => 2,
+    }
+}
+
 fn registry_display_key(plugin: &RegistryPlugin) -> String {
     [
         plugin.vendor.as_str(),
         plugin.name.as_str(),
         plugin.format.label(),
         plugin.category.as_str(),
-        match plugin.kind {
-            PluginKind::Instrument => "instrument",
-            PluginKind::Effect => "effect",
-        },
+        plugin.kind.as_str(),
     ]
     .join("|")
     .to_lowercase()
@@ -518,7 +628,7 @@ pub fn registry_plugin_from_scan(info: &PluginInfo, scanned_at_ms: i64) -> Regis
     let raw = info.category.clone();
     let sub = info.sub_categories.clone();
     let category = display_category(format, &raw, Some(&raw), sub.as_deref());
-    let kind = classify_kind(&raw, &info.name, sub.as_deref());
+    let kind = classify_kind(format, &raw, sub.as_deref(), info.sdk_metadata_loaded);
     let preset_root = default_preset_root();
     let preset_path = preset_path_for_plugin(&preset_root, format, kind, &info.name);
     let path = PathBuf::from(&info.path);
@@ -661,11 +771,7 @@ impl PluginRegistry {
         // pre-SQLite build; remove once everyone has rescanned).
         let mut plugins = crate::preset::load_cached_plugins();
         plugins.sort_by(|a, b| {
-            let kind = match (a.kind, b.kind) {
-                (PluginKind::Instrument, PluginKind::Effect) => std::cmp::Ordering::Less,
-                (PluginKind::Effect, PluginKind::Instrument) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            };
+            let kind = kind_sort_rank(a.kind).cmp(&kind_sort_rank(b.kind));
             kind.then_with(|| a.vendor.cmp(&b.vendor))
                 .then_with(|| a.name.cmp(&b.name))
         });
@@ -673,14 +779,18 @@ impl PluginRegistry {
         (plugins, last)
     }
 
-    /// Upsert the given plugins into the SQLite catalog inside one
-    /// transaction. Used by the scanner once a scan completes.
-    pub fn write_catalog(plugins: &[RegistryPlugin]) -> Result<(), String> {
-        use crate::plugin_db::{open_database, upsert_plugins, PluginCatalogEntry};
+    /// Make the SQLite catalog exactly `plugins`, in one transaction.
+    ///
+    /// `plugins` is the complete post-scan catalog (a scan that skips a format
+    /// carries that format's cached rows through), so anything else in the table
+    /// is stale and is dropped — an uninstalled plug-in, or a duplicate row left
+    /// by an earlier scan. Returns the number of stale rows removed.
+    pub fn write_catalog(plugins: &[RegistryPlugin]) -> Result<u32, String> {
+        use crate::plugin_db::{open_database, replace_plugins, PluginCatalogEntry};
         let mut conn = open_database()?;
         let entries: Vec<PluginCatalogEntry> =
             plugins.iter().map(PluginCatalogEntry::from).collect();
-        upsert_plugins(&mut conn, &entries).map_err(|e| e.to_string())
+        replace_plugins(&mut conn, &entries).map_err(|e| e.to_string())
     }
 
     /// Delete every plug-in row from the SQLite cache and remove all `.pst`
@@ -875,8 +985,8 @@ impl PluginRegistry {
                 }
 
                 match run_isolated_bundle_scan(bundle) {
-                    Ok(infos) => {
-                        for info in infos {
+                    Ok(outcome) => {
+                        for info in outcome.plugins {
                             let mut plugin = registry_plugin_from_scan(&info, scanned_at);
                             let key = registry_display_key(&plugin);
                             if !seen.insert(key) {
@@ -884,6 +994,20 @@ impl PluginRegistry {
                             }
                             plugin = resolve_unique_preset_path(plugin, &mut occupied_presets);
                             pending.push(plugin);
+                        }
+                        // Modules inside the bundle that could not be read are
+                        // reported, not listed: the Plugin Manager can name them
+                        // and the picker never offers a row that fails on insert.
+                        for failure in outcome.failures {
+                            let path = PathBuf::from(&failure.path);
+                            failed.push(PluginScanFailure {
+                                path: path.clone(),
+                                error: failure.error.clone(),
+                            });
+                            on_progress(ScanProgress::Failed {
+                                path,
+                                error: failure.error,
+                            });
                         }
                     }
                     Err(error) => {
@@ -1004,27 +1128,26 @@ impl PluginRegistry {
         let _ = save_au_cache_state(&au_cache_state);
 
         plugins.sort_by(|a, b| {
-            let kind = match (a.kind, b.kind) {
-                (PluginKind::Instrument, PluginKind::Effect) => std::cmp::Ordering::Less,
-                (PluginKind::Effect, PluginKind::Instrument) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            };
+            let kind = kind_sort_rank(a.kind).cmp(&kind_sort_rank(b.kind));
             kind.then_with(|| a.vendor.cmp(&b.vendor))
                 .then_with(|| a.name.cmp(&b.name))
         });
 
         if scan_vst3_clap || scan_au {
-            if let Err(err) = Self::write_catalog(&plugins) {
-                failed.push(PluginScanFailure {
+            match Self::write_catalog(&plugins) {
+                Err(err) => failed.push(PluginScanFailure {
                     path: crate::plugin_db::database_path(),
                     error: format!("sqlite write: {err}"),
-                });
-            } else if std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some() {
-                eprintln!(
-                    "[plugin-db] wrote {} rows to {}",
-                    plugins.len(),
-                    crate::plugin_db::database_path().display()
-                );
+                }),
+                Ok(pruned) => {
+                    if std::env::var_os("FUTUREBOARD_PLUGIN_DB_DEBUG").is_some() {
+                        eprintln!(
+                            "[plugin-db] wrote {} rows (pruned {pruned} stale) to {}",
+                            plugins.len(),
+                            crate::plugin_db::database_path().display()
+                        );
+                    }
+                }
             }
         }
 
@@ -1070,6 +1193,117 @@ mod tests {
             Some("Instrument|Synth"),
         );
         assert_eq!(cat, "Instrument");
+    }
+
+    /// The name must never move a plug-in between classes. Every case here is a
+    /// real class installed on the reference machine that the previous
+    /// name-substring heuristic mislabelled: 43 of 972 VST3 classes, all of them
+    /// effects promoted into the Instruments list.
+    #[test]
+    fn vst3_kind_comes_from_subcategories_not_the_name() {
+        for (name, sub) in [
+            ("Bass Rider Stereo", "Fx|Bass"),
+            ("CLA Drums Stereo", "Fx|Drums"),
+            ("EMO-Generator Mono", "Fx|Generator"),
+            ("GW PianoCentric Stereo", "Fx|Effects"),
+            ("Ozone 12 Bass Control", "Fx|EQ"),
+        ] {
+            assert_eq!(
+                classify_kind(PluginFormat::Vst3, "Audio Module Class", Some(sub), true),
+                PluginKind::Effect,
+                "{name} declares {sub}"
+            );
+        }
+
+        for sub in ["Instrument", "Instrument|Synth", "Instrument|Bass"] {
+            assert_eq!(
+                classify_kind(PluginFormat::Vst3, "Audio Module Class", Some(sub), true),
+                PluginKind::Instrument,
+            );
+        }
+    }
+
+    #[test]
+    fn vst3_instrument_tag_wins_over_a_co_declared_fx_tag() {
+        // Synths that also ship an FX mode declare both.
+        assert_eq!(
+            classify_kind(
+                PluginFormat::Vst3,
+                "Audio Module Class",
+                Some("Instrument|Synth|Fx"),
+                true,
+            ),
+            PluginKind::Instrument,
+        );
+    }
+
+    #[test]
+    fn undeclared_or_unreadable_plugins_are_unknown_not_effects() {
+        // No tags at all.
+        assert_eq!(
+            classify_kind(PluginFormat::Vst3, "Audio Module Class", Some(""), true),
+            PluginKind::Unknown,
+        );
+        // Module never opened, so nothing it says about itself was read.
+        assert_eq!(
+            classify_kind(
+                PluginFormat::Vst3,
+                "Audio Module Class",
+                Some("Instrument"),
+                false,
+            ),
+            PluginKind::Unknown,
+        );
+    }
+
+    #[test]
+    fn clap_and_au_kinds_come_from_their_own_metadata() {
+        assert_eq!(
+            classify_kind(
+                PluginFormat::Clap,
+                "Instrument",
+                Some("instrument|synth"),
+                true
+            ),
+            PluginKind::Instrument,
+        );
+        assert_eq!(
+            classify_kind(
+                PluginFormat::Clap,
+                "Audio Effect",
+                Some("audio-effect|reverb"),
+                true,
+            ),
+            PluginKind::Effect,
+        );
+        // AU folds the component type into `category` (`aumu`/`augn`).
+        assert_eq!(
+            classify_kind(PluginFormat::Au, "Instrument", None, true),
+            PluginKind::Instrument,
+        );
+        assert_eq!(
+            classify_kind(PluginFormat::Au, "Generator", None, true),
+            PluginKind::Instrument,
+        );
+        assert_eq!(
+            classify_kind(PluginFormat::Au, "Effect", None, true),
+            PluginKind::Effect,
+        );
+    }
+
+    #[test]
+    fn unknown_plugins_stay_insertable_as_effects() {
+        assert!(PluginKind::Unknown.usable_as_effect());
+        assert!(PluginKind::Effect.usable_as_effect());
+        assert!(!PluginKind::Instrument.usable_as_effect());
+    }
+
+    #[test]
+    fn kind_sort_is_a_total_order() {
+        // Adding a third variant to a pairwise match made the old comparator
+        // intransitive; ranks keep it total.
+        assert!(kind_sort_rank(PluginKind::Instrument) < kind_sort_rank(PluginKind::Effect));
+        assert!(kind_sort_rank(PluginKind::Effect) < kind_sort_rank(PluginKind::Unknown));
     }
 
     #[test]

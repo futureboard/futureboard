@@ -194,8 +194,12 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
 
     let pm = parsed.plugin_metadata;
     let format = PluginFormat::from_str_lossy(&pm.format);
+    // Legacy `.pst` files written before `unknown` existed only ever stored
+    // "instrument"/"effect", so an unrecognised token still reads as an effect
+    // and old caches keep loading unchanged.
     let kind = match pm.kind.to_ascii_lowercase().as_str() {
         "instrument" => PluginKind::Instrument,
+        "unknown" => PluginKind::Unknown,
         _ => PluginKind::Effect,
     };
     let category = if pm.category.is_empty() {
@@ -282,10 +286,7 @@ pub fn clear_plugin_cache() -> Result<u32, String> {
 }
 
 fn build_preset_binary(plugin: &RegistryPlugin) -> Vec<u8> {
-    let kind = match plugin.kind {
-        crate::registry::PluginKind::Instrument => "instrument",
-        crate::registry::PluginKind::Effect => "effect",
-    };
+    let kind = plugin.kind.as_str();
     let metadata = PresetMetadata {
         preset_format: "Mochi preset: Futureboard",
         version: 1,

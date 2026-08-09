@@ -1340,6 +1340,7 @@ impl StudioLayout {
         let runtime = self.plugin_editors.bridge_runtime.as_ref().cloned();
         let mut to_close: Vec<(String, String)> = Vec::new();
         let mut changed = false;
+        let mut transport_toggles: u32 = 0;
         for (key, session) in self.plugin_editors.bridge.iter_mut() {
             session.shell.pump_messages();
             // Open watchdog (spec A6): a session still loading past the deadline
@@ -1456,6 +1457,7 @@ impl StudioLayout {
                 }
             }
             let poll = session.shell.poll();
+            transport_toggles = transport_toggles.saturating_add(poll.transport_toggles);
             if poll.close_requested {
                 eprintln!(
                     "[plugin-editor-window] user close requested instance={}",
@@ -1496,6 +1498,16 @@ impl StudioLayout {
         }
         for key in to_close {
             self.close_bridge_editor(cx, &key.0, &key.1);
+            changed = true;
+        }
+        // Space pressed while the editor's own chrome held focus. The shell is a
+        // raw Win32 window in this process, so neither GPUI nor the plug-in host
+        // saw the key — run the same command the arrangement's spacebar runs.
+        for _ in 0..transport_toggles {
+            eprintln!(
+                "[PluginEditorInput] transport toggle from editor shell -> transport:play-pause"
+            );
+            self.dispatch_command_id("transport:play-pause", cx);
             changed = true;
         }
         if changed {

@@ -24,6 +24,9 @@ const COL_FAVORITE: f32 = 18.0;
 const COL_NAME_MIN: f32 = 160.0;
 const COL_VENDOR_MIN: f32 = 100.0;
 const COL_CATEGORY_MIN: f32 = 100.0;
+/// Instrument / Audio Effect / Unknown, straight from `PluginKind`. Fixed width
+/// because the three labels are the only values it ever shows.
+const COL_TYPE: f32 = 86.0;
 const COL_FORMAT: f32 = 80.0;
 
 type StringCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
@@ -63,6 +66,21 @@ fn col_category_cell(label: impl Into<String>) -> Div {
         .text_color(Colors::text_dim())
         .truncate()
         .child(label.into())
+}
+
+fn col_type_cell(kind: PluginKind) -> Div {
+    div()
+        .w(px(COL_TYPE))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .text_size(px(10.5))
+        .text_color(match kind {
+            PluginKind::Instrument => Colors::accent_primary(),
+            PluginKind::Effect => Colors::text_dim(),
+            PluginKind::Unknown => Colors::text_faint(),
+        })
+        .truncate()
+        .child(kind.label())
 }
 
 fn col_format_cell(plugin: &RegistryPlugin) -> Div {
@@ -119,6 +137,14 @@ pub fn plugin_table_header() -> impl IntoElement {
                 .overflow_hidden()
                 .truncate()
                 .child("Category"),
+        )
+        .child(
+            div()
+                .w(px(COL_TYPE))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .truncate()
+                .child("Type"),
         )
         .child(
             div()
@@ -212,6 +238,7 @@ pub fn plugin_row(
         .child(col_name_cell(name))
         .child(col_vendor_cell(vendor))
         .child(col_category_cell(category))
+        .child(col_type_cell(plugin.kind))
         .child(col_format_cell(plugin))
         .when_some(status, |el, label| {
             el.child(div().flex_shrink_0().child(status_badge(label, true)))
@@ -225,6 +252,9 @@ fn kind_icon_for(kind: PluginKind) -> (&'static str, gpui::Rgba) {
             assets::ICON_SLIDERS_HORIZONTAL_PATH,
             Colors::status_success(),
         ),
+        // Same glyph as an effect — that is how it can be inserted — but muted,
+        // so "we do not know" never reads as a confirmed classification.
+        PluginKind::Unknown => (assets::ICON_SLIDERS_HORIZONTAL_PATH, Colors::text_faint()),
     }
 }
 
@@ -326,6 +356,12 @@ pub fn skeleton_row(index: usize) -> impl IntoElement {
                 .min_w(px(COL_CATEGORY_MIN))
                 .min_w_0()
                 .child(block(80.0, alpha)),
+        )
+        .child(
+            div()
+                .w(px(COL_TYPE))
+                .flex_shrink_0()
+                .child(block(58.0, alpha)),
         )
         .child(
             div()

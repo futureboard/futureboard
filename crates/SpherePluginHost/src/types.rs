@@ -31,4 +31,8 @@ pub struct PluginInfo {
     pub sdk_version: Option<String>,
     pub is_shell_child: bool,
     pub sdk_metadata_loaded: bool,
+    /// Why the module could not be opened, when `sdk_metadata_loaded` is false.
+    /// Carried so a failed plug-in is reportable by path *and* reason instead of
+    /// silently becoming a phantom row named after its file.
+    pub load_error: Option<String>,
 }

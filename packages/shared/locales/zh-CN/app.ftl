@@ -522,6 +522,7 @@ plugin-manager.filter.kind = 类型
 plugin-manager.filter.library = 库
 plugin-manager.kind.effect = 效果
 plugin-manager.kind.instrument = 乐器
+plugin-manager.kind.unknown = 未知
 plugin-manager.list.empty = 尚无缓存插件。运行重新扫描以构建注册表。
 plugin-manager.list.no-match = 没有插件匹配当前筛选。
 plugin-manager.list.scanning = 正在扫描…插件将逐一显示在此处。

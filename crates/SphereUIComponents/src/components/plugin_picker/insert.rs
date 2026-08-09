@@ -94,7 +94,11 @@ pub fn validate_insert(plugin: &RegistryPlugin, target: &PluginInsertTarget) -> 
                 return InsertValidation::InstrumentOnInvalidTrack;
             }
         }
-        PluginKind::Effect => {
+        // A plug-in that never declared its class is offered as an insert:
+        // refusing it would make an effect that simply forgot to tag itself
+        // impossible to load. It is still not offered for an instrument slot,
+        // where a wrong choice produces a silent track.
+        PluginKind::Effect | PluginKind::Unknown => {
             if target.desired_kind == PluginInsertKind::Instrument {
                 return InsertValidation::InstrumentOnInvalidTrack;
             }

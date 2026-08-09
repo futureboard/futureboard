@@ -38,6 +38,8 @@ pub struct NativePluginInfo {
     #[serde(default)]
     pub is_shell_child: Option<bool>,
     pub sdk_metadata_loaded: bool,
+    #[serde(default)]
+    pub load_error: Option<String>,
 }
 
 pub fn scan_vst3_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
@@ -167,6 +169,7 @@ fn scan_native_root(path: &str, format: PluginFormat) -> Result<Vec<PluginInfo>,
                 sdk_version: plugin.sdk_version,
                 is_shell_child: plugin.is_shell_child.unwrap_or(false),
                 sdk_metadata_loaded: plugin.sdk_metadata_loaded,
+                load_error: plugin.load_error,
             }
         })
         .collect())
@@ -189,6 +192,10 @@ fn collect_plugin_entries(
 
     for entry in entries.flatten() {
         let p = entry.path();
+        // A bundle is a leaf: `X.vst3/Contents/x86_64-win/X.vst3` shares the
+        // extension with its own directory, so descending into a matched bundle
+        // reports the same module twice under two different paths — and the two
+        // rows get different ids, so dedup never collapsed them.
         if is_plugin_bundle(&p, format) {
             plugins.push(plugin_from_path(&p, format));
             continue;
@@ -282,6 +289,7 @@ fn plugin_from_path(path: &Path, format: PluginFormat) -> PluginInfo {
         sdk_version: None,
         is_shell_child: false,
         sdk_metadata_loaded: false,
+        load_error: Some("Plug-in metadata was not read".to_string()),
     }
 }
 
@@ -317,6 +325,7 @@ mod tests {
             sdk_version: None,
             is_shell_child: false,
             sdk_metadata_loaded: false,
+            load_error: None,
         }
     }
 

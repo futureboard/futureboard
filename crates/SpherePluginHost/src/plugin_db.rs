@@ -24,7 +24,11 @@ use crate::registry::{
     classify_kind, display_category, PluginFormat, PluginKind, PluginStatus, RegistryPlugin,
 };
 
-const SCHEMA_VERSION: i32 = 1;
+/// 1 → 2 added `plugins.sub_categories`. Migration is additive
+/// (`ALTER TABLE ADD COLUMN`) and read paths tolerate the column's absence, so a
+/// database written by an older build keeps loading and an older build keeps
+/// reading a database written by this one.
+const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginScanStatus {
@@ -79,6 +83,12 @@ pub struct PluginCatalogEntry {
     pub name: String,
     pub vendor: Option<String>,
     pub category: Option<String>,
+    /// Raw `|`-separated class tags exactly as the plug-in declared them
+    /// (VST3 `subCategories`, CLAP features). Persisted so a restart can
+    /// re-derive the same [`PluginKind`] and category label the scan did —
+    /// previously dropped, which made every cached row fall back to the
+    /// normalized display string.
+    pub sub_categories: Option<String>,
     pub path: PathBuf,
     pub class_id: Option<String>,
     pub bundle_id: Option<String>,
@@ -109,13 +119,9 @@ impl PluginCatalogEntry {
             self.format,
             self.category.as_deref().unwrap_or(""),
             raw_category.as_deref(),
-            None,
+            self.sub_categories.as_deref(),
         );
-        let kind = if self.is_instrument {
-            PluginKind::Instrument
-        } else {
-            PluginKind::Effect
-        };
+        let kind = kind_from_flags(self.is_instrument, self.is_effect);
         let status = match self.scan_status {
             PluginScanStatus::Success | PluginScanStatus::Ok => PluginStatus::PresetReady,
             _ => PluginStatus::MissingPreset,
@@ -127,7 +133,7 @@ impl PluginCatalogEntry {
             format: self.format,
             category,
             raw_category,
-            sub_categories: None,
+            sub_categories: self.sub_categories.clone(),
             kind,
             path: self.path.clone(),
             class_id: self.class_id.clone(),
@@ -142,9 +148,23 @@ impl PluginCatalogEntry {
     }
 }
 
+/// Recover the three-state kind from the two boolean columns the schema has
+/// always had. `is_instrument` wins; both-clear means the plug-in never
+/// declared a class, which is [`PluginKind::Unknown`]. Rows written by older
+/// builds always set exactly one flag (`is_effect` defaults to 1), so existing
+/// databases keep classifying exactly as before.
+fn kind_from_flags(is_instrument: bool, is_effect: bool) -> PluginKind {
+    match (is_instrument, is_effect) {
+        (true, _) => PluginKind::Instrument,
+        (false, true) => PluginKind::Effect,
+        (false, false) => PluginKind::Unknown,
+    }
+}
+
 impl From<&RegistryPlugin> for PluginCatalogEntry {
     fn from(p: &RegistryPlugin) -> Self {
         let kind_is_instrument = matches!(p.kind, PluginKind::Instrument);
+        let kind_is_effect = matches!(p.kind, PluginKind::Effect);
         let category = if p.category.is_empty() {
             p.raw_category.clone()
         } else {
@@ -174,12 +194,13 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
                 Some(p.vendor.clone())
             },
             category,
+            sub_categories: p.sub_categories.clone(),
             path: p.path.clone(),
             class_id: p.class_id.clone(),
             bundle_id: None,
             version: p.version.clone(),
             is_instrument: kind_is_instrument,
-            is_effect: !kind_is_instrument,
+            is_effect: kind_is_effect,
             scan_status: p.scan_status,
             validation_level: None,
             disabled: false,
@@ -291,6 +312,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              name TEXT NOT NULL,
              vendor TEXT,
              category TEXT,
+             sub_categories TEXT,
              path TEXT NOT NULL,
              class_id TEXT,
              bundle_id TEXT,
@@ -334,6 +356,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_plugins_search ON plugins(search_text);
          CREATE INDEX IF NOT EXISTS idx_plugins_status ON plugins(scan_status);",
     )?;
+    // Additive migration for databases created by schema v1. `CREATE TABLE IF
+    // NOT EXISTS` above is a no-op on an existing table, so the column has to be
+    // added explicitly.
+    if !has_column(conn, "plugins", "sub_categories")? {
+        conn.execute_batch("ALTER TABLE plugins ADD COLUMN sub_categories TEXT")?;
+    }
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -341,18 +369,42 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Whether `table` currently has `column`. Used both to migrate on write and to
+/// pick a compatible SELECT on read — [`open_database_readonly`] cannot run
+/// migrations, so the picker has to be able to read a v1 database as-is.
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub fn count_rows(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM plugins", [], |r| r.get::<_, i64>(0))
 }
 
 pub fn read_all(conn: &Connection) -> rusqlite::Result<Vec<PluginCatalogEntry>> {
-    let mut stmt = conn.prepare(
+    // A v1 database opened read-only has no `sub_categories` column and cannot
+    // be migrated here, so select a literal NULL in its place rather than
+    // failing the whole catalog load.
+    let sub_categories_expr = if has_column(conn, "plugins", "sub_categories")? {
+        "sub_categories"
+    } else {
+        "NULL"
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, format, name, vendor, category, path, class_id, bundle_id, version,
                 is_instrument, is_effect, scan_status, validation_level, disabled, favorite,
-                file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text
+                file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text,
+                {sub_categories_expr}
            FROM plugins
-          ORDER BY favorite DESC, vendor COLLATE NOCASE ASC, name COLLATE NOCASE ASC",
-    )?;
+          ORDER BY favorite DESC, vendor COLLATE NOCASE ASC, name COLLATE NOCASE ASC"
+    ))?;
     let rows = stmt.query_map([], |row| {
         let format: String = row.get(1)?;
         let path: String = row.get(5)?;
@@ -363,6 +415,7 @@ pub fn read_all(conn: &Connection) -> rusqlite::Result<Vec<PluginCatalogEntry>> 
             name: row.get(2)?,
             vendor: row.get(3)?,
             category: row.get(4)?,
+            sub_categories: row.get(21)?,
             path: PathBuf::from(path),
             class_id: row.get(6)?,
             bundle_id: row.get(7)?,
@@ -398,26 +451,83 @@ pub fn last_scan_ms(conn: &Connection) -> rusqlite::Result<i64> {
     Ok(parse_iso8601_to_ms(raw.as_deref()).unwrap_or(0))
 }
 
+/// Make the catalog exactly `entries`, in one transaction.
+///
+/// A scan produces the complete post-scan catalog, so rows it did not produce
+/// are stale: an uninstalled plug-in, or — until the scanner stopped reporting
+/// bundle-format plug-ins twice — a duplicate row whose id was derived from the
+/// second, inner path. [`upsert_plugins`] alone never removed those, so a
+/// rescan could not clear them and the shipped catalog held 710 duplicate
+/// vendor+name+format pairs against a 972-class library.
+///
+/// Returns the number of rows removed. Favorites on surviving rows are kept
+/// (the upsert deliberately does not overwrite `favorite`).
+pub fn replace_plugins(
+    conn: &mut Connection,
+    entries: &[PluginCatalogEntry],
+) -> rusqlite::Result<u32> {
+    // A scan that produced nothing is far more likely a scan root that went
+    // away (unplugged drive, revoked permission) than a user who uninstalled
+    // every plug-in, so it must not take the catalog with it. Emptying the
+    // catalog on purpose is what `clear_with_run_record` is for.
+    if entries.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let removed = {
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS scan_ids (id TEXT PRIMARY KEY);
+             DELETE FROM scan_ids;",
+        )?;
+        {
+            let mut stmt = tx.prepare("INSERT OR IGNORE INTO scan_ids(id) VALUES (?1)")?;
+            for entry in entries {
+                stmt.execute(params![entry.id])?;
+            }
+        }
+        let removed = tx.execute(
+            "DELETE FROM plugins WHERE id NOT IN (SELECT id FROM scan_ids)",
+            [],
+        )?;
+        upsert_within(&tx, entries)?;
+        tx.execute_batch("DELETE FROM scan_ids;")?;
+        removed as u32
+    };
+    tx.commit()?;
+    Ok(removed)
+}
+
 /// Upsert every row in `entries` inside a single transaction. Existing rows
-/// keyed by `id` are replaced (favorite flag is preserved).
+/// keyed by `id` are replaced (favorite flag is preserved). Additive only — use
+/// [`replace_plugins`] when the caller owns the whole catalog.
 pub fn upsert_plugins(
     conn: &mut Connection,
     entries: &[PluginCatalogEntry],
 ) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
+    upsert_within(&tx, entries)?;
+    tx.commit()
+}
+
+fn upsert_within(
+    tx: &rusqlite::Transaction<'_>,
+    entries: &[PluginCatalogEntry],
+) -> rusqlite::Result<()> {
     {
         let mut stmt = tx.prepare(
             "INSERT INTO plugins
                 (id, format, name, vendor, category, path, class_id, bundle_id, version,
                  is_instrument, is_effect, scan_status, validation_level, disabled, favorite,
-                 file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text)
+                 file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text,
+                 sub_categories)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21)
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(id) DO UPDATE SET
                 format = excluded.format,
                 name = excluded.name,
                 vendor = excluded.vendor,
                 category = excluded.category,
+                sub_categories = excluded.sub_categories,
                 path = excluded.path,
                 class_id = excluded.class_id,
                 bundle_id = excluded.bundle_id,
@@ -457,10 +567,11 @@ pub fn upsert_plugins(
                 e.error,
                 e.metadata_json,
                 e.search_text,
+                e.sub_categories,
             ])?;
         }
     }
-    tx.commit()
+    Ok(())
 }
 
 /// Record a scan run summary.
@@ -644,16 +755,98 @@ pub fn clear_with_run_record(conn: &mut Connection) -> rusqlite::Result<u32> {
     Ok(removed)
 }
 
-/// Re-export of the catalog helper that classifies missing-binary rows. Kept
-/// here so callers don't have to import `registry::classify_kind` separately.
+/// Re-export of the catalog helper that classifies rows from declared metadata.
+/// Kept here so callers don't have to import `registry::classify_kind`.
 #[allow(dead_code)]
-pub(crate) fn classify_kind_compat(category: &str, name: &str) -> PluginKind {
-    classify_kind(category, name, None)
+pub(crate) fn classify_kind_compat(
+    format: PluginFormat,
+    category: &str,
+    sub_categories: Option<&str>,
+) -> PluginKind {
+    classify_kind(format, category, sub_categories, true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{file_signature, signature_is_fresh};
+    use super::{file_signature, kind_from_flags, signature_is_fresh};
+    use crate::registry::PluginKind;
+
+    #[test]
+    fn legacy_rows_keep_their_kind() {
+        // Every row written by a pre-`Unknown` build sets exactly one flag
+        // (`is_effect` defaults to 1 in the schema), so an existing database
+        // classifies exactly as it did before.
+        assert_eq!(kind_from_flags(true, false), PluginKind::Instrument);
+        assert_eq!(kind_from_flags(false, true), PluginKind::Effect);
+    }
+
+    #[test]
+    fn both_flags_clear_reads_back_as_unknown() {
+        assert_eq!(kind_from_flags(false, false), PluginKind::Unknown);
+    }
+
+    #[test]
+    fn replacing_with_an_empty_scan_keeps_the_catalog() {
+        // Guard: an unplugged plug-in drive produces an empty scan, and the
+        // prune must not read that as "everything was uninstalled".
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO plugins (id, format, name, path, scan_status, search_text)
+             VALUES ('vst3:1', 'VST3', 'Keeper', 'C:/x.vst3', 'success', 'keeper')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(super::replace_plugins(&mut conn, &[]).unwrap(), 0);
+        assert_eq!(super::count_rows(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn replacing_drops_rows_the_scan_did_not_produce() {
+        use std::path::PathBuf;
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::init_schema(&conn).unwrap();
+        for id in ["vst3:stale-a", "vst3:stale-b", "vst3:keep"] {
+            conn.execute(
+                "INSERT INTO plugins (id, format, name, path, scan_status, search_text)
+                 VALUES (?1, 'VST3', 'Row', 'C:/x.vst3', 'success', 'row')",
+                [id],
+            )
+            .unwrap();
+        }
+
+        let fresh = super::PluginCatalogEntry {
+            id: "vst3:keep".into(),
+            format: crate::registry::PluginFormat::Vst3,
+            name: "Row".into(),
+            vendor: None,
+            category: None,
+            sub_categories: Some("Fx|EQ".into()),
+            path: PathBuf::from("C:/x.vst3"),
+            class_id: None,
+            bundle_id: None,
+            version: None,
+            is_instrument: false,
+            is_effect: true,
+            scan_status: super::PluginScanStatus::Success,
+            validation_level: None,
+            disabled: false,
+            favorite: false,
+            file_modified_at: None,
+            file_size: None,
+            last_scanned_at: None,
+            error: None,
+            metadata_json: None,
+            search_text: "row".into(),
+        };
+        assert_eq!(super::replace_plugins(&mut conn, &[fresh]).unwrap(), 2);
+        assert_eq!(super::count_rows(&conn).unwrap(), 1);
+
+        // And the tags round-trip, so a restart classifies the same way.
+        let rows = super::read_all(&conn).unwrap();
+        assert_eq!(rows[0].sub_categories.as_deref(), Some("Fx|EQ"));
+    }
 
     #[test]
     fn fresh_only_when_both_components_present_and_equal() {

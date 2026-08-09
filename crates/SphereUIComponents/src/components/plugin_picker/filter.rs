@@ -15,7 +15,11 @@ pub struct FilterCounts {
     pub favorites: usize,
     pub recent: usize,
     pub instruments: usize,
+    /// Everything the Effects rail offers — declared effects plus plug-ins that
+    /// declared no class at all, which are insertable as effects.
     pub effects: usize,
+    /// Subset of `effects` that never declared a class.
+    pub unknown: usize,
     pub vst3: usize,
     pub clap: usize,
     pub au: usize,
@@ -135,6 +139,9 @@ fn update_counts(
         counts.instruments += 1;
     } else {
         counts.effects += 1;
+        if plugin.kind == PluginKind::Unknown {
+            counts.unknown += 1;
+        }
     }
     if plugin.is_builtin() {
         counts.builtin += 1;
@@ -170,7 +177,10 @@ fn matches_sidebar(
         PickerFilter::Favorites => prefs.is_favorite(&plugin.id),
         PickerFilter::RecentlyUsed => prefs.recent.contains(&plugin.id),
         PickerFilter::Instruments => plugin.kind == PluginKind::Instrument,
-        PickerFilter::Effects => plugin.kind == PluginKind::Effect,
+        // `usable_as_effect` keeps undeclared plug-ins reachable: the picker
+        // opens pre-filtered to Effects for an effect slot, so anything hidden
+        // here is unreachable in the flow that needs it.
+        PickerFilter::Effects => plugin.kind.usable_as_effect(),
         PickerFilter::Format(fmt) => !plugin.is_builtin() && plugin.format == *fmt,
         PickerFilter::Builtin => plugin.is_builtin(),
         PickerFilter::Vendor(v) => plugin.vendor.eq_ignore_ascii_case(v),

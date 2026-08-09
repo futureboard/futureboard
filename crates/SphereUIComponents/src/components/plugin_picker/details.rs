@@ -9,7 +9,7 @@ use crate::components::plugin_picker::insert::{
 };
 use crate::components::plugin_picker::list_view::{format_badge_for, scan_status_label};
 use crate::theme::Colors;
-use SpherePluginHost::{PluginKind, RegistryPlugin};
+use SpherePluginHost::RegistryPlugin;
 
 pub const DETAILS_WIDTH: f32 = 228.0;
 
@@ -19,10 +19,7 @@ pub fn plugin_details_panel(
 ) -> impl IntoElement {
     let validation = validate_insert(plugin, insert_target);
     let scan = scan_status_label(plugin).unwrap_or("Ready");
-    let kind = match plugin.kind {
-        PluginKind::Instrument => "Instrument",
-        PluginKind::Effect => "Effect",
-    };
+    let kind = plugin.kind.label();
 
     div()
         .flex()

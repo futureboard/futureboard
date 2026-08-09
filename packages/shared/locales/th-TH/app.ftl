@@ -522,6 +522,7 @@ plugin-manager.filter.kind = ชนิด
 plugin-manager.filter.library = Library
 plugin-manager.kind.effect = เอฟเฟกต์
 plugin-manager.kind.instrument = เครื่องดนตรี
+plugin-manager.kind.unknown = ไม่ทราบ
 plugin-manager.list.empty = ยังไม่มีแคชปลั๊กอิน กดสแกนเพื่อสร้าง Registry
 plugin-manager.list.no-match = ไม่พบปลั๊กอินที่ตรงกับตัวกรอง
 plugin-manager.list.scanning = กำลังสแกน… ปลั๊กอินจะทยอยแสดงขึ้นมา

@@ -921,12 +921,17 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_plugin_preset_drop_callback(Some(Arc::new(
-                    move |(preset_path, track_id), _window, cx| {
+                    move |(preset_path, track_id), window, cx| {
                         let preset_path = preset_path.clone();
                         let track_id = track_id.clone();
-                        let _ = target.update(cx, |this, cx| {
-                            this.apply_dropped_plugin_preset(&track_id, &preset_path, cx);
-                        });
+                        StudioLayout::defer_update_in_window(
+                            &target,
+                            window,
+                            cx,
+                            move |this, _window, cx| {
+                                this.apply_dropped_plugin_preset(&track_id, &preset_path, cx);
+                            },
+                        );
                     },
                 )));
             });

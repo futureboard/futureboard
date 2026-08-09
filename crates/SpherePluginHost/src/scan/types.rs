@@ -111,6 +111,13 @@ pub enum PluginScanError {
     ScannerBinaryMissing(String),
     ScannerLaunchFailed(String),
     ScannerOutputInvalid(String),
+    /// The scanner child exceeded its wall-clock budget and was killed. Some
+    /// plug-ins block forever while their module loads; without this the whole
+    /// scan stalls and no catalog is ever written.
+    ScannerTimedOut {
+        format: PluginScanFormat,
+        seconds: u64,
+    },
     PathMissing(String),
     NativeScanFailed(String),
 }
@@ -148,6 +155,10 @@ impl PluginScanError {
                 format!("Failed to launch plugin scanner: {reason}")
             }
             Self::ScannerOutputInvalid(reason) => format!("Invalid scanner output: {reason}"),
+            Self::ScannerTimedOut { format, seconds } => format!(
+                "{} scan timed out after {seconds}s and was stopped",
+                format.cli_arg()
+            ),
             Self::PathMissing(path) => format!("Scan path does not exist: {path}"),
             Self::NativeScanFailed(reason) => reason.clone(),
         }

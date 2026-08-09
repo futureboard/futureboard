@@ -84,15 +84,23 @@ impl InsertPickerWindow {
         let perf = picker_perf_debug();
         let started = perf.then(std::time::Instant::now);
         let search_focused = self.snapshot.search_input.is_focused(window);
-        let (handled, snapshot) = self.owner.update(cx, |layout, cx| {
+        let (handled, finished, snapshot) = self.owner.update(cx, |layout, cx| {
             if event.keystroke.key.as_str() == "escape" {
                 layout.plugin_picker = PluginPickerState::closed();
                 layout.plugin_picker_window = None;
                 cx.notify();
-                return (true, layout.insert_picker_snapshot());
+                return (true, true, layout.insert_picker_snapshot());
             }
             let handled = layout.handle_plugin_picker_key(event, window, cx);
-            (handled, layout.insert_picker_snapshot())
+            // Enter inserts the highlighted plug-in and closes the picker state.
+            // Without this the window stayed up showing a closed picker, so the
+            // keyboard path did not actually finish the flow the way
+            // double-click and the Add button do.
+            let finished = !layout.plugin_picker.is_open;
+            if finished {
+                layout.plugin_picker_window = None;
+            }
+            (handled, finished, layout.insert_picker_snapshot())
         });
         self.set_snapshot(snapshot);
         cx.notify();
@@ -121,7 +129,7 @@ impl InsertPickerWindow {
             });
             cx.stop_propagation();
         }
-        if event.keystroke.key.as_str() == "escape" {
+        if finished {
             window.remove_window();
         }
     }
@@ -434,6 +442,18 @@ impl StudioLayout {
                 eprintln!("[plugin-picker] failed to open external window: {error}");
                 self.plugin_picker = PluginPickerState::closed();
             }
+        }
+    }
+
+    /// Close the Add Insert window and forget its state.
+    ///
+    /// The picker targets one track and slot of the *current* project. When the
+    /// project is replaced it would otherwise stay up aimed at a track that no
+    /// longer exists — a window whose Add button silently does nothing.
+    pub(super) fn close_insert_picker_window(&mut self, cx: &mut Context<Self>) {
+        self.plugin_picker = PluginPickerState::closed();
+        if let Some(handle) = self.plugin_picker_window.take() {
+            let _ = handle.update(cx, |_picker, window, _cx| window.remove_window());
         }
     }
 

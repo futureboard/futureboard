@@ -319,6 +319,11 @@ impl StudioLayout {
         // Replacing the live session invalidates any in-flight project-load
         // completion captured against the previous generation.
         self.advance_session_generation();
+        // The Add Insert window points at one track/slot of the project being
+        // replaced. Plugin *editors* are torn down by
+        // `teardown_all_plugin_instances`; this is the picker itself, which
+        // otherwise survives a close/switch aimed at a track that is gone.
+        self.close_insert_picker_window(cx);
         self.project_session = ProjectSession::untitled();
         self.project_path = None;
         self.project_folder = None;

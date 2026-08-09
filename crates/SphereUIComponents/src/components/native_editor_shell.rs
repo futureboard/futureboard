@@ -34,6 +34,14 @@ pub struct NativeShellPoll {
     /// New **content** (client-below-titlebar) size since the last poll, if the
     /// window was resized/maximized. The owner forwards it as `ResizeEditor`.
     pub resized: Option<(i32, i32)>,
+    /// Bare Space presses claimed by the shell's own chrome since the last poll.
+    ///
+    /// The shell is a raw Win32 window in the main process, so a key pressed
+    /// while *it* holds focus reaches neither GPUI (which only routes keys for
+    /// its own windows) nor the plug-in host process (which claims Space for the
+    /// windows it owns). Without this, Space did nothing whenever focus sat on
+    /// the editor's titlebar or frame instead of inside the plug-in's view.
+    pub transport_toggles: u32,
 }
 
 /// Default plugin editor shell content size before the plug-in reports its
@@ -88,23 +96,25 @@ mod imp {
     use windows::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+        GetFocus, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
+        TRACKMOUSEEVENT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsDialogMessageW,
-        IsWindow, IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW, SetForegroundWindow,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, GWLP_HWNDPARENT,
-        GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IDC_ARROW,
-        MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-        WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-        WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT,
-        WM_PAINT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-        WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+        GetClassNameW, GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+        IsDialogMessageW, IsWindow, IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+        GWLP_HWNDPARENT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT,
+        HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+        HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
+        SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
+        WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY,
+        WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCPAINT, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW,
+        WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME, WS_VISIBLE,
     };
 
     const SHELL_CLASS: PCWSTR = w!("SpherePluginEditorShell");
@@ -716,6 +726,8 @@ mod imp {
         /// resize, DPI change). Exempts programmatic resizes from the
         /// fixed-size min/max lock above.
         programmatic_resize: AtomicBool,
+        /// Bare Space presses seen by the shell chrome, drained by `poll`.
+        transport_toggles: AtomicU32,
     }
 
     impl ShellInner {
@@ -745,6 +757,7 @@ mod imp {
                 initial_auto_size_done: AtomicBool::new(false),
                 resizable: AtomicBool::new(true),
                 programmatic_resize: AtomicBool::new(false),
+                transport_toggles: AtomicU32::new(0),
             })
         }
     }
@@ -1128,6 +1141,49 @@ mod imp {
         }
     }
 
+    /// Claim a bare Space press for the DAW transport, mirroring the rule the
+    /// plug-in host process applies to the windows it owns
+    /// (`futureboard_plugin_host::platform::is_transport_toggle_key`): a fresh,
+    /// unmodified Space only, and never one aimed at a text caret.
+    ///
+    /// Returns true when the key was claimed and must not reach `DefWindowProc`.
+    unsafe fn claim_transport_key(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> bool {
+        const VK_SPACE_W: usize = 0x20;
+        const KEY_REPEAT_BIT: isize = 1 << 30;
+        if wparam.0 != VK_SPACE_W || lparam.0 & KEY_REPEAT_BIT != 0 {
+            return false;
+        }
+        unsafe {
+            let held = |vk: i32| GetKeyState(vk) < 0;
+            // VK_CONTROL / VK_MENU / VK_LWIN / VK_RWIN.
+            if held(0x11) || held(0x12) || held(0x5B) || held(0x5C) {
+                return false;
+            }
+            let focus = GetFocus();
+            if !focus.0.is_null() && focus != hwnd {
+                let mut class = [0u16; 128];
+                let len = GetClassNameW(focus, &mut class);
+                if len > 0 {
+                    let name =
+                        String::from_utf16_lossy(&class[..len as usize]).to_ascii_lowercase();
+                    // A caret owns Space — renaming a preset must not start playback.
+                    if name == "edit"
+                        || name == "combobox"
+                        || name.starts_with("richedit")
+                        || name.contains("textbox")
+                    {
+                        return false;
+                    }
+                }
+            }
+            if let Some(inner) = inner_ref(hwnd) {
+                inner.transport_toggles.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
+
     unsafe extern "system" fn shell_wndproc(
         hwnd: HWND,
         msg: u32,
@@ -1135,6 +1191,9 @@ mod imp {
         lparam: LPARAM,
     ) -> LRESULT {
         match msg {
+            WM_KEYDOWN | WM_SYSKEYDOWN if unsafe { claim_transport_key(hwnd, wparam, lparam) } => {
+                LRESULT(0)
+            }
             // Borderless: client area fills the whole window (no OS titlebar).
             WM_NCCALCSIZE if wparam.0 != 0 => LRESULT(0),
             // Suppress classic non-client painting / activation frame.
@@ -1473,6 +1532,11 @@ mod imp {
         lparam: LPARAM,
     ) -> LRESULT {
         match msg {
+            // The content surface can hold focus before the plug-in's own view
+            // takes it (and after the view is destroyed), so it claims Space too.
+            WM_KEYDOWN | WM_SYSKEYDOWN if unsafe { claim_transport_key(hwnd, wparam, lparam) } => {
+                LRESULT(0)
+            }
             WM_ERASEBKGND => {
                 if let Some(inner) = unsafe { inner_ref(hwnd) } {
                     inner.content_erase.fetch_add(1, Ordering::Relaxed);
@@ -2195,6 +2259,7 @@ mod imp {
             NativeShellPoll {
                 close_requested: self.inner.close_requested.load(Ordering::Relaxed),
                 resized,
+                transport_toggles: self.inner.transport_toggles.swap(0, Ordering::Relaxed),
             }
         }
 

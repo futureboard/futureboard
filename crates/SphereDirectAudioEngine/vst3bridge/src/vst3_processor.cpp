@@ -492,6 +492,100 @@ bool daux_resize_child_client(HWND child, int content_w, int content_h) {
                                        "resize_child");
 }
 
+struct DauxPluginRootSizeProbe {
+  HWND embed = nullptr;
+  int target_width = 0;
+  int target_height = 0;
+  int matched_width = 0;
+  int matched_height = 0;
+  long long best_error = 0x7fffffffffffffffLL;
+};
+
+BOOL CALLBACK daux_probe_scaled_plugin_root(HWND child, LPARAM data) {
+  auto *probe = reinterpret_cast<DauxPluginRootSizeProbe *>(data);
+  if (!probe || !IsWindowVisible(child))
+    return TRUE;
+  RECT rect{};
+  if (!GetClientRect(child, &rect))
+    return TRUE;
+  const int width = static_cast<int>(rect.right - rect.left);
+  const int height = static_cast<int>(rect.bottom - rect.top);
+  if (width < 16 || height < 16 || width > 8192 || height > 8192)
+    return TRUE;
+  POINT origin{0, 0};
+  MapWindowPoints(child, probe->embed, &origin, 1);
+  if (std::abs(origin.x) > 2 || std::abs(origin.y) > 2)
+    return TRUE;
+  const int tolerance_w = std::max(8, probe->target_width / 20);
+  const int tolerance_h = std::max(8, probe->target_height / 20);
+  const int error_w = std::abs(width - probe->target_width);
+  const int error_h = std::abs(height - probe->target_height);
+  if (error_w > tolerance_w || error_h > tolerance_h)
+    return TRUE;
+  const long long error = static_cast<long long>(error_w) + error_h;
+  if (error < probe->best_error) {
+    probe->best_error = error;
+    probe->matched_width = width;
+    probe->matched_height = height;
+  }
+  return TRUE;
+}
+
+bool daux_plugin_root_window_size(HWND embed, int expected_width,
+                                  int expected_height, int *out_width,
+                                  int *out_height) {
+  if (!embed || !IsWindow(embed))
+    return false;
+
+  const UINT dpi = daux_hwnd_dpi(embed);
+  if (dpi > 96) {
+    DauxPluginRootSizeProbe probe{};
+    probe.embed = embed;
+    probe.target_width = MulDiv(expected_width, 96, static_cast<int>(dpi));
+    probe.target_height = MulDiv(expected_height, 96, static_cast<int>(dpi));
+    if (probe.target_width >= 16 && probe.target_height >= 16) {
+      EnumChildWindows(embed, daux_probe_scaled_plugin_root,
+                       reinterpret_cast<LPARAM>(&probe));
+      if (probe.matched_width > 0 && probe.matched_height > 0) {
+        if (out_width)
+          *out_width = probe.matched_width;
+        if (out_height)
+          *out_height = probe.matched_height;
+        return true;
+      }
+    }
+  }
+
+  long long best_area = 0;
+  int best_width = 0;
+  int best_height = 0;
+  for (HWND child = GetWindow(embed, GW_CHILD); child;
+       child = GetWindow(child, GW_HWNDNEXT)) {
+    if (!IsWindowVisible(child))
+      continue;
+    RECT rect{};
+    if (!GetClientRect(child, &rect))
+      continue;
+    const int width = static_cast<int>(rect.right - rect.left);
+    const int height = static_cast<int>(rect.bottom - rect.top);
+    if (width < 16 || height < 16 || width > 8192 || height > 8192)
+      continue;
+    const long long area = static_cast<long long>(width) * height;
+    if (area > best_area) {
+      best_area = area;
+      best_width = width;
+      best_height = height;
+    }
+  }
+  if (best_area <= 0)
+    return false;
+  if (out_width)
+    *out_width = best_width;
+  if (out_height)
+    *out_height = best_height;
+  return true;
+}
+
 bool daux_editor_set_content_scale(SphereDauxVst3Processor *processor,
                                    HWND dpi_ref, const char *reason) {
   if (!processor || !processor->editor_view)
@@ -1451,6 +1545,39 @@ LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam,
     break;
   }
   return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+/// Top-level window of this process that should own a legacy in-process editor.
+///
+/// An owned window floats above its owner and nothing else, which is what a
+/// plug-in editor should do; the previous `WS_EX_TOPMOST` pinned it above every
+/// application on the desktop. Returns `nullptr` when no suitable window exists
+/// yet, which simply leaves the editor unowned rather than failing to open.
+HWND daux_editor_owner_window() {
+  struct Search {
+    DWORD pid = 0;
+    HWND found = nullptr;
+  } search;
+  search.pid = GetCurrentProcessId();
+  EnumWindows(
+      [](HWND hwnd, LPARAM data) -> BOOL {
+        auto *search = reinterpret_cast<Search *>(data);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != search->pid || !IsWindowVisible(hwnd))
+          return TRUE;
+        // Skip our own editor shells so one editor never owns another.
+        wchar_t class_name[128]{};
+        GetClassNameW(hwnd, class_name, 128);
+        if (std::wcscmp(class_name, kDauxEditorWindowClass) == 0)
+          return TRUE;
+        if (GetWindow(hwnd, GW_OWNER) != nullptr)
+          return TRUE;
+        search->found = hwnd;
+        return FALSE;
+      },
+      reinterpret_cast<LPARAM>(&search));
+  return search.found;
 }
 
 void register_editor_parent_class() {
@@ -3022,7 +3149,11 @@ sphere_daux_vst3_open_editor(SphereDauxVst3Processor *processor,
     ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
     UpdateWindow(processor->editor_hwnd);
     SetForegroundWindow(processor->editor_hwnd);
-    SetWindowPos(processor->editor_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+    // HWND_TOP raises the editor within the normal z-order. HWND_TOPMOST would
+    // pin it above every other application on the desktop, not just above
+    // Futureboard — always-on-top is a user choice (see the `pinned` toggle in
+    // editorplatform/windows/editor_windows_api.cpp), never the default.
+    SetWindowPos(processor->editor_hwnd, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     std::fprintf(stderr,
                  "[SphereVST3] editor reopen: complete handle=%llu "
@@ -3107,16 +3238,20 @@ sphere_daux_vst3_open_editor(SphereDauxVst3Processor *processor,
 
   RECT rect{0, 0, editor_width, editor_height};
   const DWORD outer_style = WS_OVERLAPPEDWINDOW;
-  const DWORD outer_ex_style = WS_EX_TOPMOST;
+  // No WS_EX_TOPMOST: a plug-in editor that outranks every other application on
+  // the desktop cannot be worked behind. It is owned by the app window instead
+  // (below), which floats it over Futureboard only.
+  const DWORD outer_ex_style = 0;
   if (!AdjustWindowRectExForDpi(&rect, outer_style, FALSE, outer_ex_style,
                                 96)) {
     AdjustWindowRectEx(&rect, outer_style, FALSE, outer_ex_style);
   }
   const auto wide_title = widen_utf8(title && *title ? title : "Plugin Editor");
   HWND hwnd =
-      CreateWindowExW(WS_EX_TOPMOST, kDauxEditorWindowClass, wide_title.c_str(),
-                      WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                      rect.right - rect.left, rect.bottom - rect.top, nullptr,
+      CreateWindowExW(outer_ex_style, kDauxEditorWindowClass,
+                      wide_title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                      CW_USEDEFAULT, rect.right - rect.left,
+                      rect.bottom - rect.top, daux_editor_owner_window(),
                       nullptr, GetModuleHandleW(nullptr), processor);
   if (!hwnd) {
     processor->editor_view = nullptr;
@@ -3136,7 +3271,7 @@ sphere_daux_vst3_open_editor(SphereDauxVst3Processor *processor,
   std::fprintf(stderr, "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
                static_cast<void *>(hwnd), dpi);
   std::fprintf(stderr, "[PluginEditor] outer_size=%dx%d\n", outer_w, outer_h);
-  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, outer_w, outer_h,
+  SetWindowPos(hwnd, HWND_TOP, 0, 0, outer_w, outer_h,
                SWP_NOMOVE | SWP_NOACTIVATE);
 
   HWND child =
@@ -3736,6 +3871,19 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
     size_w = std::clamp(size_w, 160, 4096);
     size_h = std::clamp(size_h, 160, 4096);
     daux_constrain_content_size(processor, &size_w, &size_h);
+    int root_w = 0;
+    int root_h = 0;
+    if (daux_plugin_root_window_size(content, size_w, size_h, &root_w, &root_h) &&
+        (root_w != size_w || root_h != size_h)) {
+      std::fprintf(stderr,
+                   "[SphereVST3/win] native root overrides stale getSize "
+                   "getSize=%dx%d root=%dx%d dpi=%u\n",
+                   size_w, size_h, root_w, root_h, daux_hwnd_dpi(content));
+      size_w = root_w;
+      size_h = root_h;
+    }
+    size_w = std::clamp(size_w, 160, 4096);
+    size_h = std::clamp(size_h, 160, 4096);
     daux_embed_apply_content_size(processor, size_w, size_h, "after_attach.getSize");
     daux_resize_child_client(content, size_w, size_h);
     std::fprintf(stderr,
