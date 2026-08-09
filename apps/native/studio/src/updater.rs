@@ -55,12 +55,67 @@ fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
         .map_err(|error| format!("GitHub API returned invalid JSON: {error}"))
 }
 
+/// Installers are named `Futureboard.Studio-<version>-<platform>.<ext>`, with
+/// `<version>` written straight from `version.json` by the release workflow —
+/// which also verifies these exact shapes before it uploads. That makes the
+/// filename a machine-written copy of the version, which a release title is not.
+const ASSET_NAME_PREFIX: &str = "futureboard.studio-";
+
+/// The platform tails that follow the version, lowercased for matching.
+///
+/// Spelling them out is what makes the split reliable: semver's prerelease
+/// grammar accepts hyphens inside an identifier, so `2026.8.9-beta1-windows`
+/// parses happily as a version with the prerelease `beta1-windows`. The tail
+/// cannot be inferred by scanning — it has to be known.
+const ASSET_PLATFORM_SUFFIXES: &[&str] = &[
+    "-windows-x86_64-setup.exe",
+    "-macos-universal.dmg",
+    "-macos-arm64.dmg",
+    "-macos-x86_64.dmg",
+    "-x86_64.appimage",
+    // Releases predating architecture-tagged DMG names.
+    "-macos.dmg",
+];
+
+fn version_from_asset_name(name: &str) -> Option<Version> {
+    let lower = name.to_ascii_lowercase();
+    let rest = lower.strip_prefix(ASSET_NAME_PREFIX)?;
+    let version = ASSET_PLATFORM_SUFFIXES
+        .iter()
+        .find_map(|suffix| rest.strip_suffix(suffix))?;
+    Version::parse(version).ok()
+}
+
+/// The version a release offers, or `None` if it cannot be established — such a
+/// release is skipped entirely.
+///
+/// A version tag answers this outright. A *moving* tag cannot: `nightly` is
+/// republished in place every day, and 2026.8.9-beta1 went out on `beta`, where
+/// `Version::parse("beta")` fails and the whole release became invisible to the
+/// updater.
+///
+/// The fallback reads the asset this machine would actually install, so the
+/// version offered is the version that arrives — and a release carrying a
+/// leftover asset from an older build cannot advertise that older version.
+///
+/// Asset names are preferred over the release name because a title is prose: for
+/// this very release it reads "Futureboard Studio 2026.8.9 Beta 1", whose only
+/// parseable token is `2026.8.9` — which *outranks* the `2026.8.9-beta1` inside
+/// the installer, and would offer every user a permanent update to the build
+/// they are already running.
 fn release_version(release: &GithubRelease) -> Option<Version> {
     let tag = release.tag_name.trim().trim_start_matches('v');
-    if tag != "nightly" {
-        return Version::parse(tag).ok();
+    if let Ok(version) = Version::parse(tag) {
+        return Some(version);
     }
 
+    platform_asset(release)
+        .and_then(|asset| version_from_asset_name(&asset.name))
+        .or_else(|| version_from_release_name(release))
+}
+
+/// Last resort for a moving tag whose assets predate the naming convention.
+fn version_from_release_name(release: &GithubRelease) -> Option<Version> {
     release
         .name
         .as_deref()?
@@ -670,13 +725,81 @@ mod tests {
         );
     }
 
+    /// An asset named the way the release workflow names them, for the platform
+    /// this test binary is running on.
+    fn versioned_release(tag: &str, name: &str, version: &str) -> GithubRelease {
+        let asset = if cfg!(target_os = "windows") {
+            format!("Futureboard.Studio-{version}-windows-x86_64-Setup.exe")
+        } else if cfg!(target_os = "macos") {
+            format!("Futureboard.Studio-{version}-macos-universal.dmg")
+        } else {
+            format!("Futureboard.Studio-{version}-x86_64.AppImage")
+        };
+        GithubRelease {
+            tag_name: tag.to_string(),
+            name: Some(name.to_string()),
+            draft: false,
+            prerelease: true,
+            assets: vec![GithubAsset {
+                name: asset,
+                browser_download_url: "https://example.test/download".to_string(),
+                size: 1,
+                digest: Some("sha256:test".to_string()),
+            }],
+        }
+    }
+
+    /// A moving tag carries no version of its own, so it comes from the asset
+    /// that would actually be installed.
     #[test]
-    fn nightly_version_comes_from_release_name() {
-        let release = release("nightly", "Nightly v2026.8.3-nightly", true);
+    fn moving_tag_version_comes_from_the_asset_name() {
+        let nightly = versioned_release("nightly", "Nightly v2026.8.3-nightly", "2026.8.3-nightly");
         assert_eq!(
-            release_version(&release).unwrap(),
+            release_version(&nightly).unwrap(),
             Version::parse("2026.8.3-nightly").unwrap()
         );
+
+        // 2026.8.9-beta1 shipped on `beta`. Before the asset fallback existed
+        // this release resolved to `None` and was skipped by every channel.
+        let beta = versioned_release(
+            "beta",
+            "Futureboard Studio 2026.8.9 Beta 1 — Hotfix",
+            "2026.8.9-beta1",
+        );
+        assert_eq!(
+            release_version(&beta).unwrap(),
+            Version::parse("2026.8.9-beta1").unwrap()
+        );
+        assert!(release_matches_channel(&beta, UpdateChannel::Beta));
+    }
+
+    /// The release title is prose. "…2026.8.9 Beta 1" offers `2026.8.9`, which
+    /// sorts *above* the `2026.8.9-beta1` in the installer, so trusting it would
+    /// offer a user on the hotfix a permanent update to their own build.
+    #[test]
+    fn asset_name_outranks_a_prose_release_title() {
+        let release = versioned_release(
+            "beta",
+            "Futureboard Studio 2026.8.9 Beta 1 — Hotfix",
+            "2026.8.9-beta1",
+        );
+        let current = Version::parse("2026.8.9-beta1").unwrap();
+        assert!(choose_release(vec![release], UpdateChannel::Beta, &current).is_none());
+    }
+
+    /// A version tag still wins outright, and a release whose version cannot be
+    /// established anywhere is skipped rather than guessed at.
+    #[test]
+    fn version_tag_wins_and_an_unresolvable_release_is_skipped() {
+        let tagged = versioned_release("v2026.8.9-beta1", "Anything at all", "2026.8.9-beta1");
+        assert_eq!(
+            release_version(&tagged).unwrap(),
+            Version::parse("2026.8.9-beta1").unwrap()
+        );
+
+        let mut opaque = versioned_release("beta", "Futureboard Studio", "2026.8.9-beta1");
+        opaque.assets[0].name = "installer.bin".to_string();
+        assert!(release_version(&opaque).is_none());
     }
 
     #[test]

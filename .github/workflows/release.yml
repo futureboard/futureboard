@@ -105,8 +105,18 @@ jobs:
             if [ ${#matches[@]} -eq 0 ]; then
               echo "::error::no $label asset matching '$pattern'"
               fail=1
+            elif [ ${#matches[@]} -gt 1 ]; then
+              # More than one match means a bundle from an earlier build rode
+              # along, and the updater would pick between them by name order.
+              # 2026.8.9-beta1 shipped a 2026.8.8-beta1 AppImage exactly here,
+              # and this step passed because it only asked for one match.
+              echo "::error::$label matched ${#matches[@]} assets: ${matches[*]}"
+              fail=1
+            elif [[ "${matches[0]}" != *"$APP_VERSION"* ]]; then
+              echo "::error::$label asset ${matches[0]} is not version $APP_VERSION"
+              fail=1
             else
-              echo "$label: ${matches[*]}"
+              echo "$label: ${matches[0]}"
             fi
           }
           check "windows"         "*setup*.exe"
@@ -115,6 +125,21 @@ jobs:
           check "macos-x86_64"    "*macos-x86_64*.dmg"
           check "linux"           "*x86_64*.AppImage"
           exit $fail
+
+      # An updater resolves a release's version from its tag. A moving tag such
+      # as `beta` carries none, so every build up to and including
+      # 2026.8.9-beta1 — which read the tag and nothing else — skips the release
+      # outright and never offers the update. Later builds fall back to the
+      # asset filenames, but installs already in the field do not, and cannot be
+      # taught to. Reaching them means publishing at a version tag.
+      - name: Check the tag is one installed updaters can resolve
+        run: |
+          set -euo pipefail
+          if [[ "${TAG#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "$TAG is a version tag — every updater can resolve it."
+          else
+            echo "::warning::'$TAG' is a moving tag. Installs of 2026.8.9-beta1 and earlier will not see this release. Publish at a version tag such as '$APP_VERSION' to reach them."
+          fi
 
       - name: Attach assets to the release
         run: |
