@@ -1,0 +1,117 @@
+import type { MixStationParams } from './bridge'
+import type { NumericParamId } from './params'
+
+/**
+ * The rack catalogue.
+ *
+ * `code` is the slot value the Rust side stores in `slotNModule` and matches
+ * the arms of `Dsp::process_stereo`; it is the stable identifier, not the array
+ * position. `enabledId` is the module's own bypass parameter. Adding a module
+ * here without a matching arm in Rust would produce a control that does
+ * nothing, so the two must move together.
+ */
+export type RackModuleId = Exclude<BooleanParamId, 'power'>
+
+export type BooleanParamId =
+  | 'power'
+  | 'filtersEnabled'
+  | 'eqEnabled'
+  | 'compEnabled'
+  | 'satEnabled'
+  | 'widthEnabled'
+  | 'limiterEnabled'
+
+export type RackModule = {
+  code: number
+  enabledId: RackModuleId
+  name: string
+  hint: string
+  /** CSS custom property carrying the module's identity colour. */
+  accent: string
+  /** Knob row, in panel order. */
+  knobs: readonly NumericParamId[]
+}
+
+export const RACK_MODULES: readonly RackModule[] = [
+  {
+    code: 1,
+    enabledId: 'filtersEnabled',
+    name: 'Filters',
+    hint: '24 dB/oct high and low cut',
+    accent: 'var(--color-mod-filters)',
+    knobs: ['hpfHz', 'lpfHz'],
+  },
+  {
+    code: 2,
+    enabledId: 'eqEnabled',
+    name: 'EQ',
+    hint: 'Four-band with proportional-Q mids',
+    accent: 'var(--color-mod-eq)',
+    knobs: ['lowGainDb', 'lowMidFreqHz', 'lowMidGainDb', 'highMidFreqHz', 'highMidGainDb', 'highGainDb'],
+  },
+  {
+    code: 3,
+    enabledId: 'compEnabled',
+    name: 'Compressor',
+    hint: 'Stereo-linked, program-dependent release',
+    accent: 'var(--color-mod-comp)',
+    knobs: [
+      'compThresholdDb',
+      'compRatio',
+      'compAttackMs',
+      'compReleaseMs',
+      'compMakeupDb',
+    ],
+  },
+  {
+    code: 4,
+    enabledId: 'satEnabled',
+    name: 'Drive',
+    hint: 'Anti-aliased asymmetric saturation',
+    accent: 'var(--color-mod-sat)',
+    knobs: ['satDrivePct', 'satCharacterPct'],
+  },
+  {
+    code: 5,
+    enabledId: 'widthEnabled',
+    name: 'Width',
+    hint: 'Mid/side stereo image',
+    accent: 'var(--color-mod-width)',
+    knobs: ['widthPct'],
+  },
+  {
+    code: 6,
+    enabledId: 'limiterEnabled',
+    name: 'Limiter',
+    hint: 'Zero-latency brickwall ceiling',
+    accent: 'var(--color-mod-limiter)',
+    knobs: ['limiterCeilingDb', 'limiterReleaseMs'],
+  },
+] as const
+
+export const SLOT_IDS = [
+  'slot1Module',
+  'slot2Module',
+  'slot3Module',
+  'slot4Module',
+  'slot5Module',
+  'slot6Module',
+] as const satisfies readonly NumericParamId[]
+
+export const BOOLEAN_LABELS: Record<RackModuleId, string> = {
+  filtersEnabled: 'Filters',
+  eqEnabled: 'EQ',
+  compEnabled: 'Compressor',
+  satEnabled: 'Drive',
+  widthEnabled: 'Width',
+  limiterEnabled: 'Limiter',
+}
+
+export function moduleByCode(code: number) {
+  return RACK_MODULES.find((item) => item.code === code)
+}
+
+/** Slot codes in chain order, as integers. */
+export function slotCodes(params: MixStationParams) {
+  return SLOT_IDS.map((id) => Math.round(params[id]))
+}

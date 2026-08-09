@@ -10,15 +10,24 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@fontsource-variable/mona-sans": "^5.3.0",
+    "@fontsource-variable/mona-sans": "catalog:",
+    "@phosphor-icons/react": "catalog:",
+    "animejs": "catalog:",
+    "d3-scale": "catalog:",
+    "d3-shape": "catalog:",
+    "motion": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
     "@types/bun": "catalog:",
+    "@types/d3-scale": "catalog:",
+    "@types/d3-shape": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plugin-singlefile": "catalog:"
