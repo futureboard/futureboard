@@ -87,8 +87,27 @@ select:focus-visible,
     linear-gradient(180deg, #0c1016 0%, var(--surface-panel) 42%, #070a0e 100%);
 }
 
-.editor.is-bypassed .stage {
-  filter: saturate(0.35);
+.editor.is-bypassed {
+  .stage {
+    filter: saturate(0.2) brightness(0.72);
+    opacity: 0.62;
+  }
+
+  .curve-line,
+  .curve-glow,
+  .curve-fill,
+  .band-curve {
+    opacity: 0.18 !important;
+  }
+
+  .node {
+    opacity: 0.28 !important;
+  }
+
+  .power-button:not(.is-on) {
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+  }
 }
 
 /* Header — thin Pro-Q chrome */

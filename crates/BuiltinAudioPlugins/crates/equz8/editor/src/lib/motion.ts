@@ -80,15 +80,12 @@ export function snapKnobDial(dial: HTMLElement | null) {
   })
 }
 
-/** Power / bypass: dim the stage without hiding structure. */
-export function tweenBypass(stage: HTMLElement | null, bypassed: boolean) {
-  if (!stage || reducedMotion) {
-    if (stage) stage.style.opacity = bypassed ? '0.55' : '1'
-    return null
-  }
+/** Power / bypass: brief brightness flash; steady look is CSS `.is-bypassed`. */
+export function tweenBypass(stage: HTMLElement | null, _bypassed: boolean) {
+  if (!stage || reducedMotion) return null
   return animate(stage, {
-    opacity: bypassed ? 0.55 : 1,
+    filter: ['brightness(1.12)', 'brightness(1)'],
     duration: 280,
-    ease: 'inOutQuad',
+    ease: 'outQuad',
   })
 }
