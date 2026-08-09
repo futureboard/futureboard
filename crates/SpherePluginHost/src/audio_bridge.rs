@@ -41,7 +41,15 @@ pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// v8 adds `builtin_gain_reduction` — a compressor's reduction cannot be
 /// recovered from the in/out levels, because makeup gain and the dry blend both
 /// sit between them.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 8;
+/// v9 adds the per-stage telemetry block: in/out peak for each of a built-in's
+/// rack positions. A multi-stage built-in's internal levels cannot be derived
+/// from the strip's endpoints, so an editor that meters its own chain needs
+/// them published. Built-ins with no rack publish zeros.
+pub const BRIDGE_LAYOUT_VERSION: u32 = 9;
+
+/// Rack positions a built-in may publish per-stage telemetry for. Fixed so the
+/// shared region stays a plain-old-data layout.
+pub const BUILTIN_RACK_SLOTS: usize = 6;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
@@ -63,6 +71,11 @@ pub struct BuiltinMeterFrame {
     pub gain_reduction_db: f32,
     pub in_clip: bool,
     pub out_clip: bool,
+    /// Level entering each rack position, in chain order. All zeros for a
+    /// built-in that is a single fixed stage rather than a user-ordered rack.
+    pub slot_in_peak: [f32; BUILTIN_RACK_SLOTS],
+    /// Level leaving each rack position, after that stage's own output trim.
+    pub slot_out_peak: [f32; BUILTIN_RACK_SLOTS],
 }
 
 /// Maximum block size (frames) the region can carry. The engine's actual block
@@ -544,6 +557,11 @@ pub struct SharedAudioBridge {
     /// EQ has no meters) from "measured, and the signal is silent" — without
     /// it a reader cannot tell the two apart, since both read as all zeros.
     pub builtin_meters_published: AtomicU32,
+    /// Per-rack-position in/out peak, `f32` bits, in chain order. Written in
+    /// the same store as the block above, so a reader that sees a fresh frame
+    /// sees these too. All zeros for a built-in with no user-ordered rack.
+    pub builtin_slot_in_peak: [AtomicU32; BUILTIN_RACK_SLOTS],
+    pub builtin_slot_out_peak: [AtomicU32; BUILTIN_RACK_SLOTS],
 
     // --- Analyser spectrum (host → engine) ---
     /// Log-spaced magnitude bins in dB, `f32` bits, published by the host at
@@ -684,8 +702,14 @@ impl SharedAudioBridge {
             flags |= 2;
         }
         self.builtin_clip_flags.store(flags, Ordering::Relaxed);
-        // Release: a reader that observes the flag must also see the four
-        // level words stored above.
+        for (slot, value) in self.builtin_slot_in_peak.iter().zip(frame.slot_in_peak) {
+            slot.store(value.to_bits(), Ordering::Relaxed);
+        }
+        for (slot, value) in self.builtin_slot_out_peak.iter().zip(frame.slot_out_peak) {
+            slot.store(value.to_bits(), Ordering::Relaxed);
+        }
+        // Release: a reader that observes the flag must also see the level
+        // words and per-stage arrays stored above.
         self.builtin_meters_published.store(1, Ordering::Release);
     }
 
@@ -705,6 +729,12 @@ impl SharedAudioBridge {
             gain_reduction_db: f32::from_bits(self.builtin_gain_reduction.load(Ordering::Relaxed)),
             in_clip: flags & 1 != 0,
             out_clip: flags & 2 != 0,
+            slot_in_peak: std::array::from_fn(|i| {
+                f32::from_bits(self.builtin_slot_in_peak[i].load(Ordering::Relaxed))
+            }),
+            slot_out_peak: std::array::from_fn(|i| {
+                f32::from_bits(self.builtin_slot_out_peak[i].load(Ordering::Relaxed))
+            }),
         })
     }
 
@@ -1655,9 +1685,35 @@ mod tests {
             gain_reduction_db: 6.5,
             in_clip: false,
             out_clip: true,
+            slot_in_peak: [0.9, 0.8, 0.0, 0.0, 0.0, 0.0],
+            slot_out_peak: [0.7, 0.6, 0.0, 0.0, 0.0, 0.0],
         };
         bridge.store_builtin_meters(&loud);
         assert_eq!(bridge.builtin_meters(), Some(loud));
+    }
+
+    #[test]
+    fn per_stage_telemetry_round_trips_and_defaults_to_silent() {
+        let region = SharedAudioRegion::new_in_process();
+        let bridge = region.bridge();
+        // A built-in with no rack publishes zeros, and those must survive the
+        // round trip as zeros rather than reading as uninitialised bits.
+        let flat = BuiltinMeterFrame {
+            in_peak: 0.4,
+            ..BuiltinMeterFrame::default()
+        };
+        bridge.store_builtin_meters(&flat);
+        let read = bridge.builtin_meters().expect("published");
+        assert_eq!(read.slot_in_peak, [0.0; BUILTIN_RACK_SLOTS]);
+        assert_eq!(read.slot_out_peak, [0.0; BUILTIN_RACK_SLOTS]);
+
+        let racked = BuiltinMeterFrame {
+            slot_in_peak: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            slot_out_peak: [0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+            ..BuiltinMeterFrame::default()
+        };
+        bridge.store_builtin_meters(&racked);
+        assert_eq!(bridge.builtin_meters(), Some(racked));
     }
 
     #[test]

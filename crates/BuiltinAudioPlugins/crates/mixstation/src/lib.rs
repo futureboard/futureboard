@@ -20,6 +20,8 @@ use dsp::{
 };
 
 pub const PLUGIN_ID: &str = "futureboard.mixstation";
+/// Rack positions, and equally the number of distinct modules.
+pub const RACK_SLOTS: usize = 6;
 const CLIP_HOLD_SECONDS: f32 = 1.0;
 /// Bottom of the high-pass range; parked here the cut leaves the path.
 const HPF_OPEN_HZ: f32 = 20.0;
@@ -70,6 +72,22 @@ pub struct Params {
     pub slot5_module: u8,
     #[serde(default = "legacy_slot_6")]
     pub slot6_module: u8,
+    /// Per-module output trim in dB. Keyed by module rather than rack slot, so
+    /// reordering the chain carries each stage's trim along with it. Added
+    /// after the original state version, hence the defaults: a project saved
+    /// before these existed loads at unity.
+    #[serde(default)]
+    pub filters_trim_db: f32,
+    #[serde(default)]
+    pub eq_trim_db: f32,
+    #[serde(default)]
+    pub comp_trim_db: f32,
+    #[serde(default)]
+    pub sat_trim_db: f32,
+    #[serde(default)]
+    pub width_trim_db: f32,
+    #[serde(default)]
+    pub limiter_trim_db: f32,
 }
 
 const fn legacy_slot_1() -> u8 {
@@ -126,6 +144,12 @@ pub fn default_params() -> Params {
         slot4_module: 0,
         slot5_module: 0,
         slot6_module: 0,
+        filters_trim_db: 0.0,
+        eq_trim_db: 0.0,
+        comp_trim_db: 0.0,
+        sat_trim_db: 0.0,
+        width_trim_db: 0.0,
+        limiter_trim_db: 0.0,
     }
 }
 
@@ -202,6 +226,12 @@ const PARAMS: &[ParamDescriptor] = &[
     param("slot4Module", "Rack Slot 4", 0.0, 0.0, 6.0, "module"),
     param("slot5Module", "Rack Slot 5", 0.0, 0.0, 6.0, "module"),
     param("slot6Module", "Rack Slot 6", 0.0, 0.0, 6.0, "module"),
+    param("filtersTrimDb", "Filters Trim", 0.0, -24.0, 24.0, "dB"),
+    param("eqTrimDb", "EQ Trim", 0.0, -24.0, 24.0, "dB"),
+    param("compTrimDb", "Compressor Trim", 0.0, -24.0, 24.0, "dB"),
+    param("satTrimDb", "Saturation Trim", 0.0, -24.0, 24.0, "dB"),
+    param("widthTrimDb", "Width Trim", 0.0, -24.0, 24.0, "dB"),
+    param("limiterTrimDb", "Limiter Trim", 0.0, -24.0, 24.0, "dB"),
 ];
 
 pub fn descriptor() -> PluginDescriptor {
@@ -225,6 +255,10 @@ pub struct MeterFrame {
     pub gain_reduction_db: f32,
     pub in_clip: bool,
     pub out_clip: bool,
+    /// Level entering each rack position, in chain order, linear peak.
+    pub slot_in_peak: [f32; RACK_SLOTS],
+    /// Level leaving each rack position, after that module's output trim.
+    pub slot_out_peak: [f32; RACK_SLOTS],
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +272,9 @@ struct Meters {
     clip_hold_samples: usize,
     in_clip_remaining: usize,
     out_clip_remaining: usize,
+    /// Per-rack-position envelopes, sharing the master meters' peak ballistics.
+    slot_in: [f32; RACK_SLOTS],
+    slot_out: [f32; RACK_SLOTS],
 }
 
 impl Meters {
@@ -252,6 +289,8 @@ impl Meters {
             clip_hold_samples: (sample_rate.max(1.0) * CLIP_HOLD_SECONDS) as usize,
             in_clip_remaining: 0,
             out_clip_remaining: 0,
+            slot_in: [0.0; RACK_SLOTS],
+            slot_out: [0.0; RACK_SLOTS],
         }
     }
 
@@ -262,6 +301,19 @@ impl Meters {
         self.out_ms = 0.0;
         self.in_clip_remaining = 0;
         self.out_clip_remaining = 0;
+        self.slot_in = [0.0; RACK_SLOTS];
+        self.slot_out = [0.0; RACK_SLOTS];
+    }
+
+    /// Publish one rack position's in/out levels. Same decay as the master
+    /// meters so a row and the footer agree on what a peak looks like.
+    #[inline]
+    fn push_stage(&mut self, slot: usize, input: f32, output: f32) {
+        if slot >= RACK_SLOTS {
+            return;
+        }
+        self.slot_in[slot] = input.max(self.slot_in[slot] * self.peak_coeff);
+        self.slot_out[slot] = output.max(self.slot_out[slot] * self.peak_coeff);
     }
 
     #[inline]
@@ -291,6 +343,8 @@ pub struct Dsp {
     params: Params,
     input_gain: SmoothedGain,
     output_gain: SmoothedGain,
+    /// Per-module output trim, indexed by module code minus one.
+    module_trim: [SmoothedGain; RACK_SLOTS],
     filters: Filters,
     compressor: StripCompressor,
     saturation_drive: f32,
@@ -310,6 +364,7 @@ impl Dsp {
             sample_rate,
             input_gain: SmoothedGain::new(sample_rate, params.input_trim_db),
             output_gain: SmoothedGain::new(sample_rate, params.output_trim_db),
+            module_trim: [SmoothedGain::new(sample_rate, 0.0); RACK_SLOTS],
             filters: Filters::new(),
             compressor: StripCompressor::new(sample_rate),
             saturation_drive: 0.0,
@@ -372,6 +427,8 @@ impl Dsp {
             gain_reduction_db: compressor_gr + limiter_gr,
             in_clip: self.meters.in_clip_remaining > 0,
             out_clip: self.meters.out_clip_remaining > 0,
+            slot_in_peak: self.meters.slot_in,
+            slot_out_peak: self.meters.slot_out,
         }
     }
 
@@ -413,6 +470,21 @@ impl Dsp {
         self.limiter.set_ceiling_db(p.limiter_ceiling_db);
         self.limiter
             .set_release(self.sample_rate, p.limiter_release_ms * 0.001);
+        for (gain, db) in self.module_trim.iter_mut().zip(Self::module_trim_db(p)) {
+            gain.set_db(db);
+        }
+    }
+
+    /// Per-module trim in dB, indexed by module code minus one.
+    const fn module_trim_db(params: &Params) -> [f32; RACK_SLOTS] {
+        [
+            params.filters_trim_db,
+            params.eq_trim_db,
+            params.comp_trim_db,
+            params.sat_trim_db,
+            params.width_trim_db,
+            params.limiter_trim_db,
+        ]
     }
 
     fn rack_contains(&self, module: u8) -> bool {
@@ -497,6 +569,15 @@ impl Dsp {
                 self.width = p.width_pct * 0.01;
             }
             ipc::OUTPUT_TRIM_INDEX => self.output_gain.set_db(p.output_trim_db),
+            ipc::FILTERS_TRIM_INDEX
+            | ipc::EQ_TRIM_INDEX
+            | ipc::COMP_TRIM_INDEX
+            | ipc::SAT_TRIM_INDEX
+            | ipc::WIDTH_TRIM_INDEX
+            | ipc::LIMITER_TRIM_INDEX => {
+                let slot = (index - ipc::FILTERS_TRIM_INDEX) as usize;
+                self.module_trim[slot].set_db(Self::module_trim_db(p)[slot]);
+            }
             ipc::LIMITER_CEILING_INDEX => self.limiter.set_ceiling_db(p.limiter_ceiling_db),
             ipc::LIMITER_RELEASE_INDEX => self
                 .limiter
@@ -540,6 +621,10 @@ impl StereoEffect for Dsp {
         self.meters.reset();
         self.input_gain.snap_db(self.params.input_trim_db);
         self.output_gain.snap_db(self.params.output_trim_db);
+        let trims = Self::module_trim_db(&self.params);
+        for (gain, db) in self.module_trim.iter_mut().zip(trims) {
+            gain.snap_db(db);
+        }
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -548,6 +633,9 @@ impl StereoEffect for Dsp {
         self.output_gain.set_sample_rate(self.sample_rate);
         self.compressor.set_sample_rate(self.sample_rate);
         self.saturation_dc.set_sample_rate(self.sample_rate);
+        for gain in &mut self.module_trim {
+            gain.set_sample_rate(self.sample_rate);
+        }
         self.meters = Meters::new(self.sample_rate);
         self.apply_params();
     }
@@ -573,7 +661,9 @@ impl StereoEffect for Dsp {
             self.params.slot6_module,
         ];
         let mut limiter_processed = false;
-        for module in slots {
+        for (slot, module) in slots.into_iter().enumerate() {
+            // Level entering this stage, for the editor's per-row meter.
+            let stage_in = l.abs().max(r.abs());
             match module {
                 1 if self.params.filters_enabled => {
                     l = self.process_filter_module(0, l);
@@ -615,6 +705,17 @@ impl StereoEffect for Dsp {
                 }
                 _ => {}
             }
+            // Per-module output trim, then the stage tap. A bypassed or empty
+            // slot still publishes its levels so the row's meter reads through
+            // rather than going dark.
+            if let Some(index) = module.checked_sub(1)
+                && (index as usize) < RACK_SLOTS
+            {
+                let trim = self.module_trim[index as usize].next();
+                l *= trim;
+                r *= trim;
+            }
+            self.meters.push_stage(slot, stage_in, l.abs().max(r.abs()));
         }
 
         let output_gain = self.output_gain.next();
@@ -812,6 +913,129 @@ mod tests {
         assert!(l.abs() <= ceiling + 1.0e-6 && r.abs() <= ceiling + 1.0e-6);
         assert!(dsp.meter_frame().gain_reduction_db > 0.0);
         assert_eq!(dsp.latency_samples(), 0);
+    }
+
+    #[test]
+    fn module_trim_scales_that_stage_only() {
+        let mut params = bypassed();
+        params.width_enabled = true;
+        params.slot1_module = 5;
+        params.width_pct = 100.0; // Unity width: the stage itself is transparent.
+        let mut unity = Dsp::new(SR);
+        unity.set_params(params.clone());
+        unity.reset();
+
+        params.width_trim_db = -6.0;
+        let mut trimmed = Dsp::new(SR);
+        trimmed.set_params(params);
+        trimmed.reset();
+
+        // Let both smoothers settle before comparing.
+        for _ in 0..8_000 {
+            let _ = unity.process_stereo(0.5, 0.5);
+            let _ = trimmed.process_stereo(0.5, 0.5);
+        }
+        let plain = unity.process_stereo(0.5, 0.5).0;
+        let cut = trimmed.process_stereo(0.5, 0.5).0;
+        assert!(
+            (cut / plain - builtin_dsp_core::db_to_linear(-6.0)).abs() < 0.01,
+            "{cut} vs {plain}"
+        );
+    }
+
+    #[test]
+    fn module_trim_follows_the_module_not_the_rack_position() {
+        // The trim is keyed by module, so moving Width from slot 1 to slot 2
+        // must not hand its trim to whatever now sits in slot 1.
+        let mut params = bypassed();
+        params.width_enabled = true;
+        params.width_trim_db = -12.0;
+        params.slot1_module = 5;
+        let mut first = Dsp::new(SR);
+        first.set_params(params.clone());
+        first.reset();
+
+        params.slot1_module = 0;
+        params.slot2_module = 5;
+        let mut second = Dsp::new(SR);
+        second.set_params(params);
+        second.reset();
+
+        for _ in 0..8_000 {
+            let _ = first.process_stereo(0.5, 0.5);
+            let _ = second.process_stereo(0.5, 0.5);
+        }
+        let a = first.process_stereo(0.5, 0.5).0;
+        let b = second.process_stereo(0.5, 0.5).0;
+        assert!((a - b).abs() < 1.0e-4, "{a} vs {b}");
+    }
+
+    #[test]
+    fn legacy_state_without_trims_loads_at_unity() {
+        // The trim fields postdate the original state version; a project saved
+        // before them must restore silently rather than being rejected.
+        let json = r#"{"version":1,"params":{
+            "power":true,"inputTrimDb":0.0,"filtersEnabled":false,"hpfHz":30.0,
+            "lpfHz":20000.0,"eqEnabled":false,"lowGainDb":0.0,"lowMidFreqHz":400.0,
+            "lowMidGainDb":0.0,"highMidFreqHz":2500.0,"highMidGainDb":0.0,
+            "highGainDb":0.0,"compEnabled":false,"compThresholdDb":-18.0,
+            "compRatio":4.0,"compAttackMs":10.0,"compReleaseMs":120.0,
+            "compMakeupDb":0.0,"satEnabled":false,"satDrivePct":0.0,
+            "satCharacterPct":50.0,"widthEnabled":false,"widthPct":100.0,
+            "outputTrimDb":0.0,"limiterEnabled":false,"limiterCeilingDb":-0.3,
+            "limiterReleaseMs":100.0}}"#;
+        let state = ipc::MixStationState::from_json(json).expect("legacy state must load");
+        assert_eq!(state.params.filters_trim_db, 0.0);
+        assert_eq!(state.params.limiter_trim_db, 0.0);
+        // Slots keep their legacy defaults so an old rack still has its chain.
+        assert_eq!(state.params.slot1_module, 1);
+    }
+
+    #[test]
+    fn stage_meters_track_each_rack_position() {
+        let mut params = bypassed();
+        params.width_enabled = true;
+        params.slot1_module = 5;
+        params.sat_enabled = true;
+        params.slot2_module = 4;
+        params.sat_drive_pct = 60.0;
+        let mut dsp = Dsp::new(SR);
+        dsp.set_params(params);
+        dsp.reset();
+
+        for n in 0..4_000 {
+            let x = (n as f32 * std::f32::consts::TAU * 220.0 / SR).sin() * 0.6;
+            let _ = dsp.process_stereo(x, x);
+        }
+        let frame = dsp.meter_frame();
+        // The two loaded positions register signal; the empty ones read the
+        // level passing through, and nothing is NaN.
+        assert!(frame.slot_in_peak[0] > 0.1, "{:?}", frame.slot_in_peak);
+        assert!(frame.slot_out_peak[1] > 0.0);
+        for value in frame.slot_in_peak.iter().chain(frame.slot_out_peak.iter()) {
+            assert!(value.is_finite());
+        }
+    }
+
+    #[test]
+    fn stage_meter_output_reflects_that_module_trim() {
+        let mut params = bypassed();
+        params.width_enabled = true;
+        params.slot1_module = 5;
+        params.width_trim_db = -24.0;
+        let mut dsp = Dsp::new(SR);
+        dsp.set_params(params);
+        dsp.reset();
+        for _ in 0..8_000 {
+            let _ = dsp.process_stereo(0.8, 0.8);
+        }
+        let frame = dsp.meter_frame();
+        assert!(
+            frame.slot_out_peak[0] < frame.slot_in_peak[0] * 0.2,
+            "in {} out {}",
+            frame.slot_in_peak[0],
+            frame.slot_out_peak[0]
+        );
     }
 
     #[test]

@@ -56,6 +56,12 @@ export const PARAM_SPECS = {
   slot4Module: spec('slot4Module', 'Slot 4', 0, 6, 1, ''),
   slot5Module: spec('slot5Module', 'Slot 5', 0, 6, 1, ''),
   slot6Module: spec('slot6Module', 'Slot 6', 0, 6, 1, ''),
+  filtersTrimDb: spec('filtersTrimDb', 'Out', -24, 24, 0.1, 'dB'),
+  eqTrimDb: spec('eqTrimDb', 'Out', -24, 24, 0.1, 'dB'),
+  compTrimDb: spec('compTrimDb', 'Out', -24, 24, 0.1, 'dB'),
+  satTrimDb: spec('satTrimDb', 'Out', -24, 24, 0.1, 'dB'),
+  widthTrimDb: spec('widthTrimDb', 'Out', -24, 24, 0.1, 'dB'),
+  limiterTrimDb: spec('limiterTrimDb', 'Out', -24, 24, 0.1, 'dB'),
 } as const satisfies Record<NumericParamId, ParamSpec>
 
 export function clamp(value: number, min: number, max: number) {
@@ -95,3 +101,4 @@ export function valueFromNormalized(specification: ParamSpec, normalized: number
     specification.max,
   )
 }
+

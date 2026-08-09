@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  defaults,
+  isSpectrumFrame,
+  parseDisplay,
+  parseParams,
+  stageLevels,
+} from './bridge'
+import {
   COMP_KNEE_DB,
   DISPLAY_SAMPLE_RATE,
   HPF_OPEN_HZ,
@@ -9,6 +16,9 @@ import {
   compressorGainDb,
   eqSections,
   filterSections,
+  LIMITER_KNEE_DB,
+  limiterOutputDb,
+  limiterSoftOverDb,
   proportionalQ,
   saturate,
   stereoWidth,
@@ -155,6 +165,144 @@ describe('saturation', () => {
   })
 })
 
+describe('limiter curve', () => {
+  // Mirrors `dsp::limiter_holds_the_ceiling_and_recovers`: the ceiling is
+  // absolute, guaranteed by the hard division after the knee.
+  test('never exceeds the ceiling', () => {
+    for (const ceiling of [-0.3, -6, -12]) {
+      for (let db = -24; db <= 6; db += 0.25) {
+        expect(limiterOutputDb(db, ceiling)).toBeLessThanOrEqual(ceiling + 1e-6)
+      }
+    }
+  })
+
+  test('is transparent well below the knee', () => {
+    expect(limiterOutputDb(-20, -6)).toBeCloseTo(-20, 6)
+  })
+
+  test('the knee begins before the ceiling, not at it', () => {
+    // Reduction starts LIMITER_KNEE_DB/2 under the ceiling, so a signal just
+    // below it is already being eased rather than passing untouched.
+    const justUnder = -6 - LIMITER_KNEE_DB / 4
+    expect(limiterOutputDb(justUnder, -6)).toBeLessThan(justUnder)
+  })
+
+  test('the curve is monotonic, so the plot never doubles back', () => {
+    let previous = Number.NEGATIVE_INFINITY
+    for (let db = -24; db <= 6; db += 0.25) {
+      const value = limiterOutputDb(db, -6)
+      expect(value).toBeGreaterThanOrEqual(previous - 1e-9)
+      previous = value
+    }
+  })
+
+  test('soft-over is continuous across both knee boundaries', () => {
+    const half = LIMITER_KNEE_DB / 2
+    expect(Math.abs(limiterSoftOverDb(-half - 1e-6) - limiterSoftOverDb(-half + 1e-6))).toBeLessThan(1e-4)
+    expect(Math.abs(limiterSoftOverDb(half - 1e-6) - limiterSoftOverDb(half + 1e-6))).toBeLessThan(1e-4)
+  })
+})
+
+describe('per-stage telemetry', () => {
+  test('accepts a well-formed level array', () => {
+    expect(stageLevels([0.1, 0.2, 0.3])).toEqual([0.1, 0.2, 0.3])
+  })
+
+  test('an absent field reads as no telemetry, not as silence', () => {
+    // An older native build omits the field. Empty must mean "not measured" so
+    // the row meters stay dark rather than showing a fabricated zero level.
+    expect(stageLevels(undefined)).toEqual([])
+    expect(stageLevels(null)).toEqual([])
+  })
+
+  test('rejects a malformed array rather than drawing garbage', () => {
+    expect(stageLevels([0.1, 'loud', 0.3])).toEqual([])
+    expect(stageLevels([0.1, Number.NaN])).toEqual([])
+  })
+})
+
+describe('instance display metadata', () => {
+  const display = {
+    trackId: 'track-1',
+    trackName: 'Audio Track 1',
+    insertId: 'insert-2',
+    insertName: 'MixStation',
+  }
+
+  test('accepts the metadata native sends', () => {
+    expect(parseDisplay(display)).toEqual(display)
+  })
+
+  test('a native build without the field reads as unnamed, not as a crash', () => {
+    expect(parseDisplay(undefined)).toBeNull()
+    expect(parseDisplay(null)).toBeNull()
+  })
+
+  test('rejects partial metadata rather than rendering undefined', () => {
+    const { insertName: _omitted, ...partial } = display
+    expect(parseDisplay(partial)).toBeNull()
+    expect(parseDisplay({ ...display, trackName: 42 })).toBeNull()
+  })
+})
+
+describe('legacy state migration', () => {
+  test('a project saved before per-module trims still loads', () => {
+    // Strict numeric validation would otherwise reject the whole state and
+    // silently reset the user's chain.
+    const legacy: Record<string, unknown> = { ...defaults }
+    for (const key of [
+      'filtersTrimDb',
+      'eqTrimDb',
+      'compTrimDb',
+      'satTrimDb',
+      'widthTrimDb',
+      'limiterTrimDb',
+    ]) {
+      delete legacy[key]
+    }
+    const parsed = parseParams(legacy)
+    expect(parsed).not.toBeNull()
+    expect(parsed!.filtersTrimDb).toBe(0)
+    expect(parsed!.limiterTrimDb).toBe(0)
+  })
+})
+
+describe('analyser frame validation', () => {
+  const valid = {
+    type: 'futureboard.spectrum' as const,
+    protocolVersion: 1,
+    instanceId: 'insert-1',
+    minHz: 20,
+    maxHz: 20_000,
+    floorDb: -100,
+    ceilDb: 0,
+    bins: [0, 128, 255],
+  }
+
+  test('accepts a well-formed frame', () => {
+    expect(isSpectrumFrame(valid)).toBe(true)
+  })
+
+  test('rejects an empty or malformed bin array', () => {
+    expect(isSpectrumFrame({ ...valid, bins: [] })).toBe(false)
+    expect(
+      isSpectrumFrame({ ...valid, bins: undefined as unknown as number[] }),
+    ).toBe(false)
+  })
+
+  test('rejects a degenerate scale that would divide by zero', () => {
+    // A zeroed shared region reads as minHz === maxHz and floorDb === ceilDb;
+    // drawing it would put every bin at full scale.
+    expect(isSpectrumFrame({ ...valid, minHz: 20, maxHz: 20 })).toBe(false)
+    expect(isSpectrumFrame({ ...valid, floorDb: 0, ceilDb: 0 })).toBe(false)
+  })
+
+  test('rejects non-finite bounds', () => {
+    expect(isSpectrumFrame({ ...valid, maxHz: Number.NaN })).toBe(false)
+    expect(isSpectrumFrame({ ...valid, floorDb: Number.NEGATIVE_INFINITY })).toBe(false)
+  })
+})
+
 describe('stereo width', () => {
   // Mirrors `dsp::width_preserves_mid_and_scales_side`.
   test('preserves mid and scales side', () => {
@@ -163,3 +311,4 @@ describe('stereo width', () => {
     expect(stereoWidth(0.25, 0.25, 2)).toEqual([0.25, 0.25])
   })
 })
+

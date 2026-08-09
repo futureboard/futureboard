@@ -30,6 +30,8 @@ export type RackModule = {
   accent: string
   /** Knob row, in panel order. */
   knobs: readonly NumericParamId[]
+  /** This module's own output trim, applied after its stage in the Rust DSP. */
+  trimId: NumericParamId
 }
 
 export const RACK_MODULES: readonly RackModule[] = [
@@ -40,6 +42,7 @@ export const RACK_MODULES: readonly RackModule[] = [
     hint: '24 dB/oct high and low cut',
     accent: 'var(--color-mod-filters)',
     knobs: ['hpfHz', 'lpfHz'],
+    trimId: 'filtersTrimDb',
   },
   {
     code: 2,
@@ -48,6 +51,7 @@ export const RACK_MODULES: readonly RackModule[] = [
     hint: 'Four-band with proportional-Q mids',
     accent: 'var(--color-mod-eq)',
     knobs: ['lowGainDb', 'lowMidFreqHz', 'lowMidGainDb', 'highMidFreqHz', 'highMidGainDb', 'highGainDb'],
+    trimId: 'eqTrimDb',
   },
   {
     code: 3,
@@ -62,6 +66,7 @@ export const RACK_MODULES: readonly RackModule[] = [
       'compReleaseMs',
       'compMakeupDb',
     ],
+    trimId: 'compTrimDb',
   },
   {
     code: 4,
@@ -70,6 +75,7 @@ export const RACK_MODULES: readonly RackModule[] = [
     hint: 'Anti-aliased asymmetric saturation',
     accent: 'var(--color-mod-sat)',
     knobs: ['satDrivePct', 'satCharacterPct'],
+    trimId: 'satTrimDb',
   },
   {
     code: 5,
@@ -78,6 +84,7 @@ export const RACK_MODULES: readonly RackModule[] = [
     hint: 'Mid/side stereo image',
     accent: 'var(--color-mod-width)',
     knobs: ['widthPct'],
+    trimId: 'widthTrimDb',
   },
   {
     code: 6,
@@ -86,6 +93,7 @@ export const RACK_MODULES: readonly RackModule[] = [
     hint: 'Zero-latency brickwall ceiling',
     accent: 'var(--color-mod-limiter)',
     knobs: ['limiterCeilingDb', 'limiterReleaseMs'],
+    trimId: 'limiterTrimDb',
   },
 ] as const
 
@@ -115,3 +123,4 @@ export function moduleByCode(code: number) {
 export function slotCodes(params: MixStationParams) {
   return SLOT_IDS.map((id) => Math.round(params[id]))
 }
+

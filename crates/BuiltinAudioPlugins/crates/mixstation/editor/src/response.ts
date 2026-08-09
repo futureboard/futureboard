@@ -269,6 +269,33 @@ export function saturate(sample: number, drivePct: number, characterPct: number)
   return (Math.tanh(sample * drive + bias) - offset) / saturationNormalization(drive, bias)
 }
 
+/** `dsp::LIMITER_KNEE_DB` — reduction begins this far below the ceiling. */
+export const LIMITER_KNEE_DB = 1.5
+
+/**
+ * `dsp::soft_over_db` — infinite-ratio reduction in dB for an input `overDb`
+ * above the ceiling, eased through a quadratic knee.
+ */
+export function limiterSoftOverDb(overDb: number, kneeDb = LIMITER_KNEE_DB) {
+  const halfKnee = kneeDb * 0.5
+  if (overDb <= -halfKnee) return 0
+  if (overDb >= halfKnee) return -overDb
+  const t = overDb + halfKnee
+  return -(t * t) / (2 * kneeDb)
+}
+
+/**
+ * Limiter output level for an input level.
+ *
+ * `dsp::Limiter::process` takes the smaller of the knee gain and a hard
+ * `ceiling / peak` division, so the ceiling is absolute — the curve flattens
+ * exactly at it rather than creeping over.
+ */
+export function limiterOutputDb(levelDb: number, ceilingDb: number) {
+  const kneeOut = levelDb + limiterSoftOverDb(levelDb - ceilingDb)
+  return Math.min(kneeOut, ceilingDb)
+}
+
 /** `dsp::stereo_width` applied to a unit L/R pair, for the width read-out. */
 export function stereoWidth(left: number, right: number, width: number) {
   const mid = (left + right) * 0.5

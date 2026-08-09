@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { scaleLinear, scaleLog } from 'd3-scale'
 import { area as d3area, curveBasis, curveMonotoneX, line as d3line } from 'd3-shape'
 import {
@@ -7,16 +7,23 @@ import {
   compressorOutputDb,
   eqSections,
   filterSections,
+  limiterOutputDb,
   saturate,
   stereoWidth,
 } from './response'
 import { useMeasure } from './useMeasure'
+import { SpectrumOverlay } from './Spectrum'
 import { clamp, type ParamSpec } from './params'
-import type { MixStationParams } from './bridge'
+import type { MeterFrame, MixStationParams, SpectrumFrame } from './bridge'
 
 const F_MIN = 20
 const F_MAX = 20_000
 const EQ_RANGE_DB = 18
+
+/* One plot size for every non-interactive display, so no single curve stretches
+   the row while its neighbour stays tiny. The EQ is the exception: it is
+   directly manipulable, so it takes the remaining width. */
+const PLOT_BOX = 'h-16 w-44 shrink-0'
 
 /** Shared frame: hairline grid, one accent trace, no decorative fill beyond data. */
 function Plot({
@@ -75,7 +82,7 @@ export function FilterCurve({
   }, [hpfHz, lpfHz, w, h])
 
   return (
-    <Plot label="High and low cut response" className="h-16 flex-1 min-w-32">
+    <Plot label="High and low cut response" className={PLOT_BOX}>
       <div ref={ref} className="h-full w-full">
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-full w-full">
           {logTicks.map((f) => (
@@ -140,12 +147,16 @@ export function EqCurve({
   specs,
   accent,
   active,
+  spectrumRef,
+  spectrumLive,
   onChange,
 }: {
   params: MixStationParams
   specs: Record<string, ParamSpec>
   accent: string
   active: boolean
+  spectrumRef: RefObject<SpectrumFrame | null>
+  spectrumLive: boolean
   onChange: (id: string, value: number) => void
 }) {
   const [ref, { w, h }] = useMeasure<HTMLDivElement>()
@@ -210,10 +221,17 @@ export function EqCurve({
       className="h-[76px] flex-1 min-w-40"
     >
       <div ref={ref} className="relative h-full w-full">
+        <SpectrumOverlay
+          frameRef={spectrumRef}
+          live={spectrumLive}
+          minHz={F_MIN}
+          maxHz={F_MAX}
+          accent={accent}
+        />
         <svg
           viewBox={`0 0 ${w} ${h}`}
           preserveAspectRatio="none"
-          className="h-full w-full touch-none"
+          className="relative h-full w-full touch-none"
         >
           {logTicks.map((f) => (
             <line
@@ -320,7 +338,7 @@ export function CompressorCurve({
   }, [thresholdDb, ratio, makeupDb, w, h])
 
   return (
-    <Plot label="Compressor transfer curve" className="h-16 w-40 shrink-0">
+    <Plot label="Compressor transfer curve" className={PLOT_BOX}>
       <div ref={ref} className="h-full w-full">
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-full w-full">
           {[-50, -40, -30, -20, -10].map((db) => (
@@ -402,7 +420,7 @@ export function SaturationCurve({
   }, [drivePct, characterPct, w, h])
 
   return (
-    <Plot label="Saturation transfer curve" className="h-16 w-24 shrink-0">
+    <Plot label="Saturation transfer curve" className={PLOT_BOX}>
       <div ref={ref} className="h-full w-full">
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-full w-full">
           <line
@@ -444,6 +462,122 @@ export function SaturationCurve({
 }
 
 /**
+ * Limiter ceiling curve.
+ *
+ * Shows the soft knee easing in below the ceiling and the hard flat top the
+ * `ceiling / peak` division guarantees, so the ceiling reads as absolute.
+ */
+export function LimiterCurve({
+  ceilingDb,
+  accent,
+  active,
+}: {
+  ceilingDb: number
+  accent: string
+  active: boolean
+}) {
+  const [ref, { w, h }] = useMeasure<HTMLDivElement>()
+
+  const { d, x, y } = useMemo(() => {
+    const xs = scaleLinear().domain([-24, 0]).range([0, w])
+    const ys = scaleLinear().domain([-24, 0]).range([h, 0])
+    const points: [number, number][] = []
+    for (let db = -24; db <= 0; db += 0.5) {
+      points.push([xs(db), ys(clamp(limiterOutputDb(db, ceilingDb), -24, 0))])
+    }
+    const generator = d3line<[number, number]>()
+      .x((p) => p[0])
+      .y((p) => p[1])
+      .curve(curveMonotoneX)
+    return { d: generator(points) ?? '', x: xs, y: ys }
+  }, [ceilingDb, w, h])
+
+  return (
+    <Plot label="Limiter ceiling curve" className={PLOT_BOX}>
+      <div ref={ref} className="h-full w-full">
+        <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-full w-full">
+          <line
+            x1={x(-24)}
+            y1={y(-24)}
+            x2={x(0)}
+            y2={y(0)}
+            stroke="rgb(255 255 255 / 0.12)"
+            strokeDasharray="2 3"
+            vectorEffect="non-scaling-stroke"
+          />
+          {/* The ceiling itself — the line the curve must never cross. */}
+          <line
+            x1={0}
+            x2={w}
+            y1={y(ceilingDb)}
+            y2={y(ceilingDb)}
+            stroke={active ? accent : 'var(--color-ink-dim)'}
+            strokeOpacity={0.45}
+            strokeDasharray="3 2"
+            vectorEffect="non-scaling-stroke"
+          />
+          <path
+            d={d}
+            fill="none"
+            stroke={active ? accent : 'var(--color-ink-dim)'}
+            strokeWidth={1.75}
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
+    </Plot>
+  )
+}
+
+/**
+ * Gain-reduction bar beside the compressor curve.
+ *
+ * Real telemetry: `gainReductionDb` from the host frame. Painted from a ref in
+ * its own rAF loop so it never re-renders the rack. Note the frame reports the
+ * strip's combined reduction (compressor + limiter), so with both loaded this
+ * bar is the chain's total, not the compressor's alone.
+ */
+export function ReductionBar({
+  metersRef,
+  live,
+  accent,
+}: {
+  metersRef: RefObject<MeterFrame | null>
+  live: boolean
+  accent: string
+}) {
+  const fillRef = useRef<HTMLDivElement | null>(null)
+  const liveRef = useRef(live)
+  liveRef.current = live
+
+  useEffect(() => {
+    let raf = 0
+    const paint = () => {
+      raf = requestAnimationFrame(paint)
+      const frame = liveRef.current ? metersRef.current : null
+      const amount = frame ? Math.min(1, Math.max(0, frame.gainReductionDb / 24)) : 0
+      if (fillRef.current) fillRef.current.style.transform = `scaleY(${amount})`
+    }
+    raf = requestAnimationFrame(paint)
+    return () => cancelAnimationFrame(raf)
+  }, [metersRef])
+
+  return (
+    <div
+      className="h-16 w-4 shrink-0 overflow-hidden rounded border border-hairline bg-well"
+      title="Gain reduction"
+      aria-hidden
+    >
+      <div
+        ref={fillRef}
+        className="h-full w-full origin-top"
+        style={{ background: accent, transform: 'scaleY(0)' }}
+      />
+    </div>
+  )
+}
+
+/**
  * Stereo width read-out.
  *
  * With no analysis data on the bridge this cannot show programme material, so
@@ -469,7 +603,7 @@ export function WidthGraphic({
   const span = (w / 2 - 10) * clamp(Math.abs(left), 0, 2) * 0.5
 
   return (
-    <Plot label="Stereo width transform" className="h-16 w-28 shrink-0">
+    <Plot label="Stereo width transform" className={PLOT_BOX}>
       <div ref={ref} className="h-full w-full">
         <svg viewBox={`0 0 ${w} ${h}`} className="h-full w-full">
           <line
@@ -507,4 +641,5 @@ export function WidthGraphic({
     </Plot>
   )
 }
+
 

@@ -209,6 +209,13 @@ struct MetersMsg {
     gain_reduction_db: f32,
     in_clip: bool,
     out_clip: bool,
+    /// Per-rack-position in/out levels, in chain order, for a built-in whose
+    /// editor meters its own stages. Empty for the rest, so a page that does
+    /// not use them pays nothing for the field.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    slot_in_peak: Vec<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    slot_out_peak: Vec<f32>,
 }
 
 /// Native -> React: one analyser frame for the bound instance.
@@ -232,6 +239,16 @@ struct SpectrumMsg {
     floor_db: f32,
     ceil_db: f32,
     bins: Vec<u8>,
+}
+
+/// Per-stage levels for the wire, or empty when the built-in has no rack.
+/// Keeps the ~30 Hz meter payload unchanged for the plugins that do not meter
+/// their own stages.
+fn stage_levels(levels: &[f32]) -> Vec<f32> {
+    if levels.iter().all(|value| *value == 0.0) {
+        return Vec::new();
+    }
+    levels.to_vec()
 }
 
 /// Native -> React: low-rate footer status from the shared-region header.
@@ -1387,6 +1404,10 @@ impl BuiltinPluginEditorWindow {
                         gain_reduction_db: frame.gain_reduction_db,
                         in_clip: frame.in_clip,
                         out_clip: frame.out_clip,
+                        // A built-in with no rack publishes all zeros; send
+                        // nothing at all rather than six dead numbers per frame.
+                        slot_in_peak: stage_levels(&frame.slot_in_peak),
+                        slot_out_peak: stage_levels(&frame.slot_out_peak),
                     });
                 }
             }

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type RefObject } from 'react'
 import {
   AnimatePresence,
   Reorder,
@@ -16,17 +16,20 @@ import {
 } from '@phosphor-icons/react'
 import { BypassSwitch, IconButton } from './Controls'
 import { Knob } from './Knob'
+import { StageMeter } from './Meters'
 import { Popover } from './Popover'
 import {
   CompressorCurve,
   EqCurve,
   FilterCurve,
+  LimiterCurve,
+  ReductionBar,
   SaturationCurve,
   WidthGraphic,
 } from './Curves'
 import { PARAM_SPECS, type NumericParamId } from './params'
 import type { RackModule } from './modules'
-import type { MixStationParams } from './bridge'
+import type { MeterFrame, MixStationParams, SpectrumFrame } from './bridge'
 
 type Props = {
   module: RackModule
@@ -41,6 +44,10 @@ type Props = {
   onRemove: () => void
   onReset: () => void
   onMove: (delta: -1 | 1) => void
+  spectrumRef: RefObject<SpectrumFrame | null>
+  metersRef: RefObject<MeterFrame | null>
+  spectrumLive: boolean
+  metersLive: boolean
 }
 
 export function ModuleRow({
@@ -55,6 +62,10 @@ export function ModuleRow({
   onRemove,
   onReset,
   onMove,
+  spectrumRef,
+  metersRef,
+  spectrumLive,
+  metersLive,
 }: Props) {
   const controls = useDragControls()
   const menuAnchor = useRef<HTMLDivElement | null>(null)
@@ -205,12 +216,32 @@ export function ModuleRow({
                 on={on}
                 knob={knob}
                 onNumber={onNumber}
+                spectrumRef={spectrumRef}
+                spectrumLive={spectrumLive}
+                metersRef={metersRef}
+                metersLive={metersLive}
               />
             )}
           </motion.div>
         </AnimatePresence>
 
-        <div className="flex shrink-0 items-center px-2">
+        {/* Per-stage telemetry, this module's output trim, and its menu. */}
+        <div className="flex shrink-0 items-center gap-2.5 border-l border-hairline/70 px-2.5">
+          <StageMeter
+            metersRef={metersRef}
+            slot={index}
+            live={metersLive && on}
+            accent={accent}
+          />
+          <Knob
+            spec={PARAM_SPECS[module.trimId]}
+            value={params[module.trimId]}
+            accent={accent}
+            size={40}
+            bipolar
+            disabled={!on}
+            onChange={(value) => onNumber(module.trimId, value)}
+          />
           <div ref={menuAnchor}>
             <IconButton
               label={`${module.name} options`}
@@ -289,12 +320,20 @@ function ModuleBody({
   on,
   knob,
   onNumber,
+  spectrumRef,
+  metersRef,
+  spectrumLive,
+  metersLive,
 }: {
   module: RackModule
   params: MixStationParams
   on: boolean
   knob: (id: NumericParamId, bipolar?: boolean) => React.ReactNode
   onNumber: (id: NumericParamId, value: number) => void
+  spectrumRef: RefObject<SpectrumFrame | null>
+  metersRef: RefObject<MeterFrame | null>
+  spectrumLive: boolean
+  metersLive: boolean
 }) {
   switch (module.enabledId) {
     case 'filtersEnabled':
@@ -308,6 +347,7 @@ function ModuleBody({
             accent={module.accent}
             active={on}
           />
+          <div className="flex-1" />
         </>
       )
 
@@ -324,6 +364,8 @@ function ModuleBody({
             specs={PARAM_SPECS}
             accent={module.accent}
             active={on}
+            spectrumRef={spectrumRef}
+            spectrumLive={spectrumLive}
             onChange={(id, value) => onNumber(id as NumericParamId, value)}
           />
           <BandStrip title="High" accent={module.accent}>
@@ -349,6 +391,8 @@ function ModuleBody({
             accent={module.accent}
             active={on}
           />
+          <ReductionBar metersRef={metersRef} live={metersLive && on} accent={module.accent} />
+          <div className="flex-1" />
         </>
       )
 
@@ -381,6 +425,12 @@ function ModuleBody({
         <>
           {knob('limiterCeilingDb')}
           {knob('limiterReleaseMs')}
+          <LimiterCurve
+            ceilingDb={params.limiterCeilingDb}
+            accent={module.accent}
+            active={on}
+          />
+          <ReductionBar metersRef={metersRef} live={metersLive && on} accent={module.accent} />
           <div className="flex-1" />
         </>
       )
@@ -408,3 +458,6 @@ function BandStrip({
     </div>
   )
 }
+
+
+

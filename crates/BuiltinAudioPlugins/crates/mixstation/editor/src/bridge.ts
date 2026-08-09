@@ -35,6 +35,12 @@ export type MixStationParams = {
   slot4Module: number
   slot5Module: number
   slot6Module: number
+  filtersTrimDb: number
+  eqTrimDb: number
+  compTrimDb: number
+  satTrimDb: number
+  widthTrimDb: number
+  limiterTrimDb: number
 }
 
 export type MeterFrame = {
@@ -45,6 +51,31 @@ export type MeterFrame = {
   gainReductionDb: number
   inClip: boolean
   outClip: boolean
+  /**
+   * Level entering and leaving each rack position, in chain order. The native
+   * side omits these entirely when every value is zero, so an empty array means
+   * "this build published no per-stage telemetry" and the row meters stay dark
+   * rather than reading a fabricated silence.
+   */
+  slotInPeak: readonly number[]
+  slotOutPeak: readonly number[]
+}
+
+/**
+ * One analyser frame from the host, published at its own ~30 Hz rate.
+ *
+ * The host captures this *before* the DSP runs, so it is the signal arriving at
+ * the insert — which is what an EQ overlay wants to be drawn against. `bins`
+ * are byte-quantised on the native side to keep the payload small; `floorDb`
+ * and `ceilDb` carry the scale so the page never duplicates those constants.
+ */
+export type SpectrumFrame = {
+  minHz: number
+  maxHz: number
+  floorDb: number
+  ceilDb: number
+  /** Log-spaced magnitude bins, 0 = floorDb, 255 = ceilDb. */
+  bins: Uint8Array
 }
 
 export const defaults: MixStationParams = {
@@ -81,6 +112,12 @@ export const defaults: MixStationParams = {
   slot4Module: 0,
   slot5Module: 0,
   slot6Module: 0,
+  filtersTrimDb: 0,
+  eqTrimDb: 0,
+  compTrimDb: 0,
+  satTrimDb: 0,
+  widthTrimDb: 0,
+  limiterTrimDb: 0,
 }
 
 export const BOOLEAN_KEYS = [
@@ -120,6 +157,12 @@ export const NUMERIC_KEYS = [
   'slot4Module',
   'slot5Module',
   'slot6Module',
+  'filtersTrimDb',
+  'eqTrimDb',
+  'compTrimDb',
+  'satTrimDb',
+  'widthTrimDb',
+  'limiterTrimDb',
 ] as const satisfies readonly (keyof MixStationParams)[]
 
 type Binding = {
@@ -128,12 +171,29 @@ type Binding = {
   bindingGeneration: number
 }
 
+/**
+ * Where this instance sits in the project. Native fills this in on every
+ * `selectInstance`, and it is the only way an editor can name the insert it is
+ * bound to — two inserts of the same plug-in are otherwise indistinguishable.
+ */
+export type InstanceDisplay = {
+  trackId: string
+  trackName: string
+  insertId: string
+  insertName: string
+}
+
+/** The approved binding, as handed to the editor. */
+export type BoundInstance = Binding & { display: InstanceDisplay | null }
+
 type SelectInstanceMessage = {
   type: 'futureboard.selectInstance'
   protocolVersion: number
   pluginId: string
   instanceId: string
   bindingGeneration: number
+  /** Absent on a native build predating the metadata. */
+  display?: unknown
   stateRevision: number
   state: unknown
 }
@@ -145,8 +205,27 @@ type InstanceRemovedMessage = {
   bindingGeneration: number
 }
 
-type MetersMessage = MeterFrame & {
+/**
+ * The analyser message carries no `bindingGeneration` — the native side only
+ * stamps it with the instance id, so that plus the protocol version is the full
+ * freshness guard available here.
+ */
+type SpectrumMessage = {
+  type: 'futureboard.spectrum'
+  protocolVersion: number
+  instanceId: string
+  minHz: number
+  maxHz: number
+  floorDb: number
+  ceilDb: number
+  bins: number[]
+}
+
+type MetersMessage = Omit<MeterFrame, 'slotInPeak' | 'slotOutPeak'> & {
   type: 'futureboard.meters'
+  /** Absent on a native build that predates per-stage telemetry. */
+  slotInPeak?: unknown
+  slotOutPeak?: unknown
   protocolVersion: number
   instanceId: string
   bindingGeneration: number
@@ -206,6 +285,37 @@ export function postParam(id: keyof MixStationParams, value: number) {
  * of the param binding so Space still works before `selectInstance` arrives.
  * When the native shell already claimed the key, this page path does not run.
  */
+/**
+ * Ask native to validate and, if it approves, bind `instanceId`.
+ *
+ * Used when the route changed with no approved `selectInstance` behind it — a
+ * hash edit or a back/forward. The route is never trusted on its own: native
+ * stays the authority on which insert this page is bound to, and answers with a
+ * real `selectInstance` (or ignores the request outright).
+ */
+export function requestSelectInstance(instanceId: string): void {
+  if (!instanceId) return
+  post({
+    type: 'futureboard.requestSelectInstance',
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    instanceId,
+  })
+}
+
+/** Narrow the optional display metadata, or `null` when it is absent/malformed. */
+export function parseDisplay(value: unknown): InstanceDisplay | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const fields = ['trackId', 'trackName', 'insertId', 'insertName'] as const
+  if (!fields.every((key) => typeof record[key] === 'string')) return null
+  return {
+    trackId: record.trackId as string,
+    trackName: record.trackName as string,
+    insertId: record.insertId as string,
+    insertName: record.insertName as string,
+  }
+}
+
 export function postGlobalCommand(commandId: string): void {
   if (!commandId) return
   post({
@@ -228,6 +338,21 @@ export function parseParams(state: unknown): MixStationParams | null {
     ['slot5Module', 'widthEnabled', 5],
     ['slot6Module', 'limiterEnabled', 6],
   ] as const
+  // Per-module trims postdate the original state shape. A project saved before
+  // them has no such field, and strict validation below would otherwise reject
+  // the whole state and silently reset the user's chain to defaults.
+  const trimKeys = [
+    'filtersTrimDb',
+    'eqTrimDb',
+    'compTrimDb',
+    'satTrimDb',
+    'widthTrimDb',
+    'limiterTrimDb',
+  ] as const
+  for (const key of trimKeys) {
+    if (params[key] === undefined) params[key] = 0
+  }
+
   for (const [slot, enabled, module] of legacySlots) {
     if (params[slot] === undefined) {
       params[slot] = params[enabled] === true ? module : 0
@@ -255,10 +380,41 @@ function isMeterFrame(message: MetersMessage) {
   )
 }
 
+/**
+ * Per-stage levels, or an empty array when the field is absent or malformed.
+ * An older native build simply omits it, and that must read as "no per-stage
+ * telemetry" rather than throwing or drawing zeros as a measurement.
+ */
+export function stageLevels(value: unknown): readonly number[] {
+  if (!Array.isArray(value)) return []
+  return value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+    ? (value as number[])
+    : []
+}
+
+export function isSpectrumFrame(message: SpectrumMessage) {
+  return (
+    Array.isArray(message.bins) &&
+    message.bins.length > 0 &&
+    Number.isFinite(message.minHz) &&
+    Number.isFinite(message.maxHz) &&
+    Number.isFinite(message.floorDb) &&
+    Number.isFinite(message.ceilDb) &&
+    message.maxHz > message.minHz &&
+    message.ceilDb > message.floorDb
+  )
+}
+
 export function connectBridge(
   onParams: (params: MixStationParams) => void,
-  onConnection: (connected: boolean) => void,
+  /**
+   * `instanceId` identifies which plug-in instance the page is now bound to.
+   * The native shell reuses one browser per plugin id and rebinds it, so this
+   * is the only way the editor can tell one instance from another.
+   */
+  onConnection: (connected: boolean, instance: BoundInstance | null) => void,
   onMeters: (frame: MeterFrame) => void,
+  onSpectrum?: (frame: SpectrumFrame) => void,
 ) {
   post({
     type: 'futureboard.bridgeReady',
@@ -272,8 +428,28 @@ export function connectBridge(
       | SelectInstanceMessage
       | InstanceRemovedMessage
       | MetersMessage
+      | SpectrumMessage
       | undefined
     if (!message || typeof message !== 'object') return
+
+    if (message.type === 'futureboard.spectrum') {
+      if (
+        !onSpectrum ||
+        message.protocolVersion !== BRIDGE_PROTOCOL_VERSION ||
+        binding?.instanceId !== message.instanceId ||
+        !isSpectrumFrame(message)
+      ) {
+        return
+      }
+      onSpectrum({
+        minHz: message.minHz,
+        maxHz: message.maxHz,
+        floorDb: message.floorDb,
+        ceilDb: message.ceilDb,
+        bins: Uint8Array.from(message.bins),
+      })
+      return
+    }
 
     if (message.type === 'futureboard.meters') {
       if (
@@ -291,6 +467,8 @@ export function connectBridge(
         gainReductionDb: message.gainReductionDb,
         inClip: message.inClip,
         outClip: message.outClip,
+        slotInPeak: stageLevels(message.slotInPeak),
+        slotOutPeak: stageLevels(message.slotOutPeak),
       })
       return
     }
@@ -333,7 +511,7 @@ export function connectBridge(
       pending.clear()
       const params = parseParams(message.state)
       onParams(params ?? defaults)
-      onConnection(true)
+      onConnection(true, { ...binding, display: parseDisplay(message.display) })
       post({
         type: 'futureboard.instanceReady',
         protocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -349,7 +527,7 @@ export function connectBridge(
       stateRevision = -1
       latestGenerationRemoved = true
       pending.clear()
-      onConnection(false)
+      onConnection(false, null)
     }
   }
 
@@ -363,3 +541,6 @@ export function connectBridge(
     pending.clear()
   }
 }
+
+
+

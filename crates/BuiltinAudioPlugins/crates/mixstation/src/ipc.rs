@@ -42,8 +42,16 @@ pub const SLOT_3_INDEX: u32 = 29;
 pub const SLOT_4_INDEX: u32 = 30;
 pub const SLOT_5_INDEX: u32 = 31;
 pub const SLOT_6_INDEX: u32 = 32;
+// Per-module output trim. Keyed by module, not by rack position, so dragging a
+// stage up or down the chain carries its trim with it.
+pub const FILTERS_TRIM_INDEX: u32 = 33;
+pub const EQ_TRIM_INDEX: u32 = 34;
+pub const COMP_TRIM_INDEX: u32 = 35;
+pub const SAT_TRIM_INDEX: u32 = 36;
+pub const WIDTH_TRIM_INDEX: u32 = 37;
+pub const LIMITER_TRIM_INDEX: u32 = 38;
 
-pub const PARAM_COUNT: usize = 33;
+pub const PARAM_COUNT: usize = 39;
 
 pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "power",
@@ -79,6 +87,12 @@ pub const UI_PARAM_IDS: [&str; PARAM_COUNT] = [
     "slot4Module",
     "slot5Module",
     "slot6Module",
+    "filtersTrimDb",
+    "eqTrimDb",
+    "compTrimDb",
+    "satTrimDb",
+    "widthTrimDb",
+    "limiterTrimDb",
 ];
 
 const RANGES: [(f32, f32); PARAM_COUNT] = [
@@ -115,6 +129,12 @@ const RANGES: [(f32, f32); PARAM_COUNT] = [
     (0.0, 6.0),
     (0.0, 6.0),
     (0.0, 6.0),
+    (-24.0, 24.0),
+    (-24.0, 24.0),
+    (-24.0, 24.0),
+    (-24.0, 24.0),
+    (-24.0, 24.0),
+    (-24.0, 24.0),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +290,12 @@ pub fn apply_wire_param(params: &mut Params, index: u32, input: f32) -> bool {
         SLOT_1_INDEX | SLOT_2_INDEX | SLOT_3_INDEX | SLOT_4_INDEX | SLOT_5_INDEX | SLOT_6_INDEX => {
             assign_slot(params, index, v.round() as u8)
         }
+        FILTERS_TRIM_INDEX => params.filters_trim_db = v,
+        EQ_TRIM_INDEX => params.eq_trim_db = v,
+        COMP_TRIM_INDEX => params.comp_trim_db = v,
+        SAT_TRIM_INDEX => params.sat_trim_db = v,
+        WIDTH_TRIM_INDEX => params.width_trim_db = v,
+        LIMITER_TRIM_INDEX => params.limiter_trim_db = v,
         _ => return false,
     }
     true
@@ -314,7 +340,26 @@ pub fn ui_values(params: &Params) -> [f32; PARAM_COUNT] {
         params.slot4_module as f32,
         params.slot5_module as f32,
         params.slot6_module as f32,
+        params.filters_trim_db,
+        params.eq_trim_db,
+        params.comp_trim_db,
+        params.sat_trim_db,
+        params.width_trim_db,
+        params.limiter_trim_db,
     ]
+}
+
+/// Per-module trim wire index for a rack module code (`1..=6`).
+pub const fn module_trim_index(module: u8) -> Option<u32> {
+    match module {
+        1 => Some(FILTERS_TRIM_INDEX),
+        2 => Some(EQ_TRIM_INDEX),
+        3 => Some(COMP_TRIM_INDEX),
+        4 => Some(SAT_TRIM_INDEX),
+        5 => Some(WIDTH_TRIM_INDEX),
+        6 => Some(LIMITER_TRIM_INDEX),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

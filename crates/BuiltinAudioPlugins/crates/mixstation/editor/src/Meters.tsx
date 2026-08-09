@@ -127,9 +127,85 @@ export function Meters({ metersRef, live }: Props) {
 }
 
 /**
+ * A rack row's own IN→OUT meter.
+ *
+ * Fed by the per-stage telemetry MixStation publishes for each rack position:
+ * `slotInPeak[slot]` is the level arriving at this stage and `slotOutPeak[slot]`
+ * the level leaving it, after that module's output trim. When the native build
+ * sends no per-stage array the bars stay dark rather than mirroring the master.
+ */
+export function StageMeter({
+  metersRef,
+  slot,
+  live,
+  accent,
+}: {
+  metersRef: RefObject<MeterFrame | null>
+  /** Rack position, zero-based, in chain order. */
+  slot: number
+  live: boolean
+  accent: string
+}) {
+  const inRef = useRef<HTMLDivElement>(null)
+  const outRef = useRef<HTMLDivElement>(null)
+  const liveRef = useRef(live)
+  liveRef.current = live
+
+  useEffect(() => {
+    let raf = 0
+    const paint = () => {
+      raf = requestAnimationFrame(paint)
+      const frame = liveRef.current ? metersRef.current : null
+      const input = frame?.slotInPeak[slot]
+      const output = frame?.slotOutPeak[slot]
+      if (inRef.current) {
+        inRef.current.style.transform = `scaleX(${input === undefined ? 0 : levelNorm(input)})`
+      }
+      if (outRef.current) {
+        outRef.current.style.transform = `scaleX(${output === undefined ? 0 : levelNorm(output)})`
+      }
+    }
+    raf = requestAnimationFrame(paint)
+    return () => cancelAnimationFrame(raf)
+  }, [metersRef, slot])
+
+  return (
+    <div className="flex shrink-0 items-center gap-2" aria-hidden>
+      <span className="label-cap">In</span>
+      <div className="flex w-24 flex-col gap-[3px]">
+        <StageBar fillRef={inRef} accent={accent} />
+        <StageBar fillRef={outRef} accent={accent} />
+      </div>
+      <span className="label-cap">Out</span>
+    </div>
+  )
+}
+
+function StageBar({
+  fillRef,
+  accent,
+}: {
+  fillRef: RefObject<HTMLDivElement | null>
+  accent: string
+}) {
+  return (
+    <div className="h-[3px] w-full overflow-hidden rounded-full bg-white/8">
+      <div
+        ref={fillRef}
+        className="h-full w-full origin-left"
+        style={{
+          background: `linear-gradient(90deg, color-mix(in srgb, ${accent} 55%, transparent), ${accent})`,
+          transform: 'scaleX(0)',
+        }}
+      />
+    </div>
+  )
+}
+
+/**
  * Horizontal in→out pair under the columns, restating the same frame as a
- * left-to-right signal flow. Both bars are master telemetry: the bridge carries
- * no per-stage levels, so this is the whole chain's in and out, not a per-module
+ * left-to-right signal flow. Both bars are master telemetry: this is the whole
+ * chain's in and out, not a per-module
  * reading.
  */
 function SignalFlow({

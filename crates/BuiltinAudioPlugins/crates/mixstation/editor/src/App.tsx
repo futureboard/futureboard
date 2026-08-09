@@ -12,10 +12,13 @@ import {
   defaults,
   postGlobalCommand,
   postParam,
+  type BoundInstance,
   type MeterFrame,
   type MixStationParams,
+  type SpectrumFrame,
 } from './bridge'
 import { BypassSwitch, IconButton } from './Controls'
+import { InstanceRoute } from './InstanceRoute'
 import { Knob } from './Knob'
 import { Meters } from './Meters'
 import { ModuleRow } from './ModuleRow'
@@ -35,12 +38,16 @@ import { FACTORY_PRESETS, matchingPresetIndex, postAllParams } from './presets'
 export default function App() {
   const [params, setParams] = useState<MixStationParams>(defaults)
   const [connected, setConnected] = useState(false)
+  /** Which plug-in instance the shell has bound this page to, if any. */
+  const [instance, setInstance] = useState<BoundInstance | null>(null)
   const [meterLive, setMeterLive] = useState(false)
+  const [spectrumLive, setSpectrumLive] = useState(false)
   const [presetIndex, setPresetIndex] = useState<number | null>(0)
   const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(new Set())
   const [presetOpen, setPresetOpen] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const metersRef = useRef<MeterFrame | null>(null)
+  const spectrumRef = useRef<SpectrumFrame | null>(null)
   const presetAnchor = useRef<HTMLButtonElement | null>(null)
   const pickerAnchor = useRef<HTMLButtonElement | null>(null)
   const presetNameRef = useRef<HTMLSpanElement | null>(null)
@@ -77,19 +84,35 @@ export default function App() {
           setPresetIndex(matchingPresetIndex(clean))
           setPresetOpen(false)
           setPickerOpen(false)
+          // Every piece of editor-local view state belongs to the instance that
+          // was bound when it was set. The shell reuses one browser per plugin
+          // id and rebinds it, so without this a row collapsed on Audio Track 1
+          // would still read as collapsed after switching to Audio 2.
+          setCollapsed(new Set())
+          // Telemetry belongs to the previous binding; drop it so a rebind
+          // cannot show the old instance's meters or analyser for a frame.
           metersRef.current = null
           setMeterLive(false)
+          spectrumRef.current = null
+          setSpectrumLive(false)
         },
-        (isConnected) => {
+        (isConnected, bound) => {
           setConnected(isConnected)
+          setInstance(bound)
           if (!isConnected) {
             metersRef.current = null
             setMeterLive(false)
+            spectrumRef.current = null
+            setSpectrumLive(false)
           }
         },
         (frame) => {
           metersRef.current = frame
           setMeterLive(true)
+        },
+        (frame) => {
+          spectrumRef.current = frame
+          setSpectrumLive(true)
         },
       ),
     [],
@@ -205,14 +228,16 @@ export default function App() {
 
   return (
     <main className="flex h-full w-full flex-col overflow-hidden bg-workspace">
+      {/* Mirrors the approved binding into the URL; never binds on its own. */}
+      <InstanceRoute instance={instance} />
       <header className="flex h-12 shrink-0 items-center gap-4 border-b border-hairline bg-panel px-4">
         <div className="flex min-w-0 items-center gap-2.5">
           <h1 className="text-[15px] font-bold tracking-[-0.01em]">MixStation</h1>
           <span
             className="flex items-center gap-1.5 rounded border border-hairline-hi px-2 py-0.5 text-[10px] font-medium text-ink-muted"
             title={
-              connected
-                ? 'Bound to a plug-in instance'
+              connected && instance
+                ? `Bound to ${instance.display ? `${instance.display.trackName} · ${instance.display.insertName}` : instance.instanceId}`
                 : 'No plug-in instance bound — controls show defaults'
             }
           >
@@ -233,6 +258,15 @@ export default function App() {
             />
             {connected ? 'Linked' : 'Standby'}
           </span>
+          {/* Two inserts of the same plug-in are otherwise indistinguishable,
+              so name the one this page is bound to. */}
+          {instance?.display && (
+            <span className="hidden min-w-0 truncate text-[11px] text-ink-dim xl:block">
+              {instance.display.trackName}
+              <span className="text-hairline-hi"> · </span>
+              {instance.display.insertName}
+            </span>
+          )}
         </div>
 
         <div className="flex flex-1 justify-center">
@@ -329,6 +363,10 @@ export default function App() {
                       onRemove={() => removeModule(module)}
                       onReset={() => resetModule(module)}
                       onMove={(delta) => moveModule(code, delta)}
+                      spectrumRef={spectrumRef}
+                      spectrumLive={connected && spectrumLive}
+                      metersRef={metersRef}
+                      metersLive={connected && meterLive}
                     />
                   )
                 })}
@@ -439,3 +477,6 @@ export default function App() {
     </main>
   )
 }
+
+
+

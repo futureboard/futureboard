@@ -17,7 +17,8 @@
     "d3-shape": "catalog:",
     "motion": "catalog:",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "react-router-dom": "catalog:"
   },
   "devDependencies": {
     "@tailwindcss/vite": "catalog:",
@@ -33,3 +34,4 @@
     "vite-plugin-singlefile": "catalog:"
   }
 }
+

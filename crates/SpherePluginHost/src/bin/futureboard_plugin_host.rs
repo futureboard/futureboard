@@ -783,6 +783,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: 0.0,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::Fa2a(dsp) => {
@@ -795,6 +798,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::Fa76(dsp) => {
@@ -807,6 +813,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::BurnLimit(dsp) => {
@@ -819,6 +828,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::Clipper67(dsp) => {
@@ -831,6 +843,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::Zcomp(dsp) => {
@@ -843,6 +858,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::MixStation(dsp) => {
@@ -855,6 +873,10 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // MixStation is the one built-in with a user-ordered rack,
+                    // so it publishes a level per position for its row meters.
+                    slot_in_peak: f.slot_in_peak,
+                    slot_out_peak: f.slot_out_peak,
                 })
             }
             BuiltinDsp::Transient(dsp) => {
@@ -869,6 +891,9 @@ impl BuiltinHostProcessor {
                     gain_reduction_db: f.gain_reduction_db,
                     in_clip: f.in_clip,
                     out_clip: f.out_clip,
+                    // Single fixed stage, not a user-ordered rack.
+                    slot_in_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
+                    slot_out_peak: [0.0; SpherePluginHost::audio_bridge::BUILTIN_RACK_SLOTS],
                 })
             }
             BuiltinDsp::Equz8(_)
