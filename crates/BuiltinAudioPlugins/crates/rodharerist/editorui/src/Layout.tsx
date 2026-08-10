@@ -120,6 +120,11 @@ export type LayoutProps = {
   canUndo: boolean;
   canRedo: boolean;
   abSlot: AbSlot;
+  snapshotSlots: readonly import("./Editor").Snapshot[];
+  activeSnapshotIndex: number;
+  onSelectSnapshot: (index: number) => void;
+  onSaveSnapshot: (index: number) => void;
+  onRenameSnapshot: (index: number, name: string) => void;
   clipboardCat: CategoryId | null;
   discardPrompt: DiscardPrompt | null;
   onUndo: () => void;
@@ -169,6 +174,11 @@ export function Layout({
   canUndo,
   canRedo,
   abSlot,
+  snapshotSlots,
+  activeSnapshotIndex,
+  onSelectSnapshot,
+  onSaveSnapshot,
+  onRenameSnapshot,
   clipboardCat,
   discardPrompt,
   onUndo,
@@ -227,6 +237,11 @@ export function Layout({
         onToggleTest={onToggleTest}
         onSave={onSave}
         onRevert={onRevert}
+        snapshotSlots={snapshotSlots}
+        activeSnapshotIndex={activeSnapshotIndex}
+        onSelectSnapshot={onSelectSnapshot}
+        onSaveSnapshot={onSaveSnapshot}
+        onRenameSnapshot={onRenameSnapshot}
       />
 
       <div className="workspace" ref={workspaceRef}>

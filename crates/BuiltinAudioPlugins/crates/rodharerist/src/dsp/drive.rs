@@ -123,6 +123,18 @@ impl DiodeVoicing {
             DriveModel::Centurion => {
                 Self::new(1.0, 0.975, 0.160, 0.158, 8.0e-7, 1.05e-6, 14_000.0, 540.0)
             }
+            // Near-matched silicon, harder knee than Breaker and a brighter,
+            // higher corner than Rat — a blues/rock rhythm crunch, not a
+            // filth pedal.
+            DriveModel::AmberCrunch => {
+                Self::new(1.0, 0.98, 0.055, 0.053, 2.2e-7, 2.6e-7, 10_000.0, 260.0)
+            }
+            // Silicon fuzz: fast junctions (no germanium leak) and a hard
+            // asymmetric pair, so it stays tight and immediate where Face
+            // Fuzz's germanium pair is soft and smeary.
+            DriveModel::CopperFuzz => {
+                Self::new(0.65, 1.35, 0.130, 0.120, 2.5e-7, 4.5e-7, 6_500.0, 105.0)
+            }
             // Dedicated-topology models never reach this table.
             _ => Self::new(1.0, 1.0, 0.075, 0.075, 2.0e-8, 2.0e-8, 12_000.0, 400.0),
         }
@@ -298,6 +310,8 @@ impl Drive {
             DriveModel::Breaker => (0.45 + g * 14.0, 0.21 + lvl * 0.68, 0.92),
             DriveModel::Fuzz => (0.35 + g * 54.0, 0.10 + lvl * 0.55, 1.0),
             DriveModel::Centurion => (0.42 + g * 16.0, 0.20 + lvl * 0.74, 0.88),
+            DriveModel::AmberCrunch => (0.42 + g * 20.0, 0.19 + lvl * 0.72, 0.90),
+            DriveModel::CopperFuzz => (0.35 + g * 58.0, 0.12 + lvl * 0.58, 1.0),
             // Dedicated-topology models returned above.
             _ => (1.0, 1.0, 1.0),
         };
@@ -374,6 +388,25 @@ impl Drive {
                     0.707,
                     sr,
                 ));
+            }
+            DriveModel::AmberCrunch => {
+                self.mid_boost
+                    .set(make_eq_coefficients("bell", 850.0, 4.0, 0.8, sr));
+                let cutoff = 3_800.0 + t * 7_500.0;
+                self.tone_lpf.set(make_eq_coefficients(
+                    "lowpass",
+                    cutoff.min(sr * 0.45),
+                    0.0,
+                    0.707,
+                    sr,
+                ));
+            }
+            DriveModel::CopperFuzz => {
+                self.mid_boost
+                    .set(make_eq_coefficients("bell", 500.0, 3.5, 0.65, sr));
+                let cutoff = (1_500.0 + t * 5_200.0).min(sr * 0.45);
+                self.tone_lpf
+                    .set(make_eq_coefficients("lowpass", cutoff, 0.0, 0.707, sr));
             }
             // Dedicated-topology models returned above.
             _ => {}

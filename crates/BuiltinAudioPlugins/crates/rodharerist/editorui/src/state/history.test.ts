@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   HISTORY_LIMIT,
+  activeBankSlot,
   activeSnapshot,
   canRedo,
   canUndo,
@@ -10,8 +11,11 @@ import {
   createHistory,
   redo,
   reset,
+  saveBankSlot,
+  setActiveBankSlot,
   switchSlot,
   undo,
+  type BankState,
 } from "./history";
 
 describe("undo/redo history", () => {
@@ -134,5 +138,36 @@ describe("A/B compare", () => {
     expect(ab.active).toBe("B");
     expect(ab.B).toBe("b-edit");
     expect(ab.A).toBe("b-edit");
+  });
+});
+
+describe("snapshot bank", () => {
+  const bank: BankState<string> = { active: 0, slots: ["one", "two", "three"] };
+
+  test("switching slots never touches stored contents (unlike A/B, a live edit is discarded, not synced)", () => {
+    const next = setActiveBankSlot(bank, 2);
+    expect(next.active).toBe(2);
+    expect(activeBankSlot(next)).toBe("three");
+    // The slot we switched away from is untouched — no "current" was ever
+    // passed in to sync, matching a real footswitch bank.
+    expect(next.slots).toEqual(["one", "two", "three"]);
+  });
+
+  test("switching to the already-active slot or an out-of-range index is a no-op", () => {
+    expect(setActiveBankSlot(bank, 0)).toBe(bank);
+    expect(setActiveBankSlot(bank, -1)).toBe(bank);
+    expect(setActiveBankSlot(bank, 3)).toBe(bank);
+  });
+
+  test("saving overwrites exactly one slot and leaves the rest and the active index alone", () => {
+    const next = saveBankSlot(bank, 1, "two-edited");
+    expect(next.active).toBe(0);
+    expect(next.slots).toEqual(["one", "two-edited", "three"]);
+    // Original is untouched.
+    expect(bank.slots).toEqual(["one", "two", "three"]);
+  });
+
+  test("saving to an out-of-range index is a no-op", () => {
+    expect(saveBankSlot(bank, 9, "x")).toBe(bank);
   });
 });

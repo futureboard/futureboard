@@ -35,6 +35,7 @@ import {
 import { postGlobalCommand } from "./instanceBridge";
 import { POWER_PARAM_ID } from "./globals";
 import {
+  activeBankSlot,
   activeSnapshot,
   canRedo as historyCanRedo,
   canUndo as historyCanUndo,
@@ -44,10 +45,13 @@ import {
   createHistory,
   redo as historyRedo,
   reset as historyReset,
+  saveBankSlot,
   setActive,
+  setActiveBankSlot,
   undo as historyUndo,
   type AbSlot,
   type AbState,
+  type BankState,
   type History,
 } from "./state/history";
 import {
@@ -60,6 +64,7 @@ import {
   presetFileName,
   serializePreset,
   type PresetFile,
+  type SerializedSnapshotBank,
 } from "./presetFiles";
 import "./Styles/Editor.css";
 import { HashRouter, Routes, Route } from "react-router-dom";
@@ -90,6 +95,22 @@ export type RigSnapshot = {
   parameters: Record<string, Param[]>;
   globals: GlobalState;
 };
+
+/**
+ * One Helix-style performance snapshot: bypass + parameter values only.
+ * Deliberately narrower than {@link RigSnapshot} — no `pathOrder` or
+ * `stageModels` — so recalling a snapshot can never change which model
+ * occupies a stage or reorder the chain, which is what keeps switching
+ * click-free (see `mergeSnapshotIntoRig`).
+ */
+export type Snapshot = {
+  name: string;
+  bypassed: Partial<Record<CategoryId, boolean>>;
+  parameters: Record<string, Param[]>;
+};
+
+/** Fixed bank size — matches the number of slots `SnapshotBar` renders. */
+export const SNAPSHOT_COUNT = 8;
 
 /**
  * Undo coalescing window. A fader drag emits an edit per pointer move; without
@@ -171,6 +192,77 @@ function applySnapshotToDsp(snap: RigSnapshot) {
   // A snapshot is one logical transaction. Do not leave it waiting on a CEF
   // animation frame (which may be throttled while the window is rebinding).
   flushParamEditsNow();
+}
+
+function snapshotContentFromRig(rig: RigSnapshot, name: string): Snapshot {
+  return {
+    name,
+    bypassed: { ...rig.bypassed },
+    parameters: cloneParameters(rig.parameters),
+  };
+}
+
+/** A fresh bank with all 8 slots seeded identically from `rig` — the state
+ * every new preset/instance starts from before anything is explicitly saved
+ * into a slot. */
+function defaultSnapshotBank(rig: RigSnapshot): BankState<Snapshot> {
+  return {
+    active: 0,
+    slots: Array.from({ length: SNAPSHOT_COUNT }, (_, i) =>
+      snapshotContentFromRig(rig, String(i + 1)),
+    ),
+  };
+}
+
+/**
+ * Resolve a persisted snapshot bank from a preset file against the current
+ * schema, defensively: missing/short/malformed entries fall back to a fresh
+ * slot seeded from `fallbackRig`, exactly as `completeParameters` already
+ * does for a `RigSnapshot`'s own parameters.
+ */
+function normalizeSnapshotBank(
+  persisted: SerializedSnapshotBank | undefined,
+  fallbackRig: RigSnapshot,
+): BankState<Snapshot> {
+  if (!persisted) return defaultSnapshotBank(fallbackRig);
+  const slots = Array.from({ length: SNAPSHOT_COUNT }, (_, i) => {
+    const saved = persisted.slots?.[i];
+    const fallback = snapshotContentFromRig(fallbackRig, String(i + 1));
+    if (!saved || typeof saved !== "object") return fallback;
+    return {
+      name: typeof saved.name === "string" && saved.name ? saved.name : fallback.name,
+      bypassed:
+        saved.bypassed && typeof saved.bypassed === "object"
+          ? { ...saved.bypassed }
+          : fallback.bypassed,
+      parameters:
+        saved.parameters && typeof saved.parameters === "object"
+          ? completeParameters(saved.parameters)
+          : fallback.parameters,
+    };
+  });
+  const active =
+    typeof persisted.active === "number" &&
+    persisted.active >= 0 &&
+    persisted.active < SNAPSHOT_COUNT
+      ? Math.floor(persisted.active)
+      : 0;
+  return { active, slots };
+}
+
+/**
+ * Overlay a snapshot's bypass/parameters onto an otherwise-unchanged rig.
+ * Model choice, chain order, active category and global trims all pass
+ * through from `rig` untouched — a snapshot recall is never a topology
+ * change, which is why it can go through the same DSP push as any other
+ * param edit and stay click-free.
+ */
+function mergeSnapshotIntoRig(rig: RigSnapshot, content: Snapshot): RigSnapshot {
+  return {
+    ...rig,
+    bypassed: { ...content.bypassed },
+    parameters: completeParameters(content.parameters),
+  };
 }
 
 function factorySnapshot(id: string): RigSnapshot | null {
@@ -275,6 +367,9 @@ export function RodhareistEditor({
   const [ab, setAb] = useState<AbState<RigSnapshot>>(() =>
     createAb(initialSnapshot),
   );
+  const [snapshots, setSnapshots] = useState<BankState<Snapshot>>(() =>
+    defaultSnapshotBank(initialSnapshot),
+  );
 
   const audioRef = useRef<{
     ctx: AudioContext;
@@ -298,6 +393,7 @@ export function RodhareistEditor({
     pendingSwitchId,
     history,
     ab,
+    snapshots,
   });
   liveRef.current = {
     currentPresetId,
@@ -314,6 +410,7 @@ export function RodhareistEditor({
     pendingSwitchId,
     history,
     ab,
+    snapshots,
   };
 
   /** Snapshot of the live editor state. */
@@ -508,6 +605,48 @@ export function RodhareistEditor({
   }, [currentSnapshot]);
 
   // -------------------------------------------------------------------------
+  // Snapshots — instant bypass/param recall within the current preset
+  // -------------------------------------------------------------------------
+
+  /** Recall a slot: bypass + parameter values only, model/path untouched. */
+  const recallSnapshot = useCallback(
+    (index: number) => {
+      const live = liveRef.current;
+      if (index === live.snapshots.active) return;
+      flushCommit();
+      const nextBank = setActiveBankSlot(live.snapshots, index);
+      liveRef.current.snapshots = nextBank;
+      setSnapshots(nextBank);
+      const merged = mergeSnapshotIntoRig(currentSnapshot(), activeBankSlot(nextBank));
+      restoreSnapshot(merged, true);
+    },
+    [currentSnapshot, flushCommit, restoreSnapshot],
+  );
+
+  /** "Save Current Here" — overwrite one slot's bypass/params, keep its name. */
+  const saveCurrentToSnapshot = useCallback(
+    (index: number) => {
+      const live = liveRef.current;
+      const rig = currentSnapshot();
+      const name = live.snapshots.slots[index]?.name ?? String(index + 1);
+      const next = saveBankSlot(live.snapshots, index, snapshotContentFromRig(rig, name));
+      liveRef.current.snapshots = next;
+      setSnapshots(next);
+      markDirty();
+    },
+    [currentSnapshot, markDirty],
+  );
+
+  const renameSnapshot = useCallback((index: number, name: string) => {
+    const live = liveRef.current;
+    const slot = live.snapshots.slots[index];
+    if (!slot) return;
+    const next = saveBankSlot(live.snapshots, index, { ...slot, name });
+    liveRef.current.snapshots = next;
+    setSnapshots(next);
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Preset handling
   // -------------------------------------------------------------------------
 
@@ -532,16 +671,21 @@ export function RodhareistEditor({
         nextDrafts[id] ?? live.savedRigs[id] ?? factorySnapshot(id);
       if (!snap) return;
 
-      // A preset load is a new baseline, not an edit: history and both A/B
-      // slots restart from it.
+      // A preset load is a new baseline, not an edit: history, both A/B
+      // slots and the snapshot bank all restart from it. Factory/saved-rig
+      // presets never carry a snapshot bank of their own (only a preset
+      // *file* can — see `loadPresetFile`), so this always reseeds fresh.
       suppressCommitRef.current = true;
       applyLocalSnapshot(snap, id, !!nextDrafts[id]);
       const freshHistory = historyReset(live.history, snap);
       const freshAb = createAb(snap);
+      const freshSnapshots = defaultSnapshotBank(snap);
       liveRef.current.history = freshHistory;
       liveRef.current.ab = freshAb;
+      liveRef.current.snapshots = freshSnapshots;
       setHistory(freshHistory);
       setAb(freshAb);
+      setSnapshots(freshSnapshots);
       setPendingSwitchId(null);
       window.setTimeout(() => {
         suppressCommitRef.current = false;
@@ -574,10 +718,13 @@ export function RodhareistEditor({
       applyLocalSnapshot(file.snapshot, file.id, false);
       const freshHistory = historyReset(liveRef.current.history, file.snapshot);
       const freshAb = createAb(file.snapshot);
+      const freshSnapshots = normalizeSnapshotBank(file.snapshots, file.snapshot);
       liveRef.current.history = freshHistory;
       liveRef.current.ab = freshAb;
+      liveRef.current.snapshots = freshSnapshots;
       setHistory(freshHistory);
       setAb(freshAb);
+      setSnapshots(freshSnapshots);
       setPendingSwitchId(null);
       window.setTimeout(() => {
         suppressCommitRef.current = false;
@@ -594,7 +741,7 @@ export function RodhareistEditor({
       const id = `U${Date.now().toString(36).toUpperCase().slice(-4)}`;
       return {
         fileName: presetFileName(id, name),
-        content: serializePreset(id, name, snap.activeCat, snap),
+        content: serializePreset(id, name, snap.activeCat, snap, liveRef.current.snapshots),
       };
     },
     [currentSnapshot],
@@ -901,8 +1048,11 @@ export function RodhareistEditor({
     suppressCommitRef.current = true;
     applyLocalSnapshot(snap, live.currentPresetId, false);
     const freshHistory = historyReset(live.history, snap);
+    const freshSnapshots = defaultSnapshotBank(snap);
     liveRef.current.history = freshHistory;
+    liveRef.current.snapshots = freshSnapshots;
     setHistory(freshHistory);
+    setSnapshots(freshSnapshots);
     window.setTimeout(() => {
       suppressCommitRef.current = false;
     }, 0);
@@ -1116,6 +1266,11 @@ export function RodhareistEditor({
       canUndo={historyCanUndo(history)}
       canRedo={historyCanRedo(history)}
       abSlot={ab.active}
+      snapshotSlots={snapshots.slots}
+      activeSnapshotIndex={snapshots.active}
+      onSelectSnapshot={recallSnapshot}
+      onSaveSnapshot={saveCurrentToSnapshot}
+      onRenameSnapshot={renameSnapshot}
       clipboardCat={clipboard?.cat ?? null}
       discardPrompt={
         pendingSwitchId

@@ -346,7 +346,7 @@ fn band_energy(spectrum: &[f32], lo: f32, hi: f32) -> f32 {
 /// Amp models in `AmpModel::ALL` order, with the cab each one is normally
 /// paired with in the bank — the map has to include the cab, because a preset
 /// is never auditioned without one.
-const AMP_MAP: [(&str, &str); 8] = [
+const AMP_MAP: [(&str, &str); 11] = [
     ("mandarin", "vintage_212"),
     ("plexi", "brit_412"),
     ("twin", "american_2x12"),
@@ -355,6 +355,9 @@ const AMP_MAP: [(&str, &str); 8] = [
     ("jcm", "brit_412"),
     ("slate", "slo_412"),
     ("bassman", "tweed_1x12"),
+    ("boutique", "vintage_212"),
+    ("invader", "uber_412"),
+    ("tweed_combo", "tweed_1x12"),
 ];
 
 /// Where each amp model actually sits on its Gain and Master travel, measured

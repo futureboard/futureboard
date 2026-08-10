@@ -197,6 +197,9 @@ export const AMP_MODEL_INDEX: Record<string, number> = {
   jcm: 5,
   slate: 6,
   bassman: 7,
+  boutique: 8,
+  invader: 9,
+  tweed_combo: 10,
 };
 
 export const DRIVE_MODEL_INDEX: Record<string, number> = {
@@ -210,6 +213,8 @@ export const DRIVE_MODEL_INDEX: Record<string, number> = {
   super_drive: 7,
   metal_core: 8,
   tight_rift: 9,
+  amber_crunch: 10,
+  copper_fuzz: 11,
 };
 
 export const CAB_MODEL_INDEX: Record<string, number> = {
@@ -225,6 +230,8 @@ export const CAB_MODEL_INDEX: Record<string, number> = {
   uber_412: 9,
   slo_412: 10,
   ir: 11,
+  modern_212: 12,
+  american_1x12: 13,
 };
 
 /** `ReverbModel` indices (mirrors Rust `ReverbModel::ALL`). */
@@ -257,12 +264,26 @@ export const MOD_MODEL_INDEX: Record<string, number> = {
   khaen_swirl: 6,
   bi_lam: 7,
   isan_jet: 8,
+  soft_phase: 9,
+  wide_vibe: 10,
 };
 
 /** `WahModel` indices (mirrors Rust `WahModel::ALL`). */
 export const WAH_MODEL_INDEX: Record<string, number> = {
   cry_wah: 0,
   touch_wah: 1,
+};
+
+/**
+ * `EqModel` indices (mirrors Rust `EqModel::ALL`). `parametric` is the
+ * editor's original (and, until the model select was added, only) EQ id —
+ * kept as Studio's id rather than renamed, so every existing preset keeps
+ * its exact voicing.
+ */
+export const EQ_MODEL_INDEX: Record<string, number> = {
+  parametric: 0,
+  vintage_eq: 1,
+  modern_eq: 2,
 };
 
 /** `ToneEngineKind` indices (Classic=0, NamCapture=1, Bypass=2). */
@@ -295,6 +316,11 @@ export function postModel(category: string, modelId: string): void {
     case "delay2": {
       const i = DELAY_MODEL_INDEX[baseModelId(modelId)];
       if (i !== undefined) postParam("delay2_model", i);
+      return;
+    }
+    case "eq2": {
+      const i = EQ_MODEL_INDEX[baseModelId(modelId)];
+      if (i !== undefined) postParam("eq2_model", i);
       return;
     }
     case "amp": {
@@ -334,6 +360,11 @@ export function postModel(category: string, modelId: string): void {
       if (i !== undefined) postParam("wah_model", i);
       return;
     }
+    case "eq": {
+      const i = EQ_MODEL_INDEX[modelId];
+      if (i !== undefined) postParam("eq_model", i);
+      return;
+    }
     case "verb":
     case "reverb": {
       const i = REVERB_MODEL_INDEX[modelId];
@@ -346,7 +377,7 @@ export function postModel(category: string, modelId: string): void {
       return;
     }
     default:
-      // Single-algorithm stages (gate/comp/eq and their B blocks) have no
+      // Single-algorithm stages (gate/comp and their B blocks) have no
       // model select.
       return;
   }

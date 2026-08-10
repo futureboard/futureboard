@@ -6,7 +6,8 @@ import {
   serializePreset,
 } from "./presetFiles";
 import { presetsData } from "./data";
-import type { RigSnapshot } from "./Editor";
+import type { RigSnapshot, Snapshot } from "./Editor";
+import type { SerializedSnapshotBank } from "./presetFiles";
 
 const SNAPSHOT: RigSnapshot = {
   activeCat: "amp",
@@ -44,6 +45,37 @@ describe("preset files", () => {
     expect(parsed?.category).toBe("amp");
     expect(parsed?.snapshot.pathOrder).toEqual(["dyn", "dist", "amp", "cab"]);
     expect(parsed?.snapshot.globals.outputTrim).toBe(-2);
+  });
+
+  test("snapshot bank round-trips when present", () => {
+    const bank: SerializedSnapshotBank = {
+      active: 2,
+      slots: Array.from({ length: 8 }, (_, i): Snapshot => ({
+        name: `Slot ${i}`,
+        bypassed: i === 2 ? { comp: true } : {},
+        parameters: { recto: [{ id: "amp_gain", name: "Drive", min: 0, max: 10, val: i, unit: "" }] },
+      })),
+    };
+    const text = serializePreset("U1", "Chug Machine", "amp", SNAPSHOT, bank);
+    const parsed = parsePresetFile(text);
+    expect(parsed?.snapshots?.active).toBe(2);
+    expect(parsed?.snapshots?.slots).toHaveLength(8);
+    expect(parsed?.snapshots?.slots[2]?.bypassed).toEqual({ comp: true });
+    expect(parsed?.snapshots?.slots[5]?.parameters.recto?.[0]?.val).toBe(5);
+  });
+
+  test("omitted snapshot bank stays absent, not a default", () => {
+    const text = serializePreset("U1", "Chug Machine", "amp", SNAPSHOT);
+    const parsed = parsePresetFile(text);
+    expect(parsed?.snapshots).toBeUndefined();
+  });
+
+  test("a malformed snapshot bank is dropped, not rejected as an invalid file", () => {
+    const file = JSON.parse(serializePreset("U1", "Chug Machine", "amp", SNAPSHOT));
+    file.snapshots = { active: "not a number", slots: "not an array" };
+    const parsed = parsePresetFile(JSON.stringify(file));
+    expect(parsed).not.toBeNull();
+    expect(parsed?.snapshots).toBeUndefined();
   });
 
   test("rejects junk, foreign JSON and future versions", () => {

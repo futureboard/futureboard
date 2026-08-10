@@ -7,6 +7,7 @@ import {
   AMP_VARIANT_TO_MODEL,
   CAB_VARIANT_TO_MODEL,
   DRIVE_VARIANT_TO_MODEL,
+  EQ_VARIANT_TO_MODEL,
   MOD_VARIANT_TO_MODEL,
   DELAY_VARIANT_TO_MODEL,
   REVERB_VARIANT_TO_MODEL,
@@ -15,7 +16,13 @@ import {
   snapshotFromRodhareistState,
 } from "./stateMap";
 import { defaultValueFor, models, parameterDefaults } from "./data";
-import { MOD_MODEL_INDEX } from "./bridge";
+import {
+  AMP_MODEL_INDEX,
+  CAB_MODEL_INDEX,
+  DRIVE_MODEL_INDEX,
+  EQ_MODEL_INDEX,
+  MOD_MODEL_INDEX,
+} from "./bridge";
 
 /** A serde-shaped `RodhareistState` fixture (variant-name enum strings). */
 const FIXTURE = {
@@ -96,10 +103,11 @@ describe("snapshotFromRodhareistState", () => {
   test("variant tables cover every Rust enum variant", () => {
     // 10 stages + the 5 second instances (`StageKind::Drive2` …).
     expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(15);
-    expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
-    expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
-    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(12);
-    expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(9);
+    expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(11);
+    expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(12);
+    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(14);
+    expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(11);
+    expect(Object.keys(EQ_VARIANT_TO_MODEL)).toHaveLength(3);
     expect(Object.keys(WAH_VARIANT_TO_MODEL)).toHaveLength(2);
     expect(Object.keys(REVERB_VARIANT_TO_MODEL)).toHaveLength(4);
     expect(Object.keys(DELAY_VARIANT_TO_MODEL)).toHaveLength(5);
@@ -127,6 +135,84 @@ describe("snapshotFromRodhareistState", () => {
         "chorus_mix",
       ]);
     }
+  });
+
+  // Same wiring hazard as the mod test above, for the two other stages with
+  // per-model tuned voicings sharing one shared knob set.
+  test("every classic amp model is wired end to end and its indices are contiguous", () => {
+    // `models.amp` also lists `nam_capture`/`bypass` — special `ToneEngineKind`
+    // engines, not `AmpModel` variants, so they carry no wire index/variant
+    // entry here by design. `AMP_MODEL_INDEX`'s keys are the classic models only.
+    const listed = Object.keys(AMP_MODEL_INDEX);
+    const byIndex = Object.entries(AMP_MODEL_INDEX).sort((a, b) => a[1] - b[1]);
+
+    expect(byIndex.map(([, i]) => i)).toEqual(listed.map((_, i) => i));
+    expect(Object.values(AMP_VARIANT_TO_MODEL).sort()).toEqual([...listed].sort());
+
+    for (const id of listed) {
+      const table = parameterDefaults[id];
+      expect(table, `no parameter table for amp model \`${id}\``).toBeDefined();
+      expect(table?.map((p) => p.id)).toEqual([
+        "amp_gain",
+        "amp_bass",
+        "amp_middle",
+        "amp_treble",
+        "amp_presence",
+        "amp_master",
+      ]);
+    }
+  });
+
+  test("every drive model is wired end to end and its indices are contiguous", () => {
+    const listed = models.dist.map((m) => m.id);
+    const byIndex = Object.entries(DRIVE_MODEL_INDEX).sort((a, b) => a[1] - b[1]);
+
+    expect(byIndex.map(([, i]) => i)).toEqual(listed.map((_, i) => i));
+    expect(byIndex.map(([id]) => id)).toEqual(listed);
+    expect(Object.values(DRIVE_VARIANT_TO_MODEL).sort()).toEqual([...listed].sort());
+
+    for (const id of listed) {
+      const table = parameterDefaults[id];
+      expect(table, `no parameter table for drive model \`${id}\``).toBeDefined();
+      expect(table?.map((p) => p.id)).toEqual([
+        "drive_gain",
+        "drive_tone",
+        "drive_level",
+      ]);
+    }
+  });
+
+  test("every eq model is wired end to end and its indices are contiguous", () => {
+    const listed = models.eq.map((m) => m.id);
+    const byIndex = Object.entries(EQ_MODEL_INDEX).sort((a, b) => a[1] - b[1]);
+
+    expect(byIndex.map(([, i]) => i)).toEqual(listed.map((_, i) => i));
+    expect(byIndex.map(([id]) => id)).toEqual(listed);
+    expect(Object.values(EQ_VARIANT_TO_MODEL).sort()).toEqual([...listed].sort());
+
+    for (const id of listed) {
+      const table = parameterDefaults[id];
+      expect(table, `no parameter table for eq model \`${id}\``).toBeDefined();
+      expect(table?.map((p) => p.id)).toEqual([
+        "eq_low_gain",
+        "eq_mid1_freq",
+        "eq_mid1_gain",
+        "eq_mid2_freq",
+        "eq_mid2_gain",
+        "eq_high_gain",
+      ]);
+    }
+  });
+
+  // Cab has no per-model parameter table (mic type/position/distance are
+  // shared across every voicing), so this checks index/variant wiring only.
+  test("every cab model is wired end to end and its indices are contiguous", () => {
+    const listed = models.cab.map((m) => m.id);
+    const byIndex = Object.entries(CAB_MODEL_INDEX).sort((a, b) => a[1] - b[1]);
+
+    expect(byIndex.map(([, i]) => i)).toEqual(listed.map((_, i) => i));
+    expect(byIndex.map(([id]) => id)).toEqual(listed);
+    expect(Object.values(CAB_VARIANT_TO_MODEL).sort()).toEqual([...listed].sort());
   });
 
   test("maps a serde fixture field-for-field", () => {

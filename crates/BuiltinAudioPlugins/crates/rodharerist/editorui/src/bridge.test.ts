@@ -9,6 +9,7 @@ import {
   CAB_MODEL_INDEX,
   DRIVE_MODEL_INDEX,
   DELAY_MODEL_INDEX,
+  EQ_MODEL_INDEX,
   REVERB_MODEL_INDEX,
   TONE_ENGINE_INDEX,
   __flushParamEditsForTest,
@@ -58,6 +59,9 @@ describe("model-select wire values", () => {
       jcm: 5,
       slate: 6,
       bassman: 7,
+      boutique: 8,
+      invader: 9,
+      tweed_combo: 10,
     });
   });
 
@@ -73,6 +77,8 @@ describe("model-select wire values", () => {
       super_drive: 7,
       metal_core: 8,
       tight_rift: 9,
+      amber_crunch: 10,
+      copper_fuzz: 11,
     });
   });
 
@@ -90,6 +96,8 @@ describe("model-select wire values", () => {
       uber_412: 9,
       slo_412: 10,
       ir: 11,
+      modern_212: 12,
+      american_1x12: 13,
     });
   });
 
@@ -110,6 +118,21 @@ describe("model-select wire values", () => {
       ping_pong: 3,
       dual: 4,
     });
+  });
+
+  test("eq map mirrors EqModel::ALL order", () => {
+    expect(EQ_MODEL_INDEX).toEqual({
+      parametric: 0,
+      vintage_eq: 1,
+      modern_eq: 2,
+    });
+  });
+
+  test("postModel forwards an eq voicing as eq_model", () => {
+    const batches = captureBatches();
+    postModel("eq", "modern_eq");
+    __flushParamEditsForTest();
+    expect(batches).toEqual([[{ id: "eq_model", value: 2 }]]);
   });
 
   test("postModel forwards a delay voicing as delay_model", () => {
