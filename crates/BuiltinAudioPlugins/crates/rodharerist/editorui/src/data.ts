@@ -866,6 +866,82 @@ export const presetsData: Preset[] = [
     },
     path: ["amp", "mod", "delay", "verb", "cab"],
   },
+  {
+    id: "13A",
+    name: "Singing Sustain",
+    outputTrim: -1.5,
+    category: "amp",
+    model: "boutique",
+    stageModels: { amp: "boutique", verb: "room", cab: "vintage_212" },
+    values: {
+      // Boutique territory: gain stays low enough that the amp's own touch
+      // compression — not clipping — is doing the sustaining, mids pushed for
+      // the singing upper-mid this voice leads with.
+      amp_gain: 3.5,
+      amp_bass: 5,
+      amp_middle: 6.8,
+      amp_treble: 5,
+      amp_presence: 5.2,
+      amp_master: 7.5,
+      reverb_decay: 1.6,
+      reverb_mix: 14,
+      cab_mic_type: 0,
+      cab_mic: 40,
+      cab_dist: 26,
+    },
+    path: ["amp", "verb", "cab"],
+  },
+  {
+    id: "13B",
+    name: "Invader Chug",
+    outputTrim: 4.5,
+    category: "amp",
+    model: "invader",
+    stageModels: { dyn: "gate", amp: "invader", eq: "parametric", cab: "uber_412" },
+    values: {
+      gate_thresh: -50,
+      amp_gain: 8.2,
+      amp_bass: 4.5,
+      amp_middle: 3,
+      amp_treble: 6,
+      amp_presence: 6.5,
+      amp_master: 4.5,
+      eq_low_gain: -1.5,
+      eq_mid1_freq: 280,
+      eq_mid1_gain: -1.5,
+      eq_mid2_freq: 1700,
+      eq_mid2_gain: 1.5,
+      eq_high_gain: 0.5,
+      cab_mic_type: 0,
+      cab_mic: 48,
+      cab_dist: 12,
+    },
+    path: ["dyn", "amp", "eq", "cab"],
+  },
+  {
+    id: "13C",
+    name: "Tweed Breakup",
+    outputTrim: -4.0,
+    category: "amp",
+    model: "tweed_combo",
+    stageModels: { amp: "tweed_combo", verb: "room", cab: "tweed_1x12" },
+    values: {
+      // A small combo's own power stage is the breakup here — gain sits at
+      // the point where picking harder pushes it over, not maxed out.
+      amp_gain: 6.5,
+      amp_bass: 5.5,
+      amp_middle: 5.5,
+      amp_treble: 6,
+      amp_presence: 4,
+      amp_master: 6.5,
+      reverb_decay: 1.3,
+      reverb_mix: 11,
+      cab_mic_type: 1,
+      cab_mic: 30,
+      cab_dist: 34,
+    },
+    path: ["amp", "verb", "cab"],
+  },
 ];
 
 const primaryCategories: Record<PrimaryCategoryId, Category> = {
@@ -989,6 +1065,18 @@ const primaryModels: Record<PrimaryCategoryId, Model[]> = {
       short: "EQ",
       sub: "4-band parametric tone shaping",
     },
+    {
+      id: "vintage_eq",
+      name: "Vintage EQ",
+      short: "Vintage",
+      sub: "Passive-console character, wide smooth bells",
+    },
+    {
+      id: "modern_eq",
+      name: "Modern EQ",
+      short: "Modern",
+      sub: "Surgical digital character, narrow precise bells",
+    },
   ],
   dist: [
     {
@@ -1051,6 +1139,18 @@ const primaryModels: Record<PrimaryCategoryId, Model[]> = {
       short: "Rift",
       sub: "Modern tight high-gain, djent-ready",
     },
+    {
+      id: "amber_crunch",
+      name: "Amber Crunch",
+      short: "Amber",
+      sub: "Bright silicon blues/rock rhythm crunch",
+    },
+    {
+      id: "copper_fuzz",
+      name: "Copper Fuzz",
+      short: "Copper",
+      sub: "Tight aggressive silicon fuzz",
+    },
   ],
   amp: [
     {
@@ -1100,6 +1200,24 @@ const primaryModels: Record<PrimaryCategoryId, Model[]> = {
       name: "Bassman",
       short: "Bassman",
       sub: "Loose American bass-heavy head",
+    },
+    {
+      id: "boutique",
+      name: "Overdrive Special",
+      short: "Boutique",
+      sub: "Smooth boutique low/mid-gain sustain",
+    },
+    {
+      id: "invader",
+      name: "Invader 5150",
+      short: "Invader",
+      sub: "Tight, scooped modern high-gain stack",
+    },
+    {
+      id: "tweed_combo",
+      name: "Tweed Deluxe",
+      short: "Tweed",
+      sub: "Small, early-breakup single-speaker combo",
     },
     {
       id: "nam_capture",
@@ -1182,6 +1300,18 @@ const primaryModels: Record<PrimaryCategoryId, Model[]> = {
       name: "Isan Jet",
       short: "IsanJet",
       sub: "6-stage, hard regeneration — lively jet, not a helicopter",
+    },
+    {
+      id: "soft_phase",
+      name: "Soft Phase",
+      short: "SoftPh",
+      sub: "2-stage, one gentle notch — the subtle end of the range",
+    },
+    {
+      id: "wide_vibe",
+      name: "Wide Vibe",
+      short: "WideV",
+      sub: "Real linked stereo spread — lush and wide, not mono",
     },
   ],
   delay: [
@@ -1310,6 +1440,18 @@ const primaryModels: Record<PrimaryCategoryId, Model[]> = {
       short: "IR",
       sub: "Convolution with a loaded .wav cabinet IR",
     },
+    {
+      id: "modern_212",
+      name: "Modern 2x12",
+      short: "Mod 2x12",
+      sub: "Tight closed-back pair, scaled-down modern scoop",
+    },
+    {
+      id: "american_1x12",
+      name: "American 1x12 Combo",
+      short: "Am 1x12",
+      sub: "Small, bright, open single speaker",
+    },
   ],
 };
 
@@ -1361,7 +1503,26 @@ const primaryParameterDefaults: Record<string, Param[]> = {
     { id: "comp_release", name: "Release", min: 10, max: 1000, val: 120, unit: "ms" },
     { id: "comp_makeup", name: "Makeup", min: 0, max: 24, val: 0, unit: "dB" },
   ],
+  // All three EQ models share this exact param set — the model only changes
+  // the fixed shelf corners and bell Q inside the DSP (`eq::EqProfile`), not
+  // what these six knobs mean or where they default.
   parametric: [
+    { id: "eq_low_gain", name: "Low", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid1_freq", name: "Mid1 Freq", min: 100, max: 1000, val: 400, unit: "Hz" },
+    { id: "eq_mid1_gain", name: "Mid1", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid2_freq", name: "Mid2 Freq", min: 600, max: 6000, val: 2000, unit: "Hz" },
+    { id: "eq_mid2_gain", name: "Mid2", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_high_gain", name: "High", min: -15, max: 15, val: 0, unit: "dB" },
+  ],
+  vintage_eq: [
+    { id: "eq_low_gain", name: "Low", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid1_freq", name: "Mid1 Freq", min: 100, max: 1000, val: 400, unit: "Hz" },
+    { id: "eq_mid1_gain", name: "Mid1", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid2_freq", name: "Mid2 Freq", min: 600, max: 6000, val: 2000, unit: "Hz" },
+    { id: "eq_mid2_gain", name: "Mid2", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_high_gain", name: "High", min: -15, max: 15, val: 0, unit: "dB" },
+  ],
+  modern_eq: [
     { id: "eq_low_gain", name: "Low", min: -15, max: 15, val: 0, unit: "dB" },
     { id: "eq_mid1_freq", name: "Mid1 Freq", min: 100, max: 1000, val: 400, unit: "Hz" },
     { id: "eq_mid1_gain", name: "Mid1", min: -15, max: 15, val: 0, unit: "dB" },
@@ -1459,6 +1620,16 @@ const primaryParameterDefaults: Record<string, Param[]> = {
   tight_rift: [
     { id: "drive_gain", name: "Gain", min: 0, max: 10, val: 7.0, unit: "" },
     { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 5.5, unit: "" },
+  ],
+  amber_crunch: [
+    { id: "drive_gain", name: "Gain", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 6.5, unit: "" },
+  ],
+  copper_fuzz: [
+    { id: "drive_gain", name: "Fuzz", min: 0, max: 10, val: 7.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 4.5, unit: "" },
     { id: "drive_level", name: "Level", min: 0, max: 10, val: 5.5, unit: "" },
   ],
   mandarin: [
@@ -1609,6 +1780,30 @@ const primaryParameterDefaults: Record<string, Param[]> = {
     { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 4.5, unit: "" },
     { id: "amp_master", name: "Master", min: 0, max: 10, val: 6.0, unit: "" },
   ],
+  boutique: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 6.5, unit: "" },
+  ],
+  invader: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 8.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
+  tweed_combo: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 6.0, unit: "" },
+  ],
   nam_capture: [
     { id: "nam_input_trim", name: "Input Trim", min: -24, max: 24, val: 0, unit: "dB" },
     { id: "nam_output_trim", name: "Output Trim", min: -24, max: 24, val: 0, unit: "dB" },
@@ -1657,6 +1852,16 @@ const primaryParameterDefaults: Record<string, Param[]> = {
     { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 7.0, unit: "" },
     { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.5, unit: "" },
     { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 65, unit: "%" },
+  ],
+  soft_phase: [
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.0, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 45, unit: "%" },
+  ],
+  wide_vibe: [
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.2, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 62, unit: "%" },
   ],
   flanger: [
     { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 2.5, unit: "" },

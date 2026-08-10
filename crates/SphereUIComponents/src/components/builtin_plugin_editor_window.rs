@@ -175,11 +175,11 @@ struct SelectInstanceMsg {
     binding_generation: u64,
     display: InstanceDisplayMetadata,
     state_revision: u64,
-    /// TODO(phase5): rodharerist has no serialized per-insert DSP state yet
-    /// (confirmed by audit — no `Serialize` impl anywhere in the DSP crate,
-    /// no project-file schema, no engine wiring). Until that lands this is
-    /// always `{}`; React has nothing real to bind to, only the identity and
-    /// display metadata.
+    /// The insert's persisted DSP state, decoded from `PluginInstanceDescriptor::state_bytes`
+    /// by `decode_state_bytes` — real per-plugin state (e.g. rodharerist's
+    /// `RodhareistState`) for a bound insert with something to restore, `{}`
+    /// for a fresh insert or unparseable bytes. See `decode_state_bytes`'s
+    /// doc comment for the fallback rules.
     state: serde_json::Value,
 }
 

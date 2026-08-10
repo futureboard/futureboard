@@ -48,6 +48,9 @@ export const AMP_VARIANT_TO_MODEL: Record<string, string> = {
   Jcm: "jcm",
   Slate: "slate",
   Bassman: "bassman",
+  Boutique: "boutique",
+  Invader: "invader",
+  TweedCombo: "tweed_combo",
 };
 
 /** Rust `DriveModel` variant → editor model id. */
@@ -62,6 +65,8 @@ export const DRIVE_VARIANT_TO_MODEL: Record<string, string> = {
   SuperDrive: "super_drive",
   MetalCore: "metal_core",
   TightRift: "tight_rift",
+  AmberCrunch: "amber_crunch",
+  CopperFuzz: "copper_fuzz",
 };
 
 /** Rust `CabModel` variant → editor model id. */
@@ -78,6 +83,8 @@ export const CAB_VARIANT_TO_MODEL: Record<string, string> = {
   Uber4x12: "uber_412",
   Slo4x12: "slo_412",
   Ir: "ir",
+  Modern2x12: "modern_212",
+  American1x12: "american_1x12",
 };
 
 /** Rust `ReverbModel` variant → editor model id. */
@@ -99,6 +106,8 @@ export const MOD_VARIANT_TO_MODEL: Record<string, string> = {
   KhaenSwirl: "khaen_swirl",
   BiLam: "bi_lam",
   IsanJet: "isan_jet",
+  SoftPhase: "soft_phase",
+  WideVibe: "wide_vibe",
 };
 
 /** Rust `DelayModel` variant → editor model id. */
@@ -114,6 +123,18 @@ export const DELAY_VARIANT_TO_MODEL: Record<string, string> = {
 export const WAH_VARIANT_TO_MODEL: Record<string, string> = {
   CryWah: "cry_wah",
   TouchWah: "touch_wah",
+};
+
+/**
+ * Rust `EqModel` variant → editor model id. `Studio` maps to `parametric`,
+ * the editor's original (and, until the model select was added, only) EQ
+ * id — kept rather than renamed, so every existing preset keeps its exact
+ * voicing.
+ */
+export const EQ_VARIANT_TO_MODEL: Record<string, string> = {
+  Studio: "parametric",
+  Vintage: "vintage_eq",
+  Modern: "modern_eq",
 };
 
 type ParamsJson = Record<string, unknown>;
@@ -178,6 +199,10 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   if (WAH_VARIANT_TO_MODEL[wahVariant]) {
     stageModels.wah = WAH_VARIANT_TO_MODEL[wahVariant]!;
   }
+  const eqVariant = typeof p.eq_model === "string" ? p.eq_model : "";
+  if (EQ_VARIANT_TO_MODEL[eqVariant]) {
+    stageModels.eq = EQ_VARIANT_TO_MODEL[eqVariant]!;
+  }
   const delayVariant = typeof p.delay_model === "string" ? p.delay_model : "";
   if (DELAY_VARIANT_TO_MODEL[delayVariant]) {
     stageModels.delay = DELAY_VARIANT_TO_MODEL[delayVariant]!;
@@ -204,6 +229,10 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   const delayBVariant = typeof b.delay_model === "string" ? b.delay_model : "";
   if (DELAY_VARIANT_TO_MODEL[delayBVariant]) {
     stageModels.delay2 = secondInstanceModelId(DELAY_VARIANT_TO_MODEL[delayBVariant]!);
+  }
+  const eqBVariant = typeof b.eq_model === "string" ? b.eq_model : "";
+  if (EQ_VARIANT_TO_MODEL[eqBVariant]) {
+    stageModels.eq2 = secondInstanceModelId(EQ_VARIANT_TO_MODEL[eqBVariant]!);
   }
   const ampVariant = typeof p.amp_model === "string" ? p.amp_model : "";
   const toneEngine = typeof p.tone_engine === "string" ? p.tone_engine : "Classic";
@@ -271,13 +300,15 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(softknee, "comp_attack", num(p, "comp_attack_ms"));
   setVal(softknee, "comp_release", num(p, "comp_release_ms"));
   setVal(softknee, "comp_makeup", num(p, "comp_makeup_db"));
-  const parametric = parameters.parametric;
-  setVal(parametric, "eq_low_gain", num(p, "eq_low_gain_db"));
-  setVal(parametric, "eq_mid1_freq", num(p, "eq_mid1_freq_hz"));
-  setVal(parametric, "eq_mid1_gain", num(p, "eq_mid1_gain_db"));
-  setVal(parametric, "eq_mid2_freq", num(p, "eq_mid2_freq_hz"));
-  setVal(parametric, "eq_mid2_gain", num(p, "eq_mid2_gain_db"));
-  setVal(parametric, "eq_high_gain", num(p, "eq_high_gain_db"));
+  // The Eq slot's models share the eq_* ids; only the selected model
+  // receives the blob values (same rule as dist/cab/mod above).
+  const eqParams = parameters[stageModels.eq];
+  setVal(eqParams, "eq_low_gain", num(p, "eq_low_gain_db"));
+  setVal(eqParams, "eq_mid1_freq", num(p, "eq_mid1_freq_hz"));
+  setVal(eqParams, "eq_mid1_gain", num(p, "eq_mid1_gain_db"));
+  setVal(eqParams, "eq_mid2_freq", num(p, "eq_mid2_freq_hz"));
+  setVal(eqParams, "eq_mid2_gain", num(p, "eq_mid2_gain_db"));
+  setVal(eqParams, "eq_high_gain", num(p, "eq_high_gain_db"));
   // The Mod slot's models share the chorus_* ids; only the selected model
   // receives the blob values (same rule as dist/cab above).
   const modParams = parameters[stageModels.mod];
@@ -322,13 +353,13 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(softkneeB, "comp2_attack", num(b, "comp_attack_ms"));
   setVal(softkneeB, "comp2_release", num(b, "comp_release_ms"));
   setVal(softkneeB, "comp2_makeup", num(b, "comp_makeup_db"));
-  const parametricB = parameters.parametric_2;
-  setVal(parametricB, "eq2_low_gain", num(b, "eq_low_gain_db"));
-  setVal(parametricB, "eq2_mid1_freq", num(b, "eq_mid1_freq_hz"));
-  setVal(parametricB, "eq2_mid1_gain", num(b, "eq_mid1_gain_db"));
-  setVal(parametricB, "eq2_mid2_freq", num(b, "eq_mid2_freq_hz"));
-  setVal(parametricB, "eq2_mid2_gain", num(b, "eq_mid2_gain_db"));
-  setVal(parametricB, "eq2_high_gain", num(b, "eq_high_gain_db"));
+  const eqB = parameters[stageModels.eq2];
+  setVal(eqB, "eq2_low_gain", num(b, "eq_low_gain_db"));
+  setVal(eqB, "eq2_mid1_freq", num(b, "eq_mid1_freq_hz"));
+  setVal(eqB, "eq2_mid1_gain", num(b, "eq_mid1_gain_db"));
+  setVal(eqB, "eq2_mid2_freq", num(b, "eq_mid2_freq_hz"));
+  setVal(eqB, "eq2_mid2_gain", num(b, "eq_mid2_gain_db"));
+  setVal(eqB, "eq2_high_gain", num(b, "eq_high_gain_db"));
   const modB = parameters[stageModels.mod2];
   setVal(modB, "chorus2_rate", num(b, "chorus_rate"));
   setVal(modB, "chorus2_depth", num(b, "chorus_depth"));

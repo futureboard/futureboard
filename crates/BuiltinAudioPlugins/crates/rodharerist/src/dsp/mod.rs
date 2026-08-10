@@ -221,6 +221,11 @@ pub enum DriveModel {
     MetalCore,
     /// "Tight Rift" — modern multi-stage tight high-gain (Neural-style).
     TightRift,
+    /// "Amber Crunch" — bright silicon hard-clip blues/rock rhythm OD.
+    AmberCrunch,
+    /// "Copper Fuzz" — silicon fuzz, tighter and more aggressive than the
+    /// germanium Face Fuzz.
+    CopperFuzz,
 }
 
 impl DriveModel {
@@ -235,6 +240,9 @@ impl DriveModel {
         Self::SuperDrive,
         Self::MetalCore,
         Self::TightRift,
+        // Append-only past this point (wire ABI).
+        Self::AmberCrunch,
+        Self::CopperFuzz,
     ];
 
     /// Map the editor model id.
@@ -250,6 +258,8 @@ impl DriveModel {
             "super_drive" => Some(Self::SuperDrive),
             "metal_core" => Some(Self::MetalCore),
             "tight_rift" => Some(Self::TightRift),
+            "amber_crunch" => Some(Self::AmberCrunch),
+            "copper_fuzz" => Some(Self::CopperFuzz),
             _ => None,
         }
     }
@@ -278,6 +288,12 @@ pub enum AmpModel {
     Slate,
     /// "Bassman" — loose American bass-heavy.
     Bassman,
+    /// "Overdrive Special" — smooth, singing boutique low/mid-gain sustain.
+    Boutique,
+    /// "Invader 5150" — tight, scooped modern high-gain full stack.
+    Invader,
+    /// "Tweed Deluxe" — small, early-breakup single-speaker combo.
+    TweedCombo,
 }
 
 impl AmpModel {
@@ -290,6 +306,10 @@ impl AmpModel {
         Self::Jcm,
         Self::Slate,
         Self::Bassman,
+        // Append-only past this point (wire ABI) — see `from_index`.
+        Self::Boutique,
+        Self::Invader,
+        Self::TweedCombo,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -302,6 +322,9 @@ impl AmpModel {
             "jcm" => Some(Self::Jcm),
             "slate" => Some(Self::Slate),
             "bassman" => Some(Self::Bassman),
+            "boutique" => Some(Self::Boutique),
+            "invader" => Some(Self::Invader),
+            "tweed_combo" => Some(Self::TweedCombo),
             _ => None,
         }
     }
@@ -344,6 +367,12 @@ pub enum CabModel {
     /// distance knobs do not apply — the IR already is a miked cabinet — and
     /// the slot passes dry until a file is loaded.
     Ir,
+    /// "Modern 2x12" — tight closed-back pair: the `ModernClosed` family's
+    /// scoop and extended top, scaled down from the 4x12s.
+    Modern2x12,
+    /// "American 1x12 Combo" — small, bright, open single speaker; brighter
+    /// and less boxy than the Tweed 1x12.
+    American1x12,
 }
 
 impl CabModel {
@@ -360,6 +389,9 @@ impl CabModel {
         Self::Uber4x12,
         Self::Slo4x12,
         Self::Ir,
+        // Append-only past this point (wire ABI).
+        Self::Modern2x12,
+        Self::American1x12,
     ];
 
     /// The modeled voicings only — [`Self::ALL`] minus [`Self::Ir`], which is
@@ -377,6 +409,8 @@ impl CabModel {
         Self::Brit4x12,
         Self::Uber4x12,
         Self::Slo4x12,
+        Self::Modern2x12,
+        Self::American1x12,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -393,6 +427,8 @@ impl CabModel {
             "uber_412" => Some(Self::Uber4x12),
             "slo_412" => Some(Self::Slo4x12),
             "ir" => Some(Self::Ir),
+            "modern_212" => Some(Self::Modern2x12),
+            "american_1x12" => Some(Self::American1x12),
             _ => None,
         }
     }
@@ -455,6 +491,11 @@ pub enum ModModel {
     BiLam,
     /// "Isan Jet" — six stages, hard regeneration, fast and narrow up top.
     IsanJet,
+    /// "Soft Phase" — two stages, one gentle notch: the subtle end of the
+    /// range.
+    SoftPhase,
+    /// "Wide Vibe" — linked stereo spread for a genuinely wide swirl.
+    WideVibe,
 }
 
 impl ModModel {
@@ -471,6 +512,8 @@ impl ModModel {
         Self::KhaenSwirl,
         Self::BiLam,
         Self::IsanJet,
+        Self::SoftPhase,
+        Self::WideVibe,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -484,6 +527,8 @@ impl ModModel {
             "khaen_swirl" => Some(Self::KhaenSwirl),
             "bi_lam" => Some(Self::BiLam),
             "isan_jet" => Some(Self::IsanJet),
+            "soft_phase" => Some(Self::SoftPhase),
+            "wide_vibe" => Some(Self::WideVibe),
             _ => None,
         }
     }
@@ -498,6 +543,8 @@ impl ModModel {
             Self::KhaenSwirl => Some(V::KhaenSwirl),
             Self::BiLam => Some(V::BiLam),
             Self::IsanJet => Some(V::IsanJet),
+            Self::SoftPhase => Some(V::SoftPhase),
+            Self::WideVibe => Some(V::WideVibe),
             Self::Chorus | Self::Flanger | Self::Tremolo => None,
         }
     }
@@ -532,6 +579,46 @@ impl WahModel {
 
     pub fn from_index(i: u32) -> Self {
         Self::ALL.get(i as usize).copied().unwrap_or(Self::CryWah)
+    }
+}
+
+/// EQ voicing in the Eq slot, matching the editor's `eq` models. All three
+/// share the same six `eq_*` knobs (low shelf, two sweepable bells, high
+/// shelf) — only the fixed shelf corners and bell Q differ, see
+/// `eq::EqProfile`.
+///
+/// APPEND-ONLY: index into `ALL` is the `eq_model` wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum EqModel {
+    /// "Studio EQ" — the original curve.
+    #[default]
+    Studio,
+    /// "Vintage EQ" — passive-console character: lower shelf corner, earlier
+    /// top roll-off, wide smooth bells.
+    Vintage,
+    /// "Modern EQ" — surgical/digital character: extended shelf range,
+    /// narrow precise bells.
+    Modern,
+}
+
+impl EqModel {
+    pub const ALL: &'static [Self] = &[Self::Studio, Self::Vintage, Self::Modern];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            // "parametric" — the editor's original (and, until now, only) EQ
+            // model id, predating the model select. Kept as Studio's id
+            // rather than renamed, so every existing preset/project
+            // referencing it keeps its exact voicing.
+            "parametric" => Some(Self::Studio),
+            "vintage_eq" => Some(Self::Vintage),
+            "modern_eq" => Some(Self::Modern),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Studio)
     }
 }
 
@@ -662,6 +749,9 @@ pub struct Params {
     pub mod_model: ModModel,
     #[serde(default)]
     pub wah_model: WahModel,
+    /// Which voicing the Eq slot runs (shares the `eq_*` knobs).
+    #[serde(default)]
+    pub eq_model: EqModel,
     /// Which algorithm the Reverb slot runs (shares the `reverb_*` knobs).
     #[serde(default)]
     pub reverb_model: ReverbModel,
@@ -830,6 +920,7 @@ pub struct StageBParams {
     pub delay_tone: f32,
 
     pub eq_on: bool,
+    pub eq_model: EqModel,
     pub eq_low_gain_db: f32,
     pub eq_mid1_freq_hz: f32,
     pub eq_mid1_gain_db: f32,
@@ -880,6 +971,7 @@ impl Default for StageBParams {
             delay_tone: default_delay_tone(),
 
             eq_on: true,
+            eq_model: EqModel::Studio,
             eq_low_gain_db: 0.0,
             eq_mid1_freq_hz: default_eq_mid1_freq(),
             eq_mid1_gain_db: 0.0,
@@ -923,6 +1015,7 @@ impl StageBParams {
             delay_tone: clamp(self.delay_tone, 0.0, 10.0),
 
             eq_on: self.eq_on,
+            eq_model: self.eq_model,
             eq_low_gain_db: clamp(self.eq_low_gain_db, -15.0, 15.0),
             eq_mid1_freq_hz: clamp(self.eq_mid1_freq_hz, 100.0, 1_000.0),
             eq_mid1_gain_db: clamp(self.eq_mid1_gain_db, -15.0, 15.0),
@@ -999,6 +1092,7 @@ pub fn default_params() -> Params {
         mic_model: MicModel::Dynamic,
         mod_model: ModModel::Chorus,
         wah_model: WahModel::CryWah,
+        eq_model: EqModel::Studio,
         reverb_model: ReverbModel::Plate,
         delay_model: DelayModel::Tape,
         tone_engine: ToneEngineKind::Classic,
@@ -1570,6 +1664,7 @@ impl Dsp {
             mic_model: params.mic_model,
             mod_model: params.mod_model,
             wah_model: params.wah_model,
+            eq_model: params.eq_model,
             reverb_model: params.reverb_model,
             delay_model: params.delay_model,
             tone_engine: params.tone_engine,
@@ -1738,6 +1833,7 @@ impl Dsp {
             p.comp_makeup_db,
         );
         self.eq_stage.configure(
+            p.eq_model,
             p.eq_low_gain_db,
             p.eq_mid1_freq_hz,
             p.eq_mid1_gain_db,
@@ -1796,6 +1892,7 @@ impl Dsp {
         self.drive_b
             .configure(b.drive_model, b.drive_gain, b.drive_tone, b.drive_level);
         self.eq_b.configure(
+            b.eq_model,
             b.eq_low_gain_db,
             b.eq_mid1_freq_hz,
             b.eq_mid1_gain_db,
@@ -1969,6 +2066,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
         "mod_model" => p.mod_model = ModModel::from_index(value.round() as u32),
         "wah_model" => p.wah_model = WahModel::from_index(value.round() as u32),
+        "eq_model" => p.eq_model = EqModel::from_index(value.round() as u32),
         "reverb_model" => p.reverb_model = ReverbModel::from_index(value.round() as u32),
         "delay_model" => p.delay_model = DelayModel::from_index(value.round() as u32),
         "amp_model" => {
@@ -2054,6 +2152,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "delay2_mix" => p.stage_b.delay_mix = value,
         "delay2_tone" => p.stage_b.delay_tone = value,
         "eq2_on" => p.stage_b.eq_on = on,
+        "eq2_model" => p.stage_b.eq_model = EqModel::from_index(value.round() as u32),
         "eq2_low_gain" => p.stage_b.eq_low_gain_db = value,
         "eq2_mid1_freq" => p.stage_b.eq_mid1_freq_hz = value,
         "eq2_mid1_gain" => p.stage_b.eq_mid1_gain_db = value,
@@ -2104,6 +2203,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("cab_model", model_index(CabModel::ALL, p.cab_model)));
     out.push(("mod_model", model_index(ModModel::ALL, p.mod_model)));
     out.push(("wah_model", model_index(WahModel::ALL, p.wah_model)));
+    out.push(("eq_model", model_index(EqModel::ALL, p.eq_model)));
     out.push((
         "reverb_model",
         model_index(ReverbModel::ALL, p.reverb_model),
@@ -2193,6 +2293,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("delay2_mix", sb.delay_mix));
     out.push(("delay2_tone", sb.delay_tone));
     out.push(("eq2_on", b(sb.eq_on)));
+    out.push(("eq2_model", model_index(EqModel::ALL, sb.eq_model)));
     out.push(("eq2_low_gain", sb.eq_low_gain_db));
     out.push(("eq2_mid1_freq", sb.eq_mid1_freq_hz));
     out.push(("eq2_mid1_gain", sb.eq_mid1_gain_db));
@@ -4096,6 +4197,8 @@ mod tests {
             ModModel::KhaenSwirl => "khaen_swirl",
             ModModel::BiLam => "bi_lam",
             ModModel::IsanJet => "isan_jet",
+            ModModel::SoftPhase => "soft_phase",
+            ModModel::WideVibe => "wide_vibe",
         }
     }
 

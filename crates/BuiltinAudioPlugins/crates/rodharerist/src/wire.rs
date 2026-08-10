@@ -123,6 +123,8 @@ pub const UI_PARAM_IDS: &[&str] = &[
     "comp2_attack",  // 104
     "comp2_release", // 105
     "comp2_makeup",  // 106
+    "eq_model",      // 107
+    "eq2_model",     // 108
 ];
 
 /// String id → wire index. Linear scan over a small table — control/UI
@@ -141,7 +143,7 @@ pub fn ui_param_id(index: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::dsp::{
-        AmpModel, CabModel, DelayModel, DriveModel, Dsp, ModModel, ReverbModel, StageKind,
+        AmpModel, CabModel, DelayModel, DriveModel, Dsp, EqModel, ModModel, ReverbModel, StageKind,
         ToneEngineKind, WahModel, apply_to_params, default_params, ui_values,
     };
 
@@ -174,7 +176,7 @@ mod tests {
     /// accidental reorder/insert must fail here, loudly.
     #[test]
     fn wire_indices_are_pinned() {
-        assert_eq!(UI_PARAM_IDS.len(), 107);
+        assert_eq!(UI_PARAM_IDS.len(), 109);
         assert_eq!(ui_param_index("power"), Some(0));
         assert_eq!(ui_param_index("gate_on"), Some(3));
         assert_eq!(ui_param_index("drive_model"), Some(10));
@@ -218,6 +220,8 @@ mod tests {
         assert_eq!(ui_param_index("eq2_on"), Some(94));
         assert_eq!(ui_param_index("comp2_on"), Some(101));
         assert_eq!(ui_param_index("comp2_makeup"), Some(106));
+        assert_eq!(ui_param_index("eq_model"), Some(107));
+        assert_eq!(ui_param_index("eq2_model"), Some(108));
     }
 
     /// `ui_values` must cover every wire id except `clear_clip` (an action,
@@ -293,7 +297,17 @@ mod tests {
     #[test]
     fn model_select_wire_values_match_editor_ids() {
         let amp = [
-            "mandarin", "plexi", "twin", "topboost", "recto", "jcm", "slate", "bassman",
+            "mandarin",
+            "plexi",
+            "twin",
+            "topboost",
+            "recto",
+            "jcm",
+            "slate",
+            "bassman",
+            "boutique",
+            "invader",
+            "tweed_combo",
         ];
         for (i, id) in amp.iter().enumerate() {
             assert_eq!(
@@ -313,6 +327,8 @@ mod tests {
             "super_drive",
             "metal_core",
             "tight_rift",
+            "amber_crunch",
+            "copper_fuzz",
         ];
         for (i, id) in drive.iter().enumerate() {
             assert_eq!(
@@ -335,6 +351,8 @@ mod tests {
             "slo_412",
             // Not a modeled voicing — the convolution engine (`dsp::ir`).
             "ir",
+            "modern_212",
+            "american_1x12",
         ];
         for (i, id) in cab.iter().enumerate() {
             assert_eq!(
@@ -363,6 +381,8 @@ mod tests {
             "khaen_swirl",
             "bi_lam",
             "isan_jet",
+            "soft_phase",
+            "wide_vibe",
         ];
         for (i, id) in mod_models.iter().enumerate() {
             assert_eq!(
@@ -385,6 +405,14 @@ mod tests {
                 WahModel::from_model_id(id),
                 Some(WahModel::ALL[i]),
                 "wah `{id}`"
+            );
+        }
+        let eq = ["parametric", "vintage_eq", "modern_eq"];
+        for (i, id) in eq.iter().enumerate() {
+            assert_eq!(
+                EqModel::from_model_id(id),
+                Some(EqModel::ALL[i]),
+                "eq `{id}`"
             );
         }
         // bridge.ts sends tone_engine=1 for nam_capture, 2 for bypass.

@@ -41,10 +41,11 @@ export type SelectInstanceMessage = {
   display: InstanceDisplayMetadata;
   stateRevision: number;
   /**
-   * TODO(phase5): rodharerist has no serialized per-insert DSP state yet
-   * (native's `SelectInstanceMsg.state` is always `{}` today — see that
-   * struct's doc comment). Treat this as opaque until the native side has
-   * something real to put in it.
+   * The bound insert's persisted DSP state (native's `decode_state_bytes`) —
+   * a real `RodhareistState` blob for an insert with something to restore,
+   * `{}` for a fresh insert. Untyped here because it is untrusted
+   * boundary data: `stateMap.ts`'s `snapshotFromRodhareistState` validates
+   * its shape structurally before use.
    */
   state: unknown;
 };

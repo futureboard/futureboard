@@ -1,5 +1,6 @@
 import logoUrl from "../Assets/logo.svg";
 import type { AbSlot } from "../state/history";
+import { SnapshotDropdown } from "./SnapshotDropdown";
 
 type HeaderProps = {
   presetId: string;
@@ -18,6 +19,11 @@ type HeaderProps = {
   onToggleTest: () => void;
   onSave: () => void;
   onRevert: () => void;
+  snapshotSlots: readonly import("../Editor").Snapshot[];
+  activeSnapshotIndex: number;
+  onSelectSnapshot: (index: number) => void;
+  onSaveSnapshot: (index: number) => void;
+  onRenameSnapshot: (index: number, name: string) => void;
 };
 
 export function Header({
@@ -37,6 +43,11 @@ export function Header({
   onToggleTest,
   onSave,
   onRevert,
+  snapshotSlots,
+  activeSnapshotIndex,
+  onSelectSnapshot,
+  onSaveSnapshot,
+  onRenameSnapshot,
 }: HeaderProps) {
   const otherSlot: AbSlot = abSlot === "A" ? "B" : "A";
   return (
@@ -96,6 +107,14 @@ export function Header({
           {abSlot}→{otherSlot}
         </button>
       </div>
+
+      <SnapshotDropdown
+        slots={snapshotSlots}
+        active={activeSnapshotIndex}
+        onSelect={onSelectSnapshot}
+        onSaveCurrent={onSaveSnapshot}
+        onRename={onRenameSnapshot}
+      />
 
       <div className="preset-nav" aria-label="Rig selector">
         <button
