@@ -9,6 +9,12 @@ import { fileURLToPath } from 'node:url'
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   plugins: [react(), tailwindcss(), viteSingleFile()],
+  // Workspace dependencies such as Motion can otherwise resolve a different
+  // React module instance from the editor. Hooks from that copy see a null
+  // dispatcher and fail as soon as the first motion component mounts.
+  resolve: {
+    dedupe: ['react', 'react-dom'],
+  },
   build: {
     target: 'es2022',
     assetsInlineLimit: 100_000_000,

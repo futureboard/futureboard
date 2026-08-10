@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "futureboard_native"
-version = "2026.8.9-beta1"
+version = "2026.8.10-beta1.1"
 dependencies = [
  "SphereDiscordRPC",
  "SpherePlatform",
