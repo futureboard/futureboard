@@ -20,9 +20,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to attach the build to (e.g. beta, or 2026.8.9-beta1).
+        description: Release tag to attach the build to (e.g. beta, or 2026.8.10-beta1.1).
         type: string
         required: true
+        default: "2026.8.10-beta1.1"
       app-version:
         description: Version to build. Empty uses version.json.
         type: string
