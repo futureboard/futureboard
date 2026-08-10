@@ -186,6 +186,7 @@ impl D3D11ExternalImage {
         if state.size != size {
             if state.size != Size::default() {
                 self.atlas.remove(&AtlasKey::Image(state.params.clone()));
+                crate::osr_profile::count(crate::osr_profile::Counter::TileReleases, 1);
             }
             state.params.image_id = ImageId::next();
             state.size = size;
@@ -235,6 +236,7 @@ impl Drop for D3D11ExternalImage {
         let state = self.state.lock();
         if state.size != Size::default() {
             self.atlas.remove(&AtlasKey::Image(state.params.clone()));
+            crate::osr_profile::count(crate::osr_profile::Counter::TileReleases, 1);
         }
     }
 }

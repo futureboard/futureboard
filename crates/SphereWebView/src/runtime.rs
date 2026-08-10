@@ -789,6 +789,26 @@ impl WebView<'_> {
         Ok(())
     }
 
+    /// Tell CEF to re-read `GetScreenInfo` and `GetScreenPoint`.
+    ///
+    /// Required after a device-scale-factor change or a move to a different
+    /// display. [`Self::notify_windowless_resized`] is **not** a substitute:
+    /// `WasResized` re-queries the view rect only, so a browser told about a
+    /// DPI change through that call alone keeps rendering at the old scale.
+    /// Callers must update the surface first — Chromium reads the handler back
+    /// synchronously from inside this call.
+    pub fn notify_screen_info_changed(&self) -> Result<(), CefRuntimeError> {
+        self.ensure_thread()?;
+        if matches!(self.render_mode, RenderMode::Windowed) {
+            return Ok(());
+        }
+        self.browser
+            .host()
+            .ok_or(CefRuntimeError::MissingBrowserHost)?
+            .notify_screen_info_changed();
+        Ok(())
+    }
+
     /// Replay one input event into a windowless browser. Rejected for a
     /// windowed browser, which receives real platform input directly.
     pub fn send_input(&self, input: crate::osr::OsrInput) -> Result<(), CefRuntimeError> {

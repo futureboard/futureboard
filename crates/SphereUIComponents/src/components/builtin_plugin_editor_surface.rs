@@ -52,6 +52,14 @@ struct AcceleratedPresentation {
     view_presented: std::sync::atomic::AtomicBool,
     popup_presented: std::sync::atomic::AtomicBool,
     popup_state: std::sync::Mutex<AcceleratedPopupState>,
+    /// View frames CEF has published into the GPU texture, and when the newest
+    /// one landed (nanoseconds since [`profiling_epoch`]). The compositor reads
+    /// both to tell a fresh frame from a reused one and to measure how long a
+    /// finished frame waited to be drawn.
+    published_generation: std::sync::atomic::AtomicU64,
+    published_at_nanos: std::sync::atomic::AtomicU64,
+    /// Generation the most recent compositor frame actually drew.
+    painted_generation: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
@@ -76,8 +84,64 @@ impl Default for AcceleratedPopupState {
 }
 
 #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+impl AcceleratedPresentation {
+    /// Account for one compositor frame drawing this editor.
+    ///
+    /// Runs inside the paint closure, so it sees exactly the frames that reach
+    /// the screen. A compositor frame that finds the generation unchanged is
+    /// *reusing* the previous web texture, which is the intended behaviour on a
+    /// display faster than the browser — the number to watch is the redraw wait,
+    /// not the reuse count.
+    fn record_paint(&self) {
+        use gpui::osr_profile::{self, Counter, Stage};
+        use std::sync::atomic::Ordering;
+
+        if !osr_profile::enabled() {
+            return;
+        }
+        let published = self.published_generation.load(Ordering::Acquire);
+        let painted = self.painted_generation.swap(published, Ordering::AcqRel);
+        if published == painted {
+            osr_profile::count(Counter::CompositorFramesReusingWebTexture, 1);
+            return;
+        }
+        // Everything between the last painted generation and the newest one was
+        // superseded before any frame drew it.
+        osr_profile::count(
+            Counter::CefFramesDropped,
+            published.saturating_sub(painted).saturating_sub(1),
+        );
+        let published_at = self.published_at_nanos.load(Ordering::Relaxed);
+        let now = osr_profile::epoch_nanos();
+        osr_profile::record(
+            Stage::RedrawWait,
+            std::time::Duration::from_nanos(now.saturating_sub(published_at)),
+        );
+    }
+}
+
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
 impl OsrAcceleratedFrameSink for AcceleratedPresentation {
     fn present(&self, frame: OsrAcceleratedFrame) -> Result<(), String> {
+        use gpui::osr_profile::{self, Counter, Stage};
+
+        // T0. The view plane is the browser's real output cadence; popup paints
+        // are event-driven and would make the interval meaningless.
+        if frame.plane == OsrPlane::View {
+            osr_profile::mark(Stage::CefFrameInterval);
+            osr_profile::count(Counter::CefFrames, 1);
+            // What changed, against what is actually copied. The copy below is
+            // whole-surface regardless, so this is the measurement that says
+            // how much of it was wasted.
+            osr_profile::count(Counter::DirtyRects, u64::from(frame.dirty_rect_count));
+            osr_profile::count(Counter::DirtyPixels, frame.dirty_pixels);
+            osr_profile::count(
+                Counter::SurfacePixels,
+                (frame.width.max(0) as u64) * (frame.height.max(0) as u64),
+            );
+        }
+        let _callback = osr_profile::span(Stage::CefCallback);
+
         let image = match frame.plane {
             OsrPlane::View => &self.view,
             OsrPlane::Popup => &self.popup,
@@ -88,11 +152,26 @@ impl OsrAcceleratedFrameSink for AcceleratedPresentation {
                 point(DevicePixels(frame.source_x), DevicePixels(frame.source_y)),
                 size(DevicePixels(frame.width), DevicePixels(frame.height)),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                osr_profile::count(Counter::CopyFailures, 1);
+                error.to_string()
+            })?;
         match frame.plane {
-            OsrPlane::View => self
-                .view_presented
-                .store(true, std::sync::atomic::Ordering::Release),
+            OsrPlane::View => {
+                self.view_presented
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // Publish the timestamp before the generation, so a compositor
+                // that observes the new generation always sees a timestamp that
+                // belongs to it or is newer — never an older one.
+                if osr_profile::enabled() {
+                    self.published_at_nanos.store(
+                        osr_profile::epoch_nanos(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                self.published_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
             OsrPlane::Popup => self
                 .popup_presented
                 .store(true, std::sync::atomic::Ordering::Release),
@@ -193,6 +272,9 @@ impl OffscreenSurface {
                 view_presented: std::sync::atomic::AtomicBool::new(false),
                 popup_presented: std::sync::atomic::AtomicBool::new(false),
                 popup_state: std::sync::Mutex::new(AcceleratedPopupState::default()),
+                published_generation: std::sync::atomic::AtomicU64::new(0),
+                published_at_nanos: std::sync::atomic::AtomicU64::new(0),
+                painted_generation: std::sync::atomic::AtomicU64::new(0),
             })
         });
         Some(presentation.clone())
@@ -215,6 +297,7 @@ impl OffscreenSurface {
             canvas(
                 |bounds, _, _| bounds,
                 move |bounds: Bounds<Pixels>, _, window, _| {
+                    presentation.record_paint();
                     let _ = window.paint_d3d11_external_image(
                         bounds,
                         Corners::default(),
@@ -277,6 +360,19 @@ impl OffscreenSurface {
     /// pointer left — or Blink cancels the captured pointer mid-drag.
     pub(crate) fn any_button_held(&self) -> bool {
         self.buttons.left || self.buttons.middle || self.buttons.right
+    }
+
+    /// Forget every held button, returning whether any were held.
+    ///
+    /// Used on native capture loss. Deliberately does **not** synthesize the
+    /// releases the page never received: CEF's `SendCaptureLostEvent` already
+    /// makes Blink end the captured gesture, and adding a mouse-up on top would
+    /// make a knob take the release twice — once as a cancel, once as a commit
+    /// at whatever position the pointer had drifted to.
+    pub(crate) fn clear_buttons(&mut self) -> bool {
+        let held = self.any_button_held();
+        self.buttons = ButtonState::default();
+        held
     }
 
     /// Modifier mask for an outgoing event: keyboard modifiers from GPUI plus
@@ -482,6 +578,30 @@ mod tests {
         assert!(surface.modifiers(Modifiers::default()).left_button);
         surface.set_button(EditorMouseButton::Left, false);
         assert!(!surface.modifiers(Modifiers::default()).left_button);
+    }
+
+    /// Capture loss has to leave no button believed held: a stuck flag makes
+    /// every later move carry a phantom button bit and permanently suppresses
+    /// the pointer-leave notification, so the page never clears hover again.
+    #[test]
+    fn clearing_buttons_reports_whether_a_gesture_was_interrupted() {
+        let mut surface = OffscreenSurface::default();
+        assert!(
+            !surface.clear_buttons(),
+            "nothing held means there is no gesture to end"
+        );
+
+        surface.set_button(EditorMouseButton::Left, true);
+        surface.set_button(EditorMouseButton::Right, true);
+        assert!(surface.clear_buttons());
+        assert!(!surface.any_button_held());
+
+        let modifiers = surface.modifiers(Modifiers::default());
+        assert!(!modifiers.left_button && !modifiers.middle_button && !modifiers.right_button);
+        assert!(
+            !surface.clear_buttons(),
+            "a repeated deactivation must not produce a second CEF event"
+        );
     }
 
     #[test]

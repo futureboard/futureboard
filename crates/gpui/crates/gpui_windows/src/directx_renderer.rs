@@ -217,13 +217,25 @@ impl DirectXRenderer {
 
     #[inline]
     fn present(&mut self) -> Result<()> {
-        let result = unsafe {
-            self.resources
-                .as_ref()
-                .expect("resources missing")
-                .swap_chain
-                .Present(0, DXGI_PRESENT(0))
+        use gpui::osr_profile::{self, Counter, Stage};
+
+        // Measured before the call, so the interval reflects the cadence frames
+        // actually reach the screen at rather than the cadence they are built at.
+        osr_profile::mark(Stage::PresentInterval);
+        let result = {
+            let _present = osr_profile::span(Stage::Present);
+            unsafe {
+                self.resources
+                    .as_ref()
+                    .expect("resources missing")
+                    .swap_chain
+                    .Present(0, DXGI_PRESENT(0))
+            }
         };
+        osr_profile::count(Counter::CompositorFrames, 1);
+        // The report is emitted from here so it can never land between a
+        // measured stage's start and end.
+        osr_profile::maybe_report();
         result.ok().context("Presenting swap chain failed")
     }
 
@@ -311,6 +323,7 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        let _frame = gpui::osr_profile::span(gpui::osr_profile::Stage::CompositorFrame);
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],

@@ -30,6 +30,9 @@ mod inspector;
 mod interactive;
 mod key_dispatch;
 mod keymap;
+/// Frame-pacing instrumentation for the CEF off-screen-rendering path,
+/// enabled by `FUTUREBOARD_OSR_PROFILING`.
+pub mod osr_profile;
 mod path_builder;
 mod platform;
 pub mod prelude;

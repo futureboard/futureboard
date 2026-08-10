@@ -636,6 +636,23 @@ pub enum EditorInput {
     },
     Key(EditorKey),
     Focus(bool),
+    /// The host lost the native pointer grab. Forwarded to the browser as
+    /// `SendCaptureLostEvent`; the caller is responsible for clearing its own
+    /// held-button state, and must not also synthesize a mouse-up.
+    CaptureLost,
+}
+
+/// Where a hosted browser view sits on the physical desktop. Mirrors
+/// [`sphere_webview::osr::OsrScreenGeometry`] so callers outside the
+/// `builtin-plugin-editor` feature still compile.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewScreenGeometry {
+    /// Physical screen coordinates of the browser view's top-left pixel.
+    pub view_origin_physical: (i32, i32),
+    /// The real display's bounds in DIP.
+    pub monitor_rect_dip: ViewRect,
+    /// The DIP screen rectangle popups must stay inside.
+    pub available_rect_dip: ViewRect,
 }
 
 /// Process-unique identity for one concrete editor window.
@@ -720,6 +737,8 @@ mod imp {
 
     pub fn set_view_bounds(_view_id: ViewId, _rect: ViewRect, _scale_factor: f32) {}
 
+    pub fn set_view_screen_geometry(_view_id: ViewId, _geometry: super::ViewScreenGeometry) {}
+
     pub fn close_view(_view_id: ViewId) {}
 
     pub fn take_view_events(_view_id: ViewId) -> Vec<ViewEvent> {
@@ -762,6 +781,7 @@ mod imp {
     use super::{
         origin_for_plugin_id, AcceleratedFrameSink, EditorInput, EditorKey, EditorKeyKind,
         EditorModifiers, EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect,
+        ViewScreenGeometry,
     };
 
     struct HostedView {
@@ -772,6 +792,10 @@ mod imp {
         lifecycle: BrowserLifecycle,
         open: PendingOpen,
         bounds: PendingBounds,
+        /// Last desktop placement pushed to the surface. Retained so a browser
+        /// recreated for accelerated-copy fallback starts on the display it was
+        /// already on rather than reporting an unresolved screen.
+        screen_geometry: ViewScreenGeometry,
         opened_at: std::time::Instant,
         stability_reported: bool,
     }
@@ -786,6 +810,7 @@ mod imp {
         view_id: ViewId,
         reopen: PendingOpen,
         bounds: PendingBounds,
+        screen_geometry: ViewScreenGeometry,
         cancel_reopen: bool,
         timeout_reported: bool,
     }
@@ -845,6 +870,10 @@ mod imp {
     struct PendingViewCommands {
         open: Option<PendingOpen>,
         bounds: Option<PendingBounds>,
+        /// Desktop placement, coalesced separately from `bounds`: dragging the
+        /// window changes where the view is on screen without changing its
+        /// size, and a DPI change does both.
+        screen_geometry: Option<ViewScreenGeometry>,
         close: bool,
     }
 
@@ -863,6 +892,9 @@ mod imp {
         /// but must never try to borrow or call CEF synchronously.
         static COMMANDS: RefCell<HashMap<ViewId, PendingViewCommands>> = RefCell::new(HashMap::new());
         static EVENTS: RefCell<HashMap<ViewId, Vec<ViewEvent>>> = RefCell::new(HashMap::new());
+        /// Per-view `(accelerated, software)` paint counts already published to
+        /// the OSR profiler. See `mirror_paint_counters`.
+        static MIRRORED_PAINTS: RefCell<HashMap<ViewId, (u64, u64)>> = RefCell::new(HashMap::new());
         static PUMPING: Cell<bool> = const { Cell::new(false) };
         /// Editor windows tick independently, but CEF owns one process-wide
         /// message loop. Coalesce near-simultaneous calls so N open plugin
@@ -1355,6 +1387,19 @@ mod imp {
         });
     }
 
+    /// Coalesce a desktop-placement update for the next pump. Applied before
+    /// any bounds change in the same tick, so a browser that is both moving and
+    /// resizing re-reads screen info against the placement it is landing on.
+    pub fn set_view_screen_geometry(view_id: ViewId, geometry: ViewScreenGeometry) {
+        COMMANDS.with(|commands| {
+            let mut commands = commands.borrow_mut();
+            let pending = commands.entry(view_id).or_default();
+            if !pending.close {
+                pending.screen_geometry = Some(geometry);
+            }
+        });
+    }
+
     /// Logical size to hand an off-screen browser for a physical rect measured
     /// at `scale_factor`. Clamped to at least one pixel: a zero-sized view rect
     /// makes Chromium drop the browser's compositor frame entirely.
@@ -1504,7 +1549,60 @@ mod imp {
             },
             EditorInput::Key(key) => OsrInput::Key(to_osr_key(key)),
             EditorInput::Focus(focused) => OsrInput::Focus(focused),
+            EditorInput::CaptureLost => OsrInput::CaptureLost,
         }
+    }
+
+    fn to_osr_rect(rect: ViewRect) -> sphere_webview::osr::OsrRect {
+        sphere_webview::osr::OsrRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+
+    fn to_osr_screen_geometry(
+        geometry: ViewScreenGeometry,
+    ) -> sphere_webview::osr::OsrScreenGeometry {
+        sphere_webview::osr::OsrScreenGeometry {
+            view_origin_physical: geometry.view_origin_physical,
+            monitor_rect_dip: to_osr_rect(geometry.monitor_rect_dip),
+            available_rect_dip: to_osr_rect(geometry.available_rect_dip),
+        }
+    }
+
+    /// Mirror each hosted surface's paint counters into the shared OSR
+    /// profiler.
+    ///
+    /// Called from the pump rather than from the paint callback: `SphereWebView`
+    /// deliberately has no GPUI dependency, and the producer's critical path
+    /// should not be taking the profiler's lock. Per-view deltas are tracked so
+    /// closing an editor retires its history instead of stalling the totals.
+    fn mirror_paint_counters(host: &Host) {
+        use gpui::osr_profile::{self, Counter};
+        if !osr_profile::enabled() {
+            return;
+        }
+        MIRRORED_PAINTS.with(|mirrored| {
+            let Ok(mut mirrored) = mirrored.try_borrow_mut() else {
+                return;
+            };
+            for (view_id, hosted) in &host.views {
+                let Some(surface) = hosted.view.osr_surface() else {
+                    continue;
+                };
+                let (accelerated, software) = surface.paint_counts();
+                let seen = mirrored.entry(*view_id).or_insert((0, 0));
+                osr_profile::count(
+                    Counter::AcceleratedPaints,
+                    accelerated.saturating_sub(seen.0),
+                );
+                osr_profile::count(Counter::SoftwarePaints, software.saturating_sub(seen.1));
+                *seen = (accelerated, software);
+            }
+            mirrored.retain(|view_id, _| host.views.contains_key(view_id));
+        });
     }
 
     /// Queue a close. Close dominates an unprocessed open/resize for this unique
@@ -1657,10 +1755,11 @@ mod imp {
                         });
                         // Off-screen: CEF lays out in logical pixels and paints
                         // physical ones into the surface the client owns.
+                        let screen_geometry = pending.screen_geometry.unwrap_or_default();
                         let surface = Some({
                             let (width, height) =
                                 logical_size(rect, bounds_command.scale_factor);
-                            if let Some(sink) = open.accelerated_sink.clone() {
+                            let surface = if let Some(sink) = open.accelerated_sink.clone() {
                                 OsrSurface::new_accelerated(
                                     width,
                                     height,
@@ -1669,7 +1768,13 @@ mod imp {
                                 )
                             } else {
                                 OsrSurface::new(width, height, bounds_command.scale_factor)
-                            }
+                            };
+                            // Placement must be in place before the browser
+                            // exists: Chromium queries `GetScreenInfo` during
+                            // creation, and there is no notification that can
+                            // retroactively fix the screen the page first sees.
+                            surface.set_screen_geometry(to_osr_screen_geometry(screen_geometry));
+                            surface
                         });
                         let (mut client, lifecycle) =
                             plugin_browser_client_with_surface(&url, surface.clone());
@@ -1717,6 +1822,7 @@ mod imp {
                                         lifecycle,
                                         open,
                                         bounds: bounds_command,
+                                        screen_geometry,
                                         opened_at: std::time::Instant::now(),
                                         stability_reported: false,
                                     },
@@ -1746,6 +1852,19 @@ mod imp {
                 }
 
                 if !opened_now {
+                    // Placement first: `NotifyScreenInfoChanged` makes Chromium
+                    // re-read the handler synchronously, so the surface has to
+                    // already describe where the view has landed.
+                    let mut screen_info_stale = false;
+                    if let Some(geometry) = pending.screen_geometry {
+                        if let Some(hosted) = host.views.get_mut(&view_id) {
+                            hosted.screen_geometry = geometry;
+                            if let Some(surface) = hosted.view.osr_surface() {
+                                screen_info_stale =
+                                    surface.set_screen_geometry(to_osr_screen_geometry(geometry));
+                            }
+                        }
+                    }
                     if let Some(PendingBounds { rect, scale_factor }) = pending.bounds {
                         if let Some(hosted) = host.views.get_mut(&view_id) {
                             hosted.bounds = PendingBounds { rect, scale_factor };
@@ -1755,13 +1874,29 @@ mod imp {
                             let bounds = match hosted.view.osr_surface() {
                                 Some(surface) => {
                                     let (width, height) = logical_size(rect, scale_factor);
-                                    surface.set_view_size(width, height, scale_factor);
+                                    // Surface first, notifications after — CEF
+                                    // reads back through the render handler from
+                                    // inside both calls.
+                                    let change =
+                                        surface.set_view_size(width, height, scale_factor);
+                                    screen_info_stale |= change.scale_changed;
                                     WindowBounds::new(0, 0, width, height)
                                 }
                                 None => WindowBounds::new(rect.x, rect.y, rect.width, rect.height),
                             };
                             if let Ok(bounds) = bounds {
+                                // `set_bounds` already issues `WasResized`, which
+                                // re-reads the view rect but *not* screen info.
                                 let _ = hosted.view.set_bounds(bounds);
+                            }
+                        }
+                    }
+                    if screen_info_stale {
+                        if let Some(hosted) = host.views.get(&view_id) {
+                            if let Err(error) = hosted.view.notify_screen_info_changed() {
+                                eprintln!(
+                                    "[plugin-bridge] notify_screen_info_changed failed view_id={view_id:?} err={error}"
+                                );
                             }
                         }
                     }
@@ -1769,6 +1904,7 @@ mod imp {
             }
 
             let _ = host.runtime.do_message_loop_work();
+            mirror_paint_counters(host);
 
             // CEF cannot switch an existing browser from shared textures to
             // software OnPaint. If the synchronous D3D11 copy failed (adapter
@@ -1793,6 +1929,7 @@ mod imp {
                 let mut reopen = hosted.open.clone();
                 reopen.accelerated_sink = None;
                 let bounds = hosted.bounds;
+                let screen_geometry = hosted.screen_geometry;
                 let _ = hosted.view.close(true);
                 host.fallback_closing_views.push(FallbackClosingView {
                     closing: ClosingView {
@@ -1802,6 +1939,7 @@ mod imp {
                     view_id,
                     reopen,
                     bounds,
+                    screen_geometry,
                     cancel_reopen: false,
                     timeout_reported: false,
                 });
@@ -1884,6 +2022,7 @@ mod imp {
                             fallback.view_id,
                             fallback.reopen,
                             fallback.bounds,
+                            fallback.screen_geometry,
                         ));
                     }
                 } else {
@@ -1907,11 +2046,15 @@ mod imp {
         if !fallback_reopens.is_empty() {
             COMMANDS.with(|commands| {
                 let mut commands = commands.borrow_mut();
-                for (view_id, open, bounds) in fallback_reopens {
+                for (view_id, open, bounds, screen_geometry) in fallback_reopens {
                     let pending = commands.entry(view_id).or_default();
                     if !pending.close {
                         pending.open = Some(open);
                         pending.bounds = Some(bounds);
+                        // Without this the replacement browser would come up
+                        // reporting an unresolved screen until the window next
+                        // moved, so its first popup would be misplaced.
+                        pending.screen_geometry = Some(screen_geometry);
                     }
                 }
             });
@@ -1964,8 +2107,8 @@ pub use imp::shutdown;
 pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, preload, pump,
     pump_after_input, reload_view, send_to_view, send_view_input, set_view_bounds,
-    take_global_play_pause_requests, take_inbound, take_view_events, view_frame_generation,
-    view_uses_accelerated_osr, with_view_frame,
+    set_view_screen_geometry, take_global_play_pause_requests, take_inbound, take_view_events,
+    view_frame_generation, view_uses_accelerated_osr, with_view_frame,
 };
 
 #[cfg(test)]

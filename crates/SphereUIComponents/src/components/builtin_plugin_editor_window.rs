@@ -32,8 +32,8 @@ use gpui::{
 };
 
 use crate::components::builtin_plugin_editor::{
-    self as host, EditorInput, EditorKeyKind, HostAvailability, ViewEvent, ViewId, ViewRect,
-    OFFSCREEN_HOSTING,
+    self as host, EditorInput, EditorKeyKind, EditorMouseButton, HostAvailability, ViewEvent,
+    ViewId, ViewRect, ViewScreenGeometry, OFFSCREEN_HOSTING,
 };
 use crate::components::builtin_plugin_editor_surface::{
     editor_char_keys, editor_key, editor_mouse_button, OffscreenSurface,
@@ -613,6 +613,21 @@ impl BuiltinEditorHostOps {
 /// thread; CEF coalesces its own work internally.
 const PUMP_INTERVAL: Duration = Duration::from_millis(8);
 
+/// How long the editor keeps redrawing at display rate after the browser's most
+/// recent frame.
+///
+/// The browser is a *producer*, not this window's clock. While it is producing,
+/// the window schedules its own redraws through `request_animation_frame`, so
+/// presents land on the display's cadence and each one samples whatever CEF has
+/// most recently copied into GPU memory — never waiting for it. Once the
+/// browser goes quiet the linger expires and the window falls back to
+/// event-driven redraws, so an idle editor costs nothing.
+///
+/// Long enough to bridge a dropped browser frame or two without visibly
+/// stalling a knob drag, short enough that an idle editor stops within a few
+/// frames.
+const ANIMATION_LINGER: Duration = Duration::from_millis(200);
+
 /// Pump ticks between `futureboard.hostStatus` pushes — ~1 Hz at
 /// [`PUMP_INTERVAL`]. Sample rate, block size and tempo all change rarely
 /// enough that a footer reading them does not need a faster leg.
@@ -697,6 +712,9 @@ pub struct BuiltinPluginEditorWindow {
     /// Off-screen presentation state: stable accelerated GPU planes on Windows,
     /// or the latest software frame on fallback and other platforms.
     surface: OffscreenSurface,
+    /// When CEF last published a frame. Drives the redraw policy: see
+    /// [`ANIMATION_LINGER`].
+    last_browser_frame_at: Option<Instant>,
     /// Keyboard focus for the off-screen browser region.
     focus: FocusHandle,
     /// How many render passes reached `attach`. Reported in the attach-timeout
@@ -713,6 +731,16 @@ pub struct BuiltinPluginEditorWindow {
     /// precision trackpad — which reports a fraction of a line per event —
     /// would otherwise round to zero forever and never scroll the page.
     scroll_carry: Point<f32>,
+    /// Click counting scoped to the browser region. Replaces GPUI's
+    /// window-global count, which mixes in chrome clicks.
+    click_tracker: BrowserClickTracker,
+    /// Desktop placement last pushed to the host, so an unchanged window does
+    /// not re-notify CEF every render pass.
+    screen_geometry: Option<ViewScreenGeometry>,
+    /// Window activation, watched so a deactivating window releases the
+    /// browser's pointer grab. `None` until the first render pass installs it —
+    /// `new()` has no `Window` to observe.
+    activation_observer: Option<gpui::Subscription>,
     /// Live-host operations (param forwarding, NAM load, telemetry polls)
     /// injected by the opener. Empty until the engine/bridge is up; requests
     /// arriving before then are dropped.
@@ -775,11 +803,15 @@ impl BuiltinPluginEditorWindow {
             attached_at: None,
             bridge_ready_retries: 0,
             surface: OffscreenSurface::default(),
+            last_browser_frame_at: None,
             focus: cx.focus_handle(),
             attach_attempts: 0,
             last_scale: 1.0,
             pointer_left: true,
             scroll_carry: Point::default(),
+            click_tracker: BrowserClickTracker::new(),
+            screen_geometry: None,
+            activation_observer: None,
             host_ops,
             telemetry_tick: 0,
             spectrum_seq: 0,
@@ -1581,14 +1613,28 @@ impl BuiltinPluginEditorWindow {
             }
         }
 
-        // Off-screen: a newly painted frame is the only thing that makes the
-        // editor's own animation (meters, knob drags) reach the screen, so the
-        // window has to repaint whenever CEF has produced one.
+        // Off-screen: pick up whatever the browser has produced since the last
+        // tick. This only records *that* a frame exists — the frame itself is
+        // already in GPU memory, and which compositor frame samples it is the
+        // redraw policy's business, not the pump's.
+        //
+        // The notify here is a wake-up from idle, not the animation clock: once
+        // the window is redrawing, `render` keeps it going at display rate (see
+        // `ANIMATION_LINGER`). Driving every frame from this timer instead made
+        // the pump an unaligned second sampling stage between the browser and
+        // the display, which is what turned a steady producer into visible
+        // judder.
         if OFFSCREEN_HOSTING
             && matches!(self.status, Status::Attaching | Status::Attached)
             && self.surface.sync(self.view_id)
         {
-            cx.notify();
+            let was_idle = self
+                .last_browser_frame_at
+                .is_none_or(|at| at.elapsed() >= ANIMATION_LINGER);
+            self.last_browser_frame_at = Some(Instant::now());
+            if was_idle {
+                cx.notify();
+            }
         }
 
         if let Status::WaitingForHandle { ticks } = self.status {
@@ -1797,6 +1843,9 @@ impl BuiltinPluginEditorWindow {
     /// confirms it processed the close, preserving the native parent HWND for
     /// the browser's entire lifetime.
     pub(crate) fn request_close(&mut self, cx: &mut Context<Self>) {
+        // Before anything is torn down: a close mid-drag would otherwise leave
+        // the page holding a pointer capture it can never release.
+        self.handle_capture_lost();
         match self.status {
             Status::Closing | Status::Closed => return,
             Status::WaitingForHandle { .. } | Status::Failed(_) => {
@@ -1868,6 +1917,176 @@ fn clamp_click_count(click_count: usize) -> i32 {
     click_count.clamp(1, 3) as i32
 }
 
+/// Platform double-click thresholds, in the units the platform defines them in.
+#[derive(Debug, Clone, Copy)]
+struct DoubleClickSettings {
+    interval: Duration,
+    /// Half-extent of the tolerance box, in **physical** pixels — the space
+    /// Windows defines `SM_CXDOUBLECLK`/`SM_CYDOUBLECLK` in.
+    tolerance_physical: (i32, i32),
+}
+
+impl Default for DoubleClickSettings {
+    fn default() -> Self {
+        // Win32 defaults, used verbatim on platforms with no equivalent query.
+        Self {
+            interval: Duration::from_millis(500),
+            tolerance_physical: (4, 4),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_double_click_settings() -> DoubleClickSettings {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
+    };
+    // SAFETY: all three are pure reads of process-wide user settings.
+    let (interval_ms, width, height) = unsafe {
+        (
+            GetDoubleClickTime(),
+            GetSystemMetrics(SM_CXDOUBLECLK),
+            GetSystemMetrics(SM_CYDOUBLECLK),
+        )
+    };
+    let fallback = DoubleClickSettings::default();
+    DoubleClickSettings {
+        interval: if interval_ms == 0 {
+            fallback.interval
+        } else {
+            Duration::from_millis(u64::from(interval_ms))
+        },
+        tolerance_physical: (
+            if width > 0 {
+                width
+            } else {
+                fallback.tolerance_physical.0
+            },
+            if height > 0 {
+                height
+            } else {
+                fallback.tolerance_physical.1
+            },
+        ),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_double_click_settings() -> DoubleClickSettings {
+    DoubleClickSettings::default()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LastBrowserClick {
+    button: EditorMouseButton,
+    at: Instant,
+    position_physical: (i32, i32),
+    /// Count this press reported. The next press in the sequence increments it,
+    /// which is what makes a triple click reach 3 rather than falling back to 2
+    /// once the intervening release has been consumed.
+    count: i32,
+}
+
+/// Click counting scoped to **this browser region**.
+///
+/// GPUI's `MouseDownEvent::click_count` comes from a window-global
+/// `ClickState` that every part of the shell feeds — titlebar, instance
+/// sidebar and browser alike. Forwarding it verbatim means a sidebar click
+/// followed quickly by a browser click arrives at Blink as `clickCount = 2`,
+/// and Blink turns that into a `dblclick` on a control the user clicked once.
+/// Plugin editors bind double-click to "reset to default", so that is a
+/// destructive misfire, not a cosmetic one.
+///
+/// This tracker only ever sees presses that landed inside the browser, and is
+/// explicitly reset by [`Self::note_click_outside`] when one lands anywhere
+/// else. It also remembers the count each press reported so the matching
+/// release carries the same number — GPUI's `MouseUpEvent` reuses whatever the
+/// last press left behind, which for a release that follows a chrome press is
+/// simply stale.
+///
+/// Thresholds are read once per editor window. A user who changes their
+/// double-click speed mid-session gets the new value on the next editor they
+/// open, which is a reasonable trade for not re-querying on every press.
+struct BrowserClickTracker {
+    settings: DoubleClickSettings,
+    last: Option<LastBrowserClick>,
+    /// Count reported by the still-held press for left/middle/right.
+    active: [Option<i32>; 3],
+}
+
+impl BrowserClickTracker {
+    fn new() -> Self {
+        Self {
+            settings: platform_double_click_settings(),
+            last: None,
+            active: [None; 3],
+        }
+    }
+
+    fn slot(button: EditorMouseButton) -> usize {
+        match button {
+            EditorMouseButton::Left => 0,
+            EditorMouseButton::Middle => 1,
+            EditorMouseButton::Right => 2,
+        }
+    }
+
+    /// A press landed outside the browser region. The next press inside it
+    /// starts a fresh sequence.
+    fn note_click_outside(&mut self) {
+        if self.last.take().is_some() {
+            gpui::osr_profile::count(gpui::osr_profile::Counter::InputClickResetOutside, 1);
+        }
+    }
+
+    /// Click count for a press inside the browser at `position_physical`.
+    fn press(
+        &mut self,
+        button: EditorMouseButton,
+        position_physical: (i32, i32),
+        now: Instant,
+    ) -> i32 {
+        let continued_from = self.last.filter(|last| {
+            last.button == button
+                && now.duration_since(last.at) <= self.settings.interval
+                && (last.position_physical.0 - position_physical.0).abs()
+                    <= self.settings.tolerance_physical.0
+                && (last.position_physical.1 - position_physical.1).abs()
+                    <= self.settings.tolerance_physical.1
+        });
+        // Saturating at 3 rather than wrapping to 1: CEF's contract is 1..=3,
+        // and a user holding a rapid click in place should keep getting the
+        // triple-click meaning rather than cycling back to single.
+        let count = continued_from
+            .map(|last| (last.count + 1).clamp(1, 3))
+            .unwrap_or(1);
+        self.last = Some(LastBrowserClick {
+            button,
+            at: now,
+            position_physical,
+            count,
+        });
+        self.active[Self::slot(button)] = Some(count);
+        if count > 1 {
+            gpui::osr_profile::count(gpui::osr_profile::Counter::InputMultiClick, 1);
+        }
+        count
+    }
+
+    /// Click count for the release matching the outstanding press.
+    fn release(&mut self, button: EditorMouseButton) -> i32 {
+        self.active[Self::slot(button)].take().unwrap_or(1)
+    }
+
+    /// Drop every outstanding press. Called on capture loss so a gesture the
+    /// page never got to finish cannot contribute to the next click's count.
+    fn reset(&mut self) {
+        self.last = None;
+        self.active = [None; 3];
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn native_hwnd(window: &Window) -> Option<u64> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1892,11 +2111,41 @@ impl Render for BuiltinPluginEditorWindow {
         // is the first point in the frame where a `Window` exists to free them.
         self.surface.release_stale(window, cx);
 
+        // Animated mode: the browser produced something recently, so keep the
+        // window on the display's own cadence. `request_animation_frame` hangs
+        // the next redraw off the platform's vsync-driven frame request, which
+        // is what makes the present interval steady rather than a beat between
+        // the browser's rate, the pump timer and the refresh rate.
+        //
+        // Static mode is the absence of this call: nothing scheduled, nothing
+        // drawn, until a real change wakes the window up again.
+        if OFFSCREEN_HOSTING
+            && self
+                .last_browser_frame_at
+                .is_some_and(|at| at.elapsed() < ANIMATION_LINGER)
+        {
+            window.request_animation_frame();
+        }
+
+        // A deactivating window keeps its held-button state unless something
+        // watches for it; `new()` had no `Window` to observe, so install here.
+        if OFFSCREEN_HOSTING && self.activation_observer.is_none() {
+            self.activation_observer =
+                Some(cx.observe_window_activation(window, |this, window, _cx| {
+                    if !window.is_window_active() {
+                        this.handle_capture_lost();
+                    }
+                }));
+        }
+
         match &self.status {
             Status::WaitingForHandle { .. } => self.attach(window, bounds, cx),
             Status::Attaching | Status::Attached => self.resync_bounds(window, bounds),
             Status::Closing | Status::Closed | Status::Failed(_) => {}
         }
+        // After `resync_bounds`, so a resize that also moved the window reports
+        // the placement it actually landed on.
+        self.resync_screen_geometry(window);
         if matches!(self.status, Status::Closed) {
             cx.defer_in(window, |_this, window, _cx| window.remove_window());
         }
@@ -1940,6 +2189,17 @@ impl Render for BuiltinPluginEditorWindow {
             .capture_any_mouse_down(move |_event, window, cx| {
                 focus_on_pointer.focus(window, cx);
             })
+            // Capture phase, so this runs before the browser region's own
+            // bubble-phase press handler: a press on the titlebar or the
+            // instance sidebar breaks any click sequence the browser had going,
+            // which is what stops "sidebar click, then knob click" from
+            // reaching Blink as a double click.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                let (x, y) = this.to_view_point(event.position);
+                if !this.view_contains(x, y) {
+                    this.click_tracker.note_click_outside();
+                }
+            }))
             .capture_key_down(transport_claim)
             .child(
                 // Shared external-dialog titlebar: gives this window the same
@@ -2085,6 +2345,134 @@ impl BuiltinPluginEditorWindow {
         host::send_view_input(self.view_id, input);
     }
 
+    /// The host lost the native pointer grab.
+    ///
+    /// Sources: the window deactivating (Alt+Tab, another app, a native menu),
+    /// and the editor closing. Each one leaves the page mid-gesture with a
+    /// release it will never receive, and leaves this side believing a button
+    /// is still down — which suppresses the leave flag forever and makes every
+    /// later event carry a phantom button bit.
+    ///
+    /// Idempotent: with nothing held there is no gesture to end, so a repeated
+    /// deactivation costs nothing and cannot produce a second CEF event.
+    fn handle_capture_lost(&mut self) {
+        if !self.surface.clear_buttons() {
+            self.click_tracker.reset();
+            return;
+        }
+        self.click_tracker.reset();
+        let received = gpui::osr_profile::epoch_nanos();
+        let seq = gpui::osr_profile::next_input_seq();
+        // Deliberately *not* followed by a synthetic mouse-up: CEF's capture
+        // lost already ends Blink's captured pointer, and a release on top of
+        // it would commit the drag at whatever position the cursor drifted to.
+        self.send_input(EditorInput::CaptureLost);
+        // Recorded in the same sequence as the clicks, so a press that seems to
+        // have gone missing can be correlated with the capture loss that ate it.
+        self.trace_input(
+            seq,
+            gpui::osr_profile::InputKind::CaptureLost,
+            None,
+            0,
+            Point::default(),
+            (0, 0),
+            received,
+        );
+        gpui::osr_profile::count(gpui::osr_profile::Counter::InputCaptureLost, 1);
+        // The pointer is no longer ours to track; let the next real move
+        // re-establish hover instead of inheriting the drag's suppressed state.
+        self.pointer_left = true;
+    }
+
+    /// Recompute where the browser view sits on the desktop, pushing it to the
+    /// host only when it actually moved.
+    ///
+    /// Called every render pass because a window drag changes the view's screen
+    /// origin without changing its size, so the bounds path would never notice.
+    fn resync_screen_geometry(&mut self, window: &Window) {
+        if !OFFSCREEN_HOSTING || !matches!(self.status, Status::Attaching | Status::Attached) {
+            return;
+        }
+        let Some(geometry) = self.resolve_screen_geometry(window) else {
+            return;
+        };
+        if self.screen_geometry == Some(geometry) {
+            return;
+        }
+        self.screen_geometry = Some(geometry);
+        host::set_view_screen_geometry(self.view_id, geometry);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn resolve_screen_geometry(&self, window: &Window) -> Option<ViewScreenGeometry> {
+        use windows::Win32::Foundation::{HWND, POINT};
+        use windows::Win32::Graphics::Gdi::{
+            ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO,
+            MONITOR_DEFAULTTONEAREST,
+        };
+
+        // The browser fills the content child's client area, so that HWND's
+        // origin *is* the view origin. Falling back to the shell would be off
+        // by the sidebar and header.
+        let content_hwnd = self.content.as_ref().filter(|c| c.is_valid())?.hwnd();
+        let hwnd = HWND(content_hwnd as *mut core::ffi::c_void);
+
+        let mut origin = POINT { x: 0, y: 0 };
+        // SAFETY: `hwnd` was validated above and `origin` is a live local.
+        if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
+            return None;
+        }
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `MonitorFromWindow` with DEFAULTTONEAREST always returns a
+        // monitor for a valid window, and `cbSize` is set as documented.
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+            return None;
+        }
+
+        let scale = window.scale_factor().max(f32::EPSILON);
+        let to_dip = |value: i32| (value as f32 / scale).round() as i32;
+        let rect = self.last_rect?;
+
+        // The display, in DIP, for `window.screen`.
+        let monitor_rect_dip = ViewRect {
+            x: to_dip(info.rcMonitor.left),
+            y: to_dip(info.rcMonitor.top),
+            width: to_dip(info.rcMonitor.right - info.rcMonitor.left),
+            height: to_dip(info.rcMonitor.bottom - info.rcMonitor.top),
+        };
+        // The view, in DIP screen space, intersected with the work area: this
+        // is the region popups must stay inside, because it is the only region
+        // this window composites them into. See `OsrScreenGeometry`.
+        let view_left = origin.x.max(info.rcWork.left);
+        let view_top = origin.y.max(info.rcWork.top);
+        let view_right = origin.x.saturating_add(rect.width).min(info.rcWork.right);
+        let view_bottom = origin.y.saturating_add(rect.height).min(info.rcWork.bottom);
+        let available_rect_dip = ViewRect {
+            x: to_dip(view_left),
+            y: to_dip(view_top),
+            width: to_dip((view_right - view_left).max(0)),
+            height: to_dip((view_bottom - view_top).max(0)),
+        };
+
+        Some(ViewScreenGeometry {
+            view_origin_physical: (origin.x, origin.y),
+            monitor_rect_dip,
+            available_rect_dip,
+        })
+    }
+
+    /// Non-Windows off-screen hosting has no content child to anchor to, so the
+    /// render handler keeps describing the view as the screen.
+    #[cfg(not(target_os = "windows"))]
+    fn resolve_screen_geometry(&self, _window: &Window) -> Option<ViewScreenGeometry> {
+        None
+    }
+
     /// Let CEF consume a click/key/wheel event as soon as this GPUI handler has
     /// unwound. Pumping inline is unsafe because Chromium may re-enter GPUI.
     fn schedule_input_pump(cx: &mut Context<Self>) {
@@ -2143,6 +2531,10 @@ impl BuiltinPluginEditorWindow {
             modifiers: self.surface.modifiers(modifiers),
             leaving,
         });
+        // Counted, never traced: a 4K high-refresh mouse produces thousands of
+        // these per second and recording each one would dominate the thread the
+        // measurement exists to exonerate.
+        gpui::osr_profile::count(gpui::osr_profile::Counter::InputMouseMove, 1);
     }
 
     /// Whether a view-space point is inside the browser rect. Uses the logical
@@ -2167,6 +2559,8 @@ impl BuiltinPluginEditorWindow {
         let Some(button) = editor_mouse_button(event.button) else {
             return;
         };
+        let received = gpui::osr_profile::epoch_nanos();
+        let seq = gpui::osr_profile::next_input_seq();
         // The page owns the keyboard while the pointer is in it; without this
         // the browser never sees a focused document and text fields stay dead.
         window.focus(&self.focus, cx);
@@ -2177,14 +2571,31 @@ impl BuiltinPluginEditorWindow {
         // against a pointer it already believes is over the control.
         self.forward_pointer_position(x, y, event.modifiers, true);
         self.surface.set_button(button, true);
+        // Browser-scoped, not GPUI's window-global count. See
+        // `BrowserClickTracker`.
+        let click_count = clamp_click_count(
+            self.click_tracker
+                .press(button, self.to_physical(event.position), Instant::now())
+                .max(1) as usize,
+        );
         self.send_input(EditorInput::MouseButton {
             x,
             y,
             button,
             pressed: true,
-            click_count: clamp_click_count(event.click_count),
+            click_count,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        self.trace_input(
+            seq,
+            gpui::osr_profile::InputKind::MouseDown,
+            Some(button),
+            click_count,
+            event.position,
+            (x, y),
+            received,
+        );
+        gpui::osr_profile::count(gpui::osr_profile::Counter::InputMouseDown, 1);
         Self::schedule_input_pump(cx);
     }
 
@@ -2197,22 +2608,85 @@ impl BuiltinPluginEditorWindow {
         let Some(button) = editor_mouse_button(event.button) else {
             return;
         };
+        let received = gpui::osr_profile::epoch_nanos();
+        let seq = gpui::osr_profile::next_input_seq();
         let (x, y) = self.to_view_point(event.position);
         // Clear the held-button bit *before* sending, so the event CEF sees
         // reports the state after the release, as a real platform event would.
         self.surface.set_button(button, false);
+        // The count the matching press reported, so down and up agree. GPUI's
+        // `MouseUpEvent::click_count` is whatever the last press anywhere in
+        // the window left behind.
+        let click_count = clamp_click_count(self.click_tracker.release(button).max(1) as usize);
         self.send_input(EditorInput::MouseButton {
             x,
             y,
             button,
             pressed: false,
-            click_count: clamp_click_count(event.click_count),
+            click_count,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        self.trace_input(
+            seq,
+            gpui::osr_profile::InputKind::MouseUp,
+            Some(button),
+            click_count,
+            event.position,
+            (x, y),
+            received,
+        );
+        gpui::osr_profile::count(gpui::osr_profile::Counter::InputMouseUp, 1);
         // A drag released outside the rect suppressed the leave for the whole
         // gesture; now that no button is held, settle the hover state.
         self.forward_pointer_position(x, y, event.modifiers, false);
         Self::schedule_input_pump(cx);
+    }
+
+    /// Window-space logical point → window-space **physical** point, the space
+    /// the platform defines its double-click tolerance in.
+    fn to_physical(&self, position: Point<Pixels>) -> (i32, i32) {
+        let scale = self.last_scale.max(f32::EPSILON);
+        let x: f32 = position.x.into();
+        let y: f32 = position.y.into();
+        ((x * scale).round() as i32, (y * scale).round() as i32)
+    }
+
+    /// Record one discrete input event's journey through every coordinate
+    /// space. Inert unless `FUTUREBOARD_OSR_PROFILING` or
+    /// `FUTUREBOARD_OSR_INPUT_TRACE` is set.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_input(
+        &self,
+        seq: u64,
+        kind: gpui::osr_profile::InputKind,
+        button: Option<EditorMouseButton>,
+        click_count: i32,
+        gpui_position: Point<Pixels>,
+        cef_view: (i32, i32),
+        received_nanos: u64,
+    ) {
+        if !gpui::osr_profile::input_enabled() {
+            return;
+        }
+        gpui::osr_profile::record_input(gpui::osr_profile::InputRecord {
+            seq,
+            kind,
+            button: button.map(|button| match button {
+                EditorMouseButton::Left => "left",
+                EditorMouseButton::Middle => "middle",
+                EditorMouseButton::Right => "right",
+            }),
+            click_count,
+            native_physical: self.to_physical(gpui_position),
+            gpui_logical: (gpui_position.x.into(), gpui_position.y.into()),
+            cef_view,
+            scale_factor: self.last_scale,
+            received_nanos,
+            // Taken after `send_input` returned, so the span covers our
+            // translation plus the synchronous handoff into CEF — and nothing
+            // that happens inside Chromium afterwards.
+            dispatched_nanos: gpui::osr_profile::epoch_nanos(),
+        });
     }
 
     fn on_surface_scroll(
@@ -2240,6 +2714,8 @@ impl BuiltinPluginEditorWindow {
         if delta_x == 0 && delta_y == 0 {
             return;
         }
+        let received = gpui::osr_profile::epoch_nanos();
+        let seq = gpui::osr_profile::next_input_seq();
         // The browser's own pointer position drives which element the page
         // scrolls; a wheel that arrives with no preceding move (trackpad rest,
         // or the pointer re-entering over the same control) would otherwise be
@@ -2252,6 +2728,16 @@ impl BuiltinPluginEditorWindow {
             delta_y,
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        self.trace_input(
+            seq,
+            gpui::osr_profile::InputKind::Wheel,
+            None,
+            0,
+            event.position,
+            (x, y),
+            received,
+        );
+        gpui::osr_profile::count(gpui::osr_profile::Counter::InputWheel, 1);
         Self::schedule_input_pump(cx);
     }
 
@@ -2556,6 +3042,126 @@ mod tests {
         assert_eq!(clamp_click_count(1), 1);
         assert_eq!(clamp_click_count(3), 3);
         assert_eq!(clamp_click_count(9), 3);
+    }
+
+    /// Fixed thresholds so the tracker's behaviour does not depend on whatever
+    /// the developer's mouse control panel happens to say.
+    fn test_tracker() -> BrowserClickTracker {
+        BrowserClickTracker {
+            settings: DoubleClickSettings {
+                interval: Duration::from_millis(500),
+                tolerance_physical: (4, 4),
+            },
+            last: None,
+            active: [None; 3],
+        }
+    }
+
+    #[test]
+    fn a_lone_click_is_always_a_single_click() {
+        let mut tracker = test_tracker();
+        let now = Instant::now();
+        assert_eq!(tracker.press(EditorMouseButton::Left, (100, 100), now), 1);
+        assert_eq!(tracker.release(EditorMouseButton::Left), 1);
+    }
+
+    #[test]
+    fn a_repeat_in_place_counts_up_to_cefs_maximum() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        let mut expected = [1, 2, 3, 3, 3].into_iter();
+        for step in 0..5 {
+            let at = start + Duration::from_millis(step * 100);
+            let count = tracker.press(EditorMouseButton::Left, (100, 100), at);
+            assert_eq!(count, expected.next().expect("one per press"));
+            // The release must agree with the press it belongs to.
+            assert_eq!(tracker.release(EditorMouseButton::Left), count);
+        }
+    }
+
+    #[test]
+    fn a_slow_repeat_starts_a_new_sequence() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), start), 1);
+        tracker.release(EditorMouseButton::Left);
+        let late = start + Duration::from_millis(501);
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), late), 1);
+    }
+
+    #[test]
+    fn a_repeat_that_moved_too_far_starts_a_new_sequence() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), start), 1);
+        tracker.release(EditorMouseButton::Left);
+        let nearby = start + Duration::from_millis(50);
+        // Within tolerance on both axes.
+        assert_eq!(tracker.press(EditorMouseButton::Left, (14, 6), nearby), 2);
+        tracker.release(EditorMouseButton::Left);
+        // One pixel beyond it.
+        assert_eq!(tracker.press(EditorMouseButton::Left, (19, 6), nearby), 1);
+    }
+
+    #[test]
+    fn a_different_button_starts_a_new_sequence() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), start), 1);
+        tracker.release(EditorMouseButton::Left);
+        let soon = start + Duration::from_millis(20);
+        assert_eq!(tracker.press(EditorMouseButton::Right, (10, 10), soon), 1);
+    }
+
+    /// The defect this tracker exists to fix: GPUI's window-global click count
+    /// is fed by the titlebar and instance sidebar too, so a chrome click
+    /// followed quickly by a browser click reached Blink as a `dblclick` on a
+    /// control the user clicked exactly once.
+    #[test]
+    fn a_chrome_click_between_two_browser_clicks_breaks_the_sequence() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), start), 1);
+        tracker.release(EditorMouseButton::Left);
+
+        tracker.note_click_outside();
+
+        let soon = start + Duration::from_millis(20);
+        assert_eq!(
+            tracker.press(EditorMouseButton::Left, (10, 10), soon),
+            1,
+            "a sidebar click in between must not produce a double click"
+        );
+    }
+
+    /// A release whose press was never seen (capture stolen mid-gesture, or a
+    /// press that landed on chrome) must not inherit a stale count.
+    #[test]
+    fn an_unmatched_release_reports_a_single_click() {
+        let mut tracker = test_tracker();
+        assert_eq!(tracker.release(EditorMouseButton::Left), 1);
+
+        let start = Instant::now();
+        tracker.press(EditorMouseButton::Left, (10, 10), start);
+        tracker.press(EditorMouseButton::Left, (10, 10), start);
+        tracker.release(EditorMouseButton::Left);
+        assert_eq!(
+            tracker.release(EditorMouseButton::Left),
+            1,
+            "the outstanding press was already consumed"
+        );
+    }
+
+    #[test]
+    fn capture_loss_clears_every_outstanding_press() {
+        let mut tracker = test_tracker();
+        let start = Instant::now();
+        tracker.press(EditorMouseButton::Left, (10, 10), start);
+        tracker.reset();
+        assert_eq!(tracker.release(EditorMouseButton::Left), 1);
+        // And the interrupted gesture cannot contribute to the next count.
+        let soon = start + Duration::from_millis(20);
+        assert_eq!(tracker.press(EditorMouseButton::Left, (10, 10), soon), 1);
     }
 
     #[test]

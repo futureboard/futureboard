@@ -6,7 +6,8 @@ use windows::{
         Foundation::HANDLE,
         Graphics::{
             Direct3D11::{
-                D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+                D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
                 ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11ShaderResourceView,
                 ID3D11Texture2D,
             },
@@ -19,6 +20,7 @@ use windows::{
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
     PlatformAtlas, Point, Size,
+    osr_profile::{self, Counter, Stage},
 };
 
 pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>);
@@ -30,7 +32,19 @@ struct DirectXAtlasState {
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    /// Shared textures already opened on this device, keyed by the handle CEF
+    /// reported. Chromium cycles a small pool of OSR surfaces, so without this
+    /// every frame pays for a kernel-mode `OpenSharedResource1` and the
+    /// deferred destruction of the wrapper it returns. The caller still reads
+    /// `GetDesc` from the returned wrapper every frame, so a reused entry is
+    /// validated against the surface it actually points at.
+    shared_textures: FxHashMap<usize, ID3D11Texture2D>,
 }
+
+/// Upper bound on cached shared-texture opens. Chromium's OSR pool is a handful
+/// of surfaces per browser; this is generous enough to never evict in steady
+/// state and small enough that a leaked handle cannot grow without limit.
+const MAX_CACHED_SHARED_TEXTURES: usize = 16;
 
 struct DirectXAtlasTexture {
     id: AtlasTextureId,
@@ -50,6 +64,7 @@ impl DirectXAtlas {
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
             tiles_by_key: Default::default(),
+            shared_textures: Default::default(),
         }))
     }
 
@@ -74,6 +89,9 @@ impl DirectXAtlas {
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
         lock.tiles_by_key.clear();
+        // The cached sources belong to the device that just went away; keeping
+        // them would hand the replacement device textures it cannot copy from.
+        lock.shared_textures.clear();
     }
 }
 
@@ -145,12 +163,10 @@ impl PlatformAtlas for DirectXAtlas {
         }
 
         let mut lock = self.0.lock();
-        let device1: ID3D11Device1 = lock.device.cast()?;
-        let source: ID3D11Texture2D = unsafe {
-            device1.OpenSharedResource1(HANDLE(shared_handle as *mut core::ffi::c_void))?
-        };
+        let source = lock.open_shared_source(shared_handle)?;
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { source.GetDesc(&mut source_desc) };
+        lock.report_first_shared_texture(&source_desc);
         let source_right = source_origin.x.0.saturating_add(size.width.0);
         let source_bottom = source_origin.y.0.saturating_add(size.height.0);
         if source_origin.x.0 < 0
@@ -159,6 +175,10 @@ impl PlatformAtlas for DirectXAtlas {
             || source_bottom > source_desc.Height as i32
             || source_desc.SampleDesc.Count != 1
         {
+            // A cached open that no longer describes the surface CEF is talking
+            // about is worse than no cache at all: forget it so the next frame
+            // re-opens the handle rather than copying from a stale texture.
+            lock.shared_textures.remove(&shared_handle);
             anyhow::bail!(
                 "CEF shared texture metadata mismatch: source={}x{} rect=({}, {}) {}x{} samples={}",
                 source_desc.Width,
@@ -174,6 +194,7 @@ impl PlatformAtlas for DirectXAtlas {
             source_desc.Format,
             DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
         ) {
+            lock.shared_textures.remove(&shared_handle);
             anyhow::bail!(
                 "unsupported CEF shared texture format: {:?}",
                 source_desc.Format
@@ -190,6 +211,7 @@ impl PlatformAtlas for DirectXAtlas {
                 .allocate(size, AtlasTextureKind::Polychrome)
                 .ok_or_else(|| anyhow::anyhow!("failed to allocate CEF atlas tile"))?;
             lock.tiles_by_key.insert(key.clone(), tile);
+            osr_profile::count(Counter::TileAllocations, 1);
             tile
         };
         let destination = lock.texture(tile.texture_id).texture.clone();
@@ -197,6 +219,7 @@ impl PlatformAtlas for DirectXAtlas {
         drop(lock);
 
         unsafe {
+            let _copy = osr_profile::span(Stage::TextureCopy);
             context.CopySubresourceRegion(
                 &destination,
                 0,
@@ -214,9 +237,18 @@ impl PlatformAtlas for DirectXAtlas {
                     back: 1,
                 }),
             );
-            // Submit the copy while CEF's callback-scoped source handle is
-            // still valid. D3D11 retains the referenced resources until the
-            // immediate-context command has completed.
+        }
+        // Submit the copy while CEF still owns the surface it reads from.
+        //
+        // `Flush` only *submits*; it does not wait, and it does not make the
+        // cross-device read safe on its own. What it buys is that the copy is in
+        // the GPU queue before Chromium hands the same pool surface to its next
+        // frame. It also ends GPUI's current command batch, so it is measured
+        // separately: on a producer running at the display's own rate this is
+        // one extra submission per frame, and it is a candidate for removal if
+        // the numbers say it costs more than it protects.
+        unsafe {
+            let _flush = osr_profile::span(Stage::TextureFlush);
             context.Flush();
         }
         Ok(Some(tile))
@@ -224,6 +256,122 @@ impl PlatformAtlas for DirectXAtlas {
 }
 
 impl DirectXAtlasState {
+    /// Describe the first CEF surface this process ever imports.
+    ///
+    /// Everything here is fixed for the lifetime of a browser, so it is logged
+    /// once rather than measured.
+    ///
+    /// `SHARED_KEYEDMUTEX` is the field that decides whether the copy below is
+    /// even correct: a surface carrying that flag expects
+    /// `IDXGIKeyedMutex::AcquireSync`/`ReleaseSync` around every access. This
+    /// path does not take the mutex, so if the flag is set the copy races
+    /// Chromium's writes and the driver is absorbing it with stalls.
+    ///
+    /// **Adapter identity is reported, not inferred.** D3D11 has no
+    /// "cross-adapter" misc flag to test — that is a D3D12 heap property — and
+    /// a plain D3D11 shared handle cannot be opened on a different adapter at
+    /// all. So reaching this function already implies Chromium and GPUI agree
+    /// on the adapter; what is logged is *which* one, to be compared against
+    /// CEF's own GPU selection in `chrome://gpu`. A genuine mismatch surfaces
+    /// as `OpenSharedResource1` failing, which the caller reports as a copy
+    /// failure and which retires the browser to software OSR.
+    fn report_first_shared_texture(&self, desc: &D3D11_TEXTURE2D_DESC) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if REPORTED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        let keyed_mutex = desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32 != 0;
+        if keyed_mutex {
+            eprintln!(
+                "[osr-gpu] WARNING: CEF shared texture declares SHARED_KEYEDMUTEX but this copy \
+                 path does not Acquire/ReleaseSync. The copy is unsynchronised against Chromium's \
+                 writes; the driver is hiding it behind stalls."
+            );
+        }
+        if !osr_profile::enabled() {
+            return;
+        }
+        eprintln!(
+            "[osr-gpu] first accelerated frame: {}x{} format={:?} samples={} misc_flags=0x{:X} \
+             keyed_mutex={keyed_mutex} nt_handle={} gpui_adapter={} \
+             (compare against chrome://gpu's adapter for the CEF GPU process)",
+            desc.Width,
+            desc.Height,
+            desc.Format,
+            desc.SampleDesc.Count,
+            desc.MiscFlags,
+            desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 as u32 != 0,
+            self.adapter_identity(),
+        );
+    }
+
+    /// `LUID and description of the adapter GPUI's device runs on`, or a reason
+    /// it could not be resolved. Diagnostics only.
+    fn adapter_identity(&self) -> String {
+        use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
+        let resolve = || -> anyhow::Result<String> {
+            let dxgi_device: IDXGIDevice = self.device.cast()?;
+            let adapter: IDXGIAdapter = unsafe { dxgi_device.GetAdapter()? };
+            let desc = unsafe { adapter.GetDesc()? };
+            let name = String::from_utf16_lossy(&desc.Description)
+                .trim_end_matches('\0')
+                .to_string();
+            Ok(format!(
+                "LUID={:08X}:{:08X} \"{name}\"",
+                desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart
+            ))
+        };
+        resolve().unwrap_or_else(|error| format!("<unavailable: {error}>"))
+    }
+
+    /// The opened `ID3D11Texture2D` behind a CEF shared handle, reusing a
+    /// previous open when one exists.
+    ///
+    /// `OpenSharedResource1` is a kernel-mode call that materialises a fresh COM
+    /// wrapper; doing it inside every accelerated paint put a driver round-trip
+    /// and a deferred destruction on the producer's critical path. Chromium
+    /// cycles a small, stable pool of OSR surfaces, so caching by handle turns
+    /// that into a one-time cost per surface.
+    ///
+    /// The residual risk is a recycled handle value naming a *different* surface
+    /// of identical dimensions and format, which the caller's metadata check
+    /// cannot distinguish. That requires CEF to close a pool surface and open a
+    /// replacement mid-session, which it does on resize — where the atlas tile
+    /// is rebuilt and the entry is evicted anyway. Set
+    /// `FUTUREBOARD_OSR_NO_HANDLE_CACHE` to fall back to opening every frame.
+    fn open_shared_source(&mut self, shared_handle: usize) -> anyhow::Result<ID3D11Texture2D> {
+        if !handle_cache_enabled() {
+            osr_profile::count(Counter::SharedHandleOpens, 1);
+            let _open = osr_profile::span(Stage::TextureOpen);
+            let device1: ID3D11Device1 = self.device.cast()?;
+            return Ok(unsafe {
+                device1.OpenSharedResource1(HANDLE(shared_handle as *mut core::ffi::c_void))?
+            });
+        }
+
+        if let Some(cached) = self.shared_textures.get(&shared_handle) {
+            osr_profile::count(Counter::SharedHandleCacheHits, 1);
+            return Ok(cached.clone());
+        }
+
+        osr_profile::count(Counter::SharedHandleOpens, 1);
+        let texture: ID3D11Texture2D = {
+            let _open = osr_profile::span(Stage::TextureOpen);
+            let device1: ID3D11Device1 = self.device.cast()?;
+            unsafe { device1.OpenSharedResource1(HANDLE(shared_handle as *mut core::ffi::c_void))? }
+        };
+
+        // A pool larger than the cap means the assumption above is wrong for
+        // this build of CEF; drop everything rather than grow without bound.
+        if self.shared_textures.len() >= MAX_CACHED_SHARED_TEXTURES {
+            self.shared_textures.clear();
+        }
+        self.shared_textures.insert(shared_handle, texture.clone());
+        Ok(texture)
+    }
+
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -407,6 +555,14 @@ impl DirectXAtlasTexture {
     fn is_unreferenced(&mut self) -> bool {
         self.live_atlas_keys == 0
     }
+}
+
+/// Whether opened CEF shared textures may be reused across frames. Read once;
+/// `FUTUREBOARD_OSR_NO_HANDLE_CACHE` restores the open-every-frame behaviour so
+/// the two can be measured against each other.
+fn handle_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_OSR_NO_HANDLE_CACHE").is_none())
 }
 
 fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
