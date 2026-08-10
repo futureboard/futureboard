@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Native windowed CEF web views for Futureboard Studio"
+description = "CEF off-screen web views for Futureboard Studio"
 
 [lib]
 name = "sphere_webview"

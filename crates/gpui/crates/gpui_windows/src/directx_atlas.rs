@@ -1,12 +1,19 @@
 use collections::FxHashMap;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
-use windows::Win32::Graphics::{
-    Direct3D11::{
-        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-        ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
+use windows::{
+    Win32::{
+        Foundation::HANDLE,
+        Graphics::{
+            Direct3D11::{
+                D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11ShaderResourceView,
+                ID3D11Texture2D,
+            },
+            Dxgi::Common::*,
+        },
     },
-    Dxgi::Common::*,
+    core::Interface,
 };
 
 use gpui::{
@@ -98,9 +105,10 @@ impl PlatformAtlas for DirectXAtlas {
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
-        let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
+        let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        let id = tile.texture_id;
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
@@ -113,13 +121,105 @@ impl PlatformAtlas for DirectXAtlas {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.decrement_ref_count();
+            texture.deallocate(tile);
             if texture.is_unreferenced() {
                 textures.free_list.push(texture.id.index as usize);
             } else {
                 *texture_slot = Some(texture);
             }
         }
+    }
+
+    fn copy_d3d11_shared_texture(
+        &self,
+        key: &AtlasKey,
+        shared_handle: usize,
+        source_origin: Point<DevicePixels>,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<Option<AtlasTile>> {
+        if shared_handle == 0 || size.width.0 <= 0 || size.height.0 <= 0 {
+            anyhow::bail!("invalid CEF D3D11 shared texture");
+        }
+        if key.texture_kind() != AtlasTextureKind::Polychrome {
+            anyhow::bail!("CEF shared textures require a polychrome atlas tile");
+        }
+
+        let mut lock = self.0.lock();
+        let device1: ID3D11Device1 = lock.device.cast()?;
+        let source: ID3D11Texture2D = unsafe {
+            device1.OpenSharedResource1(HANDLE(shared_handle as *mut core::ffi::c_void))?
+        };
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { source.GetDesc(&mut source_desc) };
+        let source_right = source_origin.x.0.saturating_add(size.width.0);
+        let source_bottom = source_origin.y.0.saturating_add(size.height.0);
+        if source_origin.x.0 < 0
+            || source_origin.y.0 < 0
+            || source_right > source_desc.Width as i32
+            || source_bottom > source_desc.Height as i32
+            || source_desc.SampleDesc.Count != 1
+        {
+            anyhow::bail!(
+                "CEF shared texture metadata mismatch: source={}x{} rect=({}, {}) {}x{} samples={}",
+                source_desc.Width,
+                source_desc.Height,
+                source_origin.x.0,
+                source_origin.y.0,
+                size.width.0,
+                size.height.0,
+                source_desc.SampleDesc.Count
+            );
+        }
+        if !matches!(
+            source_desc.Format,
+            DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+        ) {
+            anyhow::bail!(
+                "unsupported CEF shared texture format: {:?}",
+                source_desc.Format
+            );
+        }
+
+        let tile = if let Some(tile) = lock.tiles_by_key.get(key).copied() {
+            if tile.bounds.size != size {
+                anyhow::bail!("CEF atlas tile size changed without a new image key");
+            }
+            tile
+        } else {
+            let tile = lock
+                .allocate(size, AtlasTextureKind::Polychrome)
+                .ok_or_else(|| anyhow::anyhow!("failed to allocate CEF atlas tile"))?;
+            lock.tiles_by_key.insert(key.clone(), tile);
+            tile
+        };
+        let destination = lock.texture(tile.texture_id).texture.clone();
+        let context = lock.device_context.clone();
+        drop(lock);
+
+        unsafe {
+            context.CopySubresourceRegion(
+                &destination,
+                0,
+                tile.bounds.origin.x.0 as u32,
+                tile.bounds.origin.y.0 as u32,
+                0,
+                &source,
+                0,
+                Some(&D3D11_BOX {
+                    left: source_origin.x.0 as u32,
+                    top: source_origin.y.0 as u32,
+                    front: 0,
+                    right: source_right as u32,
+                    bottom: source_bottom as u32,
+                    back: 1,
+                }),
+            );
+            // Submit the copy while CEF's callback-scoped source handle is
+            // still valid. D3D11 retains the referenced resources until the
+            // immediate-context command has completed.
+            context.Flush();
+        }
+        Ok(Some(tile))
     }
 }
 
@@ -299,7 +399,8 @@ impl DirectXAtlasTexture {
         }
     }
 
-    fn decrement_ref_count(&mut self) {
+    fn deallocate(&mut self, tile: AtlasTile) {
+        self.allocator.deallocate(tile.tile_id.into());
         self.live_atlas_keys -= 1;
     }
 

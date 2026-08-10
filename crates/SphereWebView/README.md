@@ -1,7 +1,9 @@
 # SphereWebView
 
-CEF hosting for built-in Futureboard plugin editors. Windows uses a native child
-window. Linux and macOS use windowless rendering into a host-owned framebuffer.
+CEF hosting for built-in Futureboard plugin editors. Editors use windowless
+rendering on every platform. Windows takes the accelerated OSR path and copies
+CEF D3D11 shared textures into GPUI-owned GPU textures; Linux and macOS retain
+the software framebuffer path.
 
 Normal workspace builds do not download the pinned SDK. Install it explicitly:
 

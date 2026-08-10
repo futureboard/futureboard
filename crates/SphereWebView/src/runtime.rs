@@ -432,22 +432,37 @@ impl CefRuntime {
             return Err(CefRuntimeError::EmptyUrl);
         }
         let windowless = matches!(config.render_mode, RenderMode::Windowless { .. });
-        let window_info = if windowless {
+        let accelerated = matches!(
+            &config.render_mode,
+            RenderMode::Windowless { surface } if surface.is_accelerated()
+        );
+        let mut window_info = if windowless {
             cef::WindowInfo::default().set_as_windowless(parent.as_raw())
         } else {
             cef::WindowInfo::default().set_as_child(parent.as_raw(), &config.bounds.as_cef_rect())
         };
+        #[cfg(target_os = "windows")]
+        {
+            // CEF only calls OnAcceleratedPaint when this is set. The shared
+            // handle is copied synchronously into host-owned GPU memory before
+            // the callback returns; external begin frames remain disabled so
+            // CEF owns frame pacing at the configured 60 Hz cap.
+            window_info.shared_texture_enabled = i32::from(accelerated);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = accelerated;
         debug_assert_eq!(
             window_info.windowless_rendering_enabled,
             i32::from(windowless)
         );
         if crate::scheme::cef_diagnostics_enabled() {
             eprintln!(
-                "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} render_mode={:?} thread={:?}",
+                "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} render_mode={:?} accelerated={} thread={:?}",
                 config.url,
                 parent.as_raw(),
                 config.bounds,
                 config.render_mode,
+                accelerated,
                 std::thread::current().id()
             );
         }

@@ -1,7 +1,13 @@
+#[cfg(target_os = "windows")]
+use crate::{AtlasKey, AtlasTile, PlatformAtlas, Point};
 use crate::{DevicePixels, Pixels, Result, SharedString, Size, size};
 use smallvec::SmallVec;
 
 use image::{Delay, Frame};
+#[cfg(target_os = "windows")]
+use parking_lot::Mutex;
+#[cfg(target_os = "windows")]
+use std::sync::Arc;
 use std::{
     borrow::Cow,
     fmt,
@@ -32,6 +38,13 @@ impl AssetSource for () {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ImageId(pub usize);
 
+impl ImageId {
+    fn next() -> Self {
+        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+        Self(NEXT_ID.fetch_add(1, SeqCst))
+    }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone)]
 #[expect(missing_docs)]
 pub struct RenderImageParams {
@@ -59,10 +72,8 @@ impl Eq for RenderImage {}
 impl RenderImage {
     /// Create a new image from the given data.
     pub fn new(data: impl Into<SmallVec<[Frame; 1]>>) -> Self {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
         Self {
-            id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
+            id: ImageId::next(),
             scale_factor: 1.0,
             data: data.into(),
         }
@@ -112,6 +123,119 @@ impl fmt::Debug for RenderImage {
             .field("id", &self.id)
             .field("size", &self.data.first().map(|f| f.buffer().dimensions()))
             .finish()
+    }
+}
+
+/// A stable GPUI atlas image updated from callback-scoped D3D11 shared
+/// textures. This is used by accelerated CEF off-screen rendering on Windows.
+/// Pixel data never crosses the CPU; each update is copied into a GPUI-owned
+/// atlas tile before CEF releases its source handle.
+#[cfg(target_os = "windows")]
+pub struct D3D11ExternalImage {
+    atlas: Arc<dyn PlatformAtlas>,
+    owner_thread: std::thread::ThreadId,
+    state: Mutex<D3D11ExternalImageState>,
+}
+
+#[cfg(target_os = "windows")]
+struct D3D11ExternalImageState {
+    params: RenderImageParams,
+    size: Size<DevicePixels>,
+}
+
+// GPUI's Windows atlas is backed by a mutex and D3D11's device/context are
+// free-threaded COM interfaces. CEF currently invokes the sink on the same UI
+// thread as GPUI, but its handler type requires a Send + Sync owner.
+#[cfg(target_os = "windows")]
+unsafe impl Send for D3D11ExternalImage {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for D3D11ExternalImage {}
+
+#[cfg(target_os = "windows")]
+impl D3D11ExternalImage {
+    pub(crate) fn new(atlas: Arc<dyn PlatformAtlas>) -> Self {
+        Self {
+            atlas,
+            owner_thread: std::thread::current().id(),
+            state: Mutex::new(D3D11ExternalImageState {
+                params: RenderImageParams {
+                    image_id: ImageId::next(),
+                    frame_index: 0,
+                },
+                size: Size::default(),
+            }),
+        }
+    }
+
+    /// Copy a CEF shared texture into this image. `shared_handle` remains owned
+    /// by CEF and is valid only for the duration of this call.
+    pub fn update_from_shared_texture(
+        &self,
+        shared_handle: usize,
+        source_origin: Point<DevicePixels>,
+        size: Size<DevicePixels>,
+    ) -> Result<()> {
+        if std::thread::current().id() != self.owner_thread {
+            anyhow::bail!("D3D11 external image updated from the wrong thread");
+        }
+        if shared_handle == 0 || size.width.0 <= 0 || size.height.0 <= 0 {
+            anyhow::bail!("invalid D3D11 shared texture");
+        }
+
+        let mut state = self.state.lock();
+        if state.size != size {
+            if state.size != Size::default() {
+                self.atlas.remove(&AtlasKey::Image(state.params.clone()));
+            }
+            state.params.image_id = ImageId::next();
+            state.size = size;
+        }
+
+        let tile = self.atlas.copy_d3d11_shared_texture(
+            &AtlasKey::Image(state.params.clone()),
+            shared_handle,
+            source_origin,
+            size,
+        )?;
+        if tile.is_none() {
+            anyhow::bail!("active GPUI renderer cannot import D3D11 shared textures");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn tile(&self) -> Result<Option<AtlasTile>> {
+        if std::thread::current().id() != self.owner_thread {
+            anyhow::bail!("D3D11 external image painted from the wrong thread");
+        }
+        let state = self.state.lock();
+        if state.size == Size::default() {
+            return Ok(None);
+        }
+        self.atlas
+            .get_or_insert_with(&AtlasKey::Image(state.params.clone()), &mut || Ok(None))
+    }
+
+    /// Whether the image's atlas tile survived the latest device state.
+    pub fn is_available(&self) -> bool {
+        self.tile().ok().flatten().is_some()
+    }
+
+    /// Physical size of the most recently copied texture.
+    pub fn size(&self) -> Size<DevicePixels> {
+        self.state.lock().size
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for D3D11ExternalImage {
+    fn drop(&mut self) {
+        if std::thread::current().id() != self.owner_thread {
+            return;
+        }
+        let state = self.state.lock();
+        if state.size != Size::default() {
+            self.atlas.remove(&AtlasKey::Image(state.params.clone()));
+        }
     }
 }
 

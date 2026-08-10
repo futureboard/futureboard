@@ -1044,6 +1044,23 @@ pub trait PlatformAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+
+    /// Copy a callback-scoped CEF D3D11 shared texture into a stable atlas tile.
+    ///
+    /// The default implementation reports that the active renderer does not
+    /// support D3D11 texture import. Windows' DirectX atlas overrides this and
+    /// performs a GPU-to-GPU copy before the callback-scoped handle expires.
+    #[cfg(target_os = "windows")]
+    fn copy_d3d11_shared_texture(
+        &self,
+        key: &AtlasKey,
+        shared_handle: usize,
+        source_origin: Point<DevicePixels>,
+        size: Size<DevicePixels>,
+    ) -> Result<Option<AtlasTile>> {
+        let _ = (key, shared_handle, source_origin, size);
+        Ok(None)
+    }
 }
 
 #[doc(hidden)]

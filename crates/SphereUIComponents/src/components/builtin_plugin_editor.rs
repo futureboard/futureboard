@@ -555,15 +555,20 @@ pub struct ViewRect {
     pub height: i32,
 }
 
-/// Whether editors are hosted **off-screen** on this platform.
+/// Built-in editors are always hosted off-screen.
 ///
-/// Windows parents a real CEF child window into a `WS_CHILD` content host (see
-/// `plugin_content_host.rs`). Nothing equivalent exists on Linux: GPUI owns an
-/// X11/Wayland surface it composites itself, CEF's X11 child cannot be
-/// reparented into it, and under Wayland there is no window id to parent to at
-/// all. There the browser renders windowless and the GPUI window draws the
-/// framebuffer itself, forwarding input back in.
-pub const OFFSCREEN_HOSTING: bool = !cfg!(target_os = "windows");
+/// Windows uses CEF accelerated OSR and copies D3D11 shared textures directly
+/// into GPUI's DirectX atlas. Other platforms retain the software framebuffer
+/// path until their compositor-specific texture interop is enabled.
+pub const OFFSCREEN_HOSTING: bool = true;
+
+/// Optional synchronous GPU sink supplied by the GPUI editor window.
+#[cfg(feature = "builtin-plugin-editor")]
+pub type AcceleratedFrameSink = std::sync::Arc<dyn sphere_webview::osr::OsrAcceleratedFrameSink>;
+
+#[cfg(not(feature = "builtin-plugin-editor"))]
+#[derive(Clone)]
+pub struct AcceleratedFrameSink;
 
 /// Modifier state accompanying a forwarded input event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -652,6 +657,10 @@ pub enum ViewEvent {
     Opened,
     OpenFailed(String),
     Closed,
+    /// Accelerated shared-texture import failed and the host is recreating this
+    /// browser in software OSR mode. Native DSP state and the editor window stay
+    /// alive while the page bridge reconnects.
+    AcceleratedFallback,
     /// The renderer process for this browser terminated (crash, OOM-kill,
     /// `chrome://kill` in dev). The browser object and native DSP state on
     /// the Rust side are untouched — only the page's JS state is gone, so
@@ -681,12 +690,17 @@ mod imp {
         _parent_hwnd: u64,
         _rect: ViewRect,
         _scale_factor: f32,
+        _accelerated_sink: Option<super::AcceleratedFrameSink>,
     ) -> Result<(), HostAvailability> {
         Err(HostAvailability::NotCompiledIn)
     }
 
     pub fn view_frame_generation(_view_id: ViewId) -> u64 {
         0
+    }
+
+    pub fn view_uses_accelerated_osr(_view_id: ViewId) -> bool {
+        false
     }
 
     pub fn with_view_frame<R>(
@@ -746,8 +760,8 @@ mod imp {
     use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
     use super::{
-        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
-        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
+        origin_for_plugin_id, AcceleratedFrameSink, EditorInput, EditorKey, EditorKeyKind,
+        EditorModifiers, EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect,
     };
 
     struct HostedView {
@@ -756,6 +770,8 @@ mod imp {
         view: WebView<'static>,
         _client: sphere_webview::runtime::cef::Client,
         lifecycle: BrowserLifecycle,
+        open: PendingOpen,
+        bounds: PendingBounds,
         opened_at: std::time::Instant,
         stability_reported: bool,
     }
@@ -763,6 +779,15 @@ mod imp {
     struct ClosingView {
         hosted: HostedView,
         pump_ticks: u16,
+    }
+
+    struct FallbackClosingView {
+        closing: ClosingView,
+        view_id: ViewId,
+        reopen: PendingOpen,
+        bounds: PendingBounds,
+        cancel_reopen: bool,
+        timeout_reported: bool,
     }
 
     const MAX_CLOSE_PUMP_TICKS: u16 = 250;
@@ -777,26 +802,6 @@ mod imp {
         _view: WebView<'static>,
         _client: sphere_webview::runtime::cef::Client,
         _lifecycle: BrowserLifecycle,
-        /// Hidden native parent for the windowed (Windows) case; destroyed
-        /// after the browser it hosts.
-        hidden_parent: u64,
-    }
-
-    impl Drop for WarmupBrowser {
-        fn drop(&mut self) {
-            #[cfg(target_os = "windows")]
-            if self.hidden_parent != 0 {
-                use windows::Win32::Foundation::HWND;
-                use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, IsWindow};
-                unsafe {
-                    let hwnd = HWND(self.hidden_parent as *mut core::ffi::c_void);
-                    if IsWindow(Some(hwnd)).as_bool() {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                }
-            }
-            let _ = self.hidden_parent;
-        }
     }
 
     /// One CEF runtime plus every open editor view.
@@ -807,6 +812,10 @@ mod imp {
     struct Host {
         views: HashMap<ViewId, HostedView>,
         closing_views: HashMap<ViewId, ClosingView>,
+        /// Accelerated browsers being retired during transparent software
+        /// fallback. They must stay alive through OnBeforeClose but must not
+        /// emit `Closed` for the still-open GPUI editor window.
+        fallback_closing_views: Vec<FallbackClosingView>,
         warmup: Option<WarmupBrowser>,
         runtime: CefRuntime,
         // The exact CefApp passed to execute_process in the browser process.
@@ -814,11 +823,13 @@ mod imp {
         _application: sphere_webview::runtime::cef::App,
     }
 
+    #[derive(Clone)]
     struct PendingOpen {
         editor_id: String,
         origin: &'static str,
         parent_hwnd: u64,
         rect: ViewRect,
+        accelerated_sink: Option<AcceleratedFrameSink>,
     }
 
     /// Physical rect plus the scale it was measured at. Off-screen browsers are
@@ -968,6 +979,12 @@ mod imp {
         })
     }
 
+    fn discard_inbound(origin: &str) {
+        if let Ok(mut map) = inbound_map().lock() {
+            map.remove(origin);
+        }
+    }
+
     /// Drain every bridge message POSTed by `origin`'s page since the last
     /// call. Never blocks on CEF — just takes whatever `bridge_sink` queued.
     pub fn take_inbound(origin: &str) -> Vec<Vec<u8>> {
@@ -1087,9 +1104,9 @@ mod imp {
                 Ok(subprocess) => subprocess,
                 Err(error) => return remember_runtime_failure(error.to_string()),
             },
-            // Chromium decides this once, at initialize, so the whole process
-            // opts in wherever editors are hosted off-screen.
-            windowless_rendering: OFFSCREEN_HOSTING,
+            // Chromium decides this once, at initialize. Every built-in editor
+            // is OSR-hosted, including accelerated shared-texture OSR on Windows.
+            windowless_rendering: true,
             ..Default::default()
         };
         let runtime = match CefRuntime::initialize(config, Some(&mut app)) {
@@ -1107,6 +1124,7 @@ mod imp {
         *slot = Some(Host {
             views: HashMap::new(),
             closing_views: HashMap::new(),
+            fallback_closing_views: Vec::new(),
             warmup: None,
             runtime,
             _application: app,
@@ -1119,41 +1137,6 @@ mod imp {
             *failure.borrow_mut() = Some(error.clone());
         });
         Err(HostAvailability::RuntimeFailed(error))
-    }
-
-    /// Hidden 2×2 native window to parent the warm-up browser to on windowed
-    /// platforms. `0` where off-screen hosting needs no parent.
-    #[cfg(target_os = "windows")]
-    fn create_hidden_warmup_parent() -> u64 {
-        use windows::core::w;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, HMENU, WINDOW_EX_STYLE, WS_POPUP,
-        };
-        // The predefined STATIC class is fine here: the window is never shown,
-        // it exists only so CEF has a real HWND to create its child under.
-        unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("STATIC"),
-                w!("futureboard-cef-warmup"),
-                WS_POPUP, // not WS_VISIBLE — never shown
-                0,
-                0,
-                2,
-                2,
-                None,
-                None::<HMENU>,
-                None,
-                None,
-            )
-            .map(|hwnd| hwnd.0 as u64)
-            .unwrap_or(0)
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn create_hidden_warmup_parent() -> u64 {
-        0
     }
 
     /// Create the boot-time warm-up browser (idempotent).
@@ -1177,30 +1160,18 @@ mod imp {
             return;
         }
         let url = "about:blank".to_string();
-        let surface = OFFSCREEN_HOSTING.then(|| OsrSurface::new(2, 2, 1.0));
-        let hidden_parent = if OFFSCREEN_HOSTING {
-            0
-        } else {
-            let hwnd = create_hidden_warmup_parent();
-            if hwnd == 0 {
-                eprintln!("[cef-warmup] hidden parent creation failed; skipping warm-up");
-                return;
-            }
-            hwnd
-        };
-        let (mut client, lifecycle) = plugin_browser_client_with_surface(&url, surface.clone());
+        let surface = OsrSurface::new(2, 2, 1.0);
+        let (mut client, lifecycle) =
+            plugin_browser_client_with_surface(&url, Some(surface.clone()));
         let result = WindowBounds::new(0, 0, 2, 2)
             .map_err(|error| error.to_string())
             .and_then(|bounds| {
-                let mut config = WebViewConfig::new(url, bounds);
-                if let Some(surface) = surface {
-                    config = config.windowless(surface);
-                }
+                let config = WebViewConfig::new(url, bounds).windowless(surface);
                 // SAFETY: the warm-up view is stored in `host.warmup`,
                 // declared before `host.runtime`, and therefore released
                 // first.
                 unsafe {
-                    let parent = NativeParent::from_raw(hwnd_to_cef(hidden_parent));
+                    let parent = NativeParent::from_raw(hwnd_to_cef(0));
                     host.runtime
                         .create_webview_detached(parent, config, Some(&mut client))
                 }
@@ -1216,19 +1187,10 @@ mod imp {
                     _view: view,
                     _client: client,
                     _lifecycle: lifecycle,
-                    hidden_parent,
                 });
             }
             Err(error) => {
                 eprintln!("[cef-warmup] warm-up browser failed: {error}");
-                #[cfg(target_os = "windows")]
-                if hidden_parent != 0 {
-                    use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
-                    unsafe {
-                        let _ = DestroyWindow(HWND(hidden_parent as *mut core::ffi::c_void));
-                    }
-                }
             }
         }
     }
@@ -1259,14 +1221,19 @@ mod imp {
             let Some(host) = cell.borrow_mut().take() else {
                 return;
             };
-            let open_count =
-                host.views.len() + host.closing_views.len() + usize::from(host.warmup.is_some());
+            let open_count = host.views.len()
+                + host.closing_views.len()
+                + host.fallback_closing_views.len()
+                + usize::from(host.warmup.is_some());
             eprintln!("[cef-runtime] shutdown requested open_browser_count={open_count}");
             for hosted in host.views.values() {
                 let _ = hosted.view.close(true);
             }
             for closing in host.closing_views.values() {
                 let _ = closing.hosted.view.close(true);
+            }
+            for fallback in &host.fallback_closing_views {
+                let _ = fallback.closing.hosted.view.close(true);
             }
             if let Some(warmup) = host.warmup.as_ref() {
                 let _ = warmup._view.close(true);
@@ -1284,6 +1251,11 @@ mod imp {
                         .closing_views
                         .values()
                         .filter(|closing| !closing.hosted.lifecycle.before_close())
+                        .count()
+                    + host
+                        .fallback_closing_views
+                        .iter()
+                        .filter(|fallback| !fallback.closing.hosted.lifecycle.before_close())
                         .count()
                     + host
                         .warmup
@@ -1334,6 +1306,7 @@ mod imp {
         parent_hwnd: u64,
         rect: ViewRect,
         scale_factor: f32,
+        accelerated_sink: Option<AcceleratedFrameSink>,
     ) -> Result<(), HostAvailability> {
         match super::availability(plugin_id) {
             HostAvailability::Ready => {}
@@ -1342,13 +1315,8 @@ mod imp {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return Err(HostAvailability::NoEditorForPlugin(plugin_id.to_string()));
         };
-        // An off-screen browser has no parent window to be a child of; CEF only
-        // uses the handle to resolve monitor info, and accepts none.
-        if parent_hwnd == 0 && !OFFSCREEN_HOSTING {
-            return Err(HostAvailability::RuntimeFailed(
-                "editor window has no native parent handle yet".to_string(),
-            ));
-        }
+        // OSR accepts no native parent; when Windows supplies one it is used
+        // only for monitor information and native dialog ownership.
         WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
             .map_err(|e| HostAvailability::RuntimeFailed(e.to_string()))?;
 
@@ -1365,6 +1333,7 @@ mod imp {
                 origin,
                 parent_hwnd,
                 rect,
+                accelerated_sink,
             });
             pending.bounds = Some(PendingBounds { rect, scale_factor });
             Ok(())
@@ -1413,6 +1382,21 @@ mod imp {
                     Some(hosted.view.osr_surface()?.generation())
                 })
                 .unwrap_or(0)
+        })
+    }
+
+    /// Whether the currently active browser for `view_id` is using CEF shared
+    /// textures instead of software `OnPaint` frames.
+    pub fn view_uses_accelerated_osr(view_id: ViewId) -> bool {
+        HOST.with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|slot| {
+                    let host = slot.as_ref()?;
+                    let hosted = host.views.get(&view_id)?;
+                    Some(hosted.view.osr_surface()?.is_accelerated())
+                })
+                .unwrap_or(false)
         })
     }
 
@@ -1556,7 +1540,16 @@ mod imp {
             || HOST.with(|cell| {
                 cell.try_borrow()
                     .ok()
-                    .and_then(|slot| slot.as_ref().map(|host| host.views.contains_key(&view_id)))
+                    .and_then(|slot| {
+                        slot.as_ref().map(|host| {
+                            host.views.contains_key(&view_id)
+                                || host.fallback_closing_views.iter().any(|fallback| {
+                                    fallback.view_id == view_id
+                                        && !fallback.cancel_reopen
+                                        && !fallback.timeout_reported
+                                })
+                        })
+                    })
                     .unwrap_or(false)
             })
     }
@@ -1601,6 +1594,7 @@ mod imp {
         }
         let commands = COMMANDS.with(|commands| std::mem::take(&mut *commands.borrow_mut()));
         let mut completed = Vec::new();
+        let mut fallback_reopens = Vec::new();
 
         HOST.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -1618,6 +1612,14 @@ mod imp {
 
             for (view_id, pending) in commands {
                 if pending.close {
+                    if let Some(fallback) = host
+                        .fallback_closing_views
+                        .iter_mut()
+                        .find(|fallback| fallback.view_id == view_id)
+                    {
+                        fallback.cancel_reopen = true;
+                        continue;
+                    }
                     if let Some(hosted) = host.views.remove(&view_id) {
                         let browser_id = hosted.view.browser_identifier();
                         let _ = hosted.view.close(true);
@@ -1655,10 +1657,19 @@ mod imp {
                         });
                         // Off-screen: CEF lays out in logical pixels and paints
                         // physical ones into the surface the client owns.
-                        let surface = OFFSCREEN_HOSTING.then(|| {
+                        let surface = Some({
                             let (width, height) =
                                 logical_size(rect, bounds_command.scale_factor);
-                            OsrSurface::new(width, height, bounds_command.scale_factor)
+                            if let Some(sink) = open.accelerated_sink.clone() {
+                                OsrSurface::new_accelerated(
+                                    width,
+                                    height,
+                                    bounds_command.scale_factor,
+                                    sink,
+                                )
+                            } else {
+                                OsrSurface::new(width, height, bounds_command.scale_factor)
+                            }
                         });
                         let (mut client, lifecycle) =
                             plugin_browser_client_with_surface(&url, surface.clone());
@@ -1700,10 +1711,12 @@ mod imp {
                                 host.views.insert(
                                     view_id,
                                     HostedView {
-                                        _editor_id: open.editor_id,
+                                        _editor_id: open.editor_id.clone(),
                                         view,
                                         _client: client,
                                         lifecycle,
+                                        open,
+                                        bounds: bounds_command,
                                         opened_at: std::time::Instant::now(),
                                         stability_reported: false,
                                     },
@@ -1734,7 +1747,8 @@ mod imp {
 
                 if !opened_now {
                     if let Some(PendingBounds { rect, scale_factor }) = pending.bounds {
-                        if let Some(hosted) = host.views.get(&view_id) {
+                        if let Some(hosted) = host.views.get_mut(&view_id) {
+                            hosted.bounds = PendingBounds { rect, scale_factor };
                             // A windowed child is placed with the physical rect;
                             // an off-screen browser is told the logical size it
                             // should lay out at, and the scale it renders with.
@@ -1755,6 +1769,47 @@ mod imp {
             }
 
             let _ = host.runtime.do_message_loop_work();
+
+            // CEF cannot switch an existing browser from shared textures to
+            // software OnPaint. If the synchronous D3D11 copy failed (adapter
+            // mismatch, RDP, unsupported format, device loss), retire that
+            // browser and transparently queue the same view without a GPU sink.
+            let accelerated_failures = host
+                .views
+                .iter()
+                .filter_map(|(view_id, hosted)| {
+                    hosted
+                        .view
+                        .osr_surface()
+                        .is_some_and(|surface| surface.take_accelerated_failure())
+                        .then_some(*view_id)
+                })
+                .collect::<Vec<_>>();
+            for view_id in accelerated_failures {
+                let Some(hosted) = host.views.remove(&view_id) else {
+                    continue;
+                };
+                let browser_id = hosted.view.browser_identifier();
+                let mut reopen = hosted.open.clone();
+                reopen.accelerated_sink = None;
+                let bounds = hosted.bounds;
+                let _ = hosted.view.close(true);
+                host.fallback_closing_views.push(FallbackClosingView {
+                    closing: ClosingView {
+                        hosted,
+                        pump_ticks: 0,
+                    },
+                    view_id,
+                    reopen,
+                    bounds,
+                    cancel_reopen: false,
+                    timeout_reported: false,
+                });
+                completed.push((view_id, ViewEvent::AcceleratedFallback));
+                eprintln!(
+                    "[cef-osr] accelerated browser_id={browser_id} view_id={view_id:?} falling back to software OnPaint"
+                );
+            }
 
             // Renderer crash detection (`BrowserLifecycle`, set from
             // `on_render_process_terminated`). The browser object and native
@@ -1784,11 +1839,10 @@ mod imp {
                 }
             }
 
-            // `close_browser(true)` is asynchronous. Keep both the WebView and
-            // the GPUI-owned parent shell alive until CEF's native child HWND is
-            // actually gone; only then may the window consume `Closed` and tear
-            // down its HWND hierarchy. The timeout is a bounded shutdown escape
-            // hatch for a wedged renderer process.
+            // `close_browser(true)` is asynchronous. Keep the WebView alive
+            // until CEF confirms OnBeforeClose; only then may the GPUI window
+            // consume `Closed`. The timeout is a bounded shutdown escape hatch
+            // for a wedged renderer process.
             let mut closed = Vec::new();
             for (view_id, closing) in &mut host.closing_views {
                 closing.pump_ticks = closing.pump_ticks.saturating_add(1);
@@ -1811,7 +1865,57 @@ mod imp {
                 );
                 completed.push((view_id, ViewEvent::Closed));
             }
+
+            let mut index = 0;
+            while index < host.fallback_closing_views.len() {
+                let fallback = &mut host.fallback_closing_views[index];
+                fallback.closing.pump_ticks = fallback.closing.pump_ticks.saturating_add(1);
+                let before_close = fallback.closing.hosted.lifecycle.before_close();
+                if before_close {
+                    let fallback = host.fallback_closing_views.swap_remove(index);
+                    if fallback.cancel_reopen {
+                        completed.push((fallback.view_id, ViewEvent::Closed));
+                    } else if !fallback.timeout_reported {
+                        // This origin had exactly one shared built-in editor.
+                        // Drop any late messages from the retired page before
+                        // the replacement browser is allowed to post.
+                        discard_inbound(fallback.reopen.origin);
+                        fallback_reopens.push((
+                            fallback.view_id,
+                            fallback.reopen,
+                            fallback.bounds,
+                        ));
+                    }
+                } else {
+                    if fallback.closing.pump_ticks >= MAX_CLOSE_PUMP_TICKS
+                        && !fallback.timeout_reported
+                    {
+                        fallback.timeout_reported = true;
+                        completed.push((
+                            fallback.view_id,
+                            ViewEvent::OpenFailed(
+                                "accelerated browser did not close before software fallback"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                    index += 1;
+                }
+            }
         });
+
+        if !fallback_reopens.is_empty() {
+            COMMANDS.with(|commands| {
+                let mut commands = commands.borrow_mut();
+                for (view_id, open, bounds) in fallback_reopens {
+                    let pending = commands.entry(view_id).or_default();
+                    if !pending.close {
+                        pending.open = Some(open);
+                        pending.bounds = Some(bounds);
+                    }
+                }
+            });
+        }
 
         if !completed.is_empty() {
             EVENTS.with(|events| {
@@ -1861,7 +1965,7 @@ pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, preload, pump,
     pump_after_input, reload_view, send_to_view, send_view_input, set_view_bounds,
     take_global_play_pause_requests, take_inbound, take_view_events, view_frame_generation,
-    with_view_frame,
+    view_uses_accelerated_osr, with_view_frame,
 };
 
 #[cfg(test)]

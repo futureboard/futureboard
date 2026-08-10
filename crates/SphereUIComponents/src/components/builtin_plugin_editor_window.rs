@@ -1,17 +1,10 @@
 //! Floating shell window for a built-in plugin's CEF editor.
 //!
-//! Two hosting modes, chosen per platform by
-//! [`host::OFFSCREEN_HOSTING`](crate::components::builtin_plugin_editor::OFFSCREEN_HOSTING):
-//!
-//! - **Windowed (Windows).** GPUI draws only the chrome: a compact titlebar
-//!   and, when the host is unavailable, an explanatory panel. The editor is a
-//!   native CEF child window parented into a dedicated `WS_CHILD` content host,
-//!   exactly like the VST3 editor path — GPUI never paints over the browser's
-//!   rect.
-//! - **Off-screen (Linux).** There is no window to parent into, so CEF renders
-//!   windowless and this window draws the resulting framebuffer as an image in
-//!   the same content region, forwarding mouse and keyboard back into the
-//!   browser. See `builtin_plugin_editor_surface.rs`.
+//! Built-in editors use off-screen CEF on every platform. Windows takes the
+//! accelerated path: CEF supplies D3D11 shared textures which are copied into
+//! stable GPUI atlas tiles on the GPU. Other platforms use the software BGRA
+//! framebuffer path. The same GPUI region forwards mouse and keyboard input in
+//! both cases; see `builtin_plugin_editor_surface.rs`.
 //!
 //! ## Lifecycle
 //!
@@ -694,11 +687,10 @@ pub struct BuiltinPluginEditorWindow {
     /// Capped so a page that *never* comes up (broken build, not a transient
     /// crash) fails loudly instead of reloading forever.
     bridge_ready_retries: u32,
-    /// Off-screen presentation state. Stays empty (no frame, no buttons held)
-    /// in windowed hosting, where CEF owns its own pixels and input.
+    /// Off-screen presentation state: stable accelerated GPU planes on Windows,
+    /// or the latest software frame on fallback and other platforms.
     surface: OffscreenSurface,
-    /// Keyboard focus for the browser region. Only meaningful off-screen —
-    /// a native CEF child window takes platform focus for itself.
+    /// Keyboard focus for the off-screen browser region.
     focus: FocusHandle,
     /// How many render passes reached `attach`. Reported in the attach-timeout
     /// message: `0` means the window never re-rendered while waiting (a
@@ -1534,12 +1526,22 @@ impl BuiltinPluginEditorWindow {
             match event {
                 ViewEvent::Opened if matches!(self.status, Status::Attaching) => {
                     self.status = Status::Attached;
+                    self.browser_ready = false;
                     self.attached_at = Some(Instant::now());
                     cx.notify();
                 }
                 ViewEvent::OpenFailed(error) if matches!(self.status, Status::Attaching) => {
                     self.status = Status::Failed(format!("CEF failed to open the editor: {error}"));
                     content_to_drop = self.content.take();
+                    cx.notify();
+                }
+                ViewEvent::AcceleratedFallback
+                    if matches!(self.status, Status::Attaching | Status::Attached) =>
+                {
+                    self.status = Status::Attaching;
+                    self.browser_ready = false;
+                    self.attached_at = None;
+                    self.bridge_ready_retries = 0;
                     cx.notify();
                 }
                 ViewEvent::Closed => {
@@ -1550,7 +1552,7 @@ impl BuiltinPluginEditorWindow {
                 // An open completion can race a close requested from a nested
                 // Win32 callback. Closing dominates; the queued close is handled
                 // by the next pump.
-                ViewEvent::Opened | ViewEvent::OpenFailed(_) => {}
+                ViewEvent::Opened | ViewEvent::OpenFailed(_) | ViewEvent::AcceleratedFallback => {}
                 ViewEvent::RendererCrashed => {
                     // The host already reloaded the browser. `active_instance`
                     // and `instances` are untouched — native DSP state (what
@@ -1605,7 +1607,7 @@ impl BuiltinPluginEditorWindow {
 
         // Bridge inbound: only once the browser exists, keyed by the same
         // scheme origin `resolve_asset`/`bridge_sink` match requests against.
-        if matches!(self.status, Status::Attaching | Status::Attached) {
+        if self.status == Status::Attached {
             if let Some(origin) = host::origin_for_plugin_id(&self.plugin_id) {
                 for raw in host::take_inbound(origin) {
                     match parse_inbound_message(&raw) {
@@ -1662,8 +1664,8 @@ impl BuiltinPluginEditorWindow {
     }
 
     /// Create the CEF browser for this window. Called from the render pass,
-    /// which is the first place a valid native handle (windowed hosting) and
-    /// real content bounds are both available.
+    /// which is the first place the GPUI atlas, optional Windows parent handle,
+    /// and real content bounds are all available.
     fn attach(&mut self, window: &mut Window, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
         self.attach_attempts += 1;
         let scale = window.scale_factor();
@@ -1682,10 +1684,11 @@ impl BuiltinPluginEditorWindow {
             self.attach_attempts
         );
 
-        // Off-screen hosting has no parent window and no content child: CEF
-        // paints into a buffer this window draws itself.
+        // Off-screen hosting has no content child. On Windows the top-level
+        // handle is still useful to CEF for monitor/dialog ownership; other
+        // platforms may pass no native parent.
         let parent_hwnd = if OFFSCREEN_HOSTING {
-            0
+            native_hwnd(window).unwrap_or(0)
         } else {
             let Some(top_hwnd) = native_hwnd(window) else {
                 return;
@@ -1723,6 +1726,7 @@ impl BuiltinPluginEditorWindow {
             width: rect.width,
             height: rect.height,
         };
+        let accelerated_sink = self.surface.accelerated_sink(window);
         match host::open_view(
             self.view_id,
             &self.editor_id,
@@ -1730,6 +1734,7 @@ impl BuiltinPluginEditorWindow {
             parent_hwnd,
             view_rect,
             scale,
+            accelerated_sink,
         ) {
             Ok(()) => {
                 self.status = Status::Attaching;
@@ -1747,8 +1752,11 @@ impl BuiltinPluginEditorWindow {
     /// Keep the content child and the browser matched to the shell's content
     /// rect. Only issues native calls when the rect actually changed.
     fn resync_bounds(&mut self, window: &Window, bounds: Bounds<Pixels>) {
-        let rect = content_rect(bounds, window.scale_factor(), self.sidebar_width());
-        if rect.width <= 0 || rect.height <= 0 || self.last_rect == Some(rect) {
+        let scale_factor = window.scale_factor();
+        let rect = content_rect(bounds, scale_factor, self.sidebar_width());
+        let scale_unchanged = (self.last_scale - scale_factor).abs() <= f32::EPSILON;
+        if rect.width <= 0 || rect.height <= 0 || (self.last_rect == Some(rect) && scale_unchanged)
+        {
             return;
         }
         if let Some(content) = self.content.as_ref() {
@@ -1767,10 +1775,10 @@ impl BuiltinPluginEditorWindow {
                 width: rect.width,
                 height: rect.height,
             },
-            window.scale_factor(),
+            scale_factor,
         );
         self.last_rect = Some(rect);
-        self.last_scale = window.scale_factor();
+        self.last_scale = scale_factor;
     }
 
     /// Begin an asynchronous close. The shell remains alive until the CEF pump
@@ -1829,8 +1837,7 @@ fn native_hwnd(window: &Window) -> Option<u64> {
 
 #[cfg(not(target_os = "windows"))]
 fn native_hwnd(_window: &Window) -> Option<u64> {
-    // CEF child embedding for built-in editors is Windows-only for now; the
-    // host reports this rather than opening a blank window.
+    // Non-Windows OSR does not need a native parent handle.
     None
 }
 
@@ -1915,10 +1922,6 @@ impl Render for BuiltinPluginEditorWindow {
                     .flex_row()
                     .child(self.render_sidebar(cx))
                     .child(match failure {
-                        // Windowed hosting: the browser paints itself into the
-                        // native child below the header and right of the
-                        // sidebar, so that area stays deliberately empty.
-                        // Off-screen hosting: this window draws the frame.
                         None => self.render_browser_region(cx),
                         Some(reason) => div()
                             .flex_1()
@@ -1950,10 +1953,8 @@ impl Render for BuiltinPluginEditorWindow {
 impl BuiltinPluginEditorWindow {
     /// The region the browser occupies.
     ///
-    /// Windowed hosting leaves it empty — the native CEF child is composited
-    /// there by the platform, and anything GPUI painted would cover it.
-    /// Off-screen hosting draws the last painted frame and is the only place
-    /// the browser can receive input, so it also owns the event handlers.
+    /// Draws the latest accelerated or software frame and owns all forwarded
+    /// browser input handlers.
     fn render_browser_region(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let region = div().flex_1().min_h(px(0.0)).overflow_hidden();
         if !OFFSCREEN_HOSTING {
@@ -1963,6 +1964,9 @@ impl BuiltinPluginEditorWindow {
         region
             .id("builtin-plugin-editor-surface")
             .track_focus(&self.focus)
+            .when_some(self.surface.accelerated_element(), |el, surface| {
+                el.child(surface)
+            })
             .when_some(self.surface.image(), |el, image| {
                 // The frame is already exactly the content rect in physical
                 // pixels; `Fill` maps it back 1:1 rather than letterboxing it.
@@ -2239,8 +2243,7 @@ impl BuiltinPluginEditorWindow {
     }
 
     /// Native instance list. Reserved width matches `sidebar_width()`, which
-    /// `content_rect` also reads — the CEF child and this column can never
-    /// disagree about where the boundary is.
+    /// `content_rect` also reads so CEF and this column share one boundary.
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         if self.sidebar_collapsed {
             return div().flex_none().w(px(0.0)).into_any_element();
@@ -2349,8 +2352,7 @@ pub fn open_builtin_editor_window(
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = false;
-    // Opaque: the CEF child composites above the swap chain in the content
-    // region, and a transparent shell would show the timeline behind it.
+    // Opaque: an unpainted OSR frame must never reveal the timeline behind it.
     options.window_background = WindowBackgroundAppearance::Opaque;
     options.window_min_size = Some(size(
         px(BUILTIN_EDITOR_MIN_WIDTH),

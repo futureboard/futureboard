@@ -1,13 +1,11 @@
-//! Windowless (off-screen) CEF rendering for platforms where a native child
-//! window cannot be parented into the GPUI shell.
+//! Windowless (off-screen) CEF rendering for built-in plugin editors.
 //!
-//! On Windows the plugin editor is a real `WS_CHILD` CEF window inside a
-//! content-host HWND (see `plugin_content_host.rs`). Linux has no equivalent:
-//! GPUI owns an X11/Wayland surface it composites itself, and CEF's X11 child
-//! embedding cannot be reparented into it (and does not exist at all under
-//! Wayland). There the browser is created windowless and CEF hands us a raw
-//! BGRA framebuffer through [`ImplRenderHandler::on_paint`]; the host uploads
-//! that as a texture and feeds input back in with `send_*_event`.
+//! Windows uses `OnAcceleratedPaint`: CEF exposes a callback-scoped D3D11 shared
+//! texture which the host copies directly into GPUI-owned GPU memory. This
+//! avoids CPU readback, per-frame image allocation, and atlas churn. Linux,
+//! macOS, and Windows fallback use [`ImplRenderHandler::on_paint`]; the host
+//! uploads that BGRA framebuffer as a texture and feeds input back in with
+//! `send_*_event`.
 //!
 //! ## Threading
 //!
@@ -25,9 +23,11 @@
 //! must therefore size the drawn image by the *reported* frame dimensions, not
 //! by its own multiplication.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "windows")]
+use cef::AcceleratedPaintInfo;
 use cef::rc::Rc as _;
 use cef::{
     Browser, ImplBrowserHost, ImplRenderHandler, KeyEvent, KeyEventType, MouseButtonType,
@@ -172,9 +172,57 @@ impl SurfaceState {
 
 struct SurfaceInner {
     state: Mutex<SurfaceState>,
+    accelerated_sink: Option<Arc<dyn OsrAcceleratedFrameSink>>,
+    accelerated_failed: AtomicBool,
+    accelerated_error_reported: AtomicBool,
     /// Bumped on every composited frame. Read without locking so the host's
     /// pump can decide whether a repaint is even needed.
     generation: AtomicU64,
+}
+
+/// Which CEF OSR plane an accelerated texture contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsrPlane {
+    View,
+    Popup,
+}
+
+/// One callback-scoped accelerated CEF frame. The shared texture handle remains
+/// owned by CEF and must be copied before [`OsrAcceleratedFrameSink::present`]
+/// returns.
+#[derive(Debug, Clone, Copy)]
+pub struct OsrAcceleratedFrame {
+    pub plane: OsrPlane,
+    pub shared_texture_handle: usize,
+    pub source_x: i32,
+    pub source_y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Logical popup placement and the device scale used by its physical texture.
+#[derive(Debug, Clone)]
+pub struct OsrPopupState {
+    pub visible: bool,
+    pub rect: Rect,
+    pub scale_factor: f32,
+}
+
+/// Synchronous destination for CEF accelerated OSR frames.
+///
+/// Implementations must perform the GPU copy inline. Retaining CEF's handle for
+/// later use is invalid because Chromium returns that resource to its pool as
+/// soon as the callback completes.
+pub trait OsrAcceleratedFrameSink: Send + Sync {
+    fn present(&self, frame: OsrAcceleratedFrame) -> Result<(), String>;
+    fn set_popup_state(&self, state: OsrPopupState);
+
+    /// Whether previously presented host-owned GPU images still exist. GPUI's
+    /// device-loss recovery clears its atlas; returning false recreates this
+    /// browser in software mode instead of leaving a static page blank.
+    fn is_valid(&self) -> bool {
+        true
+    }
 }
 
 /// Shared off-screen framebuffer for one windowless browser.
@@ -187,6 +235,27 @@ pub struct OsrSurface(Arc<SurfaceInner>);
 impl OsrSurface {
     /// Create a surface sized in logical pixels at `scale_factor`.
     pub fn new(width: i32, height: i32, scale_factor: f32) -> Self {
+        Self::new_with_sink(width, height, scale_factor, None)
+    }
+
+    /// Create a Windows accelerated surface. CEF calls the sink with a D3D11
+    /// shared texture, which the GPUI host copies into its own GPU texture before
+    /// the callback returns.
+    pub fn new_accelerated(
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        sink: Arc<dyn OsrAcceleratedFrameSink>,
+    ) -> Self {
+        Self::new_with_sink(width, height, scale_factor, Some(sink))
+    }
+
+    fn new_with_sink(
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        accelerated_sink: Option<Arc<dyn OsrAcceleratedFrameSink>>,
+    ) -> Self {
         Self(Arc::new(SurfaceInner {
             state: Mutex::new(SurfaceState {
                 view_width: width.max(1),
@@ -198,15 +267,35 @@ impl OsrSurface {
                 },
                 ..Default::default()
             }),
+            accelerated_sink,
+            accelerated_failed: AtomicBool::new(false),
+            accelerated_error_reported: AtomicBool::new(false),
             generation: AtomicU64::new(0),
         }))
+    }
+
+    /// Whether this surface requests CEF's shared-texture accelerated paint path.
+    pub fn is_accelerated(&self) -> bool {
+        self.0.accelerated_sink.is_some()
+    }
+
+    /// Read and clear the signal that the host could not copy an accelerated
+    /// frame. The browser must be recreated with shared textures disabled;
+    /// CEF does not switch an existing browser from accelerated to `OnPaint`.
+    pub fn take_accelerated_failure(&self) -> bool {
+        let sink_invalid = self
+            .0
+            .accelerated_sink
+            .as_ref()
+            .is_some_and(|sink| !sink.is_valid());
+        self.0.accelerated_failed.swap(false, Ordering::AcqRel) || sink_invalid
     }
 
     /// Update the logical size/scale CEF should lay out at. The caller must
     /// follow this with [`crate::runtime::WebView::notify_windowless_resized`]
     /// so the browser re-reads the view rect.
     pub fn set_view_size(&self, width: i32, height: i32, scale_factor: f32) {
-        if let Ok(mut state) = self.0.state.lock() {
+        let popup_state = if let Ok(mut state) = self.0.state.lock() {
             state.view_width = width.max(1);
             state.view_height = height.max(1);
             state.scale_factor = if scale_factor > 0.0 {
@@ -214,6 +303,16 @@ impl OsrSurface {
             } else {
                 1.0
             };
+            Some(OsrPopupState {
+                visible: state.popup_visible,
+                rect: state.popup_rect.clone(),
+                scale_factor: state.scale_factor,
+            })
+        } else {
+            None
+        };
+        if let (Some(sink), Some(popup_state)) = (&self.0.accelerated_sink, popup_state) {
+            sink.set_popup_state(popup_state);
         }
     }
 
@@ -290,19 +389,84 @@ impl OsrSurface {
     }
 
     fn set_popup_visible(&self, visible: bool) {
-        if let Ok(mut state) = self.0.state.lock() {
+        let popup_state = if let Ok(mut state) = self.0.state.lock() {
             state.popup_visible = visible;
             if !visible {
                 state.popup = Plane::default();
             }
             state.composite();
+            Some(OsrPopupState {
+                visible,
+                rect: state.popup_rect.clone(),
+                scale_factor: state.scale_factor,
+            })
+        } else {
+            None
+        };
+        if let (Some(sink), Some(popup_state)) = (&self.0.accelerated_sink, popup_state) {
+            sink.set_popup_state(popup_state);
         }
         self.0.generation.fetch_add(1, Ordering::Release);
     }
 
     fn set_popup_rect(&self, rect: Rect) {
-        if let Ok(mut state) = self.0.state.lock() {
+        let popup_state = if let Ok(mut state) = self.0.state.lock() {
             state.popup_rect = rect;
+            Some(OsrPopupState {
+                visible: state.popup_visible,
+                rect: state.popup_rect.clone(),
+                scale_factor: state.scale_factor,
+            })
+        } else {
+            None
+        };
+        if let (Some(sink), Some(popup_state)) = (&self.0.accelerated_sink, popup_state) {
+            sink.set_popup_state(popup_state);
+        }
+        self.0.generation.fetch_add(1, Ordering::Release);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn on_accelerated_paint(&self, element: PaintElementType, info: Option<&AcceleratedPaintInfo>) {
+        let (Some(sink), Some(info)) = (&self.0.accelerated_sink, info) else {
+            return;
+        };
+        let visible = &info.extra.visible_rect;
+        let coded = &info.extra.coded_size;
+        let (source_x, source_y, width, height) = if visible.width > 0 && visible.height > 0 {
+            (visible.x, visible.y, visible.width, visible.height)
+        } else {
+            (0, 0, coded.width, coded.height)
+        };
+        let frame = OsrAcceleratedFrame {
+            plane: if element == PaintElementType::POPUP {
+                OsrPlane::Popup
+            } else {
+                OsrPlane::View
+            },
+            shared_texture_handle: info.shared_texture_handle as usize,
+            source_x,
+            source_y,
+            width,
+            height,
+        };
+        if frame.shared_texture_handle == 0 || frame.width <= 0 || frame.height <= 0 {
+            return;
+        }
+        match sink.present(frame) {
+            Ok(()) => {
+                self.0.generation.fetch_add(1, Ordering::Release);
+            }
+            Err(error) => {
+                self.0.accelerated_failed.store(true, Ordering::Release);
+                if !self
+                    .0
+                    .accelerated_error_reported
+                    .swap(true, Ordering::AcqRel)
+                {
+                    eprintln!("[cef-osr] accelerated texture copy failed: {error}");
+                }
+            }
         }
     }
 }
@@ -371,6 +535,17 @@ wrap_render_handler! {
         ) {
             self.surface
                 .on_paint(type_, _dirty_rects.unwrap_or(&[]), buffer, width, height);
+        }
+
+        #[cfg(target_os = "windows")]
+        fn on_accelerated_paint(
+            &self,
+            _browser: Option<&mut Browser>,
+            type_: PaintElementType,
+            _dirty_rects: Option<&[Rect]>,
+            info: Option<&AcceleratedPaintInfo>,
+        ) {
+            self.surface.on_accelerated_paint(type_, info);
         }
     }
 }
@@ -584,6 +759,65 @@ mod tests {
         assert_eq!(surface.view_size(), (320, 200));
         assert_eq!(surface.generation(), 0);
         assert!(surface.with_frame(|_, _, _| ()).is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[derive(Default)]
+    struct RecordingAcceleratedSink {
+        frames: Mutex<Vec<OsrAcceleratedFrame>>,
+        fail: AtomicBool,
+    }
+
+    #[cfg(target_os = "windows")]
+    impl OsrAcceleratedFrameSink for RecordingAcceleratedSink {
+        fn present(&self, frame: OsrAcceleratedFrame) -> Result<(), String> {
+            if self.fail.load(Ordering::Acquire) {
+                return Err("test failure".to_string());
+            }
+            self.frames.lock().expect("frames").push(frame);
+            Ok(())
+        }
+
+        fn set_popup_state(&self, _state: OsrPopupState) {}
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn accelerated_paint_uses_the_visible_rect_and_signals_failure() {
+        let sink = Arc::new(RecordingAcceleratedSink::default());
+        let surface = OsrSurface::new_accelerated(320, 200, 1.0, sink.clone());
+        let mut info = AcceleratedPaintInfo::default();
+        info.shared_texture_handle = 1usize as *mut core::ffi::c_void;
+        info.extra.coded_size.width = 512;
+        info.extra.coded_size.height = 256;
+        info.extra.visible_rect = Rect {
+            x: 4,
+            y: 8,
+            width: 320,
+            height: 200,
+        };
+
+        surface.on_accelerated_paint(PaintElementType::VIEW, Some(&info));
+        assert_eq!(surface.generation(), 1);
+        let frames = sink.frames.lock().expect("frames");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].plane, OsrPlane::View);
+        assert_eq!(
+            (
+                frames[0].source_x,
+                frames[0].source_y,
+                frames[0].width,
+                frames[0].height
+            ),
+            (4, 8, 320, 200)
+        );
+        drop(frames);
+
+        sink.fail.store(true, Ordering::Release);
+        surface.on_accelerated_paint(PaintElementType::VIEW, Some(&info));
+        assert_eq!(surface.generation(), 1);
+        assert!(surface.take_accelerated_failure());
+        assert!(!surface.take_accelerated_failure());
     }
 
     #[test]

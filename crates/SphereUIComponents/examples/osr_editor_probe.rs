@@ -63,7 +63,7 @@ fn run() {
         width: 972,
         height: 728,
     };
-    if let Err(error) = host::open_view(view_id, "probe::instance", plugin_id, 0, rect, 1.0) {
+    if let Err(error) = host::open_view(view_id, "probe::instance", plugin_id, 0, rect, 1.0, None) {
         println!("[probe] FAILED open_view: {error}");
         return;
     }

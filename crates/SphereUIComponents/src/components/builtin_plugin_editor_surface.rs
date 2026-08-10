@@ -1,13 +1,12 @@
 //! GPUI presentation of an **off-screen** built-in plugin editor.
 //!
-//! On Windows the CEF browser is a real child window and GPUI never touches
-//! its pixels (see `plugin_content_host.rs`). Where that is impossible — Linux,
-//! and any host without child-window embedding — CEF renders windowless and
-//! hands the host a BGRA framebuffer instead. This module owns the two halves
-//! of that arrangement:
+//! CEF renders windowless on every platform. Windows normally copies accelerated
+//! D3D11 shared textures directly into stable GPUI atlas tiles; software OSR
+//! hands the host a BGRA framebuffer instead. This module owns both presentation
+//! paths plus input forwarding:
 //!
-//! - **Out:** turning the latest painted frame into a GPUI texture, and
-//!   releasing the previous one so the sprite atlas does not grow per frame.
+//! - **Out:** reusing stable GPU textures for accelerated frames, or turning a
+//!   software frame into a GPUI texture and releasing the previous atlas tile.
 //! - **In:** translating GPUI mouse/keyboard events into the logical-pixel,
 //!   `VKEY_*`-coded events CEF expects.
 //!
@@ -15,6 +14,11 @@
 
 use std::sync::Arc;
 
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+use gpui::{
+    canvas, point, px, size, AnyElement, Bounds, Corners, D3D11ExternalImage, DevicePixels,
+    IntoElement, Pixels, Styled,
+};
 use gpui::{App, Keystroke, Modifiers, MouseButton, RenderImage, Window};
 use image::{Frame, ImageBuffer};
 use smallvec::SmallVec;
@@ -22,6 +26,8 @@ use smallvec::SmallVec;
 use crate::components::builtin_plugin_editor::{
     self as host, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton, ViewId,
 };
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+use sphere_webview::osr::{OsrAcceleratedFrame, OsrAcceleratedFrameSink, OsrPlane, OsrPopupState};
 
 /// The frame currently uploaded to GPUI, plus the mouse-button state CEF needs
 /// echoed back in every event's modifier mask.
@@ -30,10 +36,92 @@ pub(crate) struct OffscreenSurface {
     image: Option<Arc<RenderImage>>,
     /// Surface generation `image` was built from. `0` means "nothing yet".
     generation: u64,
+    using_accelerated_frames: bool,
     /// Frames replaced since the last render pass. Their atlas tiles can only
     /// be dropped with a `Window` in hand, which `sync` does not have.
     stale: Vec<Arc<RenderImage>>,
+    #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+    accelerated: Option<Arc<AcceleratedPresentation>>,
     buttons: ButtonState,
+}
+
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+struct AcceleratedPresentation {
+    view: Arc<D3D11ExternalImage>,
+    popup: Arc<D3D11ExternalImage>,
+    view_presented: std::sync::atomic::AtomicBool,
+    popup_presented: std::sync::atomic::AtomicBool,
+    popup_state: std::sync::Mutex<AcceleratedPopupState>,
+}
+
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+#[derive(Debug, Clone, Copy)]
+struct AcceleratedPopupState {
+    visible: bool,
+    x: i32,
+    y: i32,
+    scale_factor: f32,
+}
+
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+impl Default for AcceleratedPopupState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            x: 0,
+            y: 0,
+            scale_factor: 1.0,
+        }
+    }
+}
+
+#[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+impl OsrAcceleratedFrameSink for AcceleratedPresentation {
+    fn present(&self, frame: OsrAcceleratedFrame) -> Result<(), String> {
+        let image = match frame.plane {
+            OsrPlane::View => &self.view,
+            OsrPlane::Popup => &self.popup,
+        };
+        image
+            .update_from_shared_texture(
+                frame.shared_texture_handle,
+                point(DevicePixels(frame.source_x), DevicePixels(frame.source_y)),
+                size(DevicePixels(frame.width), DevicePixels(frame.height)),
+            )
+            .map_err(|error| error.to_string())?;
+        match frame.plane {
+            OsrPlane::View => self
+                .view_presented
+                .store(true, std::sync::atomic::Ordering::Release),
+            OsrPlane::Popup => self
+                .popup_presented
+                .store(true, std::sync::atomic::Ordering::Release),
+        }
+        Ok(())
+    }
+
+    fn set_popup_state(&self, state: OsrPopupState) {
+        if let Ok(mut popup) = self.popup_state.lock() {
+            *popup = AcceleratedPopupState {
+                visible: state.visible,
+                x: state.rect.x,
+                y: state.rect.y,
+                scale_factor: state.scale_factor.max(f32::EPSILON),
+            };
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        let view_valid = !self
+            .view_presented
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.view.is_available();
+        let popup_valid = !self
+            .popup_presented
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.popup.is_available();
+        view_valid && popup_valid
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -47,9 +135,22 @@ impl OffscreenSurface {
     /// Pull the latest painted frame for `view_id`. Returns `true` when a new
     /// frame was taken and the window therefore needs to repaint.
     pub(crate) fn sync(&mut self, view_id: ViewId) -> bool {
+        let using_accelerated_frames = host::view_uses_accelerated_osr(view_id);
+        if using_accelerated_frames != self.using_accelerated_frames {
+            self.using_accelerated_frames = using_accelerated_frames;
+            self.generation = 0;
+        }
         let generation = host::view_frame_generation(view_id);
         if generation == 0 || generation == self.generation {
             return false;
+        }
+        #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+        if using_accelerated_frames {
+            // On accelerated Windows OSR the callback already copied the frame
+            // into a stable GPUI D3D11 atlas tile. Only the generation changes;
+            // no CPU image or per-frame allocation is needed here.
+            self.generation = generation;
+            return true;
         }
         let Some(Some(image)) = host::with_view_frame(view_id, |bgra, width, height| {
             // GPUI's `RenderImage` is BGRA with premultiplied alpha, which is
@@ -73,6 +174,86 @@ impl OffscreenSurface {
     /// The texture to draw, if a frame has arrived.
     pub(crate) fn image(&self) -> Option<Arc<RenderImage>> {
         self.image.clone()
+    }
+
+    /// Prepare the GPU-to-GPU CEF presentation path for this window. Returning
+    /// `None` selects the existing software `OnPaint` surface instead.
+    #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+    pub(crate) fn accelerated_sink(
+        &mut self,
+        window: &Window,
+    ) -> Option<host::AcceleratedFrameSink> {
+        if std::env::var_os("FUTUREBOARD_CEF_SOFTWARE_OSR").is_some() {
+            return None;
+        }
+        let presentation = self.accelerated.get_or_insert_with(|| {
+            Arc::new(AcceleratedPresentation {
+                view: window.create_d3d11_external_image(),
+                popup: window.create_d3d11_external_image(),
+                view_presented: std::sync::atomic::AtomicBool::new(false),
+                popup_presented: std::sync::atomic::AtomicBool::new(false),
+                popup_state: std::sync::Mutex::new(AcceleratedPopupState::default()),
+            })
+        });
+        Some(presentation.clone())
+    }
+
+    #[cfg(not(all(feature = "builtin-plugin-editor", target_os = "windows")))]
+    pub(crate) fn accelerated_sink(
+        &mut self,
+        _window: &Window,
+    ) -> Option<host::AcceleratedFrameSink> {
+        None
+    }
+
+    /// Draw the two stable accelerated planes. Popups remain separate so hiding
+    /// one immediately reveals the unchanged view texture below it.
+    #[cfg(all(feature = "builtin-plugin-editor", target_os = "windows"))]
+    pub(crate) fn accelerated_element(&self) -> Option<AnyElement> {
+        let presentation = self.accelerated.clone()?;
+        Some(
+            canvas(
+                |bounds, _, _| bounds,
+                move |bounds: Bounds<Pixels>, _, window, _| {
+                    let _ = window.paint_d3d11_external_image(
+                        bounds,
+                        Corners::default(),
+                        presentation.view.clone(),
+                    );
+                    let popup = presentation
+                        .popup_state
+                        .lock()
+                        .map(|popup| *popup)
+                        .unwrap_or_default();
+                    let popup_size = presentation.popup.size();
+                    if popup.visible && popup_size.width.0 > 0 && popup_size.height.0 > 0 {
+                        let popup_bounds = Bounds {
+                            origin: point(
+                                bounds.origin.x + px(popup.x as f32),
+                                bounds.origin.y + px(popup.y as f32),
+                            ),
+                            size: size(
+                                px(popup_size.width.0 as f32 / popup.scale_factor),
+                                px(popup_size.height.0 as f32 / popup.scale_factor),
+                            ),
+                        };
+                        let _ = window.paint_d3d11_external_image(
+                            popup_bounds,
+                            Corners::default(),
+                            presentation.popup.clone(),
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .size_full()
+            .into_any_element(),
+        )
+    }
+
+    #[cfg(not(all(feature = "builtin-plugin-editor", target_os = "windows")))]
+    pub(crate) fn accelerated_element(&self) -> Option<gpui::AnyElement> {
+        None
     }
 
     /// Drop the atlas tiles of every superseded frame. Must be called from a

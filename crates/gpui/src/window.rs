@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use crate::D3D11ExternalImage;
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
@@ -4063,6 +4065,46 @@ impl Window {
             opacity,
         });
         Ok(())
+    }
+
+    /// Create a stable external image backed by this window's D3D11 atlas.
+    /// CEF accelerated OSR uses it to copy callback-scoped shared textures into
+    /// GPUI-owned GPU memory without a CPU readback.
+    #[cfg(target_os = "windows")]
+    pub fn create_d3d11_external_image(&self) -> Arc<D3D11ExternalImage> {
+        Arc::new(D3D11ExternalImage::new(self.sprite_atlas.clone()))
+    }
+
+    /// Paint a D3D11 external image into the scene at the current z-index.
+    /// Returns `false` before the first shared texture update or after device
+    /// loss while the atlas is waiting for a replacement frame.
+    #[cfg(target_os = "windows")]
+    pub fn paint_d3d11_external_image(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<D3D11ExternalImage>,
+    ) -> Result<bool> {
+        self.invalidator.debug_assert_paint();
+        let Some(tile) = data.tile()? else {
+            return Ok(false);
+        };
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        let corner_radii = corner_radii.scale(self.scale_factor());
+        let opacity = self.element_opacity();
+        self.next_frame.scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false,
+            bounds,
+            content_mask,
+            corner_radii,
+            tile,
+            opacity,
+        });
+        Ok(true)
     }
 
     /// Paint a surface into the scene for the next frame at the current z-index.

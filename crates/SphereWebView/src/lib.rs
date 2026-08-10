@@ -5,9 +5,9 @@
 //! workspace-local `build/cef/<version>/<platform>` directory, then enable
 //! `cef-runtime` in the executable that owns the CEF process lifecycle.
 //!
-//! Two presentations are supported: a native CEF child window (Windows), and
-//! windowless/off-screen rendering into a host-owned framebuffer (see
-//! [`osr`]), which Linux and macOS use.
+//! Built-in editors use windowless/off-screen rendering (see [`osr`]). Windows
+//! can consume CEF's accelerated D3D11 shared textures; software BGRA frames
+//! remain available as a cross-platform path and automatic Windows fallback.
 
 use std::path::{Path, PathBuf};
 
