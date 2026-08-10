@@ -6,10 +6,21 @@ import {
   presetsData,
   type CategoryId,
 } from "./data";
-import type { RigSnapshot } from "./Editor";
+import type { RigSnapshot, Snapshot } from "./Editor";
 
 export const PRESET_FILE_FORMAT = "rodhareist-preset";
 export const PRESET_FILE_VERSION = 1;
+
+/**
+ * A persisted snapshot bank. Optional on `PresetFile` — additive to v1, so
+ * older files (and older builds reading a newer file) round-trip fine: an
+ * absent/malformed block just means the editor reseeds a fresh bank from
+ * `snapshot` (see `Editor.tsx`'s `normalizeSnapshotBank`).
+ */
+export type SerializedSnapshotBank = {
+  active: number;
+  slots: readonly Snapshot[];
+};
 
 export type PresetFile = {
   format: typeof PRESET_FILE_FORMAT;
@@ -18,6 +29,7 @@ export type PresetFile = {
   name: string;
   category: CategoryId;
   snapshot: RigSnapshot;
+  snapshots?: SerializedSnapshotBank;
 };
 
 export function serializePreset(
@@ -25,6 +37,7 @@ export function serializePreset(
   name: string,
   category: CategoryId,
   snapshot: RigSnapshot,
+  snapshots?: SerializedSnapshotBank,
 ): string {
   const file: PresetFile = {
     format: PRESET_FILE_FORMAT,
@@ -33,6 +46,7 @@ export function serializePreset(
     name,
     category,
     snapshot,
+    ...(snapshots ? { snapshots } : {}),
   };
   return JSON.stringify(file, null, 2);
 }
@@ -59,7 +73,17 @@ export function parsePresetFile(text: string): PresetFile | null {
   if (!snap.parameters || typeof snap.parameters !== "object") return null;
   if (!snap.stageModels || typeof snap.stageModels !== "object") return null;
   if (!snap.globals || typeof snap.globals !== "object") return null;
-  return file as PresetFile;
+
+  // `snapshots` is optional and additive: a missing or structurally invalid
+  // block is dropped rather than rejecting an otherwise-valid preset file —
+  // the rig itself is still good, and the editor reseeds a fresh bank.
+  const bank = file.snapshots;
+  const validBank =
+    bank &&
+    typeof bank === "object" &&
+    typeof bank.active === "number" &&
+    Array.isArray(bank.slots);
+  return { ...file, snapshots: validBank ? bank : undefined } as PresetFile;
 }
 
 /**

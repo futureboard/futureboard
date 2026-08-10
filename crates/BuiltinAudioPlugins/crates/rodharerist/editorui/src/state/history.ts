@@ -132,3 +132,38 @@ export function setActive<T>(ab: AbState<T>, slot: AbSlot, current: T): AbState<
   if (ab.active === slot) return ab;
   return switchSlot(ab, current);
 }
+
+// ---------------------------------------------------------------------------
+// Snapshot bank (Helix-style performance snapshots)
+// ---------------------------------------------------------------------------
+
+/**
+ * A fixed-size bank of named slots with one active. Unlike {@link AbState},
+ * switching never writes the live state back into the outgoing slot: a
+ * snapshot only changes when explicitly saved into (see {@link saveBankSlot}).
+ * Live edits made while a slot is active and not saved are simply live —
+ * switching away discards them from the bank, same as real footswitchable
+ * snapshots.
+ */
+export type BankState<T> = {
+  readonly active: number;
+  readonly slots: readonly T[];
+};
+
+export function activeBankSlot<T>(bank: BankState<T>): T {
+  return bank.slots[bank.active]!;
+}
+
+/** Switch the active slot. Out-of-range or already-active indices are a no-op. */
+export function setActiveBankSlot<T>(bank: BankState<T>, index: number): BankState<T> {
+  if (index === bank.active || index < 0 || index >= bank.slots.length) return bank;
+  return { ...bank, active: index };
+}
+
+/** Overwrite one slot's contents — the "save current into this slot" gesture. */
+export function saveBankSlot<T>(bank: BankState<T>, index: number, value: T): BankState<T> {
+  if (index < 0 || index >= bank.slots.length) return bank;
+  const slots = bank.slots.slice();
+  slots[index] = value;
+  return { ...bank, slots };
+}

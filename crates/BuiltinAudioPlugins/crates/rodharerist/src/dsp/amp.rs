@@ -373,6 +373,125 @@ impl AmpProfile {
                 shape_seed: 3,
                 clean_low_blend: 0.24,
             },
+            // Boutique low/mid-gain sustain: low bias movement and low
+            // pre-compression keep the note singing rather than crunching, but
+            // real sag and a soft power-stage headroom give the touch-sensitive
+            // clean-to-mild-overdrive transition the style is built around.
+            // American family for the rich, present upper mid this voice leads
+            // with instead of a scoop.
+            AmpModel::Boutique => Self {
+                stages: 3,
+                oversample: 4,
+                tone: ToneFamily::American,
+                input_hpf: 18.0,
+                input_lpf: 19_500.0,
+                coupling_hpf: 62.0,
+                stage_lpf: 10_500.0,
+                pre_gain: 1.65,
+                inter_gain: 1.30,
+                bias: 0.05,
+                bias_move: 0.07,
+                pre_compression: 0.10,
+                tightness: 0.14,
+                pi_drive: 1.20,
+                pi_compression: 0.14,
+                power_drive: 1.70,
+                power_headroom: 1.30,
+                power_asymmetry: 0.035,
+                feedback: 0.38,
+                presence_depth: 0.40,
+                resonance: 0.16,
+                damping: 0.44,
+                // The long, singing sustain this style is known for is a slow,
+                // deep sag: the note's own attack compresses the rail, then the
+                // rail recovers under the decaying signal instead of snapping
+                // back — closer to a limiter's release than a crunch amp's.
+                sag_amount: 0.16,
+                sag_attack: 0.020,
+                sag_release: 0.220,
+                transformer_memory: 0.13,
+                transformer_compression: 0.12,
+                output_gain: 0.80,
+                shape_seed: 1,
+                clean_low_blend: 0.10,
+            },
+            // Aggressive modern high-gain: tighter and more scooped than Recto
+            // or Slate rather than merely louder — the highest tightness in the
+            // lineup keeps palm mutes articulate under a lot of gain, and a very
+            // low sag/fast recovery makes the power stage itself the tight,
+            // percussive part of the voice.
+            AmpModel::Invader => Self {
+                stages: 4,
+                oversample: 8,
+                tone: ToneFamily::Modern,
+                input_hpf: 32.0,
+                input_lpf: 17_500.0,
+                coupling_hpf: 118.0,
+                stage_lpf: 8_200.0,
+                pre_gain: 3.85,
+                inter_gain: 2.30,
+                bias: 0.115,
+                bias_move: 0.19,
+                pre_compression: 0.24,
+                tightness: 0.94,
+                pi_drive: 1.95,
+                pi_compression: 0.26,
+                power_drive: 2.55,
+                power_headroom: 0.98,
+                power_asymmetry: 0.05,
+                // Even less global feedback than Recto/Slate: the power section
+                // stays raw at the top of Gain, which is where this voice lives.
+                feedback: 0.16,
+                presence_depth: 0.85,
+                resonance: 0.34,
+                damping: 0.70,
+                sag_amount: 0.045,
+                sag_attack: 0.0025,
+                sag_release: 0.024,
+                transformer_memory: 0.065,
+                transformer_compression: 0.13,
+                output_gain: 0.52,
+                shape_seed: 3,
+                clean_low_blend: 0.0,
+            },
+            // Small single-speaker combo: two stages only (a real Deluxe-class
+            // amp has far less cascade than a modern high-gain head), low power
+            // headroom so the *output pair* breaks up early rather than the
+            // preamp, and a spongier, slower sag than Bassman — this is the
+            // amp's own compression doing the work, at a level a small combo
+            // actually reaches, not a bigger head turned down.
+            AmpModel::TweedCombo => Self {
+                stages: 2,
+                oversample: 4,
+                tone: ToneFamily::American,
+                input_hpf: 22.0,
+                input_lpf: 15_500.0,
+                coupling_hpf: 68.0,
+                stage_lpf: 7_600.0,
+                pre_gain: 2.05,
+                inter_gain: 1.55,
+                bias: 0.095,
+                bias_move: 0.15,
+                pre_compression: 0.20,
+                tightness: 0.10,
+                pi_drive: 1.50,
+                pi_compression: 0.22,
+                power_drive: 2.05,
+                power_headroom: 0.85,
+                power_asymmetry: 0.09,
+                feedback: 0.22,
+                presence_depth: 0.32,
+                resonance: 0.20,
+                damping: 0.40,
+                sag_amount: 0.24,
+                sag_attack: 0.014,
+                sag_release: 0.150,
+                transformer_memory: 0.19,
+                transformer_compression: 0.19,
+                output_gain: 0.74,
+                shape_seed: 2,
+                clean_low_blend: 0.06,
+            },
         }
     }
 }

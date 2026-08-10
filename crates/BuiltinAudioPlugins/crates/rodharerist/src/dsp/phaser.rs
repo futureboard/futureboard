@@ -78,6 +78,12 @@ pub(super) enum PhaserVoice {
     BiLam,
     /// "Isan Jet" — six stages, hard regeneration, fast and narrow up top.
     IsanJet,
+    /// "Soft Phase" — two stages, one gentle notch: the subtle end nothing
+    /// else in the lineup covers (a Phase-45 rather than a Phase-90).
+    SoftPhase,
+    /// "Wide Vibe" — real linked stereo spread (unlike every mono voice
+    /// above), staggered corners, a lush width-forward swirl.
+    WideVibe,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +211,37 @@ impl PhaserVoice {
                 skew: 1.0,
                 spread: 0.06,
                 rate_scale: 1.35,
+                max_blend: MAX_BLEND,
+                mono: false,
+            },
+            // One notch, gentle regeneration, narrow sweep: the subtle "just
+            // a little movement" voice — everything else in the lineup is at
+            // least a two-notch swirl.
+            Self::SoftPhase => Profile {
+                stages: 2,
+                feedback: 0.30,
+                sweep_lo: 250.0,
+                sweep_hi: 1_800.0,
+                stagger: 1.0,
+                skew: 1.0,
+                spread: 0.0,
+                rate_scale: 0.75,
+                max_blend: MAX_BLEND,
+                mono: true,
+            },
+            // The one voice that actually runs linked-but-independent L/R
+            // sweeps at a musical width — every other voice here is mono for
+            // exactly the ghosted-double reason explained above; this one
+            // spends that risk deliberately for a genuinely wide swirl.
+            Self::WideVibe => Profile {
+                stages: 4,
+                feedback: 0.38,
+                sweep_lo: 180.0,
+                sweep_hi: 2_100.0,
+                stagger: 1.35,
+                skew: 1.30,
+                spread: 0.22,
+                rate_scale: 0.60,
                 max_blend: MAX_BLEND,
                 mono: false,
             },
@@ -474,13 +511,15 @@ impl Phaser {
 mod tests {
     use super::*;
 
-    const ALL: [PhaserVoice; 6] = [
+    const ALL: [PhaserVoice; 8] = [
         PhaserVoice::Phase90,
         PhaserVoice::MolamSwirl,
         PhaserVoice::PhinVibe,
         PhaserVoice::KhaenSwirl,
         PhaserVoice::BiLam,
         PhaserVoice::IsanJet,
+        PhaserVoice::SoftPhase,
+        PhaserVoice::WideVibe,
     ];
 
     /// Peak-to-null depth of the parked cascade's magnitude response, in dB.
@@ -728,6 +767,7 @@ mod tests {
             PhaserVoice::PhinVibe,
             PhaserVoice::KhaenSwirl,
             PhaserVoice::BiLam,
+            PhaserVoice::SoftPhase,
         ] {
             let mut p = Phaser::new(48_000.0);
             p.configure(voice, 4.0, 7.0, 100.0);

@@ -326,6 +326,56 @@ impl CabProfile {
             // active. A profile is still needed so the standby lane holds
             // something valid — the most neutral voicing in the set.
             CabModel::Ir => Self::for_model(CabModel::Vintage4x12),
+            // Modern 2x12: the closed, scooped, extended-top family shared
+            // with Modern/Uber/Slo 4x12, scaled down — a higher box
+            // resonance and a milder scoop than any of the 4x12s.
+            CabModel::Modern2x12 => Self {
+                topology: CabTopology::ModernClosed,
+                hpf_hz: 78.0,
+                resonance_hz: 112.0,
+                resonance_damping: 0.62,
+                resonance_gain: 0.30,
+                second_mode_hz: 220.0,
+                second_mode_gain: 0.05,
+                body_hz: 580.0,
+                body_gain: -0.06,
+                breakup_hz: 3_500.0,
+                breakup_damping: 0.50,
+                breakup_gain: 0.22,
+                notch_hz: 2_300.0,
+                notch_gain: 0.14,
+                cutoff_hz: 6_800.0,
+                slope: 3,
+                rear_delay_ms: 0.0,
+                rear_gain: 0.0,
+                compression: 0.10,
+                output_gain: 0.91,
+            },
+            // American 1x12 Combo: `OpenBack` family, but a single small
+            // speaker — higher resonance, brighter and more extended top,
+            // a shorter/weaker rear path than the 2-speaker Open Back.
+            CabModel::American1x12 => Self {
+                topology: CabTopology::OpenBack,
+                hpf_hz: 105.0,
+                resonance_hz: 165.0,
+                resonance_damping: 0.55,
+                resonance_gain: 0.30,
+                second_mode_hz: 400.0,
+                second_mode_gain: -0.08,
+                body_hz: 800.0,
+                body_gain: 0.05,
+                breakup_hz: 3_600.0,
+                breakup_damping: 0.40,
+                breakup_gain: 0.17,
+                notch_hz: 2_000.0,
+                notch_gain: 0.09,
+                cutoff_hz: 7_200.0,
+                slope: 2,
+                rear_delay_ms: 0.85,
+                rear_gain: -0.16,
+                compression: 0.05,
+                output_gain: 0.95,
+            },
         }
     }
 }

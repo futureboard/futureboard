@@ -11,6 +11,7 @@ import { onNativeMessage } from "../instanceBridge";
 import { distanceCm, micTypeLabel, positionLabel } from "../globals";
 import { GateMonitor } from "./GateMonitor";
 import { Knob } from "./Knob";
+import { ModelPicker } from "./ModelPicker";
 
 /** Lifecycle of the most recent `.nam` load request. */
 type NamLoadStatus =
@@ -54,6 +55,15 @@ export function ModuleEditor({
   const [namStereo, setNamStereo] = useState(true);
   const [namFullRig, setNamFullRig] = useState(false);
   const [namStatus, setNamStatus] = useState<NamLoadStatus>({ kind: "idle" });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const canPickModel = list.length > 1;
+
+  // A category switch (or the active model changing out from under an open
+  // picker, e.g. via undo) should not leave a stale picker open over the
+  // wrong category's models.
+  useEffect(() => {
+    setPickerOpen(false);
+  }, [activeCat]);
 
   // Resolve the pending load from the host's async result message.
   useEffect(
@@ -111,7 +121,22 @@ export function ModuleEditor({
             <span className="fp-stage" style={{ color: cat.color }}>
               {cat.name}
             </span>
-            <div className="fp-name">{model?.name ?? "—"}</div>
+            {canPickModel ? (
+              <button
+                type="button"
+                className="fp-name-btn"
+                onClick={() => setPickerOpen(true)}
+                aria-haspopup="dialog"
+                aria-expanded={pickerOpen}
+              >
+                <span className="fp-name">{model?.name ?? "—"}</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+            ) : (
+              <div className="fp-name">{model?.name ?? "—"}</div>
+            )}
             <div className="fp-sub">{model?.sub ?? ""}</div>
           </div>
           <button
@@ -124,28 +149,6 @@ export function ModuleEditor({
             <span>{bypassed ? "Bypassed" : "Active"}</span>
           </button>
         </div>
-
-        {/* A single-model stage has nothing to choose — the identity header
-            already names it, so skip the redundant chip row. Chips are
-            compact (name only); the active model's description lives in the
-            header, the rest surface theirs as a tooltip. */}
-        {list.length > 1 && (
-          <div className="model-strip" role="listbox" aria-label="Model">
-            {list.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                role="option"
-                aria-selected={m.id === activeModelId}
-                className={`model-chip${m.id === activeModelId ? " active" : ""}`}
-                title={m.sub}
-                onClick={() => onSelectModel(m.id)}
-              >
-                {m.name}
-              </button>
-            ))}
-          </div>
-        )}
 
         {isNamCapture && (
           <div className="nam-capture-controls">
@@ -257,6 +260,16 @@ export function ModuleEditor({
           </div>
         )}
       </div>
+
+      {pickerOpen && canPickModel && (
+        <ModelPicker
+          cat={activeCat}
+          models={list}
+          activeModelId={activeModelId}
+          onSelect={onSelectModel}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
     </section>
   );
 }
