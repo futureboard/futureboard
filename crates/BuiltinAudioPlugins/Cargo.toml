@@ -17,6 +17,7 @@ default = []
 builtin-dsp-core.workspace = true
 builtin-ui-embed.workspace = true
 equz8.workspace = true
+equzx.workspace = true
 compresser.workspace = true
 fa2a.workspace = true
 echospace.workspace = true

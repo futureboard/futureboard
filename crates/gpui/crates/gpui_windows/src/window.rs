@@ -71,6 +71,7 @@ pub struct WindowsWindowState {
     pub force_render_after_recovery: Cell<bool>,
 
     pub click_state: ClickState,
+    pub pressed_buttons: PressedButtons,
     pub current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with [`WindowsPlatformState::cursor_visible`].
     pub cursor_visible: Arc<AtomicBool>,
@@ -168,6 +169,7 @@ impl WindowsWindowState {
             renderer: RefCell::new(renderer),
             force_render_after_recovery: Cell::new(false),
             click_state,
+            pressed_buttons: PressedButtons::default(),
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
             nc_button_pressed: Cell::new(nc_button_pressed),
@@ -1189,6 +1191,63 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
     }
 }
 
+/// The mouse buttons currently held down over this window's client area.
+///
+/// Win32 only delivers `WM_*BUTTONUP` while the window holds the mouse
+/// capture it took on the matching button down. When that capture is taken
+/// away mid-gesture — a modal move/size or menu loop, another window on this
+/// thread calling `SetCapture`, foreign code calling `ReleaseCapture`, or the
+/// shell cancelling with `WM_CANCELMODE` — the release is never delivered and
+/// the press would otherwise stay live forever. Tracking the held buttons lets
+/// `WM_CAPTURECHANGED` end the gesture explicitly.
+///
+/// macOS and Linux deliver a release regardless of capture, so this is the
+/// only backend that needs it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PressedButtons(Cell<u8>);
+
+impl PressedButtons {
+    fn bit(button: MouseButton) -> u8 {
+        match button {
+            MouseButton::Left => 1 << 0,
+            MouseButton::Right => 1 << 1,
+            MouseButton::Middle => 1 << 2,
+            MouseButton::Navigate(NavigationDirection::Back) => 1 << 3,
+            MouseButton::Navigate(NavigationDirection::Forward) => 1 << 4,
+        }
+    }
+
+    const ALL: [MouseButton; 5] = [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Navigate(NavigationDirection::Back),
+        MouseButton::Navigate(NavigationDirection::Forward),
+    ];
+
+    pub fn press(&self, button: MouseButton) {
+        self.0.set(self.0.get() | Self::bit(button));
+    }
+
+    pub fn release(&self, button: MouseButton) {
+        self.0.set(self.0.get() & !Self::bit(button));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.get() == 0
+    }
+
+    /// Take every held button, leaving the set empty. Buttons come back in a
+    /// fixed order so a cancelled multi-button gesture releases predictably.
+    pub fn take(&self) -> Vec<MouseButton> {
+        let held = self.0.replace(0);
+        Self::ALL
+            .into_iter()
+            .filter(|button| held & Self::bit(*button) != 0)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ClickState {
     button: Cell<MouseButton>,
@@ -1680,10 +1739,79 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClickState, NativeDialogTemplate};
-    use gpui::{DevicePixels, MouseButton, point};
+    use super::{ClickState, NativeDialogTemplate, PressedButtons};
+    use gpui::{DevicePixels, MouseButton, NavigationDirection, point};
     use std::time::Duration;
     use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WINDOW_STYLE};
+
+    #[test]
+    fn pressed_buttons_starts_empty_and_tracks_each_button() {
+        let buttons = PressedButtons::default();
+        assert!(buttons.is_empty());
+
+        buttons.press(MouseButton::Left);
+        assert!(!buttons.is_empty());
+
+        buttons.release(MouseButton::Left);
+        assert!(buttons.is_empty());
+    }
+
+    #[test]
+    fn releasing_one_button_keeps_the_other_held() {
+        let buttons = PressedButtons::default();
+        buttons.press(MouseButton::Left);
+        buttons.press(MouseButton::Right);
+
+        buttons.release(MouseButton::Left);
+
+        // Capture must survive here: the right button's `WM_RBUTTONUP` is only
+        // delivered while this window still holds it.
+        assert!(!buttons.is_empty());
+        assert_eq!(buttons.take(), vec![MouseButton::Right]);
+    }
+
+    #[test]
+    fn take_drains_every_held_button_in_a_fixed_order() {
+        let buttons = PressedButtons::default();
+        buttons.press(MouseButton::Middle);
+        buttons.press(MouseButton::Left);
+        buttons.press(MouseButton::Navigate(NavigationDirection::Forward));
+
+        assert_eq!(
+            buttons.take(),
+            vec![
+                MouseButton::Left,
+                MouseButton::Middle,
+                MouseButton::Navigate(NavigationDirection::Forward),
+            ]
+        );
+        // A second capture-loss message must not replay the same gesture.
+        assert!(buttons.is_empty());
+        assert!(buttons.take().is_empty());
+    }
+
+    #[test]
+    fn pressing_the_same_button_twice_still_releases_once() {
+        // Win32 can repeat a down without an intervening up when a gesture is
+        // interrupted; the set must not leak a phantom press.
+        let buttons = PressedButtons::default();
+        buttons.press(MouseButton::Left);
+        buttons.press(MouseButton::Left);
+
+        buttons.release(MouseButton::Left);
+
+        assert!(buttons.is_empty());
+    }
+
+    #[test]
+    fn releasing_a_button_that_was_never_pressed_is_inert() {
+        let buttons = PressedButtons::default();
+        buttons.press(MouseButton::Left);
+
+        buttons.release(MouseButton::Right);
+
+        assert_eq!(buttons.take(), vec![MouseButton::Left]);
+    }
 
     #[test]
     fn native_dialog_template_keeps_variable_fields_on_word_boundary() {

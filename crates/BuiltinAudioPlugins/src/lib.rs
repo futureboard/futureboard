@@ -25,6 +25,7 @@ pub use clipper67;
 pub use compresser;
 pub use echospace;
 pub use equz8;
+pub use equzx;
 pub use fa2a;
 pub use fa76;
 pub use meowsyn;
@@ -39,6 +40,7 @@ use builtin_dsp_core::PluginDescriptor;
 pub fn focus_descriptors() -> Vec<PluginDescriptor> {
     vec![
         equz8::descriptor(),
+        equzx::descriptor(),
         compresser::descriptor(),
         fa2a::descriptor(),
         echospace::descriptor(),
@@ -63,6 +65,7 @@ mod tests {
     fn focus_set_is_complete() {
         let ids: Vec<_> = focus_descriptors().into_iter().map(|d| d.id).collect();
         assert!(ids.contains(&equz8::PLUGIN_ID));
+        assert!(ids.contains(&equzx::PLUGIN_ID));
         assert!(ids.contains(&compresser::PLUGIN_ID));
         assert!(ids.contains(&fa2a::PLUGIN_ID));
         assert!(ids.contains(&echospace::PLUGIN_ID));

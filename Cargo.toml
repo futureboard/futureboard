@@ -31,6 +31,7 @@ members = [
     "crates/BuiltinAudioPlugins/crates/builtin_dsp_core",
     "crates/BuiltinAudioPlugins/crates/builtin_ui_embed",
     "crates/BuiltinAudioPlugins/crates/equz8",
+    "crates/BuiltinAudioPlugins/crates/equzx",
     "crates/BuiltinAudioPlugins/crates/compresser",
     "crates/BuiltinAudioPlugins/crates/fa2a",
     "crates/BuiltinAudioPlugins/crates/echospace",
@@ -108,6 +109,7 @@ builtin-dsp-core = { path = "crates/BuiltinAudioPlugins/crates/builtin_dsp_core"
 # see the crate docs before adding anything to it.
 builtin-ui-embed = { path = "crates/BuiltinAudioPlugins/crates/builtin_ui_embed", package = "builtin_ui_embed" }
 equz8 = { path = "crates/BuiltinAudioPlugins/crates/equz8" }
+equzx = { path = "crates/BuiltinAudioPlugins/crates/equzx" }
 compresser = { path = "crates/BuiltinAudioPlugins/crates/compresser" }
 fa2a = { path = "crates/BuiltinAudioPlugins/crates/fa2a" }
 echospace = { path = "crates/BuiltinAudioPlugins/crates/echospace" }

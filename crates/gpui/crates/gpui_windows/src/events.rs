@@ -115,6 +115,11 @@ impl WindowsWindowInner {
             WM_XBUTTONUP => {
                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_up_msg)
             }
+            // Win32 stops delivering button releases the moment capture moves
+            // elsewhere, so a gesture that loses capture must be ended here or
+            // it never ends at all. See `PressedButtons`.
+            WM_CAPTURECHANGED => self.handle_capture_changed_msg(handle, lparam),
+            WM_CANCELMODE => self.handle_cancel_mode_msg(handle),
             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
             WM_SYSKEYUP => self.handle_syskeyup_msg(wparam, lparam),
@@ -464,6 +469,7 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> Option<isize> {
         unsafe { SetCapture(handle) };
+        self.state.pressed_buttons.press(button);
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -493,7 +499,17 @@ impl WindowsWindowInner {
         button: MouseButton,
         lparam: LPARAM,
     ) -> Option<isize> {
-        unsafe { ReleaseCapture().log_err() };
+        // Clear the button before dropping capture: `ReleaseCapture` posts
+        // `WM_CAPTURECHANGED` synchronously, and this release is orderly, so
+        // the cancellation path must find nothing left to cancel.
+        //
+        // Hold capture until the last button comes up. Releasing it on the
+        // first of two held buttons would strand the second one, since its
+        // `WM_*BUTTONUP` is only delivered while we still have capture.
+        self.state.pressed_buttons.release(button);
+        if self.state.pressed_buttons.is_empty() {
+            unsafe { ReleaseCapture().log_err() };
+        }
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);
@@ -513,6 +529,70 @@ impl WindowsWindowInner {
         self.state.callbacks.input.set(Some(func));
 
         if handled { Some(0) } else { Some(1) }
+    }
+
+    /// `lparam` is the window *gaining* capture. Taking capture ourselves on a
+    /// button down is not a loss, so only a transfer away from us cancels.
+    fn handle_capture_changed_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
+        if lparam.0 == handle.0 as isize {
+            return None;
+        }
+        if self.cancel_pressed_buttons(handle) {
+            log::debug!(
+                "gpui: mouse capture lost to {:#x} while buttons were held; gesture cancelled",
+                lparam.0
+            );
+        }
+        None
+    }
+
+    /// The shell asks a window to abandon any modal state it is tracking; a
+    /// held mouse button is exactly that.
+    fn handle_cancel_mode_msg(&self, handle: HWND) -> Option<isize> {
+        if self.cancel_pressed_buttons(handle) {
+            log::debug!("gpui: WM_CANCELMODE while buttons were held; gesture cancelled");
+        }
+        None
+    }
+
+    /// End every gesture Win32 will no longer report a release for. Returns
+    /// whether anything was actually held.
+    fn cancel_pressed_buttons(&self, handle: HWND) -> bool {
+        let buttons = self.state.pressed_buttons.take();
+        if buttons.is_empty() {
+            return false;
+        }
+
+        // The interrupted press never completed a click, so it must not extend
+        // the next one into a double click.
+        self.state.click_state.current_count.set(0);
+
+        let Some(mut func) = self.state.callbacks.input.take() else {
+            return true;
+        };
+        // The cancelling event carries no coordinates, so report where the
+        // cursor actually is rather than where the gesture started.
+        let mut cursor = POINT::default();
+        unsafe {
+            if GetCursorPos(&mut cursor).log_err().is_some() {
+                ScreenToClient(handle, &mut cursor).ok().log_err();
+            }
+        }
+        let scale_factor = self.state.scale_factor.get();
+        let position = logical_point(cursor.x as f32, cursor.y as f32, scale_factor);
+        for button in buttons {
+            // `click_count: 0` marks this as a cancellation rather than a
+            // click, so nothing downstream treats it as an activation.
+            func(PlatformInput::MouseUp(MouseUpEvent {
+                button,
+                position,
+                modifiers: current_modifiers(),
+                click_count: 0,
+            }));
+        }
+        self.state.callbacks.input.set(Some(func));
+
+        true
     }
 
     fn handle_xbutton_msg(

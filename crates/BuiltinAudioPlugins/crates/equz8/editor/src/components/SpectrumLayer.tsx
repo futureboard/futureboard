@@ -17,6 +17,13 @@ export type SpectrumLayerProps = {
 ///
 /// The redraw is driven by rAF, so the browser parks it entirely while the
 /// editor window is hidden rather than burning frames nobody sees.
+///
+/// The loop polls but only *draws* when the frame it would draw is not the one
+/// already on the canvas. Issuing GL commands is what marks the canvas dirty,
+/// and a dirty canvas makes Chromium composite the whole editor surface and
+/// hand the host a new shared texture. Drawing unconditionally therefore pinned
+/// the browser at the display's frame rate forever — including while idle, and
+/// including the ~half of frames where no new analyser data had arrived at all.
 export function SpectrumLayer({ frameRef, visible }: SpectrumLayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rendererRef = useRef<SpectrumRenderer | null>(null)
@@ -38,12 +45,28 @@ export function SpectrumLayer({ frameRef, visible }: SpectrumLayerProps) {
     if (!renderer) return
     rendererRef.current = renderer
 
-    const observer = new ResizeObserver(() => renderer.resize())
+    // `undefined` is "nothing drawn yet", which is distinct from the `null`
+    // that means "drawn, and deliberately blank". The first tick always draws.
+    let drawn: SpectrumFrame | null | undefined = undefined
+
+    const observer = new ResizeObserver(() => {
+      renderer.resize()
+      // Resizing a canvas clears its backing store, so the frame that was on
+      // screen is gone even though the ref still points at it. Forget it, or
+      // the skip below would leave the overlay blank until new data arrives.
+      drawn = undefined
+    })
     observer.observe(canvas)
 
     let raf = 0
     const tick = () => {
-      renderer.draw(visibleRef.current ? frameRef.current : null)
+      // The bridge replaces this ref with a fresh object per analyser frame, so
+      // identity is a sound "is there anything new" test.
+      const next = visibleRef.current ? frameRef.current : null
+      if (next !== drawn) {
+        renderer.draw(next)
+        drawn = next
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)

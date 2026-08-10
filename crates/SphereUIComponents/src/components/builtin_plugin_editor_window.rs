@@ -2411,17 +2411,26 @@ impl BuiltinPluginEditorWindow {
             MONITOR_DEFAULTTONEAREST,
         };
 
-        // The browser fills the content child's client area, so that HWND's
-        // origin *is* the view origin. Falling back to the shell would be off
-        // by the sidebar and header.
-        let content_hwnd = self.content.as_ref().filter(|c| c.is_valid())?.hwnd();
-        let hwnd = HWND(content_hwnd as *mut core::ffi::c_void);
+        let rect = self.last_rect?;
+
+        // With a content child the browser fills that child's client area, so
+        // the child's origin *is* the view origin. Off-screen hosting — which
+        // is every built-in editor today — has no child, so the view sits at
+        // its content offset inside the shell's own client area; using the
+        // shell origin unadjusted would be off by the sidebar and header.
+        let (host_hwnd, offset) = match self.content.as_ref().filter(|c| c.is_valid()) {
+            Some(content) => (content.hwnd(), (0, 0)),
+            None => (native_hwnd(window)?, (rect.x, rect.y)),
+        };
+        let hwnd = HWND(host_hwnd as *mut core::ffi::c_void);
 
         let mut origin = POINT { x: 0, y: 0 };
         // SAFETY: `hwnd` was validated above and `origin` is a live local.
         if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool() {
             return None;
         }
+        origin.x = origin.x.saturating_add(offset.0);
+        origin.y = origin.y.saturating_add(offset.1);
 
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -2436,7 +2445,6 @@ impl BuiltinPluginEditorWindow {
 
         let scale = window.scale_factor().max(f32::EPSILON);
         let to_dip = |value: i32| (value as f32 / scale).round() as i32;
-        let rect = self.last_rect?;
 
         // The display, in DIP, for `window.screen`.
         let monitor_rect_dip = ViewRect {
