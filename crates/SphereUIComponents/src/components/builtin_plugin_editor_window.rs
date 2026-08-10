@@ -59,8 +59,15 @@ const ZCOMP_EDITOR_CONTENT_HEIGHT: f32 = 720.0;
 const HEADER_H: f32 = TITLEBAR_HEIGHT;
 
 /// Logical pixels one line-based scroll notch scrolls the page by. GPUI
-/// reports discrete wheel steps in lines; CEF wants pixel deltas.
-const SCROLL_LINE_HEIGHT: f32 = 20.0;
+/// reports discrete wheel steps in lines; CEF wants pixel deltas. Matches
+/// Chromium's own `kPixelsPerLineStep`, so a notch moves an embedded editor
+/// exactly as far as it would move the same page in a browser window.
+const SCROLL_LINE_HEIGHT: f32 = 40.0;
+
+/// Guard against a pathological wheel step (Windows reports `WHEEL_PAGESCROLL`
+/// as `u32::MAX` lines when "scroll one screen at a time" is selected), which
+/// would otherwise saturate the `i32` CEF is handed.
+const MAX_SCROLL_DELTA: f32 = 10_000.0;
 
 /// Width of the native instance sidebar. Reserved out of the CEF content rect
 /// the same way `HEADER_H` is — the browser must never be told to draw under
@@ -702,6 +709,10 @@ pub struct BuiltinPluginEditorWindow {
     /// Whether the pointer is currently outside the browser rect. Keeps the
     /// leave notification edge-triggered rather than sent on every move.
     pointer_left: bool,
+    /// Sub-pixel wheel remainder. CEF takes integer pixel deltas, so a
+    /// precision trackpad — which reports a fraction of a line per event —
+    /// would otherwise round to zero forever and never scroll the page.
+    scroll_carry: Point<f32>,
     /// Live-host operations (param forwarding, NAM load, telemetry polls)
     /// injected by the opener. Empty until the engine/bridge is up; requests
     /// arriving before then are dropped.
@@ -768,6 +779,7 @@ impl BuiltinPluginEditorWindow {
             attach_attempts: 0,
             last_scale: 1.0,
             pointer_left: true,
+            scroll_carry: Point::default(),
             host_ops,
             telemetry_tick: 0,
             spectrum_seq: 0,
@@ -1825,6 +1837,37 @@ fn content_rect(bounds: Bounds<Pixels>, scale: f32, sidebar_w: f32) -> ViewRect 
     }
 }
 
+/// Whole-pixel wheel delta for CEF, carrying the fraction into `carry`.
+///
+/// A Windows precision trackpad reports a fraction of a line per message.
+/// Rounding each one on its own turns a slow two-finger swipe into a stream of
+/// zero deltas that never reach the page, so the remainder is kept and spent as
+/// soon as it adds up to a whole pixel.
+fn take_whole_scroll(carry: &mut Point<f32>, pixels: Point<f32>) -> (i32, i32) {
+    // A reversal makes the leftover fraction point the wrong way; dropping it
+    // keeps a direction change from being swallowed by stale carry.
+    if pixels.x * carry.x < 0.0 {
+        carry.x = 0.0;
+    }
+    if pixels.y * carry.y < 0.0 {
+        carry.y = 0.0;
+    }
+    carry.x = (carry.x + pixels.x).clamp(-MAX_SCROLL_DELTA, MAX_SCROLL_DELTA);
+    carry.y = (carry.y + pixels.y).clamp(-MAX_SCROLL_DELTA, MAX_SCROLL_DELTA);
+    let delta_x = carry.x.trunc();
+    let delta_y = carry.y.trunc();
+    carry.x -= delta_x;
+    carry.y -= delta_y;
+    (delta_x as i32, delta_y as i32)
+}
+
+/// CEF's click count contract is 1..=3 (single, double, triple). GPUI keeps
+/// counting past that while a fast click repeats in place, and Blink has no
+/// defined press behaviour for a higher count.
+fn clamp_click_count(click_count: usize) -> i32 {
+    click_count.clamp(1, 3) as i32
+}
+
 #[cfg(target_os = "windows")]
 fn native_hwnd(window: &Window) -> Option<u64> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -2059,20 +2102,46 @@ impl BuiltinPluginEditorWindow {
 
     fn forward_mouse_move(&mut self, event: &MouseMoveEvent) {
         let (x, y) = self.to_view_point(event.position);
-        // A move whose position is outside the browser rect is still forwarded
-        // (a drag must keep tracking), but it is flagged as a leave so the page
-        // can drop hover state instead of holding the last hovered control lit
-        // forever. `mouse_leave` stays sticky until the pointer comes back.
-        let inside = self.view_contains(x, y);
-        if !inside && self.pointer_left {
+        self.forward_pointer_position(x, y, event.modifiers, false);
+    }
+
+    /// Tell the browser where the pointer is.
+    ///
+    /// A position outside the browser rect is still forwarded, because a knob
+    /// drag routinely leaves it and the page must keep tracking. Two rules
+    /// govern the leave flag:
+    ///
+    /// * While a button is held the page owns the gesture through pointer
+    ///   capture. Sending `mouse_leave` there makes Blink cancel the captured
+    ///   pointer (`pointercancel`), which ends the drag mid-gesture and leaves
+    ///   the control stuck — so a drag is never reported as leaving, and its
+    ///   moves are never suppressed.
+    /// * With no button held the flag is edge-triggered: the page is told once
+    ///   that the pointer left, so hover state clears instead of holding the
+    ///   last control lit forever, and further outside moves are dropped until
+    ///   the pointer comes back.
+    ///
+    /// `force` sends the position even when it would otherwise be suppressed —
+    /// used before a button event so the browser's pointer position is current
+    /// when the click arrives.
+    fn forward_pointer_position(
+        &mut self,
+        x: i32,
+        y: i32,
+        modifiers: gpui::Modifiers,
+        force: bool,
+    ) {
+        let dragging = self.surface.any_button_held();
+        let leaving = !self.view_contains(x, y) && !dragging;
+        if leaving && self.pointer_left && !force {
             return;
         }
-        self.pointer_left = !inside;
+        self.pointer_left = leaving;
         self.send_input(EditorInput::MouseMove {
             x,
             y,
-            modifiers: self.surface.modifiers(event.modifiers),
-            leaving: !inside,
+            modifiers: self.surface.modifiers(modifiers),
+            leaving,
         });
     }
 
@@ -2102,14 +2171,18 @@ impl BuiltinPluginEditorWindow {
         // the browser never sees a focused document and text fields stay dead.
         window.focus(&self.focus, cx);
         self.send_input(EditorInput::Focus(true));
-        self.surface.set_button(button, true);
         let (x, y) = self.to_view_point(event.position);
+        // Position first, with no button bit set yet — the same order a real
+        // platform delivers (move, then press), so Blink hit-tests the press
+        // against a pointer it already believes is over the control.
+        self.forward_pointer_position(x, y, event.modifiers, true);
+        self.surface.set_button(button, true);
         self.send_input(EditorInput::MouseButton {
             x,
             y,
             button,
             pressed: true,
-            click_count: event.click_count.max(1) as i32,
+            click_count: clamp_click_count(event.click_count),
             modifiers: self.surface.modifiers(event.modifiers),
         });
         Self::schedule_input_pump(cx);
@@ -2133,9 +2206,12 @@ impl BuiltinPluginEditorWindow {
             y,
             button,
             pressed: false,
-            click_count: event.click_count.max(1) as i32,
+            click_count: clamp_click_count(event.click_count),
             modifiers: self.surface.modifiers(event.modifiers),
         });
+        // A drag released outside the rect suppressed the leave for the whole
+        // gesture; now that no button is held, settle the hover state.
+        self.forward_pointer_position(x, y, event.modifiers, false);
         Self::schedule_input_pump(cx);
     }
 
@@ -2150,20 +2226,25 @@ impl BuiltinPluginEditorWindow {
             return;
         }
         let (x, y) = self.to_view_point(event.position);
-        let (delta_x, delta_y) = match event.delta {
-            ScrollDelta::Pixels(delta) => {
-                let dx: f32 = delta.x.into();
-                let dy: f32 = delta.y.into();
-                (dx.round() as i32, dy.round() as i32)
-            }
-            ScrollDelta::Lines(delta) => (
-                (delta.x * SCROLL_LINE_HEIGHT).round() as i32,
-                (delta.y * SCROLL_LINE_HEIGHT).round() as i32,
-            ),
+        let pixels = match event.delta {
+            ScrollDelta::Pixels(delta) => Point {
+                x: f32::from(delta.x),
+                y: f32::from(delta.y),
+            },
+            ScrollDelta::Lines(delta) => Point {
+                x: delta.x * SCROLL_LINE_HEIGHT,
+                y: delta.y * SCROLL_LINE_HEIGHT,
+            },
         };
+        let (delta_x, delta_y) = take_whole_scroll(&mut self.scroll_carry, pixels);
         if delta_x == 0 && delta_y == 0 {
             return;
         }
+        // The browser's own pointer position drives which element the page
+        // scrolls; a wheel that arrives with no preceding move (trackpad rest,
+        // or the pointer re-entering over the same control) would otherwise be
+        // applied wherever CEF last thought the cursor was.
+        self.forward_pointer_position(x, y, event.modifiers, false);
         self.send_input(EditorInput::MouseWheel {
             x,
             y,
@@ -2418,6 +2499,63 @@ mod tests {
         let rect = content_rect(bounds(400.0, 10.0), 1.0, 0.0);
         assert_eq!(rect.height, 0);
         assert!(rect.height >= 0);
+    }
+
+    #[test]
+    fn a_sub_pixel_trackpad_swipe_eventually_scrolls() {
+        let mut carry = Point::default();
+        let step = Point { x: 0.0, y: 0.3 };
+        // Each event on its own rounds to nothing; the carry must spend it.
+        assert_eq!(take_whole_scroll(&mut carry, step), (0, 0));
+        assert_eq!(take_whole_scroll(&mut carry, step), (0, 0));
+        assert_eq!(take_whole_scroll(&mut carry, step), (0, 0));
+        assert_eq!(take_whole_scroll(&mut carry, step), (0, 1));
+    }
+
+    #[test]
+    fn scroll_carry_never_swallows_a_direction_change() {
+        let mut carry = Point::default();
+        assert_eq!(
+            take_whole_scroll(&mut carry, Point { x: 0.0, y: 0.9 }),
+            (0, 0)
+        );
+        // Reversing must not need to pay off the 0.9 left over from going up.
+        assert_eq!(
+            take_whole_scroll(&mut carry, Point { x: 0.0, y: -1.5 }),
+            (0, -1)
+        );
+    }
+
+    #[test]
+    fn a_whole_pixel_wheel_step_passes_through_unchanged() {
+        let mut carry = Point::default();
+        assert_eq!(
+            take_whole_scroll(&mut carry, Point { x: -7.0, y: 120.0 }),
+            (-7, 120)
+        );
+        assert_eq!(carry.x, 0.0);
+        assert_eq!(carry.y, 0.0);
+    }
+
+    #[test]
+    fn a_pathological_wheel_step_stays_inside_cefs_range() {
+        let mut carry = Point::default();
+        let (_, delta_y) = take_whole_scroll(
+            &mut carry,
+            Point {
+                x: 0.0,
+                y: f32::MAX,
+            },
+        );
+        assert_eq!(delta_y, MAX_SCROLL_DELTA as i32);
+    }
+
+    #[test]
+    fn click_count_stays_within_cefs_contract() {
+        assert_eq!(clamp_click_count(0), 1);
+        assert_eq!(clamp_click_count(1), 1);
+        assert_eq!(clamp_click_count(3), 3);
+        assert_eq!(clamp_click_count(9), 3);
     }
 
     #[test]

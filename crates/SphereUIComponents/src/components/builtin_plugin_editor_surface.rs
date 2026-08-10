@@ -272,6 +272,13 @@ impl OffscreenSurface {
         }
     }
 
+    /// Whether the page currently owns a pointer gesture. While a button is
+    /// held the browser must keep receiving moves — and must never be told the
+    /// pointer left — or Blink cancels the captured pointer mid-drag.
+    pub(crate) fn any_button_held(&self) -> bool {
+        self.buttons.left || self.buttons.middle || self.buttons.right
+    }
+
     /// Modifier mask for an outgoing event: keyboard modifiers from GPUI plus
     /// the buttons this surface believes are held.
     pub(crate) fn modifiers(&self, modifiers: Modifiers) -> EditorModifiers {
