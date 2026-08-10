@@ -17,7 +17,11 @@ use sphere_ui_components::update_service::{
     DownloadProgressFn, InstallOutcome, UpdateCandidate, UpdateProvider,
 };
 
-const RELEASES_API: &str = "https://api.github.com/repos/futureboard/Futureboard/releases";
+/// The repository was renamed to `futureboard-studio`. The old path still
+/// resolves only because GitHub answers a rename with a 301, which every
+/// shipped build follows silently — a redirect that disappears the moment the
+/// old name is claimed by anything else. Ask for the real repository.
+const RELEASES_API: &str = "https://api.github.com/repos/futureboard/futureboard-studio/releases";
 const USER_AGENT: &str = "Futureboard-Studio-Updater";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,14 +48,27 @@ pub struct AvailableUpdate {
     asset: GithubAsset,
 }
 
-fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
-    let response = ureq::get(url)
+/// `Ok(None)` when GitHub answered 404.
+///
+/// That is the ordinary reply for a channel with nothing published — the
+/// nightly channel asks for `releases/tags/nightly` by name, and no such
+/// release exists until the first nightly of a cycle is uploaded. The check
+/// runs automatically after launch, so treating it as a failure would show
+/// "GitHub API request failed" to a user who simply has no update waiting.
+/// Every other transport or status failure stays an error.
+fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<Option<T>, String> {
+    let response = match ureq::get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header("User-Agent", USER_AGENT)
         .call()
-        .map_err(|error| format!("GitHub API request failed: {error}"))?;
+    {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => return Ok(None),
+        Err(error) => return Err(format!("GitHub API request failed: {error}")),
+    };
     serde_json::from_reader(response.into_body().into_reader())
+        .map(Some)
         .map_err(|error| format!("GitHub API returned invalid JSON: {error}"))
 }
 
@@ -245,9 +262,14 @@ pub fn check_for_update(
         UpdateChannel::Beta | UpdateChannel::Stable => format!("{RELEASES_API}?per_page=30"),
     };
     let releases = if channel == UpdateChannel::Nightly {
-        vec![get_json::<GithubRelease>(&url)?]
+        // A missing `nightly` release means no nightly has been published, not
+        // that the lookup failed.
+        match get_json::<GithubRelease>(&url)? {
+            Some(release) => vec![release],
+            None => return Ok(None),
+        }
     } else {
-        get_json::<Vec<GithubRelease>>(&url)?
+        get_json::<Vec<GithubRelease>>(&url)?.unwrap_or_default()
     };
     Ok(choose_release(releases, channel, &current))
 }
@@ -355,7 +377,16 @@ pub fn install_update(staged: &Path, cache_root: &Path) -> Result<InstallOutcome
 ///   `/SUPPRESSMSGBOXES`   accept the default answer for setup message boxes
 ///   `/NORESTART`          never reboot the machine on our behalf
 ///   `/CLOSEAPPLICATIONS`  let Restart Manager close remaining app processes
+///   `/NORESTARTAPPLICATIONS` leave the relaunch to the `[Run]` entry below,
+///                        so Restart Manager cannot open a second copy
+///   `/RELAUNCH`          our own switch, not Inno's: `installer.iss` reopens
+///                        the app when it is present on a silent run
 ///   `/DIR`, `/ALLUSERS` / `/CURRENTUSER`  keep the existing install location
+///
+/// The relaunch matters because a silent update is started *by* the running
+/// app, which then quits so setup can replace its files. Inno's `[Run]`
+/// checkbox carries `skipifsilent`, so without `/RELAUNCH` an update ends with
+/// the application closed and nothing to bring it back.
 ///
 /// `installer.iss` declares `PrivilegesRequired=lowest` with
 /// `PrivilegesRequiredOverridesAllowed=dialog commandline`, so `/ALLUSERS`
@@ -375,6 +406,8 @@ fn install_windows(staged: &Path, cache_root: &Path) -> Result<InstallOutcome, S
         .arg("/SUPPRESSMSGBOXES")
         .arg("/NORESTART")
         .arg("/CLOSEAPPLICATIONS")
+        .arg("/NORESTARTAPPLICATIONS")
+        .arg("/RELAUNCH")
         .arg(format!("/LOG={}", log_path.display()));
     if let Some(dir) = install_dir.as_deref() {
         command.arg(format!("/DIR={}", dir.display()));
@@ -807,6 +840,29 @@ mod tests {
         let candidate = release("2026.8.2-beta.1", "Beta", false);
         assert!(!release_matches_channel(&candidate, UpdateChannel::Stable));
         assert!(release_matches_channel(&candidate, UpdateChannel::Beta));
+    }
+
+    /// A 404 from the channel lookup resolves to an empty release list, which
+    /// must read as "up to date" rather than propagating as a failure. The
+    /// nightly channel asks for `releases/tags/nightly` by name, so it 404s
+    /// until the first nightly of a cycle exists.
+    #[test]
+    fn a_channel_with_no_releases_offers_nothing() {
+        let current = Version::parse("2026.8.1").unwrap();
+        for channel in UpdateChannel::ALL {
+            assert!(choose_release(Vec::new(), channel, &current).is_none());
+        }
+    }
+
+    /// The updater must ask for the repository under its current name. The old
+    /// `futureboard/Futureboard` path survives only on GitHub's rename
+    /// redirect.
+    #[test]
+    fn the_releases_api_names_the_current_repository() {
+        assert_eq!(
+            RELEASES_API,
+            "https://api.github.com/repos/futureboard/futureboard-studio/releases"
+        );
     }
 
     #[test]

@@ -167,6 +167,19 @@ Filename: "{app}\{#MyAppExeName}"; \
     Description: "Launch {#MyAppName}"; \
     Flags: nowait postinstall skipifsilent runasoriginaluser
 
+; In-app update: the running application starts this installer silently and
+; then quits so its files can be replaced. The entry above cannot bring it
+; back, because `skipifsilent` is exactly what stops a silent install from
+; launching anything. The updater therefore passes `/RELAUNCH`, and this entry
+; reopens the app for that case only.
+;
+; `runasoriginaluser` is required, not decorative: updating a machine-wide
+; install runs setup elevated, and without this the app would be relaunched as
+; Administrator.
+Filename: "{app}\{#MyAppExeName}"; \
+    Flags: nowait runasoriginaluser; \
+    Check: ShouldRelaunchAfterUpdate
+
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
 
@@ -177,6 +190,28 @@ begin
     Result := ExpandConstant('{#MyAppMachineDir}')
   else
     Result := ExpandConstant('{#MyAppUserDir}');
+end;
+
+{ Whether the in-app updater asked for the application to be reopened once a
+  silent install finishes.
+
+  `/RELAUNCH` is our own switch, not one of Inno's, so it has to be read off
+  the command line by hand — Inno ignores switches it does not recognise. The
+  `WizardSilent` guard keeps an interactive install on the postinstall
+  checkbox, so a user who unticks "Launch Futureboard Studio" is still obeyed. }
+function ShouldRelaunchAfterUpdate(): Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if not WizardSilent then
+    Exit;
+  for Index := 1 to ParamCount do
+    if CompareText(ParamStr(Index), '/RELAUNCH') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
 end;
 
 function InitializeSetup(): Boolean;
