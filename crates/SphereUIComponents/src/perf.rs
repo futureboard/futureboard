@@ -562,25 +562,6 @@ impl PowerMode {
         !matches!(self, PowerMode::LowEnd)
     }
 
-    /// Cap meter update rate (Hz). Lower = fewer notify/redraw triggers.
-    pub fn meter_update_hz(self) -> f32 {
-        match self {
-            PowerMode::Performance => 60.0,
-            PowerMode::Balanced => 30.0,
-            PowerMode::LowEnd => 15.0,
-        }
-    }
-
-    /// Minimum meter delta required to mark the meter dirty. Tiny meter
-    /// flicker doesn't justify a repaint on low-end GPUs.
-    pub fn meter_min_delta(self) -> f32 {
-        match self {
-            PowerMode::Performance => 0.005,
-            PowerMode::Balanced => 0.01,
-            PowerMode::LowEnd => 0.025,
-        }
-    }
-
     /// Whether expensive visual effects (shadows, glows, blurs over dense
     /// timeline regions) should be drawn.
     pub fn allow_expensive_effects(self) -> bool {
@@ -602,8 +583,9 @@ impl PowerMode {
 /// Pure, so the policy can be tested without a GPU or an environment.
 ///
 /// An integrated-only machine gets [`PowerMode::LowEnd`] by default: that is
-/// the configuration where grid density, meter rate, and repaint frequency
-/// actually decide whether the UI keeps up. Anything else stays Balanced, and an
+/// the configuration where grid density and expensive effects decide whether
+/// the UI keeps up. Meter cadence remains display-synced in every profile.
+/// Anything else stays Balanced, and an
 /// explicit override always wins — a user who asks for Performance on an iGPU
 /// gets it.
 pub fn resolve_power_mode(override_label: Option<&str>, class: GpuClass) -> PowerMode {
@@ -803,10 +785,9 @@ mod power_mode_tests {
 
     #[test]
     fn the_low_end_profile_only_ever_reduces_work() {
-        assert!(PowerMode::LowEnd.meter_update_hz() < PowerMode::Balanced.meter_update_hz());
-        assert!(PowerMode::LowEnd.meter_min_delta() > PowerMode::Balanced.meter_min_delta());
         assert!(PowerMode::LowEnd.grid_line_budget_scale() < 1.0);
         assert!(!PowerMode::LowEnd.allow_sub_grid_lines());
+        assert!(!PowerMode::LowEnd.allow_expensive_effects());
     }
 
     #[test]

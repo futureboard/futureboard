@@ -144,43 +144,55 @@ pub(super) fn numbered_name_stem(name: &str) -> String {
     }
 }
 
-/// Advance one smoothed meter value. Returns whether the move is large enough
-/// to be worth a repaint — the threshold comes from the render-cost profile, so
-/// an integrated-only machine stops repainting the whole mixer for meter motion
-/// too small to see. The value itself always advances; only the "dirty" verdict
-/// is profiled, so ballistics never depend on the hardware.
+#[inline]
+fn meter_visual_bucket(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0) as u8
+}
+
+/// Advance one smoothed meter value. The dirty verdict follows the same 8-bit
+/// visual precision used by meter render signatures, so every visible step is
+/// painted while sub-visible motion remains free of redundant notifications.
 pub(super) fn smooth_meter_value(current: &mut f32, target: f32, dt_secs: f32) -> bool {
+    let previous_bucket = meter_visual_bucket(*current);
     let target = target.clamp(0.0, 1.0);
     let dt_frames = (dt_secs.clamp(1.0 / 240.0, 0.1) * 60.0).max(0.0);
     let base_rate: f32 = if target > *current { 0.72 } else { 0.18 };
     let rate = 1.0 - (1.0 - base_rate).powf(dt_frames);
     let next = (*current + (target - *current) * rate).clamp(0.0, 1.0);
-    let changed = (*current - next).abs() > crate::perf::power_mode().meter_min_delta();
     *current = if next < 0.002 { 0.0 } else { next };
-    changed
+    previous_bucket != meter_visual_bucket(*current)
 }
 
 /// Update a peak-hold value: jump up instantly to a higher level, otherwise
 /// release slowly so the held peak lingers above the decaying meter bar
 /// (roughly a third of full scale per second, independent of display refresh).
-pub(super) fn update_meter_hold(hold: &mut f32, level: f32, dt_secs: f32) {
+pub(super) fn update_meter_hold(hold: &mut f32, level: f32, dt_secs: f32) -> bool {
+    let previous_bucket = meter_visual_bucket(*hold);
     let level = level.clamp(0.0, 1.0);
     *hold = if level >= *hold {
         level
     } else {
         (*hold - 0.36 * dt_secs.clamp(1.0 / 240.0, 0.1)).max(level)
     };
+    previous_bucket != meter_visual_bucket(*hold)
 }
 
 /// Latch / release the clip indicator. Sets it when either channel's raw
 /// (pre-clamp) peak reached 0 dBFS, and clears it once the held peak has
 /// fallen back below 0.6 (≈1 s after the last overload, via the hold release).
-pub(super) fn update_meter_clip(clip: &mut bool, raw_peak_l: f64, raw_peak_r: f64, hold_max: f32) {
+pub(super) fn update_meter_clip(
+    clip: &mut bool,
+    raw_peak_l: f64,
+    raw_peak_r: f64,
+    hold_max: f32,
+) -> bool {
+    let previous = *clip;
     if raw_peak_l >= 1.0 || raw_peak_r >= 1.0 {
         *clip = true;
     } else if hold_max < 0.6 {
         *clip = false;
     }
+    previous != *clip
 }
 
 pub(super) fn find_clip_summary<'a>(
@@ -314,5 +326,29 @@ mod transport_binding_tests {
                 "normalized save id {normalized:?} must not map to a transport action"
             );
         }
+    }
+
+    #[test]
+    fn meter_dirty_detection_tracks_visible_steps_and_final_zero() {
+        let mut level = 0.5;
+        assert!(smooth_meter_value(&mut level, 0.0, 1.0 / 60.0));
+
+        level = 0.0041;
+        assert!(smooth_meter_value(&mut level, 0.0, 0.1));
+        assert_eq!(level, 0.0);
+    }
+
+    #[test]
+    fn peak_hold_and_clip_report_visual_state_changes() {
+        let mut hold = 0.8;
+        assert!(update_meter_hold(&mut hold, 0.0, 1.0 / 60.0));
+
+        let mut clip = false;
+        assert!(update_meter_clip(&mut clip, 1.0, 0.0, hold));
+        assert!(clip);
+        assert!(!update_meter_clip(&mut clip, 0.0, 0.0, hold));
+        hold = 0.0;
+        assert!(update_meter_clip(&mut clip, 0.0, 0.0, hold));
+        assert!(!clip);
     }
 }

@@ -81,8 +81,9 @@ pub(crate) struct EngineSyncState {
     pub playhead_beat: f32,
     /// Last time the engine snapshot was synced to the UI.
     pub synced_at: Instant,
-    /// Last time engine meter levels were pushed into timeline state (PowerMode
-    /// throttle so low-end GPUs don't repaint 60 Hz for sub-perceptual wiggles).
+    /// Last time engine meter levels were pushed into timeline state. Meter
+    /// cadence is owned by the frame scheduler and remains independent of the
+    /// render-cost profile so VU motion stays even on integrated GPUs.
     pub meter_applied_at: Instant,
     /// Quantised meter signature last pushed to meter-isolated UI regions.
     pub last_meter_notify_sig: u64,
@@ -900,27 +901,10 @@ impl StudioLayout {
         // the frame scheduler so 120/144 Hz displays do not step at a fixed low
         // FPS. Ballistics below use the actual elapsed time, so throttling or
         // brief stalls do not change the apparent attack/release speed.
-        let transport_active = self
-            .audio_bridge
-            .stats
-            .as_ref()
-            .map(|stats| stats.transport_playing)
-            .unwrap_or(false);
-        let scheduled_interval = if transport_active {
-            self.frame_scheduler.meter_min_interval()
-        } else {
-            // Idle meters only need to finish their release animation; 30 Hz
-            // halves snapshot/track traversal work while remaining smooth.
-            self.frame_scheduler.background_interval()
-        };
-        // Floor from the render-cost profile. On an integrated-only machine a
-        // meter tick is one of the few things that repaints while nothing else
-        // is happening, and every tick walks the full track list; 15 Hz still
-        // reads as a live meter. `max` = the slower of the two, so the profile
-        // can only ever reduce work.
-        let power_interval =
-            Duration::from_secs_f32(1.0 / crate::perf::power_mode().meter_update_hz().max(1.0));
-        let min_interval = scheduled_interval.max(power_interval);
+        // Live input and monitor meters can move while transport is stopped, so
+        // they use the meter cadence in every transport state. Region-isolated
+        // notifications below keep this from repainting the StudioLayout root.
+        let min_interval = self.frame_scheduler.meter_min_interval();
         let now = Instant::now();
         let elapsed = now.duration_since(self.engine_sync.meter_applied_at);
         if elapsed < min_interval {
@@ -992,17 +976,17 @@ impl StudioLayout {
                     }
                     changed |= smooth_meter_value(&mut track.meter_level_l, next_l, meter_dt);
                     changed |= smooth_meter_value(&mut track.meter_level_r, next_r, meter_dt);
-                    update_meter_hold(
+                    changed |= update_meter_hold(
                         &mut track.meter_peak_hold_l,
                         track.meter_level_l,
                         meter_dt,
                     );
-                    update_meter_hold(
+                    changed |= update_meter_hold(
                         &mut track.meter_peak_hold_r,
                         track.meter_level_r,
                         meter_dt,
                     );
-                    update_meter_clip(
+                    changed |= update_meter_clip(
                         &mut track.meter_clip,
                         track_meter.peak_l,
                         track_meter.peak_r,
@@ -1021,9 +1005,11 @@ impl StudioLayout {
                 master_peak_r.clamp(0.0, 1.0) as f32,
                 meter_dt,
             );
-            update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l, meter_dt);
-            update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r, meter_dt);
-            update_meter_clip(
+            changed |=
+                update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l, meter_dt);
+            changed |=
+                update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r, meter_dt);
+            changed |= update_meter_clip(
                 &mut master.meter_clip,
                 master_peak_l,
                 master_peak_r,
@@ -1040,9 +1026,17 @@ impl StudioLayout {
                 monitor_peak_r.clamp(0.0, 1.0) as f32,
                 meter_dt,
             );
-            update_meter_hold(&mut monitor.meter_peak_hold_l, monitor.meter_level_l, meter_dt);
-            update_meter_hold(&mut monitor.meter_peak_hold_r, monitor.meter_level_r, meter_dt);
-            update_meter_clip(
+            changed |= update_meter_hold(
+                &mut monitor.meter_peak_hold_l,
+                monitor.meter_level_l,
+                meter_dt,
+            );
+            changed |= update_meter_hold(
+                &mut monitor.meter_peak_hold_r,
+                monitor.meter_level_r,
+                meter_dt,
+            );
+            changed |= update_meter_clip(
                 &mut monitor.meter_clip,
                 monitor_peak_l,
                 monitor_peak_r,
@@ -1077,8 +1071,8 @@ impl StudioLayout {
                 );
             }
             changed |= smooth_meter_value(&mut entry.level, next, meter_dt);
-            update_meter_hold(&mut entry.peak_hold, entry.level, meter_dt);
-            update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
+            changed |= update_meter_hold(&mut entry.peak_hold, entry.level, meter_dt);
+            changed |= update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
         }
         self.mixer_view.vsti_output_meters.retain(|key, meter| {
             if live_keys.contains(key) {
@@ -1086,8 +1080,8 @@ impl StudioLayout {
             }
             let mut keep = false;
             changed |= smooth_meter_value(&mut meter.level, 0.0, meter_dt);
-            update_meter_hold(&mut meter.peak_hold, meter.level, meter_dt);
-            update_meter_clip(&mut meter.clip, 0.0, 0.0, meter.peak_hold);
+            changed |= update_meter_hold(&mut meter.peak_hold, meter.level, meter_dt);
+            changed |= update_meter_clip(&mut meter.clip, 0.0, 0.0, meter.peak_hold);
             if meter.level > 0.0 || meter.peak_hold > 0.0 || meter.clip {
                 keep = true;
             }

@@ -2257,6 +2257,9 @@ fn mixer_channel_meter_signature(
     for track in tracks {
         q(track.meter_level_l).hash(&mut hasher);
         q(track.meter_level_r).hash(&mut hasher);
+        q(track.meter_peak_hold_l).hash(&mut hasher);
+        q(track.meter_peak_hold_r).hash(&mut hasher);
+        track.meter_clip.hash(&mut hasher);
     }
     hasher.finish()
 }
