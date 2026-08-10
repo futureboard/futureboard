@@ -1,6 +1,6 @@
 use gpui::{
     div, px, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled,
+    KeyDownEvent, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
     UniformListScrollHandle, Window, WindowHandle,
 };
 

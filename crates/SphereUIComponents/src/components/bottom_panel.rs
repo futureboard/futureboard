@@ -3,7 +3,7 @@ use crate::i18n::I18n;
 use crate::theme::Colors;
 use gpui::{
     div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    Role, StatefulInteractiveElement, Styled, Window,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,6 +92,7 @@ fn tab_button(
     on_click: std::sync::Arc<impl Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let active = tab == active_tab;
+    let label: String = label.into();
     let on_click_clone = on_click.clone();
     let text_color = if active {
         Colors::tab_text_active()
@@ -116,6 +117,12 @@ fn tab_button(
         // the default (black) text color.
         .text_color(text_color)
         .id(id)
+        .role(Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(active)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
         })
@@ -126,7 +133,7 @@ fn tab_button(
                 .h(px(14.0))
                 .text_color(text_color),
         )
-        .child(label.into());
+        .child(label);
 
     if active {
         btn = btn

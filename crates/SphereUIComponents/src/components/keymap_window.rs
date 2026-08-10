@@ -82,7 +82,8 @@ impl KeymapWindow {
                 .with_placeholder("Filter action names..."),
             filter_query: String::new(),
             filter_pending: String::new(),
-            json_input: TextInputState::new("keymap-json", cx.focus_handle()),
+            json_input: TextInputState::new("keymap-json", cx.focus_handle())
+                .with_accessible_label("Keymap JSON"),
             json_error: None,
             selected_row_id: None,
             profile_select_open: false,

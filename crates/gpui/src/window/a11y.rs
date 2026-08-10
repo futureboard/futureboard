@@ -65,7 +65,7 @@
 //! the adapter and the screen reader can announce the changes.
 //!
 //! ### Responding to actions
-//!  
+//!
 //! On adapter creation, we provide a callback to the adapter, which can be used
 //! to dispatch actions. This callback forwards to [`A11y::action_listeners`], a
 //! mapping from [`NodeId`]s to action handlers (basically just `Box<dyn
@@ -170,18 +170,6 @@ impl A11y {
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self) -> TreeUpdate {
         let tree_update = self.nodes.finalize();
-
-        // Zed currently doesn't set any a11y APIs on *any* UI elements, so a
-        // tree with nodes other than the root indicates a bug in the
-        // `TreeUpdate`-producing logic.
-        //
-        // Remove this when adding aria attributes.
-        if tree_update.nodes.len() > 1 {
-            log::warn!(
-                "expected an empty a11y tree update (only the root node), but got {} nodes; Zed has no accessible UI elements yet",
-                tree_update.nodes.len()
-            );
-        }
 
         tree_update
     }

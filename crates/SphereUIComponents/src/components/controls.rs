@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement, Styled, Toggled, Window,
 };
 
 use crate::assets;
@@ -54,8 +54,17 @@ pub fn fb_button(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let primary = kind == FbButtonKind::Primary;
+    let label: String = label.into();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_disabled(!enabled)
+        .when(enabled, |this| {
+            this.focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.border_color(Colors::border_focus()))
+        })
         .flex()
         .items_center()
         .justify_center()
@@ -95,7 +104,7 @@ pub fn fb_button(
                 })
                 .on_click(on_click)
         })
-        .child(label.into())
+        .child(label)
 }
 
 pub fn fb_stepper_button(
@@ -103,8 +112,18 @@ pub fn fb_stepper_button(
     label: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let accessible_label = match label {
+        "+" => "Increase",
+        "-" | "−" => "Decrease",
+        label => label,
+    };
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .flex()
         .items_center()
         .justify_center()
@@ -168,9 +187,22 @@ pub fn fb_checkbox(
     enabled: bool,
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let label = label.into();
+    let label: String = label.into();
     let mut row = div()
         .id(id)
+        .role(Role::CheckBox)
+        .aria_label(label.clone())
+        .aria_disabled(!enabled)
+        .aria_toggled(if checked {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .when(enabled, |this| {
+            this.focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.bg(Colors::surface_hover()))
+        })
         .flex()
         .flex_row()
         .items_center()
@@ -229,8 +261,19 @@ pub fn fb_segmented_button(
     active: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label: String = label.into();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_toggled(if active {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .flex()
         .items_center()
         .justify_center()
@@ -264,5 +307,5 @@ pub fn fb_segmented_button(
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
         .on_click(on_click)
-        .child(label.into())
+        .child(label)
 }

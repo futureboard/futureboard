@@ -1783,10 +1783,12 @@ impl AddTrackWindow {
         on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut track_name_input = TextInputState::new("add-track-window-name", cx.focus_handle());
+        let mut track_name_input = TextInputState::new("add-track-window-name", cx.focus_handle())
+            .with_accessible_label("Track name");
         track_name_input.set_value(initial_state.track_name.clone());
         track_name_input.select_all();
-        let mut count_input = TextInputState::new("add-track-window-count", cx.focus_handle());
+        let mut count_input = TextInputState::new("add-track-window-count", cx.focus_handle())
+            .with_accessible_label("Number of tracks");
         count_input.set_value(initial_state.count.to_string());
         let color_picker = ColorPickerState::new(
             "add-track-hex",

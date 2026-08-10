@@ -9,8 +9,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     div, point, px, relative, App, Bounds, ClipboardItem, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, FocusHandle, GlobalElementId, InteractiveElement, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    ShapedLine, Style, Styled, TextRun, UTF16Selection, Window,
+    KeyDownEvent, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Role,
+    ShapedLine, StatefulInteractiveElement, Style, Styled, TextRun, UTF16Selection, Window,
 };
 
 use crate::components::context_menu::ContextMenuEntry;
@@ -265,6 +265,7 @@ pub struct TextInputState {
     pub element_id: &'static str,
     pub focus_handle: FocusHandle,
     pub placeholder: Option<String>,
+    accessible_label: Option<String>,
     pub buffer: TextEditBuffer,
     /// When true, a mouse-down outside this field (while it is focused) releases
     /// keyboard focus via `window.blur()`. Off by default so modal dialogs keep
@@ -292,6 +293,7 @@ impl TextInputState {
             element_id,
             focus_handle,
             placeholder: None,
+            accessible_label: None,
             buffer: TextEditBuffer::default(),
             blur_on_click_outside: false,
             mouse_selecting: false,
@@ -301,6 +303,24 @@ impl TextInputState {
     pub fn with_placeholder(mut self, p: impl Into<String>) -> Self {
         self.placeholder = Some(p.into());
         self
+    }
+
+    /// Give assistive technology a stable, human-readable name for this field.
+    /// When omitted, the placeholder is used, then the element id as a fallback.
+    pub fn with_accessible_label(mut self, label: impl Into<String>) -> Self {
+        self.accessible_label = Some(label.into());
+        self
+    }
+
+    fn accessible_label(&self) -> String {
+        self.accessible_label
+            .clone()
+            .or_else(|| {
+                self.placeholder
+                    .clone()
+                    .filter(|label| !label.trim().is_empty())
+            })
+            .unwrap_or_else(|| self.element_id.replace(['-', '_'], " "))
     }
 
     /// Opt into releasing keyboard focus when the user clicks outside this field.
@@ -1308,11 +1328,15 @@ fn text_field_inner(
 ) -> impl IntoElement {
     let fh_click = state.focus_handle.clone();
     let fh_right = state.focus_handle.clone();
-    let fh_track = state.focus_handle.clone();
-    let fh_out = state.focus_handle.clone();
     let disabled = state.disabled;
+    let fh_track = state.focus_handle.clone().tab_stop(!disabled);
+    let fh_out = state.focus_handle.clone();
     let focused = focused && !disabled;
     let blur_outside = state.blur_on_click_outside;
+    let accessible_label = state.accessible_label();
+    let accessible_value = state.value.clone();
+    let read_only = state.read_only;
+    let is_password = state.is_password;
     let value = state.display_value();
     let placeholder = state.placeholder.clone().unwrap_or_default();
     let selection = state.selection_range();
@@ -1411,8 +1435,14 @@ fn text_field_inner(
 
     div()
         .id(state.element_id)
+        .role(Role::TextInput)
+        .aria_label(accessible_label)
+        .aria_disabled(disabled)
+        .aria_read_only(read_only)
+        .when(!is_password, |this| this.aria_value(accessible_value))
         .relative()
         .track_focus(&fh_track)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .flex()
         .flex_row()
         .items_center()

@@ -185,7 +185,8 @@ impl AudioConnectionsWindow {
     ) -> Self {
         Self {
             panel: AudioConnectionsPanelState::new(),
-            name_input: TextInputState::new("audio-connections-name", focus_handle),
+            name_input: TextInputState::new("audio-connections-name", focus_handle)
+                .with_accessible_label("Connection name"),
             snapshot,
             on_edit,
             on_close,

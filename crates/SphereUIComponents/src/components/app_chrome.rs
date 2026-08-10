@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea,
+    div, px, svg, AccessibleAction, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
+    Toggled, Window, WindowControlArea,
 };
 
 use crate::assets;
@@ -67,6 +68,39 @@ impl Render for BpmDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         Empty
     }
+}
+
+fn chrome_action_button(
+    id: &'static str,
+    icon_path: &'static str,
+    label: impl Into<gpui::SharedString>,
+    toggled: Option<bool>,
+    color: gpui::Rgba,
+    action: ChromeActionCb,
+) -> gpui::Stateful<gpui::Div> {
+    let label = label.into();
+    chrome_button(
+        Some(icon_path),
+        label.clone(),
+        toggled.unwrap_or(false),
+        color,
+    )
+    .id(id)
+    .role(Role::Button)
+    .aria_label(label)
+    .when_some(toggled, |button, toggled| {
+        button.aria_toggled(if toggled {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+    })
+    .focusable()
+    .tab_stop(true)
+    .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+    .cursor(gpui::CursorStyle::PointingHand)
+    .on_click(move |_, window, cx| action(&(), window, cx))
+    .occlude()
 }
 
 #[derive(Clone)]
@@ -160,6 +194,11 @@ fn tap_tempo_chip(
 
     div()
         .id("transport-tap-tempo")
+        .role(Role::Button)
+        .aria_label("Tap tempo")
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .h(px(19.0))
         .min_w(px(26.0))
         .flex()
@@ -183,7 +222,7 @@ fn tap_tempo_chip(
                 .bg(Colors::with_alpha(Colors::accent_primary(), 0.85))
         }))
         .occlude()
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+        .on_click(move |_, window, cx| {
             on_tap(&(), window, cx);
         })
         .on_mouse_down(
@@ -228,8 +267,18 @@ fn bpm_display(
 
     let on_bpm_drag_move = on_bpm_drag.clone();
     let on_bpm_menu_down = on_bpm_menu.clone();
+    let on_bpm_edit_accessible = on_bpm_edit_start.clone();
+    let accessible_label = format!("Tempo {label} BPM. Activate to edit");
     div()
         .id("transport-bpm")
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .aria_numeric_value(state_bpm as f64)
+        .aria_min_numeric_value(BPM_MIN as f64)
+        .aria_max_numeric_value(BPM_MAX as f64)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .w(px(36.0))
         .h(px(19.0))
         .flex()
@@ -250,6 +299,9 @@ fn bpm_display(
             if event.click_count() >= 2 {
                 on_bpm_edit_start(&(), window, cx);
             }
+        })
+        .on_a11y_action(AccessibleAction::Click, move |_, window, cx| {
+            on_bpm_edit_accessible(&(), window, cx);
         })
         .on_mouse_down(
             gpui::MouseButton::Right,
@@ -333,7 +385,14 @@ fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl I
         Colors::status_success()
     };
     let title = crate::platform_chrome::branded_window_title(&state.name);
+    let accessible_label = format!("Project {title}, {status}");
     div()
+        .id("project-title-menu")
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .flex()
         .flex_row()
         .items_center()
@@ -343,7 +402,7 @@ fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl I
         .rounded_md()
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
-        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+        .on_click(move |_event, window, cx| {
             on_open(&anchor_x, window, cx);
         })
         .occlude()
@@ -468,61 +527,41 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
         .items_center()
         .gap(px(1.0))
         // Skip back
-        .child(
-            chrome_button(
-                Some(assets::ICON_SKIP_BACK_PATH),
-                label_skip_back,
-                false,
-                Colors::text_muted(),
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_return(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-return-to-start",
+            assets::ICON_SKIP_BACK_PATH,
+            label_skip_back,
+            None,
+            Colors::text_muted(),
+            on_return,
+        ))
         // Play
-        .child(
-            chrome_button(
-                Some(assets::ICON_PLAY_PATH),
-                label_play,
-                state.playing,
-                play_color,
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_play(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-play",
+            assets::ICON_PLAY_PATH,
+            label_play,
+            Some(state.playing),
+            play_color,
+            on_play,
+        ))
         // Stop
-        .child(
-            chrome_button(
-                Some(assets::ICON_SQUARE_PATH),
-                label_stop,
-                false,
-                Colors::text_muted(),
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_stop(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-stop",
+            assets::ICON_SQUARE_PATH,
+            label_stop,
+            None,
+            Colors::text_muted(),
+            on_stop,
+        ))
         // Record
-        .child(
-            chrome_button(
-                Some(assets::ICON_CIRCLE_PATH),
-                label_record,
-                state.recording,
-                record_color,
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_record(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-record",
+            assets::ICON_CIRCLE_PATH,
+            label_record,
+            Some(state.recording),
+            record_color,
+            on_record,
+        ))
         // Record count-in split control: the main button is a true on/off
         // toggle; the visible chevron opens the duration dropdown.
         .child(
@@ -539,6 +578,17 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
                 .font_weight(gpui::FontWeight::BOLD)
                 .child(
                     div()
+                        .id("transport-count-in")
+                        .role(Role::Button)
+                        .aria_label("Count in")
+                        .aria_toggled(if state.count_in_enabled {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        })
+                        .focusable()
+                        .tab_stop(true)
+                        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                         .h_full()
                         .min_w(px(34.0))
                         .px(px(5.0))
@@ -551,13 +601,19 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
                             Colors::text_muted()
                         })
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        .on_click(move |_, window, cx| {
                             on_count_in_toggle(&(), window, cx);
                         })
                         .child("COUNT"),
                 )
                 .child(
                     div()
+                        .id("transport-count-in-menu")
+                        .role(Role::Button)
+                        .aria_label("Count in settings")
+                        .focusable()
+                        .tab_stop(true)
+                        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                         .h_full()
                         .w(px(13.0))
                         .flex()
@@ -567,67 +623,56 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
                         .border_color(Colors::border_subtle())
                         .text_color(Colors::text_muted())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
-                            let x: f32 = event.position.x.into();
-                            let y: f32 = event.position.y.into();
-                            on_count_in_menu(&(x, y), window, cx);
+                        .on_click(move |event, window, cx| {
+                            let position = event.position();
+                            on_count_in_menu(&(position.x.into(), position.y.into()), window, cx);
                         })
                         .child("▾"),
                 )
                 .occlude(),
         )
         // Loop
-        .child(
-            chrome_button(
-                Some(assets::ICON_REPEAT2_PATH),
-                label_loop,
-                state.loop_enabled,
-                loop_color,
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_loop(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-loop",
+            assets::ICON_REPEAT2_PATH,
+            label_loop,
+            Some(state.loop_enabled),
+            loop_color,
+            on_loop,
+        ))
         // Metronome
-        .child(
-            chrome_button(
-                Some(assets::ICON_METRONOME_PATH),
-                label_metronome,
-                state.metronome_enabled,
-                metronome_color,
-            )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_metronome(&(), window, cx);
-            })
-            .occlude(),
-        )
+        .child(chrome_action_button(
+            "transport-metronome",
+            assets::ICON_METRONOME_PATH,
+            label_metronome,
+            Some(state.metronome_enabled),
+            metronome_color,
+            on_metronome,
+        ))
         // Follow playhead / Auto-scroll. Magnet icon reads as "snap to
         // playhead" — same metaphor most DAWs use for this button.
         // Left-click toggles follow on/off; right-click switches the auto-scroll
         // mode between paged (jump) and continuous (smooth) follow.
         .child(
-            chrome_button(
-                Some(assets::TIMELINE_SCROLL_PATH),
+            chrome_action_button(
+                "transport-follow-playhead",
+                assets::TIMELINE_SCROLL_PATH,
                 label_follow,
-                state.follow_playhead,
+                Some(state.follow_playhead),
                 follow_color,
+                on_follow,
             )
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                on_follow(&(), window, cx);
-            })
             .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
                 on_follow_mode(&(), window, cx);
-            })
-            .occlude(),
+            }),
         )
         .child(section_separator())
         // Position display
         .child(
             div()
+                .id("transport-position")
+                .role(Role::Label)
+                .aria_label(format!("Playhead position {}", state.position_label))
                 .w(px(78.0))
                 .h(px(24.0))
                 .flex()
@@ -815,6 +860,7 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
 }
 
 fn panel_toggle_button(
+    id: &'static str,
     icon_path: &'static str,
     fallback: impl Into<gpui::SharedString>,
     active: bool,
@@ -825,13 +871,7 @@ fn panel_toggle_button(
     } else {
         Colors::text_muted()
     };
-    let on_click = on_click.clone();
-    chrome_button(Some(icon_path), fallback, active, color)
-        .cursor(gpui::CursorStyle::PointingHand)
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            on_click(&(), window, cx);
-        })
-        .occlude()
+    chrome_action_button(id, icon_path, fallback, Some(active), color, on_click)
 }
 
 fn panel_toggles(state: PanelChromeState, i18n: I18n) -> impl IntoElement {
@@ -844,18 +884,21 @@ fn panel_toggles(state: PanelChromeState, i18n: I18n) -> impl IntoElement {
         .items_center()
         .gap(px(2.0))
         .child(panel_toggle_button(
+            "panel-browser-toggle",
             assets::ICON_FOLDER_OPEN_PATH,
             i18n.tr("panel.browser"),
             state.browser_visible,
             on_browser,
         ))
         .child(panel_toggle_button(
+            "panel-mixer-toggle",
             assets::ICON_PANEL_BOTTOM_PATH,
             i18n.tr("panel.mixer"),
             state.mixer_visible,
             on_mixer,
         ))
         .child(panel_toggle_button(
+            "panel-inspector-toggle",
             assets::ICON_PANEL_RIGHT_PATH,
             i18n.tr("panel.inspector"),
             state.inspector_visible,
@@ -953,8 +996,24 @@ pub(crate) fn account_chip() -> Option<impl IntoElement> {
     } else {
         Colors::text_muted()
     };
+    let accessible_label = if signed_in {
+        snapshot
+            .username
+            .as_deref()
+            .or(snapshot.email.as_deref())
+            .map(|name| format!("Account menu for {name}"))
+            .unwrap_or_else(|| "Account menu".to_string())
+    } else {
+        "Sign in".to_string()
+    };
 
     let mut chip = div()
+        .id("account-menu")
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .flex()
         .flex_row()
         .items_center()
@@ -965,7 +1024,7 @@ pub(crate) fn account_chip() -> Option<impl IntoElement> {
         .rounded_md()
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+        .on_click(move |_, window, cx| {
             crate::account::dispatch_account_action(action, window, cx);
         });
 
@@ -1038,20 +1097,48 @@ fn window_controls(
                           icon_path: &'static str,
                           fallback_text: gpui::SharedString,
                           on_linux: Option<ChromeActionCb>| {
-        let button =
-            crate::components::title_bar::window_control_icon(area, icon_path, fallback_text)
-                .w(px(WINDOW_CONTROL_WIDTH))
-                .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
-                .rounded_none()
-                .hover(move |style| {
-                    style.bg(if area == WindowControlArea::Close {
-                        Colors::accent_danger()
-                    } else {
-                        Colors::surface_control_hover()
-                    })
-                })
-                .window_control_area(area)
-                .occlude();
+        let id = match area {
+            WindowControlArea::Min => "studio-window-minimize",
+            WindowControlArea::Max => "studio-window-maximize-or-restore",
+            WindowControlArea::Close => "studio-window-close",
+            WindowControlArea::Drag => "studio-window-drag",
+        };
+        let accessible_action = on_linux.clone();
+        let button = crate::components::title_bar::window_control_icon(
+            area,
+            icon_path,
+            fallback_text.clone(),
+        )
+        .id(id)
+        .role(Role::Button)
+        .aria_label(fallback_text)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+        .on_a11y_action(AccessibleAction::Click, move |_, window, cx| match area {
+            WindowControlArea::Min => window.minimize_window(),
+            WindowControlArea::Max => window.zoom_window(),
+            WindowControlArea::Close => {
+                if let Some(action) = accessible_action.as_ref() {
+                    action(&(), window, cx);
+                } else {
+                    window.remove_window();
+                }
+            }
+            WindowControlArea::Drag => {}
+        })
+        .w(px(WINDOW_CONTROL_WIDTH))
+        .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
+        .rounded_none()
+        .hover(move |style| {
+            style.bg(if area == WindowControlArea::Close {
+                Colors::accent_danger()
+            } else {
+                Colors::surface_control_hover()
+            })
+        })
+        .window_control_area(area)
+        .occlude();
 
         #[cfg(target_os = "linux")]
         let button = {

@@ -8,11 +8,20 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Window,
+    div, px, AccessibleAction, App, AppContext, DragMoveEvent, Empty, InteractiveElement,
+    IntoElement, Orientation, ParentElement, Render, Role, StatefulInteractiveElement, Styled,
+    Window,
 };
+use std::sync::Arc;
 
 use crate::theme::Colors;
+
+type SliderValueCb = Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>;
+type SliderCommitCb = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
+
+fn accessible_label_from_id(id: &str) -> String {
+    id.replace(['-', '_'], " ")
+}
 
 /// Drag payload sent from a slider mouse-down. Carries the slider's `id` so a
 /// shared on_drag_move listener (or multiple sliders on screen) can dispatch
@@ -81,7 +90,12 @@ pub fn compact_slider_with_reset(
 ) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
+    let accessible_label = accessible_label_from_id(&id_string);
     let value = value_norm.clamp(0.0, 1.0);
+    let on_change: SliderValueCb = Arc::new(on_change);
+    let on_change_drag = on_change.clone();
+    let on_change_increment = on_change.clone();
+    let on_change_decrement = on_change.clone();
     let fill = {
         let mut c = accent;
         c.a = 0.9;
@@ -90,6 +104,23 @@ pub fn compact_slider_with_reset(
 
     div()
         .id(gpui::ElementId::Name(id_str.clone()))
+        .role(Role::Slider)
+        .aria_label(accessible_label)
+        .aria_numeric_value(value as f64)
+        .aria_min_numeric_value(0.0)
+        .aria_max_numeric_value(1.0)
+        .aria_orientation(Orientation::Horizontal)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border(px(1.0)).border_color(Colors::border_focus()))
+        .on_a11y_action(AccessibleAction::Increment, move |_, window, cx| {
+            let next = (value + 0.01).min(1.0);
+            on_change_increment(&next, window, cx);
+        })
+        .on_a11y_action(AccessibleAction::Decrement, move |_, window, cx| {
+            let next = (value - 0.01).max(0.0);
+            on_change_decrement(&next, window, cx);
+        })
         .h(px(10.0))
         .flex_1()
         .min_w_0()
@@ -134,7 +165,7 @@ pub fn compact_slider_with_reset(
             let ox: f32 = bounds.origin.x.into();
             let ow: f32 = f32::from(bounds.size.width).max(1.0);
             let new_value = ((x - ox) / ow).clamp(0.0, 1.0);
-            on_change(&new_value, window, cx);
+            on_change_drag(&new_value, window, cx);
         })
         .when_some(on_double_click_reset, |this, reset| {
             this.on_click(move |event, window, cx| {
@@ -156,7 +187,20 @@ pub fn slider_with_drag_callbacks(
 ) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
+    let accessible_label = accessible_label_from_id(&id_string);
     let value = value_norm.clamp(0.0, 1.0);
+    let on_drag_start: Option<SliderValueCb> =
+        on_drag_start.map(|callback| Arc::new(callback) as SliderValueCb);
+    let on_drag_preview: Option<SliderValueCb> =
+        on_drag_preview.map(|callback| Arc::new(callback) as SliderValueCb);
+    let on_drag_commit: Option<SliderCommitCb> =
+        on_drag_commit.map(|callback| Arc::new(callback) as SliderCommitCb);
+    let a11y_start_increment = on_drag_start.clone();
+    let a11y_preview_increment = on_drag_preview.clone();
+    let a11y_commit_increment = on_drag_commit.clone();
+    let a11y_start_decrement = on_drag_start.clone();
+    let a11y_preview_decrement = on_drag_preview.clone();
+    let a11y_commit_decrement = on_drag_commit.clone();
 
     let fill = {
         let mut c = accent;
@@ -168,6 +212,39 @@ pub fn slider_with_drag_callbacks(
 
     div()
         .id(gpui::ElementId::Name(id_str.clone()))
+        .role(Role::Slider)
+        .aria_label(accessible_label)
+        .aria_numeric_value(value as f64)
+        .aria_min_numeric_value(0.0)
+        .aria_max_numeric_value(1.0)
+        .aria_orientation(Orientation::Horizontal)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border(px(1.0)).border_color(Colors::border_focus()))
+        .on_a11y_action(AccessibleAction::Increment, move |_, window, cx| {
+            let next = (value + 0.01).min(1.0);
+            if let Some(start) = a11y_start_increment.as_ref() {
+                start(&value, window, cx);
+            }
+            if let Some(preview) = a11y_preview_increment.as_ref() {
+                preview(&next, window, cx);
+            }
+            if let Some(commit) = a11y_commit_increment.as_ref() {
+                commit(window, cx);
+            }
+        })
+        .on_a11y_action(AccessibleAction::Decrement, move |_, window, cx| {
+            let next = (value - 0.01).max(0.0);
+            if let Some(start) = a11y_start_decrement.as_ref() {
+                start(&value, window, cx);
+            }
+            if let Some(preview) = a11y_preview_decrement.as_ref() {
+                preview(&next, window, cx);
+            }
+            if let Some(commit) = a11y_commit_decrement.as_ref() {
+                commit(window, cx);
+            }
+        })
         // Generous vertical hit area so the user can drift up/down during drag.
         .h(px(20.0))
         .flex_1()
@@ -261,8 +338,6 @@ pub fn slider_with_drag_callbacks(
             }
         })
         .when_some(on_drag_commit, |this, commit| {
-            use std::sync::Arc;
-            let commit: Arc<dyn Fn(&mut Window, &mut App) + 'static> = Arc::new(commit);
             this.on_mouse_up(gpui::MouseButton::Left, {
                 let commit = commit.clone();
                 move |_event, window, cx| commit(window, cx)

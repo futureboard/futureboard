@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, AppContext, DragMoveEvent, InteractiveElement, IntoElement, ParentElement,
+    div, px, App, AppContext, DragMoveEvent, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -262,8 +262,18 @@ pub fn inspector_mini_button(
     enabled: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label: String = label.into();
     let mut button = div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_disabled(!enabled)
+        .when(enabled, |button| {
+            button
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.border_color(Colors::border_focus()))
+        })
         .h(px(24.0))
         .min_w(px(26.0))
         .px(px(7.0))
@@ -278,7 +288,7 @@ pub fn inspector_mini_button(
         .text_size(px(10.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_secondary())
-        .child(label.into());
+        .child(label);
     if enabled {
         button = button
             .cursor(gpui::CursorStyle::PointingHand)

@@ -151,7 +151,8 @@ impl ColorPickerState {
         recent: Vec<String>,
     ) -> Self {
         let draft = normalize_color(initial.color.unwrap_or(fallback));
-        let mut hex_input = TextInputState::new(hex_field_id, focus_handle);
+        let mut hex_input =
+            TextInputState::new(hex_field_id, focus_handle).with_accessible_label("Hex color");
         hex_input.set_value(rgba_to_hex(draft));
         Self {
             open: false,

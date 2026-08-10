@@ -4,7 +4,12 @@ impl Render for StudioLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.session_install_status.is_ready() {
             eprintln!("[StudioMount] blocked because session not ready");
-            return div().size_full().bg(Colors::surface_base());
+            return div()
+                .id("futureboard-studio-root")
+                .role(Role::Application)
+                .aria_label("Futureboard Studio")
+                .size_full()
+                .bg(Colors::surface_base());
         }
 
         publish_studio_main_hwnd(window);
@@ -57,7 +62,7 @@ impl Render for StudioLayout {
         let title = self.window_title();
         if self.last_window_title.as_deref() != Some(title.as_str()) {
             window.set_window_title(&title);
-            self.last_window_title = Some(title);
+            self.last_window_title = Some(title.clone());
         }
 
         // Pull a render-only track snapshot and current selection from the
@@ -1298,7 +1303,10 @@ impl Render for StudioLayout {
                 .lyric_editor_panel
                 .read(cx)
                 .is_text_input_focused(window);
-        if !self.focus_handle.is_focused(window)
+        // Seed the shortcut anchor only when the window has no focused element.
+        // Do not reclaim focus from buttons or sliders: AccessKit focus actions
+        // and Tab navigation must remain stable for assistive technology.
+        if window.focused(cx).is_none()
             && !docked_midi_editor_owns_keyboard
             && !docked_song_text_editor_owns_keyboard
             && !self.keyboard_text_capture_live(window)
@@ -1321,6 +1329,9 @@ impl Render for StudioLayout {
         let shortcut_keydown_target = shortcut_target.clone();
 
         div()
+            .id("futureboard-studio-root")
+            .role(Role::Application)
+            .aria_label(title.clone())
             // NOTE: `track_focus` deliberately lives on the tiny invisible
             // `focus_holder` child below, NOT on this root. Putting it on
             // the root makes GPUI insert a full-window Normal hitbox
@@ -1347,6 +1358,22 @@ impl Render for StudioLayout {
                 focus_holder_on_pointer.focus(window, cx);
             })
             .capture_key_down(move |event, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key.eq_ignore_ascii_case("tab")
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && !modifiers.function
+                {
+                    if modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    return;
+                }
                 let handled = shortcut_keydown_target.update(cx, |this, cx| {
                     let handled = this.handle_command_palette_key(event, window, cx)
                         || this.handle_bpm_edit_key(event, window, cx)
@@ -1823,6 +1850,9 @@ fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl
         RightDockTab::LyricEditor => Some(components::SongTextPanelKind::LyricEditor),
     };
     let mut row = div()
+        .id("right-dock-tabs")
+        .role(Role::TabList)
+        .aria_label("Right panel")
         .h(px(28.0))
         .flex_shrink_0()
         .flex()
@@ -1851,6 +1881,11 @@ fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl
             Colors::text_muted(),
         )
         .id("right-dock-popout")
+        .role(Role::Button)
+        .aria_label("Open panel in a separate window")
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |_, window, cx| {
             let bounds = Some(window.bounds());
@@ -1875,6 +1910,12 @@ fn right_dock_tab_button(
     };
     div()
         .id(("right-dock-tab", tab as u32))
+        .role(Role::Tab)
+        .aria_label(label)
+        .aria_selected(selected)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
         .h(px(22.0))
         .px(px(6.0))
         .flex()

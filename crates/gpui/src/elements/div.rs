@@ -1193,6 +1193,24 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the current textual value for this element.
+    fn aria_value(mut self, value: impl Into<SharedString>) -> Self {
+        self.interactivity().aria_value = Some(value.into());
+        self
+    }
+
+    /// Set whether this element is disabled.
+    fn aria_disabled(mut self, disabled: bool) -> Self {
+        self.interactivity().aria_disabled = Some(disabled);
+        self
+    }
+
+    /// Set whether this element is read-only.
+    fn aria_read_only(mut self, read_only: bool) -> Self {
+        self.interactivity().aria_read_only = Some(read_only);
+        self
+    }
+
     /// Set the selected state for this element.
     fn aria_selected(mut self, selected: bool) -> Self {
         self.interactivity().aria_selected = Some(selected);
@@ -1844,6 +1862,9 @@ pub struct Interactivity {
         Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
     pub(crate) override_role: Option<accesskit::Role>,
     pub(crate) aria_label: Option<SharedString>,
+    pub(crate) aria_value: Option<SharedString>,
+    pub(crate) aria_disabled: Option<bool>,
+    pub(crate) aria_read_only: Option<bool>,
     pub(crate) aria_selected: Option<bool>,
     pub(crate) aria_expanded: Option<bool>,
     pub(crate) aria_toggled: Option<accesskit::Toggled>,
@@ -3037,6 +3058,23 @@ impl Interactivity {
         if let Some(label) = &self.aria_label {
             node.set_label(label.to_string());
         }
+        if let Some(value) = &self.aria_value {
+            node.set_value(value.to_string());
+        }
+        if let Some(disabled) = self.aria_disabled {
+            if disabled {
+                node.set_disabled();
+            } else {
+                node.clear_disabled();
+            }
+        }
+        if let Some(read_only) = self.aria_read_only {
+            if read_only {
+                node.set_read_only();
+            } else {
+                node.clear_read_only();
+            }
+        }
         if let Some(selected) = self.aria_selected {
             node.set_selected(selected);
         }
@@ -3846,6 +3884,23 @@ mod tests {
     use super::*;
     use crate::{AppContext as _, Context, InputEvent, MouseMoveEvent, TestAppContext};
     use std::rc::Weak;
+
+    #[test]
+    fn writes_text_control_accessibility_properties() {
+        let mut interactivity = Interactivity::default();
+        interactivity.aria_label = Some("Project name".into());
+        interactivity.aria_value = Some("Demo".into());
+        interactivity.aria_disabled = Some(true);
+        interactivity.aria_read_only = Some(true);
+
+        let mut node = accesskit::Node::new(accesskit::Role::TextInput);
+        interactivity.write_a11y_info(&mut node);
+
+        assert_eq!(node.label(), Some("Project name"));
+        assert_eq!(node.value(), Some("Demo"));
+        assert!(node.is_disabled());
+        assert!(node.is_read_only());
+    }
 
     struct TestTooltipView;
 

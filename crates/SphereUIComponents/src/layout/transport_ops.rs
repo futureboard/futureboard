@@ -52,11 +52,14 @@ pub(crate) struct TempoEditState {
 impl TempoEditState {
     pub(super) fn new(cx: &mut Context<StudioLayout>) -> Self {
         Self {
-            bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
+            bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle())
+                .with_accessible_label("Tempo in BPM"),
             bpm_editing: false,
             bpm_session: None,
-            ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle()),
-            ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle()),
+            ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle())
+                .with_accessible_label("Time signature numerator"),
+            ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle())
+                .with_accessible_label("Time signature denominator"),
             ts_editing: false,
             ts_edit_point_id: None,
             ts_edit_focus_num: true,

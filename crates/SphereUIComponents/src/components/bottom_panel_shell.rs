@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gpui::{
     div, px, svg, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Window,
+    Render, Role, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
@@ -285,6 +285,11 @@ fn render_tab_bar(
                 Colors::text_muted(),
             )
             .id("bottom-panel-hide")
+            .role(Role::Button)
+            .aria_label("Hide bottom panel")
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
             .cursor(gpui::CursorStyle::PointingHand)
             .on_click(move |event, window, cx| on_close_panel(event, window, cx)),
         )
@@ -306,6 +311,7 @@ fn tab_button(
     on_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let active = tab == active_tab || active_panel_matches_tab(active_panel, tab);
+    let label: String = label.into();
     let on_click_clone = on_click.clone();
     let text_color = if active {
         Colors::tab_text_active()
@@ -326,6 +332,12 @@ fn tab_button(
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text_color)
         .id(id)
+        .role(Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(active)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
         .on_click(move |_, window, cx| {
             on_click_clone(&tab, window, cx);
         })
@@ -336,7 +348,7 @@ fn tab_button(
                 .h(px(14.0))
                 .text_color(text_color),
         )
-        .child(label.into());
+        .child(label);
 
     if active {
         btn = btn.bg(Colors::tab_bg_active()).child(

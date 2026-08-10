@@ -1,7 +1,7 @@
 //! Compact DAW-style boxed list rows — reusable for MIDI / audio / plug-in / GPU device lists.
 
 use gpui::{
-    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement,
+    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -180,11 +180,16 @@ pub fn box_list_toggle(
 pub fn box_list_icon_button(
     id: impl Into<gpui::ElementId>,
     icon_path: &'static str,
-    _tooltip: &'static str,
+    tooltip: &'static str,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(tooltip)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .flex()
         .items_center()
         .justify_center()

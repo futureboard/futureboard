@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use gpui::{
     canvas, div, fill, point, px, size, svg, uniform_list, App, AppContext, Bounds, Empty,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, ScrollHandle,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, Role, ScrollHandle,
     StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
 };
 
@@ -160,6 +160,11 @@ pub fn sidebar(
                 Colors::text_muted(),
             )
             .id("browser-collapse-all")
+            .role(Role::Button)
+            .aria_label("Collapse all browser folders")
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
             .cursor(gpui::CursorStyle::PointingHand)
             .on_click(move |_e, w, cx| collapse_cb(w, cx)),
         )
@@ -173,6 +178,11 @@ pub fn sidebar(
                 Colors::text_muted(),
             )
             .id("browser-rescan")
+            .role(Role::Button)
+            .aria_label("Rescan browser files")
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
             .cursor(gpui::CursorStyle::PointingHand)
             .on_click(move |_e, w, cx| rescan_cb(w, cx)),
         );

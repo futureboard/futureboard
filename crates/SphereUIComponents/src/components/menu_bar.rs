@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
@@ -70,6 +70,9 @@ fn menu_bar_full(
     let mut next_label_left = chrome_left + MENU_BAR_PAD_X;
 
     div()
+        .id("top-menu-bar")
+        .role(Role::MenuBar)
+        .aria_label("Application menu")
         .flex()
         .flex_row()
         .items_center()
@@ -113,6 +116,9 @@ fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> imp
     let anchor_x = chrome_left + MENU_BAR_PAD_X;
 
     div()
+        .id("compact-top-menu-bar")
+        .role(Role::MenuBar)
+        .aria_label("Application menu")
         .flex()
         .flex_row()
         .items_center()
@@ -121,6 +127,12 @@ fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> imp
         .child(
             div()
                 .id("top-menu-hamburger")
+                .role(Role::Button)
+                .aria_label("Open application menu")
+                .aria_expanded(is_open)
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                 .w(px(COMPACT_MENU_BUTTON_SIZE))
                 .h(px(COMPACT_MENU_BUTTON_SIZE))
                 .flex()
@@ -134,7 +146,7 @@ fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> imp
                 })
                 .hover(|s| s.bg(Colors::surface_control_hover()))
                 .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                .on_click(move |_event, window, cx| {
                     cb(&(MENU_PICKER_ID.to_string(), anchor_x), window, cx);
                 })
                 .occlude()
@@ -198,6 +210,9 @@ pub fn menu_picker_dropdown(
         ))
         .child(
             div()
+                .id("menu-picker")
+                .role(Role::Menu)
+                .aria_label("Application menus")
                 .absolute()
                 .left(px(panel_left))
                 .top(px(panel_top))
@@ -217,6 +232,11 @@ pub fn menu_picker_dropdown(
                     let cb = on_open_menu.clone();
                     div()
                         .id(("menu-picker-row", i))
+                        .role(Role::MenuItem)
+                        .aria_label(label.clone())
+                        .focusable()
+                        .tab_stop(true)
+                        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                         .h(px(PICKER_ROW_HEIGHT))
                         .px(px(menu_style::ROW_PAD_X))
                         .flex()
@@ -227,7 +247,7 @@ pub fn menu_picker_dropdown(
                         .text_color(Colors::text_primary())
                         .hover(|s| s.bg(Colors::surface_control_hover()))
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+                        .on_click(move |_event, window, cx| {
                             cb(&(menu_id.clone(), panel_left), window, cx);
                         })
                         .occlude()
@@ -246,10 +266,17 @@ pub fn menu_label_button(
     active: bool,
     enable_hover_switch: bool,
     on_hover: impl Fn(&bool, &mut Window, &mut App) + 'static,
-    on_mouse_down: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_mouse_down: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label: String = label.into();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_expanded(active)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .h(px(24.0))
         .px(px(MENU_LABEL_PAD_X))
         .flex()
@@ -273,7 +300,7 @@ pub fn menu_label_button(
         })
         .cursor(gpui::CursorStyle::PointingHand)
         .when(enable_hover_switch, |this| this.on_hover(on_hover))
-        .on_mouse_down(gpui::MouseButton::Left, on_mouse_down)
+        .on_click(on_mouse_down)
         .occlude()
-        .child(label.into())
+        .child(label)
 }

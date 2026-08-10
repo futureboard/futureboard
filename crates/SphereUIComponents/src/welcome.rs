@@ -5,8 +5,8 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, img, px, svg, App, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
-    WindowControlArea,
+    MouseButton, ParentElement, Render, Role, SharedString, StatefulInteractiveElement, Styled,
+    Window, WindowControlArea,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -232,6 +232,22 @@ impl WelcomeWindow {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.is_held && !is_repeatable_edit_key(event) {
+            return;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key.eq_ignore_ascii_case("tab")
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.platform
+            && !modifiers.function
+        {
+            if modifiers.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
         if self.project_name_input.is_focused(window) {
@@ -491,6 +507,9 @@ impl Render for WelcomeWindow {
         let project_name_callbacks =
             bind_mouse_selection(target.clone(), |this| &mut this.project_name_input);
         div()
+            .id("futureboard-welcome-root")
+            .role(Role::Application)
+            .aria_label("Futureboard Studio Welcome")
             .key_context("WelcomeWindow")
             .capture_key_down(move |event, window, cx| {
                 let _ = target.update(cx, |this, cx| this.handle_key(event, window, cx));
@@ -840,6 +859,12 @@ fn rail_item(
     let target = cx.entity().clone();
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_selected(is_active)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_card_hover()))
         .flex()
         .items_center()
         .gap(px(8.0))
@@ -855,7 +880,7 @@ fn rail_item(
         .border_color(Colors::accent_primary())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
-        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+        .on_click(move |_event, window, cx| {
             if changes_nav {
                 let _ = target.update(cx, |this, cx| {
                     this.active_nav = nav.clone();
@@ -1086,6 +1111,12 @@ fn new_project_pane(
                     "welcome-template-{}",
                     template.label()
                 )))
+                .role(Role::Button)
+                .aria_label(format!("{} project template", template.label()))
+                .aria_selected(is_active)
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.border_color(Colors::border_focus()))
                 .flex()
                 .items_center()
                 .h(px(26.0))
@@ -1104,7 +1135,7 @@ fn new_project_pane(
                 })
                 .cursor(gpui::CursorStyle::PointingHand)
                 .hover(|style| style.bg(Colors::surface_card_hover()))
-                .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                .on_click(move |_event, _window, cx| {
                     let _ = target.update(cx, |this, cx| {
                         this.selected_template = template;
                         this.project_bpm = template.default_bpm();
@@ -1478,8 +1509,18 @@ fn start_row(
     selected: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let accessible_label = format!(
+        "{}. {}. Shortcut {}",
+        row.title, row.description, row.shortcut
+    );
     div()
         .id(("welcome-start-row", index))
+        .role(Role::Button)
+        .aria_label(accessible_label)
+        .aria_selected(selected)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .relative()
         .flex()
         .flex_row()
@@ -1502,7 +1543,7 @@ fn start_row(
         .py(px(6.0))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
-        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+        .on_click(move |_event, window, cx| {
             on_click(window, cx);
         })
         .when(selected, |item| {
@@ -1548,8 +1589,15 @@ fn continue_row(
     i18n: I18n,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let label = i18n.tr("welcome.button.continue-without-project");
     div()
         .id("welcome-continue-row")
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .aria_selected(selected)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.border_color(Colors::border_focus()))
         .relative()
         .flex()
         .items_center()
@@ -1570,7 +1618,7 @@ fn continue_row(
         .px(px(9.0))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
-        .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
+        .on_click(move |_event, window, cx| {
             on_click(window, cx);
         })
         .when(selected, |item| {
@@ -1596,7 +1644,7 @@ fn continue_row(
                         .text_size(px(11.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
-                        .child(i18n.tr("welcome.button.continue-without-project")),
+                        .child(label),
                 )
                 .child(
                     div()

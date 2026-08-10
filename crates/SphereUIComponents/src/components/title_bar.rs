@@ -1,6 +1,6 @@
 use gpui::{
-    div, px, svg, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+    div, px, svg, AccessibleAction, App, Div, InteractiveElement, IntoElement, ParentElement, Rgba,
+    Role, SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea,
 };
 
 use crate::assets;
@@ -144,8 +144,27 @@ pub fn window_control_button(
     area: WindowControlArea,
     icon_path: &'static str,
     fallback_text: impl Into<SharedString>,
-) -> Div {
-    let button = window_control_icon(area, icon_path, fallback_text)
+) -> gpui::Stateful<Div> {
+    let label = fallback_text.into();
+    let id = match area {
+        WindowControlArea::Min => "window-minimize",
+        WindowControlArea::Max => "window-maximize-or-restore",
+        WindowControlArea::Close => "window-close",
+        WindowControlArea::Drag => "window-drag",
+    };
+    let button = window_control_icon(area, icon_path, label.clone())
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+        .on_a11y_action(AccessibleAction::Click, move |_, window, _cx| match area {
+            WindowControlArea::Min => window.minimize_window(),
+            WindowControlArea::Max => window.zoom_window(),
+            WindowControlArea::Close => window.remove_window(),
+            WindowControlArea::Drag => {}
+        })
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .rounded_none()
@@ -270,6 +289,11 @@ pub fn external_window_titlebar_with_icon(
         bar = bar.child(
             div()
                 .id(close_id)
+                .role(Role::Button)
+                .aria_label("Close window")
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -305,6 +329,11 @@ pub fn external_window_titlebar_compact(
     let close_button = policy.needs_drawn_close_fallback().then(|| {
         div()
             .id(close_id)
+            .role(Role::Button)
+            .aria_label("Close window")
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
             .flex()
             .items_center()
             .justify_center()
@@ -386,6 +415,11 @@ pub fn chromeless_window_titlebar(
         .children(on_close.map(|on_close| {
             div()
                 .id(close_id)
+                .role(Role::Button)
+                .aria_label("Close window")
+                .focusable()
+                .tab_stop(true)
+                .focus_visible(|style| style.bg(Colors::surface_control_hover()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -408,9 +442,20 @@ fn external_window_control_button(
     icon_path: &'static str,
     on_click: impl Fn(&mut Window, &mut App) + 'static + Clone,
 ) -> impl IntoElement {
+    let label = match area {
+        WindowControlArea::Min => "Minimize window",
+        WindowControlArea::Max => "Maximize or restore window",
+        WindowControlArea::Close => "Close window",
+        WindowControlArea::Drag => "Move window",
+    };
     div()
         .window_control_area(area)
         .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
         .flex()
         .items_center()
         .justify_center()
