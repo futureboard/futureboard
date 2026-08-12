@@ -193,6 +193,23 @@ pub enum EditCommand {
 }
 
 impl EditCommand {
+    /// MIDI content changes are cheap to identify at the command boundary.
+    /// The owner uses this to publish a note edit immediately instead of
+    /// waiting for the general 75 ms gesture-sync throttle.
+    pub fn is_midi_edit(&self) -> bool {
+        matches!(
+            self,
+            EditCommand::CreateMidiNote { .. }
+                | EditCommand::CreateMidiNotes { .. }
+                | EditCommand::DeleteMidiNotes { .. }
+                | EditCommand::SetMidiNotesMuted { .. }
+                | EditCommand::EditMidiNotes { .. }
+                | EditCommand::SetControllerPoints { .. }
+                | EditCommand::SetMidiArticulations { .. }
+                | EditCommand::SplitMidiNote { .. }
+        )
+    }
+
     pub fn is_metadata_only(&self) -> bool {
         matches!(self, EditCommand::SetSongTextEvents { .. })
     }

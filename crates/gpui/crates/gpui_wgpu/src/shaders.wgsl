@@ -312,8 +312,21 @@ fn oklab_to_linear_srgb(color: vec4<f32>) -> vec4<f32> {
 
 fn over(below: vec4<f32>, above: vec4<f32>) -> vec4<f32> {
     let alpha = above.a + below.a * (1.0 - above.a);
-    let color = (above.rgb * above.a + below.rgb * below.a * (1.0 - above.a)) / alpha;
+    let composited_rgb = above.rgb * above.a + below.rgb * below.a * (1.0 - above.a);
+    let color = if (alpha > 0.000001) {
+        composited_rgb / alpha
+    } else {
+        vec3<f32>(0.0)
+    };
     return vec4<f32>(color, alpha);
+}
+
+// SDF distances are measured in device pixels. Derivatives make the edge
+// transition follow the fragment footprint at fractional scale factors and
+// prevent fixed-threshold aliasing on transformed surfaces.
+fn sdf_coverage(signed_distance: f32) -> f32 {
+    let width = max(fwidth(signed_distance), 0.0001);
+    return saturate(0.5 - signed_distance / width);
 }
 
 // A standard gaussian function, used for weighting samples
@@ -495,7 +508,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             let pattern = rotated_point.x % pattern_period;
             let distance = min(pattern, pattern_period - pattern) - pattern_period * (pattern_width / pattern_height) /  2.0f;
             background_color = solid_color;
-            background_color.a *= saturate(0.5 - distance);
+            background_color.a *= sdf_coverage(distance);
         }
         case 3u: {
             // checkerboard
@@ -1015,7 +1028,7 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     var alpha: f32;
     if (shadow.blur_radius == 0.0) {
         let distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
-        alpha = saturate(0.5 - distance);
+        alpha = sdf_coverage(distance);
     } else {
         // The signal is only non-zero in a limited range, so don't waste samples
         let low = center_to_point.y - half_size.y;
@@ -1037,11 +1050,11 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 
     if (shadow.inset != 0u) {
         // The inset shadow is the complement of the (blurred) hole rect, clipped to the element.
-        // `saturate(0.5 - d)` gives a 1-pixel antialiased edge: d <= -0.5 -> 1, d >= 0.5 -> 0.
+        // Derivative-based coverage keeps this edge stable at fractional DPI.
         alpha = 1.0 - alpha;
         let element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
                                         shadow.element_corner_radii);
-        alpha *= saturate(0.5 - element_distance);
+        alpha *= sdf_coverage(element_distance);
     }
 
     return blend_color(input.color, alpha);
@@ -1098,7 +1111,7 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         let gradient = 2.0 * input.st_position.xx * vec2<f32>(dx.x, dy.x) - vec2<f32>(dx.y, dy.y);
         let f = input.st_position.x * input.st_position.x - input.st_position.y;
         let distance = f / length(gradient);
-        alpha = saturate(0.5 - distance);
+        alpha = sdf_coverage(distance);
     }
     let prepared_gradient = prepare_gradient_color(
         background.tag,
@@ -1208,7 +1221,7 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
     let distance_in_pixels = distance * underline.bounds.size.y;
     let distance_from_top_border = distance_in_pixels - half_thickness;
     let distance_from_bottom_border = distance_in_pixels + half_thickness;
-    let alpha = saturate(0.5 - max(-distance_from_bottom_border, distance_from_top_border));
+    let alpha = sdf_coverage(max(-distance_from_bottom_border, distance_from_top_border));
     return blend_color(input.color, alpha * input.color.a);
 }
 
@@ -1309,7 +1322,7 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
         let grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = vec4<f32>(vec3<f32>(grayscale), sample.a);
     }
-    return blend_color(color, sprite.opacity * saturate(0.5 - distance));
+    return blend_color(color, sprite.opacity * sdf_coverage(distance));
 }
 
 // --- surfaces --- //

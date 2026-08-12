@@ -2,7 +2,7 @@ use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, StretchMode, TimelineState, TimelineTool,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
-use crate::{custom_cursors, theme::Colors};
+use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, relative, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
@@ -247,8 +247,8 @@ fn fade_drag_zone(
         .w(relative(0.5))
         .h(px(10.0))
         .cursor(match edge {
-            FadeEdge::In => custom_cursors::fade_in(),
-            FadeEdge::Out => custom_cursors::fade_out(),
+            FadeEdge::In => gpui::CursorStyle::ResizeLeft,
+            FadeEdge::Out => gpui::CursorStyle::ResizeRight,
         })
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_drag(
@@ -481,9 +481,13 @@ pub fn audio_clip(
         })
         .cursor(if active_tool == TimelineTool::Cut {
             // Cut tool: a click splits (never drags), so drop the move cursor.
-            custom_cursors::timeline_tool(active_tool)
+            if active_tool == TimelineTool::Pen {
+                gpui::CursorStyle::Crosshair
+            } else {
+                gpui::CursorStyle::Arrow
+            }
         } else {
-            custom_cursors::move_clip()
+            gpui::CursorStyle::OpenHand
         })
         .id(("audio-clip", id_num))
         .on_mouse_down(
@@ -681,7 +685,7 @@ pub fn audio_clip(
                 .left_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(custom_cursors::resize_left())
+                .cursor(gpui::CursorStyle::ResizeLeft)
                 .id(("audio-clip-resize-l", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
@@ -695,7 +699,7 @@ pub fn audio_clip(
                 .right_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(custom_cursors::resize_right())
+                .cursor(gpui::CursorStyle::ResizeRight)
                 .id(("audio-clip-resize-r", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {

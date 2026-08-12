@@ -2952,6 +2952,20 @@ impl EngineInner {
         let mut deferred_open_warning: Option<String> = None;
 
         let stream = match backend {
+            BackendKind::WasapiShared => {
+                let handle = cpal_backend::open_wasapi_shared(
+                    &daux_cfg,
+                    Arc::clone(&self.shared),
+                    initial_runtime,
+                    Arc::clone(&self.glitch_counter),
+                )?;
+                let sr = handle.sample_rate;
+                let bs = handle.buffer_size;
+                let dev_name = handle.device_name.clone();
+                let stream = ActiveStream::Cpal(handle);
+                self.commit_stream_open(sr, bs, dev_name, "DAUx WASAPI Shared".into());
+                stream
+            }
             #[cfg(target_os = "windows")]
             BackendKind::WasapiExclusive => {
                 let handle = wasapi_exclusive::open(

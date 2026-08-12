@@ -7,7 +7,6 @@
       "apps/*",
       "packages/*",
       "crates/*",
-      "plugins/*",
       "extensions/template",
       "crates/BuiltinAudioPlugins/crates/*/editor",
       "crates/BuiltinAudioPlugins/crates/*/editorui"

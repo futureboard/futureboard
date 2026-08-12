@@ -1885,33 +1885,6 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
-
-    /// Futureboard Studio arrow cursor rendered from bundled PNG assets.
-    FutureboardArrow,
-
-    /// Futureboard Studio selection cursor rendered from bundled PNG assets.
-    FutureboardSelect,
-
-    /// Futureboard Studio marquee cursor rendered from bundled PNG assets.
-    FutureboardMarquee,
-
-    /// Futureboard Studio move cursor rendered from bundled PNG assets.
-    FutureboardMove,
-
-    /// Futureboard Studio fade-in cursor rendered from bundled PNG assets.
-    FutureboardFadeIn,
-
-    /// Futureboard Studio fade-out cursor rendered from bundled PNG assets.
-    FutureboardFadeOut,
-
-    /// Futureboard Studio horizontal resize cursor rendered from bundled PNG assets.
-    FutureboardResizeHorizon,
-
-    /// Futureboard Studio left-edge resize cursor rendered from bundled PNG assets.
-    FutureboardResizeLeft,
-
-    /// Futureboard Studio right-edge resize cursor rendered from bundled PNG assets.
-    FutureboardResizeRight,
 }
 
 /// A clipboard item that should be copied to the clipboard

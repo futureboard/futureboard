@@ -4,6 +4,8 @@
 
 use super::*;
 
+use gpui::{PathBuilder, PathStyle, StrokeOptions};
+
 /// Spacing, in lane pixels, between samples written while freehand-drawing a CC
 /// stroke. Small enough that the written curve matches the pointer path at any
 /// drag speed, large enough that free (unsnapped) drawing does not mint a point
@@ -784,16 +786,22 @@ impl PianoRoll {
                     size(px(view_w), px(1.0)),
                 );
                 window.paint_quad(fill(baseline, baseline_color));
-                for col in 0..num_cols {
-                    let y0 = samples[col];
-                    let y1 = samples[col + 1];
-                    let top = y0.min(y1);
-                    let h = (y0 - y1).abs().max(1.6);
-                    let rect = Bounds::new(
-                        origin + point(px(col as f32), px(top)),
-                        size(px(1.0), px(h)),
-                    );
-                    window.paint_quad(fill(rect, line_color));
+                // Keep the controller envelope as one continuous stroked path.
+                // Column quads create visible stair-stepping on diagonal ramps,
+                // especially at fractional Windows scale factors.
+                if samples.len() >= 2 {
+                    let options = StrokeOptions::default()
+                        .with_line_width(1.6)
+                        .with_miter_limit(2.0);
+                    let mut path =
+                        PathBuilder::stroke(px(1.6)).with_style(PathStyle::Stroke(options));
+                    path.move_to(origin + point(px(0.0), px(samples[0])));
+                    for (col, y) in samples.iter().enumerate().skip(1) {
+                        path.line_to(origin + point(px(col as f32), px(*y)));
+                    }
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, line_color);
+                    }
                 }
                 for (x, y, selected) in &handles {
                     // A selected handle reads as a ring around a filled dot; an

@@ -1924,17 +1924,6 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
-            CursorStyle::FutureboardArrow => msg_send![class!(NSCursor), arrowCursor],
-            CursorStyle::FutureboardSelect => msg_send![class!(NSCursor), arrowCursor],
-            CursorStyle::FutureboardMarquee => msg_send![class!(NSCursor), crosshairCursor],
-            CursorStyle::FutureboardMove => msg_send![class!(NSCursor), openHandCursor],
-            CursorStyle::FutureboardFadeIn => msg_send![class!(NSCursor), resizeLeftCursor],
-            CursorStyle::FutureboardFadeOut => msg_send![class!(NSCursor), resizeRightCursor],
-            CursorStyle::FutureboardResizeHorizon => {
-                msg_send![class!(NSCursor), resizeLeftRightCursor]
-            }
-            CursorStyle::FutureboardResizeLeft => msg_send![class!(NSCursor), resizeLeftCursor],
-            CursorStyle::FutureboardResizeRight => msg_send![class!(NSCursor), resizeRightCursor],
         };
 
         let bounds = NSView::bounds(this as *const Object as id);

@@ -567,10 +567,12 @@ impl StudioLayout {
         // engine snapshots. Until the entity exists we fall back to ~60 Hz.
         const FALLBACK_INTERVAL_NANOS: u64 = 16_666_667; // ~60 Hz
         const IDLE_MIN_INTERVAL_NANOS: u64 = 16_666_667; // cap idle control work at 60 Hz
+        const MIDI_RECORD_INTERVAL_NANOS: u64 = 2_000_000; // 2 ms while writing MIDI
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let mut interval_handle: Option<Arc<AtomicU64>> = None;
             let mut transport_active = false;
+            let mut midi_recording_active = false;
             loop {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;
@@ -588,7 +590,13 @@ impl StudioLayout {
                 // High-refresh polling is useful only while the transport is
                 // moving. At idle, 60 Hz keeps hardware MIDI latency low while
                 // avoiding 120/144/240 registry, meter, and status polls/sec.
-                let interval_nanos = if transport_active {
+                let interval_nanos = if midi_recording_active {
+                    // Hardware MIDI arrives on a native callback thread, but
+                    // recording is committed by this control loop. Keep the
+                    // write path below one audio period without making every
+                    // idle Studio poll run at 500 Hz.
+                    MIDI_RECORD_INTERVAL_NANOS
+                } else if transport_active {
                     requested_interval_nanos
                 } else {
                     requested_interval_nanos.max(IDLE_MIN_INTERVAL_NANOS)
@@ -597,22 +605,31 @@ impl StudioLayout {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;
                 }
-                let Ok((changed, mixer_handle, active)) = this.update(cx, |this, cx| {
-                    if crate::shutdown::ShutdownState::global().is_shutting_down() {
-                        return (false, None, false);
-                    }
-                    let changed = this.poll_native_audio(cx);
-                    let active = this
-                        .audio_bridge
-                        .stats
-                        .as_ref()
-                        .map(|stats| stats.transport_playing)
-                        .unwrap_or(false);
-                    (changed, this.external_windows.mixer.clone(), active)
-                }) else {
+                let Ok((changed, mixer_handle, active, midi_recording)) =
+                    this.update(cx, |this, cx| {
+                        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                            return (false, None, false, false);
+                        }
+                        let changed = this.poll_native_audio(cx);
+                        let active = this
+                            .audio_bridge
+                            .stats
+                            .as_ref()
+                            .map(|stats| stats.transport_playing)
+                            .unwrap_or(false);
+                        let midi_recording = this.recording.midi.is_some();
+                        (
+                            changed,
+                            this.external_windows.mixer.clone(),
+                            active,
+                            midi_recording,
+                        )
+                    })
+                else {
                     continue;
                 };
                 transport_active = active;
+                midi_recording_active = midi_recording;
                 if changed && !crate::shutdown::ShutdownState::global().is_shutting_down() {
                     crate::perf::record_notify("transport");
                     let studio_id = this.entity_id();

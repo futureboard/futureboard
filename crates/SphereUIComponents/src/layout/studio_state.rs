@@ -101,6 +101,8 @@ pub(super) enum TextMenuTarget {
     InspectorName,
     /// The Inspector's clip-name edit field.
     InspectorClipName,
+    /// The Inspector's hex colour edit field.
+    InspectorColorHex,
 }
 
 #[derive(Debug, Clone, Copy)]

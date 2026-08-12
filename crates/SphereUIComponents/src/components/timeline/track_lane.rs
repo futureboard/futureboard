@@ -7,7 +7,7 @@ use crate::components::timeline::timeline_state::{
     ClipState, ClipType, TimelineState, TimelineTool, TrackState, TrackType, HEADER_WIDTH,
 };
 use crate::components::timeline::video_clip::video_clip;
-use crate::{custom_cursors, theme::Colors};
+use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
 
@@ -154,7 +154,11 @@ pub fn track_lane(
     let active_tool = state.active_tool;
     let track_type = track.track_type;
     let midi_lane = matches!(track_type, TrackType::Midi | TrackType::Instrument);
-    let lane_cursor = custom_cursors::timeline_tool(active_tool);
+    let lane_cursor = if active_tool == TimelineTool::Pen {
+        gpui::CursorStyle::Crosshair
+    } else {
+        gpui::CursorStyle::Arrow
+    };
     let state_ref = state.clone();
     let id_num = {
         use std::hash::{Hash, Hasher};

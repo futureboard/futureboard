@@ -314,6 +314,27 @@ impl Render for StudioLayout {
             cx.entity().clone(),
             |layout: &mut StudioLayout| &mut layout.inspector_name_edit.color_picker.hex_input,
         );
+        let inspector_color_hex_context: Arc<
+            dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            Arc::new(move |(x, y): &(f32, f32), _window, cx| {
+                let x = *x;
+                let y = *y;
+                let _ = this.update(cx, |this, cx| {
+                    this.overlay.text_context_menu = Some(TextContextMenu {
+                        target: TextMenuTarget::InspectorColorHex,
+                        x,
+                        y,
+                    });
+                    cx.notify();
+                });
+            })
+        };
+        let inspector_color_hex_callbacks = TextInputCallbacks {
+            on_context_menu: Some(inspector_color_hex_context),
+            on_mouse: inspector_color_hex_callbacks.on_mouse,
+        };
         let inspector_color_callbacks = self
             .build_inspector_color_picker_callbacks(cx.entity().clone(), selected_track_id.clone());
         let inspector_color_open = self.inspector_name_edit.color_picker.open;

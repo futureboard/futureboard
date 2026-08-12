@@ -640,6 +640,9 @@ impl StudioLayout {
             TextMenuTarget::AutomationPickerSearch => &mut self.automation_picker_search_input,
             TextMenuTarget::InspectorName => &mut self.inspector_name_edit.name_input,
             TextMenuTarget::InspectorClipName => &mut self.inspector_name_edit.clip_name_input,
+            TextMenuTarget::InspectorColorHex => {
+                &mut self.inspector_name_edit.color_picker.hex_input
+            }
         }
     }
 
@@ -652,6 +655,7 @@ impl StudioLayout {
             TextMenuTarget::AutomationPickerSearch => &self.automation_picker_search_input,
             TextMenuTarget::InspectorName => &self.inspector_name_edit.name_input,
             TextMenuTarget::InspectorClipName => &self.inspector_name_edit.clip_name_input,
+            TextMenuTarget::InspectorColorHex => &self.inspector_name_edit.color_picker.hex_input,
         }
     }
 
@@ -678,6 +682,11 @@ impl StudioLayout {
             }
             TextMenuTarget::InspectorClipName => {
                 // Same as InspectorName: clip rename commits need `Context`.
+            }
+            TextMenuTarget::InspectorColorHex => {
+                // The colour picker owns the value and observes the input
+                // state through its callback; the context menu only edits the
+                // shared TextInputState here.
             }
             TextMenuTarget::PluginPickerSearch => {
                 self.plugin_picker.query = self.plugin_picker_search_input.value.clone();
@@ -1865,13 +1874,14 @@ impl StudioLayout {
         // the separate InsertPickerWindow, which can't share this bridge, so it
         // stays on the key_char insertion path in both hosts (see
         // `handle_plugin_picker_text_input`).
-        const TARGETS: [TextMenuTarget; 6] = [
+        const TARGETS: [TextMenuTarget; 7] = [
             TextMenuTarget::CommandPalette,
             TextMenuTarget::ProjectSwitcherSearch,
             TextMenuTarget::BrowserSearch,
             TextMenuTarget::AutomationPickerSearch,
             TextMenuTarget::InspectorName,
             TextMenuTarget::InspectorClipName,
+            TextMenuTarget::InspectorColorHex,
         ];
         TARGETS
             .into_iter()
@@ -1892,6 +1902,7 @@ impl StudioLayout {
         match target {
             TextMenuTarget::InspectorName => self.commit_inspector_name(cx),
             TextMenuTarget::InspectorClipName => self.commit_inspector_clip_name(cx),
+            TextMenuTarget::InspectorColorHex => {}
             other => self.sync_text_input_target(other),
         }
     }

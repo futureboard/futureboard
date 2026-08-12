@@ -282,6 +282,7 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
 /// engine.
 fn native_audio_backend_from_driver_type(driver_type: &str) -> DirectAudio::AudioBackend {
     let backend = match driver_type {
+        "WASAPI Shared" => DirectAudio::AudioBackend::WasapiShared,
         "WASAPI Exclusive" => DirectAudio::AudioBackend::WasapiExclusive,
         "WDM-KS" => DirectAudio::AudioBackend::WdmKs,
         "ASIO" => DirectAudio::AudioBackend::Asio,
@@ -871,6 +872,25 @@ impl StudioLayout {
                     cx.defer(move |cx| {
                         let _ = target.update(cx, |this, _cx| {
                             this.mark_dirty();
+                        });
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_midi_changed_callback(Some(Arc::new(move |cx| {
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, cx| {
+                            // MIDI note edits must reach the native scheduler
+                            // at commit time. The normal project path is
+                            // intentionally throttled for drag gestures; using
+                            // the forced, background snapshot here removes the
+                            // audible “note written, then appears later” gap.
+                            this.mark_dirty();
+                            this.schedule_audio_project_sync(cx, true, "midi_edit");
                         });
                     });
                 })));

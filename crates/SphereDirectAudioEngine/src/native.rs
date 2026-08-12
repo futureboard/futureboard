@@ -48,6 +48,8 @@ pub enum AudioBackend {
     Auto,
     /// cpal-backed best-effort (same as `Auto` for now; explicit selector).
     Cpal,
+    /// Windows: WASAPI Shared system mixer (aggregate endpoint, no extra driver).
+    WasapiShared,
     /// Windows: WASAPI Exclusive event-driven (lowest latency).
     WasapiExclusive,
     /// Windows: WDM-KS low-level driver path (experimental).
@@ -82,6 +84,7 @@ impl AudioBackend {
         match self {
             AudioBackend::Auto => BackendKind::Auto,
             AudioBackend::Cpal => BackendKind::Auto,
+            AudioBackend::WasapiShared => BackendKind::WasapiShared,
             AudioBackend::WasapiExclusive => BackendKind::WasapiExclusive,
             AudioBackend::WdmKs => BackendKind::WdmKs,
             AudioBackend::Asio => BackendKind::Asio,
@@ -98,7 +101,8 @@ impl AudioBackend {
             (
                 AudioBackend::WasapiExclusive,
                 AudioDeviceId::WasapiEndpoint(_)
-            ) | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
+            ) | (AudioBackend::WasapiShared, AudioDeviceId::DauxEndpoint(_))
+                | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
                 | (AudioBackend::Asio, AudioDeviceId::AsioDevice(_))
                 | (
                     AudioBackend::Auto | AudioBackend::Cpal,
@@ -260,6 +264,13 @@ impl EngineDeviceInfo {
     }
 
     fn from_daux(d: crate::types::JsAudioDeviceInfo) -> Self {
+        Self::from_daux_with_backend(d, None)
+    }
+
+    fn from_daux_with_backend(
+        d: crate::types::JsAudioDeviceInfo,
+        backend_override: Option<&str>,
+    ) -> Self {
         let channel_info = generic_channel_info(&d.kind, d.channels);
         Self {
             device_id: AudioDeviceId::DauxEndpoint(d.id.clone()),
@@ -270,7 +281,7 @@ impl EngineDeviceInfo {
             channel_info,
             default_sample_rate: d.default_sample_rate,
             is_default: d.is_default,
-            backend: d.backend,
+            backend: backend_override.unwrap_or(&d.backend).to_string(),
         }
     }
 
@@ -873,6 +884,15 @@ impl AudioEngine {
                     Vec::new()
                 }
             }
+            AudioBackend::WasapiShared => device::list_output_devices()
+                .into_iter()
+                .map(|device| {
+                    EngineDeviceInfo::from_daux_with_backend(
+                        device,
+                        Some("DAUx WASAPI Shared (Aggregate System)"),
+                    )
+                })
+                .collect(),
             AudioBackend::Auto | AudioBackend::Cpal => device::list_output_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_daux)
@@ -899,6 +919,15 @@ impl AudioEngine {
                     Vec::new()
                 }
             }
+            AudioBackend::WasapiShared => device::list_input_devices()
+                .into_iter()
+                .map(|device| {
+                    EngineDeviceInfo::from_daux_with_backend(
+                        device,
+                        Some("DAUx WASAPI Shared (Aggregate System)"),
+                    )
+                })
+                .collect(),
             AudioBackend::Auto | AudioBackend::Cpal => device::list_input_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_daux)

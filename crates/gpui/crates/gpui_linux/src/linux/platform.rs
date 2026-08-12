@@ -788,15 +788,6 @@ pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'stat
         CursorStyle::DragLink => &["alias"],
         CursorStyle::DragCopy => &["copy"],
         CursorStyle::ContextualMenu => &["context-menu"],
-        CursorStyle::FutureboardArrow => &[DEFAULT_CURSOR_ICON_NAME],
-        CursorStyle::FutureboardSelect => &[DEFAULT_CURSOR_ICON_NAME],
-        CursorStyle::FutureboardMarquee => &["crosshair", "cross"],
-        CursorStyle::FutureboardMove => &["move", "fleur"],
-        CursorStyle::FutureboardFadeIn => &["w-resize", "left_side"],
-        CursorStyle::FutureboardFadeOut => &["e-resize", "right_side"],
-        CursorStyle::FutureboardResizeHorizon => &["ew-resize", "sb_h_double_arrow"],
-        CursorStyle::FutureboardResizeLeft => &["w-resize", "left_side"],
-        CursorStyle::FutureboardResizeRight => &["e-resize", "right_side"],
     }
 }
 

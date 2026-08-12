@@ -1330,16 +1330,23 @@ impl Render for Timeline {
             },
         );
 
-        let on_files_dropped = cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+        let on_files_dropped = cx.listener(|this, paths: &ExternalPaths, window, cx| {
+            // The final OLE Drop callback is authoritative. A platform drag can
+            // be released between two DragOver notifications, so relying only
+            // on `last_drag_position` can place the imported clip at the
+            // previous frame's coordinates (especially with a scaled Windows
+            // client area). GPUI has already normalized the drop point to the
+            // same logical window space used by mouse events.
+            this.last_drag_position = Some(window.mouse_position());
             let mut any_imported = false;
             // Multi-file drops: the first file lands at the cursor; subsequent
             // files always land on a brand-new track (forced via y past the end).
             let mut force_new_track = false;
             for path in paths.paths().iter() {
                 let imported =
-                    this.import_midi_path_at_last_drag(path, force_new_track, _window, cx)
-                        || this.import_audio_path_at_last_drag(path, force_new_track, _window, cx)
-                        || this.import_video_path_at_last_drag(path, force_new_track, _window, cx);
+                    this.import_midi_path_at_last_drag(path, force_new_track, window, cx)
+                        || this.import_audio_path_at_last_drag(path, force_new_track, window, cx)
+                        || this.import_video_path_at_last_drag(path, force_new_track, window, cx);
                 any_imported |= imported;
                 force_new_track |= imported;
             }
@@ -1365,6 +1372,7 @@ impl Render for Timeline {
         );
 
         let on_browser_file_dropped = cx.listener(|this, item: &BrowserDragItem, window, cx| {
+            this.last_drag_position = Some(window.mouse_position());
             let had_hint = this.file_drop_hint.take().is_some();
             let imported = this.import_midi_path_at_last_drag(&item.path, false, window, cx)
                 || this.import_audio_path_at_last_drag(&item.path, false, window, cx)

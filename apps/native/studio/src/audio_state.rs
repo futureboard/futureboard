@@ -313,6 +313,36 @@ mod tests {
     }
 
     #[test]
+    fn wasapi_shared_accepts_daux_system_device() {
+        let mut state = NativeAudioState::new();
+        state.set_backend(AudioBackend::WasapiShared);
+        state.set_output_device(Some(AudioDeviceId::DauxEndpoint("system-default".into())));
+
+        state.apply_audio_settings_with(|_, _| Ok(())).unwrap();
+
+        assert_eq!(
+            state.active_settings.config.backend,
+            AudioBackend::WasapiShared
+        );
+    }
+
+    #[test]
+    fn asio_device_cannot_be_applied_to_wasapi_exclusive() {
+        let mut state = NativeAudioState::new();
+        state.set_backend(AudioBackend::WasapiExclusive);
+        state.set_output_device(Some(AudioDeviceId::AsioDevice("asio-driver".into())));
+
+        let result = state.apply_audio_settings_with(|_, _| Ok(()));
+
+        assert!(result.is_err());
+        assert!(state
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("DAUx WASAPI Exclusive Apply failed"));
+    }
+
+    #[test]
     fn failed_apply_preserves_previous_active_settings() {
         let mut state = NativeAudioState::new();
         state.set_backend(AudioBackend::Cpal);

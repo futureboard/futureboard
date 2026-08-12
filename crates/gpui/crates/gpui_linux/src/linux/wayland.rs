@@ -37,14 +37,5 @@ pub(super) fn to_shape(style: CursorStyle) -> Shape {
         CursorStyle::DragLink => Shape::Alias,
         CursorStyle::DragCopy => Shape::Copy,
         CursorStyle::ContextualMenu => Shape::ContextMenu,
-        CursorStyle::FutureboardArrow => Shape::Default,
-        CursorStyle::FutureboardSelect => Shape::Default,
-        CursorStyle::FutureboardMarquee => Shape::Crosshair,
-        CursorStyle::FutureboardMove => Shape::Move,
-        CursorStyle::FutureboardFadeIn => Shape::WResize,
-        CursorStyle::FutureboardFadeOut => Shape::EResize,
-        CursorStyle::FutureboardResizeHorizon => Shape::EwResize,
-        CursorStyle::FutureboardResizeLeft => Shape::WResize,
-        CursorStyle::FutureboardResizeRight => Shape::EResize,
     }
 }

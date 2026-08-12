@@ -14,7 +14,7 @@
 use crate::components::timeline::timeline_state::{
     ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType, TimelineState,
 };
-use crate::{assets, custom_cursors, theme::Colors};
+use crate::{assets, theme::Colors};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, svg, AppContext, InteractiveElement, IntoElement, ParentElement,
@@ -128,7 +128,7 @@ pub fn video_clip(
             c.a = 0.4;
             c
         })
-        .cursor(custom_cursors::move_clip())
+        .cursor(gpui::CursorStyle::OpenHand)
         .id(("video-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -214,7 +214,7 @@ pub fn video_clip(
                 .left_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(custom_cursors::resize_left())
+                .cursor(gpui::CursorStyle::ResizeLeft)
                 .id(("video-clip-resize-l", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
@@ -228,7 +228,7 @@ pub fn video_clip(
                 .right_0()
                 .h_full()
                 .w(px(RESIZE_HANDLE_W))
-                .cursor(custom_cursors::resize_right())
+                .cursor(gpui::CursorStyle::ResizeRight)
                 .id(("video-clip-resize-r", id_num))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {

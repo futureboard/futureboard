@@ -76,6 +76,32 @@ pub fn open(
     )
 }
 
+/// Open the explicit Windows WASAPI Shared host. CPAL's Windows default is
+/// currently WASAPI too, but selecting the host by id keeps the persisted
+/// “Aggregate System” backend from being redirected to a driver host by a
+/// future CPAL default-host change.
+#[cfg(target_os = "windows")]
+pub fn open_wasapi_shared(
+    config: &DauxDeviceConfig,
+    shared: Arc<SharedState>,
+    initial_runtime: RuntimeProject,
+    glitch_counter: Arc<AtomicU64>,
+) -> Result<CpalStreamHandle, SphereAudioError> {
+    let host = cpal::host_from_id(cpal::HostId::Wasapi)
+        .map_err(|error| SphereAudioError::BackendUnavailable(format!("WASAPI Shared: {error}")))?;
+    open_on_host(&host, config, shared, initial_runtime, glitch_counter)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn open_wasapi_shared(
+    config: &DauxDeviceConfig,
+    shared: Arc<SharedState>,
+    initial_runtime: RuntimeProject,
+    glitch_counter: Arc<AtomicU64>,
+) -> Result<CpalStreamHandle, SphereAudioError> {
+    open(config, shared, initial_runtime, glitch_counter)
+}
+
 /// Open through a specific CPAL host while reusing the DAUx render kernel.
 /// Host/device discovery and stream creation are control-thread operations.
 pub(crate) fn open_on_host(

@@ -7,7 +7,7 @@ use crate::components::timeline::timeline_state::{
 use crate::theme::Colors;
 use gpui::{
     canvas, div, fill, point, px, size, Bounds, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Styled,
+    PathBuilder, PathStyle, Pixels, StrokeOptions, Styled,
 };
 
 /// Tempo Track mouse-down: `(beat, bpm, point_id, additive, click_count)`.
@@ -67,16 +67,27 @@ pub fn tempo_track_lane(
                 size(px(lane_w), px(1.0)),
             );
             window.paint_quad(fill(bl, baseline_color));
+
+            // A single stroked path lets GPUI's tessellator generate coverage
+            // for fractional y positions. Per-column quads produced stair-step
+            // edges and shimmered when the lane was zoomed or displayed at 125%
+            // / 150% Windows scaling.
+            if samples.len() >= 2 {
+                let options = StrokeOptions::default()
+                    .with_line_width(1.6)
+                    .with_miter_limit(2.0);
+                let mut path = PathBuilder::stroke(px(1.6)).with_style(PathStyle::Stroke(options));
+                path.move_to(bounds.origin + point(px(0.0), px(samples[0])));
+                for (col, y) in samples.iter().enumerate().skip(1) {
+                    path.line_to(bounds.origin + point(px(col as f32), px(*y)));
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, line_color);
+                }
+            }
+
             for col in 0..num_cols {
-                let y0 = samples[col];
-                let y1 = samples[col + 1];
-                let top = y0.min(y1);
-                let h = (y0 - y1).abs().max(2.0);
-                let r = Bounds::new(
-                    bounds.origin + point(px(col as f32), px(top)),
-                    size(px(2.0), px(h)),
-                );
-                window.paint_quad(fill(r, line_color));
+                let top = samples[col].min(samples[col + 1]);
                 if col % 3 == 0 {
                     let fill_h = (lane_height - top).max(0.0);
                     if fill_h > 0.5 {

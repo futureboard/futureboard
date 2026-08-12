@@ -3,7 +3,7 @@ use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
     GridLineLevel, TempoMap, TimeSignatureMap, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
 };
-use crate::{custom_cursors, theme::Colors};
+use crate::theme::Colors;
 use gpui::{
     div, px, svg, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window,
@@ -241,7 +241,7 @@ pub fn timeline_ruler(
                 // draws with a negative `left` straight over the left "Arrangement"
                 // ruler header. This is the ruler's `ruler_content_rect`.
                 .overflow_hidden()
-                .cursor(custom_cursors::marquee())
+                .cursor(gpui::CursorStyle::Crosshair)
                 .id("ruler-markings-area")
                 // Debug: outline the ruler content clip rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline())
@@ -488,7 +488,7 @@ pub fn timeline_ruler(
                                     .top_0()
                                     .bottom_0()
                                     .w(px(6.0))
-                                    .cursor(custom_cursors::resize_left())
+                                    .cursor(gpui::CursorStyle::ResizeLeft)
                                     .id(("ruler-region-start", id_num))
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
@@ -504,7 +504,7 @@ pub fn timeline_ruler(
                                     .top_0()
                                     .bottom_0()
                                     .w(px(6.0))
-                                    .cursor(custom_cursors::resize_right())
+                                    .cursor(gpui::CursorStyle::ResizeRight)
                                     .id(("ruler-region-end", id_num))
                                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
@@ -662,7 +662,7 @@ pub fn timeline_ruler(
                                         .bottom_0()
                                         .w(px(8.0))
                                         .id("ruler-loop-start-hit")
-                                        .cursor(custom_cursors::resize_left())
+                                        .cursor(gpui::CursorStyle::ResizeLeft)
                                         .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();
@@ -679,7 +679,7 @@ pub fn timeline_ruler(
                                         .bottom_0()
                                         .w(px(8.0))
                                         .id("ruler-loop-end-hit")
-                                        .cursor(custom_cursors::resize_right())
+                                        .cursor(gpui::CursorStyle::ResizeRight)
                                         .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
                                             window.prevent_default();
                                             cx.stop_propagation();

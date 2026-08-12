@@ -245,9 +245,19 @@ float gaussian(float x, float sigma) {
 float4 over(float4 below, float4 above) {
     float4 result;
     float alpha = above.a + below.a * (1.0 - above.a);
-    result.rgb = (above.rgb * above.a + below.rgb * below.a * (1.0 - above.a)) / alpha;
+    float3 composited_rgb = above.rgb * above.a + below.rgb * below.a * (1.0 - above.a);
+    result.rgb = alpha > 0.000001 ? composited_rgb / alpha : float3(0.0, 0.0, 0.0);
     result.a = alpha;
     return result;
+}
+
+// Signed-distance fields are expressed in device pixels. `fwidth` adapts the
+// transition to the actual fragment footprint, keeping edges stable under
+// fractional scale factors instead of assuming every fragment is exactly one
+// pixel wide.
+float sdf_coverage(float signed_distance) {
+    float width = max(fwidth(signed_distance), 0.0001);
+    return saturate(0.5 - signed_distance / width);
 }
 
 float2 to_tile_position(float2 unit_vertex, AtlasTile tile) {
@@ -415,7 +425,7 @@ float4 gradient_color(Background background,
             float pattern = fmod(rotated_point.x, pattern_period);
             float distance = min(pattern, pattern_period - pattern) - pattern_period * (pattern_width / pattern_height) /  2.0f;
             color = solid_color;
-            color.a *= saturate(0.5 - distance);
+            color.a *= sdf_coverage(distance);
             break;
         }
         case 3: {
@@ -914,7 +924,7 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
     float alpha;
     if (shadow.blur_radius == 0.) {
         float distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
-        alpha = saturate(0.5 - distance);
+        alpha = sdf_coverage(distance);
     } else {
         // The signal is only non-zero in a limited range, so don't waste samples
         float low = point0.y - half_size.y;
@@ -936,11 +946,11 @@ float4 shadow_fragment(ShadowFragmentInput input): SV_TARGET {
 
     if (shadow.inset != 0u) {
         // The inset shadow is the complement of the (blurred) hole rect, clipped to the element.
-        // `saturate(0.5 - d)` gives a 1-pixel antialiased edge: d <= -0.5 -> 1, d >= 0.5 -> 0.
+        // Derivative-based coverage keeps this edge stable at fractional DPI.
         alpha = 1.0 - alpha;
         float element_distance = quad_sdf(input.position.xy, shadow.element_bounds,
                                           shadow.element_corner_radii);
-        alpha *= saturate(0.5 - element_distance);
+        alpha *= sdf_coverage(element_distance);
     }
 
     return input.color * float4(1., 1., 1., alpha);
@@ -1001,7 +1011,7 @@ float4 path_rasterization_fragment(PathFragmentInput input): SV_Target {
         float2 gradient = 2.0 * input.st_position.xx * float2(dx.x, dy.x) - float2(dx.y, dy.y);
         float f = input.st_position.x * input.st_position.x - input.st_position.y;
         float distance = f / length(gradient);
-        alpha = saturate(0.5 - distance);
+        alpha = sdf_coverage(distance);
     }
 
     GradientColor gradient = prepare_gradient_color(
@@ -1115,8 +1125,8 @@ float4 underline_fragment(UnderlineFragmentInput input): SV_Target {
         float distance_in_pixels = distance * underline.bounds.size.y;
         float distance_from_top_border = distance_in_pixels - half_thickness;
         float distance_from_bottom_border = distance_in_pixels + half_thickness;
-        float alpha = saturate(
-            0.5 - max(-distance_from_bottom_border, distance_from_top_border));
+        float alpha = sdf_coverage(
+            max(-distance_from_bottom_border, distance_from_top_border));
         return input.color * float4(1., 1., 1., alpha);
     } else {
         return input.color;
@@ -1253,6 +1263,6 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
         float3 grayscale = dot(color.rgb, GRAYSCALE_FACTORS);
         color = float4(grayscale, sample.a);
     }
-    color.a *= sprite.opacity * saturate(0.5 - distance);
+    color.a *= sprite.opacity * sdf_coverage(distance);
     return color;
 }

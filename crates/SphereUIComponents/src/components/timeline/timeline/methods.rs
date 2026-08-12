@@ -170,6 +170,7 @@ impl Timeline {
             on_track_param_change: None,
             on_track_input_state_change: None,
             on_project_changed: None,
+            on_midi_changed: None,
             on_control_state_changed: None,
             on_loop_changed: None,
             on_tempo_map_changed: None,
@@ -221,6 +222,7 @@ impl Timeline {
             on_track_param_change: None,
             on_track_input_state_change: None,
             on_project_changed: None,
+            on_midi_changed: None,
             on_control_state_changed: None,
             on_loop_changed: None,
             on_tempo_map_changed: None,
@@ -262,9 +264,14 @@ impl Timeline {
     }
 
     pub fn run_edit_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
+        let midi_edit = cmd.is_midi_edit();
         cmd.execute(&mut self.state);
         self.edit_history.push(cmd);
-        self.mark_project_changed(cx);
+        if midi_edit {
+            self.mark_midi_changed(cx);
+        } else {
+            self.mark_project_changed(cx);
+        }
         cx.notify();
     }
 
@@ -281,8 +288,13 @@ impl Timeline {
     /// (e.g. a gesture that mutated `state` live). Pushes it onto the undo
     /// stack without re-executing, then marks the project changed.
     pub fn record_executed_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
+        let midi_edit = cmd.is_midi_edit();
         self.edit_history.push(cmd);
-        self.mark_project_changed(cx);
+        if midi_edit {
+            self.mark_midi_changed(cx);
+        } else {
+            self.mark_project_changed(cx);
+        }
         cx.notify();
     }
 
@@ -446,6 +458,10 @@ impl Timeline {
         self.on_project_changed = callback;
     }
 
+    pub fn set_midi_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
+        self.on_midi_changed = callback;
+    }
+
     pub fn set_control_state_changed_callback(
         &mut self,
         callback: Option<TimelineProjectChangedCb>,
@@ -499,6 +515,14 @@ impl Timeline {
     pub(crate) fn mark_project_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_project_changed.as_ref() {
             callback(cx);
+        }
+    }
+
+    pub(crate) fn mark_midi_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_midi_changed.as_ref() {
+            callback(cx);
+        } else {
+            self.mark_project_changed(cx);
         }
     }
 

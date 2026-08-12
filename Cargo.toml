@@ -335,7 +335,7 @@ which = "6.0.0"
 core-video = { version = "0.5.2", features = ["metal"] }
 image = "0.25.1"
 rust-embed = { version = "8.11", features = ["include-exclude"] }
-wgpu = { version = "29.0.3", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "gles"] }
+wgpu = { version = "29.0.3", default-features = false, features = ["std", "wgsl", "dx12", "vulkan", "metal", "gles"] }
 
 
 # =============================================================================

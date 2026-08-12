@@ -41,7 +41,6 @@ pub mod audio_routing_compile;
 pub mod boot;
 pub mod color;
 pub mod components;
-pub mod custom_cursors;
 pub mod device_registry;
 pub mod edition;
 pub mod embedded_assets;
