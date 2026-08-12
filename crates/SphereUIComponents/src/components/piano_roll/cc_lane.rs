@@ -11,11 +11,69 @@ use gpui::{PathBuilder, PathStyle, StrokeOptions};
 /// drag speed, large enough that free (unsnapped) drawing does not mint a point
 /// per pixel.
 const CC_PAINT_SAMPLE_PX: f32 = 2.0;
+const CC_POINT_MERGE_EPS: f32 = 1.0e-3;
 
 /// Radius of a CC point handle, in lane pixels. Kept just under the ~6 px
 /// hit-test radius in [`PianoRoll::cc_point_at`] so a handle is never smaller
 /// than the area that grabs it.
 const HANDLE_R: f32 = 4.0;
+
+/// Keep a controller lane single-valued at each beat. Freehand painting can
+/// revisit the same x range many times, and retaining near-identical points
+/// makes the renderer draw narrow vertical spikes when the lane is sorted.
+fn compact_cc_points(mut points: Vec<MidiControllerPoint>) -> Vec<MidiControllerPoint> {
+    points.sort_by(|a, b| {
+        a.beat
+            .partial_cmp(&b.beat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut compacted: Vec<MidiControllerPoint> = Vec::with_capacity(points.len());
+    for point in points {
+        if let Some(previous) = compacted.last_mut() {
+            if (previous.beat - point.beat).abs() <= CC_POINT_MERGE_EPS {
+                // `point` is newer in the paint/replace path, so its value is
+                // the one that should remain at this beat.
+                *previous = point;
+                continue;
+            }
+        }
+        compacted.push(point);
+    }
+    compacted
+}
+
+/// Replace the horizontal segment covered by one paint event. This is the
+/// important distinction between a CC brush and an append-only point list:
+/// dragging back over an earlier segment paints over it instead of building a
+/// second envelope that later turns into a comb of almost-vertical lines.
+fn replace_cc_paint_segment(
+    existing: Vec<MidiControllerPoint>,
+    edits: &[(f32, f32)],
+    erase: bool,
+    epsilon: f32,
+) -> Vec<MidiControllerPoint> {
+    let Some(first) = edits.first() else {
+        return existing;
+    };
+    let last = edits.last().unwrap_or(first);
+    let lo = first.0.min(last.0);
+    let hi = first.0.max(last.0);
+    let epsilon = epsilon.max(CC_POINT_MERGE_EPS);
+
+    let mut points: Vec<MidiControllerPoint> = existing
+        .into_iter()
+        .filter(|point| point.beat < lo - epsilon || point.beat > hi + epsilon)
+        .collect();
+    if !erase {
+        points.extend(
+            edits
+                .iter()
+                .map(|(beat, value)| MidiControllerPoint::new(*beat, *value)),
+        );
+    }
+    compact_cc_points(points)
+}
 
 impl PianoRoll {
     pub(super) fn cc_view_size(&self) -> (f32, f32) {
@@ -123,7 +181,8 @@ impl PianoRoll {
             (self.x_to_beat(CC_PAINT_SAMPLE_PX) - self.x_to_beat(0.0)).abs()
         } else {
             0.0
-        };
+        }
+        .max(CC_POINT_MERGE_EPS);
 
         let mut edits: Vec<(f32, f32)> = Vec::with_capacity(steps as usize + 1);
         let mut last_beat: Option<f32> = None;
@@ -155,15 +214,19 @@ impl PianoRoll {
             if unsnap { " · free" } else { "" }
         ));
 
+        let existing = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_points_snapshot(&clip_id, kind);
+        // Snapped strokes should clear the whole grid interval they traverse;
+        // freehand strokes use their screen-space sample spacing so a vertical
+        // brush still replaces the point directly under the cursor.
+        let replace_epsilon = if unsnap { min_gap } else { tol };
+        let points = replace_cc_paint_segment(existing, &edits, erase, replace_epsilon);
+
         self.timeline.update(cx, |tl, tcx| {
-            for (beat, value) in &edits {
-                if erase {
-                    tl.state
-                        .delete_controller_points_near(&clip_id, kind, *beat, tol);
-                } else {
-                    tl.state.put_controller_point(&clip_id, kind, *beat, *value);
-                }
-            }
+            tl.state.set_controller_lane_points(&clip_id, kind, points);
             tcx.notify();
         });
 
@@ -729,8 +792,8 @@ impl PianoRoll {
             let points = timeline
                 .state
                 .controller_lane_points(clip_id, kind)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+                .map(|points| compact_cc_points(points.clone()))
+                .unwrap_or_default();
 
             // Columns advance left-to-right and points are kept sorted by beat,
             // so one cursor over the points serves every column.
@@ -760,7 +823,7 @@ impl PianoRoll {
                 samples.push(Self::controller_y_for_value(value, cc_h));
             }
 
-            for p in points {
+            for p in &points {
                 let x = self.beat_to_x(p.beat);
                 if x < -HANDLE_R || x > view_w + HANDLE_R {
                     continue;
@@ -1050,5 +1113,55 @@ impl PianoRoll {
                 .with_priority(PIANO_ROLL_MENU_PRIORITY)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_paint_replaces_the_previous_horizontal_segment() {
+        let existing = vec![
+            MidiControllerPoint::new(0.0, 0.1),
+            MidiControllerPoint::new(0.25, 0.2),
+            MidiControllerPoint::new(0.5, 0.3),
+            MidiControllerPoint::new(0.75, 0.4),
+        ];
+        let points = replace_cc_paint_segment(
+            existing,
+            &[(0.75, 0.9), (0.5, 0.8)],
+            false,
+            CC_POINT_MERGE_EPS,
+        );
+
+        assert_eq!(points.len(), 4);
+        assert_eq!(points[2].beat, 0.5);
+        assert_eq!(points[2].value, 0.8);
+        assert_eq!(points[3].beat, 0.75);
+        assert_eq!(points[3].value, 0.9);
+        assert!(points
+            .windows(2)
+            .all(|pair| (pair[1].beat - pair[0].beat) > CC_POINT_MERGE_EPS));
+    }
+
+    #[test]
+    fn erase_paint_removes_the_whole_reversed_segment() {
+        let existing = vec![
+            MidiControllerPoint::new(0.0, 0.1),
+            MidiControllerPoint::new(0.25, 0.2),
+            MidiControllerPoint::new(0.5, 0.3),
+            MidiControllerPoint::new(0.75, 0.4),
+        ];
+        let points = replace_cc_paint_segment(
+            existing,
+            &[(0.75, 0.0), (0.5, 0.0)],
+            true,
+            CC_POINT_MERGE_EPS,
+        );
+
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].beat, 0.0);
+        assert_eq!(points[1].beat, 0.25);
     }
 }

@@ -244,6 +244,7 @@ fn msri_button(
         .justify_center()
         .h(px(16.0))
         .flex_1()
+        .min_w(px(0.0))
         .rounded_sm()
         .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::BOLD)
@@ -305,13 +306,12 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         }
     };
 
-    div()
+    let state_row = div()
         .flex()
         .flex_row()
+        .w_full()
+        .h(px(16.0))
         .gap(px(2.0))
-        .px(px(4.0))
-        .h(px(SEC_BUTTONS_H))
-        .items_center()
         .child(msri_button(
             ("mix-m-btn", id_num).into(),
             "M",
@@ -343,7 +343,13 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_input,
-        ))
+        ));
+    let listen_row = div()
+        .flex()
+        .flex_row()
+        .w_full()
+        .h(px(16.0))
+        .gap(px(2.0))
         .child(msri_button(
             ("mix-pfl-btn", id_num).into(),
             "PFL",
@@ -359,7 +365,18 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_afl,
-        ))
+        ));
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .h(px(SEC_BUTTONS_H))
+        .gap(px(2.0))
+        .px(px(4.0))
+        .justify_center()
+        .child(state_row)
+        .child(listen_row)
 }
 
 // ─── Meter ──────────────────────────────────────────────────────────────────
@@ -1716,9 +1733,9 @@ fn channel_strip(
             MixerSplitTarget::SendFader,
             split,
         ))
-        // ── Lower Control — pan / fader / meter / M·S·R·I. Takes the remaining
-        // height; the fader area is the flex_1 child so it absorbs growth and
-        // shrinks first when space is tight (pan + buttons stay fixed).
+        // ── Lower Control — pan / fader / meter / M·S·R·I + PFL·AFL. Takes the
+        // remaining height; the fader area is the flex_1 child so it absorbs
+        // growth and shrinks first when space is tight (pan + buttons stay fixed).
         .child(
             div()
                 .flex()

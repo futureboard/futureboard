@@ -361,6 +361,51 @@ impl WindowsWindowInner {
         Ok(())
     }
 
+    /// Show the native Win32 system menu at a screen-space position.
+    ///
+    /// Client-side decorated windows still keep the normal system menu in
+    /// `WS_SYSMENU`; they only need to invoke it themselves because the OS
+    /// title bar is hidden.
+    pub(crate) fn show_window_menu_at_screen(&self, position: POINT) {
+        unsafe {
+            let menu = GetSystemMenu(self.hwnd, false);
+            if menu.is_invalid() {
+                return;
+            }
+
+            // TrackPopupMenu expects the owner window to be foreground. The
+            // follow-up WM_NULL is required by Win32 to let the menu close
+            // cleanly after a command or cancellation.
+            let _ = SetForegroundWindow(self.hwnd);
+            let command = TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                position.x,
+                position.y,
+                None,
+                self.hwnd,
+                None,
+            );
+
+            if command.0 != 0 {
+                SendMessageW(
+                    self.hwnd,
+                    WM_SYSCOMMAND,
+                    Some(WPARAM(command.0 as usize)),
+                    Some(LPARAM(0)),
+                );
+            }
+
+            PostMessageW(
+                Some(self.hwnd),
+                WM_NULL,
+                WPARAM::default(),
+                LPARAM::default(),
+            )
+            .log_err();
+        }
+    }
+
     pub(crate) fn system_settings(&self) -> &WindowsSystemSettings {
         &self.system_settings
     }
@@ -680,6 +725,21 @@ impl PlatformWindow for WindowsWindow {
             point
         };
         logical_point(point.x as f32, point.y as f32, scale_factor)
+    }
+
+    fn show_window_menu(&self, position: Point<Pixels>) {
+        let scale_factor = self.scale_factor();
+        let mut screen_position = POINT {
+            x: (position.x.as_f32() * scale_factor) as i32,
+            y: (position.y.as_f32() * scale_factor) as i32,
+        };
+
+        unsafe {
+            ClientToScreen(self.0.hwnd, &mut screen_position)
+                .ok()
+                .log_err()
+        };
+        self.0.show_window_menu_at_screen(screen_position);
     }
 
     fn modifiers(&self) -> Modifiers {

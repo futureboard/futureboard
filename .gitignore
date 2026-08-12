@@ -134,3 +134,5 @@ build-private-temporary.py
 
 # APAK keys stay local; CI/release builds receive the public key via Actions secrets.
 /apak.public.key
+
+*.pyc

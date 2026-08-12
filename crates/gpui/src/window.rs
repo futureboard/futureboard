@@ -2300,7 +2300,7 @@ impl Window {
         self.platform_window.zoom();
     }
 
-    /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
+    /// Opens the native title bar context menu, useful when implementing client-side decorations.
     pub fn show_window_menu(&self, position: Point<Pixels>) {
         self.platform_window.show_window_menu(position)
     }

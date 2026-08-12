@@ -9,7 +9,10 @@ pub const STRIP_MIN_HEIGHT: f32 = 320.0;
 pub(crate) const SEC_HEADER_H: f32 = 40.0;
 pub(crate) const SEC_SECTION_HEADER_H: f32 = 20.0;
 pub(crate) const SEC_PAN_H: f32 = 60.0;
-pub(crate) const SEC_BUTTONS_H: f32 = 24.0;
+/// Two compact control rows: four channel-state buttons (M/S/R/I) above two
+/// wider listen-tap buttons (PFL/AFL). This keeps the long listen labels clear
+/// while preserving the narrow 88px mixer strip.
+pub(crate) const SEC_BUTTONS_H: f32 = 40.0;
 pub(crate) const SEC_FOOTER_H: f32 = 22.0;
 pub(crate) const SEC_FADER_MIN_H: f32 = 66.0;
 pub(crate) const LOWER_CONTROL_MIN_H: f32 = SEC_PAN_H + SEC_FADER_MIN_H + SEC_BUTTONS_H;

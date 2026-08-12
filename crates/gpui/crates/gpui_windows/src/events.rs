@@ -97,9 +97,11 @@ impl WindowsWindowInner {
             WM_NCLBUTTONUP => {
                 self.handle_nc_mouse_up_msg(handle, MouseButton::Left, wparam, lparam)
             }
-            WM_NCRBUTTONUP => {
-                self.handle_nc_mouse_up_msg(handle, MouseButton::Right, wparam, lparam)
-            }
+            WM_NCRBUTTONUP => self
+                .handle_window_menu_msg(handle, wparam, lparam, true)
+                .or_else(|| {
+                    self.handle_nc_mouse_up_msg(handle, MouseButton::Right, wparam, lparam)
+                }),
             WM_NCMBUTTONUP => {
                 self.handle_nc_mouse_up_msg(handle, MouseButton::Middle, wparam, lparam)
             }
@@ -110,7 +112,9 @@ impl WindowsWindowInner {
                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_down_msg)
             }
             WM_LBUTTONUP => self.handle_mouse_up_msg(handle, MouseButton::Left, lparam),
-            WM_RBUTTONUP => self.handle_mouse_up_msg(handle, MouseButton::Right, lparam),
+            WM_RBUTTONUP => self
+                .handle_window_menu_msg(handle, wparam, lparam, false)
+                .or_else(|| self.handle_mouse_up_msg(handle, MouseButton::Right, lparam)),
             WM_MBUTTONUP => self.handle_mouse_up_msg(handle, MouseButton::Middle, lparam),
             WM_XBUTTONUP => {
                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_up_msg)
@@ -1015,22 +1019,12 @@ impl WindowsWindowInner {
             return None;
         }
 
-        let callback = self.state.callbacks.hit_test_window_control.take();
-        let drag_area = if let Some(mut callback) = callback {
-            let area = callback();
-            self.state
-                .callbacks
-                .hit_test_window_control
-                .set(Some(callback));
-            if let Some(area) = area {
-                match area {
-                    WindowControlArea::Drag => Some(HTCAPTION as _),
-                    WindowControlArea::Close => return Some(HTCLOSE as _),
-                    WindowControlArea::Max => return Some(HTMAXBUTTON as _),
-                    WindowControlArea::Min => return Some(HTMINBUTTON as _),
-                }
-            } else {
-                None
+        let drag_area = if let Some(area) = self.window_control_area() {
+            match area {
+                WindowControlArea::Drag => Some(HTCAPTION as _),
+                WindowControlArea::Close => return Some(HTCLOSE as _),
+                WindowControlArea::Max => return Some(HTMAXBUTTON as _),
+                WindowControlArea::Min => return Some(HTMINBUTTON as _),
             }
         } else {
             None
@@ -1071,6 +1065,44 @@ impl WindowsWindowInner {
         }
 
         drag_area
+    }
+
+    fn window_control_area(&self) -> Option<WindowControlArea> {
+        let mut callback = self.state.callbacks.hit_test_window_control.take()?;
+        let area = callback();
+        self.state
+            .callbacks
+            .hit_test_window_control
+            .set(Some(callback));
+        area
+    }
+
+    fn handle_window_menu_msg(
+        &self,
+        handle: HWND,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        non_client: bool,
+    ) -> Option<isize> {
+        let is_drag_area = if non_client {
+            wparam.0 as u32 == HTCAPTION
+        } else {
+            self.window_control_area() == Some(WindowControlArea::Drag)
+        };
+
+        if !is_drag_area {
+            return None;
+        }
+
+        let mut screen_position = POINT {
+            x: lparam.signed_loword().into(),
+            y: lparam.signed_hiword().into(),
+        };
+        if !non_client {
+            unsafe { ClientToScreen(handle, &mut screen_position).ok().log_err() };
+        }
+        self.show_window_menu_at_screen(screen_position);
+        Some(0)
     }
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
