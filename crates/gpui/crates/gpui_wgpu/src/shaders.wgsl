@@ -313,11 +313,7 @@ fn oklab_to_linear_srgb(color: vec4<f32>) -> vec4<f32> {
 fn over(below: vec4<f32>, above: vec4<f32>) -> vec4<f32> {
     let alpha = above.a + below.a * (1.0 - above.a);
     let composited_rgb = above.rgb * above.a + below.rgb * below.a * (1.0 - above.a);
-    let color = if (alpha > 0.000001) {
-        composited_rgb / alpha
-    } else {
-        vec3<f32>(0.0)
-    };
+    let color = select(vec3<f32>(0.0), composited_rgb / alpha, alpha > 0.000001);
     return vec4<f32>(color, alpha);
 }
 
