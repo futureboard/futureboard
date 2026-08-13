@@ -84,17 +84,17 @@ pub fn visible_track_row_range(
     if track_count == 0 {
         return (0, 0, 0.0, 0.0);
     }
+    // Row tops and bottoms are both non-decreasing (each row starts where the
+    // previous one ends), so both edges binary-search instead of scanning. The
+    // scan was O(track_count) per consumer per frame and grew with the project;
+    // this is O(log track_count).
     let visible_start = row_layout
         .rows
-        .iter()
-        .position(|row| row.y + row.block_height() > scroll_y)
-        .unwrap_or(track_count)
+        .partition_point(|row| row.y + row.block_height() <= scroll_y)
         .saturating_sub(overscan);
     let visible_end = row_layout
         .rows
-        .iter()
-        .position(|row| row.y >= scroll_y + viewport_height)
-        .unwrap_or(track_count)
+        .partition_point(|row| row.y < scroll_y + viewport_height)
         .saturating_add(overscan)
         .min(track_count);
     let top_spacer = row_layout

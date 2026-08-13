@@ -10,7 +10,7 @@ use crate::components::timeline::automation_lane::{
     automation_lane, AutomationDownCallback, AutomationHoverCallback, AutomationLaneActionCallback,
 };
 use crate::components::timeline::timeline_state::{
-    is_arrangement_hidden_track, AutomationHover, AutomationMarquee, TimelineState,
+    AutomationHover, AutomationMarquee, TimelineState, TrackRowLayout,
     AUTOMATION_CONTROL_LANE_HEIGHT, AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
@@ -34,8 +34,14 @@ fn timeline_bg_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_BG_DEBUG").is_some())
 }
 
+/// Arrangement rows for the current viewport.
+///
+/// `row_layout` is this frame's arrangement geometry, built once by
+/// `Timeline::render` and shared with the arrangement surface — rebuilding it
+/// here would clone every track id a second time per frame.
 pub fn track_list(
     state: &TimelineState,
+    row_layout: &TrackRowLayout,
     header_callbacks: TrackHeaderCallbacks,
     on_resize_arm: TrackHeightResizeArmCb,
     on_resize_reset: TrackHeightResizeResetCb,
@@ -76,7 +82,6 @@ pub fn track_list(
     let _s = crate::perf::PerfScope::enter("TrackList");
     let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
-    let row_layout = state.track_row_layout();
     let total_tracks_height = row_layout.total_height;
     let tail_start_y = (total_tracks_height - state.viewport.scroll_y).max(0.0);
 
@@ -99,7 +104,7 @@ pub fn track_list(
     let scroll_y = state.viewport.scroll_y;
     let viewport_height = state.viewport.viewport_height;
     let (visible_start, visible_end, top_spacer_h, bottom_spacer_h) =
-        visible_track_row_range(&row_layout, scroll_y, viewport_height, OVERSCAN);
+        visible_track_row_range(row_layout, scroll_y, viewport_height, OVERSCAN);
 
     crate::perf::count(
         "visible_track_rows",
@@ -119,32 +124,25 @@ pub fn track_list(
         );
     }
 
-    for track in state.tracks[visible_start..visible_end].iter() {
-        // Mixer-only channels (Bus/Return + VSTi multi-out children) never render
-        // as arrangement rows (no header, no lane, no resize handle). They have a
-        // zero-height entry in the row layout, so spacers/indices stay aligned.
-        if is_arrangement_hidden_track(track) || state.is_track_hidden_by_collapsed_group(track) {
+    for (offset, track) in state.tracks[visible_start..visible_end].iter().enumerate() {
+        // `row_layout.rows` is 1:1 with `state.tracks`, so the row is an index
+        // lookup rather than an id scan. The scan was O(track_count) per visible
+        // row, which made per-frame cost grow with total track count even though
+        // the row window is already virtualized.
+        let index = visible_start + offset;
+        let Some(row_entry) = row_layout.row_for_index(index) else {
+            continue;
+        };
+        // Mixer-only channels (Bus/Return + VSTi multi-out children) and the
+        // children of a collapsed group never render as arrangement rows (no
+        // header, no lane, no resize handle). The layout already collapsed them
+        // to zero height, so spacers/indices stay aligned.
+        if row_entry.height <= 0.0 {
             continue;
         }
-        let index = row_layout
-            .row_for_track(&track.id)
-            .map(|row| row.index)
-            .unwrap_or(visible_start);
-        let row_entry = row_layout
-            .row_for_track(&track.id)
-            .cloned()
-            .unwrap_or_else(
-                || crate::components::timeline::timeline_state::TrackRowLayoutEntry {
-                    track_id: track.id.clone(),
-                    index,
-                    y: 0.0,
-                    height: DEFAULT_TRACK_HEIGHT,
-                    automation_height: 0.0,
-                },
-            );
         let row_height = row_entry.height;
         let row_y = row_entry.y;
-        let automation_height = state.track_automation_height(track);
+        let automation_height = row_entry.automation_height;
         let total_row_height = row_height + automation_height;
 
         // Build the expandable automation sub-lane rows that stack directly
@@ -236,7 +234,7 @@ pub fn track_list(
                             )),
                     )
                     .child(track_row_resize_handle(
-                        &row_entry,
+                        row_entry,
                         on_resize_arm.clone(),
                         on_resize_reset.clone(),
                     )),
@@ -302,7 +300,7 @@ pub fn track_list(
                         .bottom_0()
                         .bg(Colors::timeline_empty_body_background())
                 }))
-                .child(timeline_surface(state, grid_width, grid_height)),
+                .child(timeline_surface(state, row_layout, grid_width, grid_height)),
         )
         .child(
             div()

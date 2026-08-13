@@ -53,7 +53,7 @@ mod callbacks;
 mod drag;
 mod split;
 pub use callbacks::*;
-use drag::SendSlotDrag;
+use drag::{MixerScrollDrag, SendSlotDrag};
 pub use split::*;
 
 /// True when a mixer strip should paint as selected (multi-select aware).
@@ -2599,6 +2599,152 @@ pub(crate) fn monitor_strip(
 /// prevent pop-in during horizontal mixer scrolling.
 const MIXER_OVERSCAN: usize = 1;
 
+/// Mixer channel-scroller scrollbar metrics. Same values the arrangement
+/// scrollbars use, so both surfaces read as one control language.
+const MIXER_SCROLLBAR_THICKNESS: f32 = 8.0;
+const MIXER_SCROLLBAR_MIN_THUMB: f32 = 24.0;
+
+/// The single coordinate transform behind the channel scrollbar: it sizes and
+/// places the thumb, and it maps a pointer x back to a scroll offset. Drawing
+/// and hit-testing both go through it, so a track click can never land the thumb
+/// somewhere a drag would not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MixerScrollbarGeometry {
+    pub track_w: f32,
+    pub thumb_w: f32,
+    pub thumb_left: f32,
+    max_scroll_x: f32,
+}
+
+impl MixerScrollbarGeometry {
+    /// `None` when the channel strips already fit, i.e. there is nothing to
+    /// scroll and no bar should be drawn.
+    pub fn new(scroll_x: f32, content_w: f32, view_w: f32, max_scroll_x: f32) -> Option<Self> {
+        if max_scroll_x <= 0.5 || view_w <= 0.0 || content_w <= 0.0 {
+            return None;
+        }
+        let track_w = view_w;
+        let thumb_w = ((view_w / content_w) * track_w)
+            .max(MIXER_SCROLLBAR_MIN_THUMB)
+            .min(track_w);
+        let progress = (scroll_x / max_scroll_x).clamp(0.0, 1.0);
+        Some(Self {
+            track_w,
+            thumb_w,
+            thumb_left: progress * (track_w - thumb_w).max(0.0),
+            max_scroll_x,
+        })
+    }
+
+    /// Scroll offset that centers the thumb on a pointer at `local_x` (pointer x
+    /// relative to the scrollbar track's left edge).
+    pub fn scroll_x_for_local_pointer(&self, local_x: f32) -> f32 {
+        let track_range = (self.track_w - self.thumb_w).max(1.0);
+        let local = (local_x - self.thumb_w * 0.5).clamp(0.0, track_range);
+        ((local / track_range) * self.max_scroll_x).clamp(0.0, self.max_scroll_x)
+    }
+}
+
+/// Horizontal scrollbar for the channel-strip scroller.
+///
+/// The scroller is virtualized against an owner-held `scroll_x` rather than a
+/// GPUI `ScrollHandle`, so it gets no scrollbar for free: before this the only
+/// way to move through the channels was the wheel, with nothing showing scroll
+/// position or extent. Returns `None` when every strip already fits, so the bar
+/// never covers the empty bay.
+///
+/// Geometry, drawing, and hit-testing share one transform: `track` is the full
+/// scroller width, the thumb is sized by `view_w / content_w`, and both the
+/// track click and the thumb drag center the thumb on the pointer. The track's
+/// window bounds are captured in prepaint so pointer x maps to an offset
+/// without estimating the panel origin.
+fn mixer_horizontal_scrollbar(
+    scroll_x: f32,
+    content_w: f32,
+    view_w: f32,
+    max_scroll_x: f32,
+    on_scroll: std::sync::Arc<dyn Fn(f32, &mut gpui::Window, &mut gpui::App) + 'static>,
+) -> Option<gpui::AnyElement> {
+    use gpui::canvas;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let geometry = MixerScrollbarGeometry::new(scroll_x, content_w, view_w, max_scroll_x)?;
+
+    // Written during prepaint, read by this frame's pointer handlers.
+    let track_origin_x: Rc<Cell<Option<f32>>> = Rc::new(Cell::new(None));
+    let measure = {
+        let track_origin_x = track_origin_x.clone();
+        canvas(
+            move |bounds: gpui::Bounds<gpui::Pixels>, _w, _cx| {
+                track_origin_x.set(Some(bounds.origin.x.into()));
+            },
+            |_b, _r, _w, _cx| {},
+        )
+        .absolute()
+        .inset_0()
+    };
+
+    // Window pointer x -> scroll offset. Shared by the track click and the thumb
+    // drag so a click never jumps somewhere a drag would not.
+    let scroll_for_pointer = {
+        let track_origin_x = track_origin_x.clone();
+        move |pointer_x: f32| -> Option<f32> {
+            let origin_x = track_origin_x.get()?;
+            Some(geometry.scroll_x_for_local_pointer(pointer_x - origin_x))
+        }
+    };
+
+    let on_track_down = {
+        let on_scroll = on_scroll.clone();
+        let scroll_for_pointer = scroll_for_pointer.clone();
+        move |event: &MouseDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+            if let Some(new_x) = scroll_for_pointer(event.position.x.into()) {
+                on_scroll(new_x, window, cx);
+            }
+            cx.stop_propagation();
+        }
+    };
+
+    let on_thumb_drag = {
+        let on_scroll = on_scroll.clone();
+        move |event: &DragMoveEvent<MixerScrollDrag>,
+              window: &mut gpui::Window,
+              cx: &mut gpui::App| {
+            if let Some(new_x) = scroll_for_pointer(event.event.position.x.into()) {
+                on_scroll(new_x, window, cx);
+            }
+        }
+    };
+
+    Some(
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(MIXER_SCROLLBAR_THICKNESS))
+            .id("mixer-hscroll")
+            .child(measure)
+            .on_mouse_down(gpui::MouseButton::Left, on_track_down)
+            .on_drag(MixerScrollDrag, |drag, _offset, _window, cx| {
+                cx.new(|_| *drag)
+            })
+            .on_drag_move::<MixerScrollDrag>(on_thumb_drag)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(geometry.thumb_left))
+                    .top(px(2.0))
+                    .bottom(px(2.0))
+                    .w(px(geometry.thumb_w))
+                    .rounded_full()
+                    .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
+            )
+            .into_any_element(),
+    )
+}
+
 pub(crate) fn mixer_visible_item_range(
     strip_count: usize,
     scroll_x: f32,
@@ -3246,6 +3392,16 @@ pub(crate) fn mixer_strip_scroller(
         }
     };
 
+    // Drawn last so the bar sits above the strip row; hidden entirely when every
+    // channel already fits, which is also when the empty bay is showing.
+    let scrollbar = mixer_horizontal_scrollbar(
+        scroll_x,
+        total_content_w,
+        viewport_width,
+        max_scroll_x,
+        on_scroll.clone(),
+    );
+
     div()
         .flex_1()
         .min_w(px(0.0))
@@ -3299,6 +3455,7 @@ pub(crate) fn mixer_strip_scroller(
                     )
                 }),
         )
+        .children(scrollbar)
 }
 
 /// The pinned right-hand pair: Master then Monitor, sharing one divider.
@@ -3490,5 +3647,81 @@ mod mixer_virtualization_tests {
         assert!(middle.len() <= 12);
         assert!(end.len() <= 12);
         assert_eq!(end.end, 1_000);
+    }
+}
+
+#[cfg(test)]
+mod mixer_scrollbar_tests {
+    use super::{MixerScrollbarGeometry, MIXER_SCROLLBAR_MIN_THUMB, STRIP_WIDTH};
+
+    /// The 2k-channel session from the bug report: 88px strips in an ~880px bay.
+    fn big_session() -> (f32, f32, f32) {
+        let content_w = 2_000.0 * STRIP_WIDTH;
+        let view_w = 880.0;
+        (content_w, view_w, content_w - view_w)
+    }
+
+    #[test]
+    fn no_bar_when_every_channel_already_fits() {
+        // Content narrower than the bay -> nothing to scroll, nothing to draw,
+        // so the bar never covers the empty channel bay.
+        assert!(MixerScrollbarGeometry::new(0.0, 400.0, 880.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn thumb_stays_grabbable_and_inside_the_track() {
+        let (content_w, view_w, max_scroll_x) = big_session();
+        for scroll_x in [0.0, max_scroll_x * 0.5, max_scroll_x] {
+            let geometry =
+                MixerScrollbarGeometry::new(scroll_x, content_w, view_w, max_scroll_x).unwrap();
+            assert!(
+                geometry.thumb_w >= MIXER_SCROLLBAR_MIN_THUMB,
+                "a 2000-channel thumb must stay grabbable, got {}",
+                geometry.thumb_w
+            );
+            assert!(geometry.thumb_left >= 0.0);
+            assert!(
+                geometry.thumb_left + geometry.thumb_w <= geometry.track_w + 0.01,
+                "thumb must not overhang the track"
+            );
+        }
+    }
+
+    #[test]
+    fn thumb_position_tracks_scroll_offset() {
+        let (content_w, view_w, max_scroll_x) = big_session();
+        let start = MixerScrollbarGeometry::new(0.0, content_w, view_w, max_scroll_x).unwrap();
+        let end =
+            MixerScrollbarGeometry::new(max_scroll_x, content_w, view_w, max_scroll_x).unwrap();
+        assert_eq!(start.thumb_left, 0.0);
+        assert!((end.thumb_left + end.thumb_w - end.track_w).abs() < 0.01);
+    }
+
+    #[test]
+    fn pointer_maps_back_to_the_offset_that_drew_the_thumb() {
+        // Drawing and hit-testing share one transform: clicking the center of a
+        // drawn thumb must resolve to the scroll offset it was drawn for.
+        let (content_w, view_w, max_scroll_x) = big_session();
+        for scroll_x in [0.0, max_scroll_x * 0.25, max_scroll_x * 0.5, max_scroll_x] {
+            let geometry =
+                MixerScrollbarGeometry::new(scroll_x, content_w, view_w, max_scroll_x).unwrap();
+            let thumb_center = geometry.thumb_left + geometry.thumb_w * 0.5;
+            let resolved = geometry.scroll_x_for_local_pointer(thumb_center);
+            assert!(
+                (resolved - scroll_x).abs() < 1.0,
+                "round trip drifted: drew at {scroll_x}, pointer resolved {resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_outside_the_track_clamps_to_the_scroll_range() {
+        let (content_w, view_w, max_scroll_x) = big_session();
+        let geometry = MixerScrollbarGeometry::new(0.0, content_w, view_w, max_scroll_x).unwrap();
+        assert_eq!(geometry.scroll_x_for_local_pointer(-500.0), 0.0);
+        assert_eq!(
+            geometry.scroll_x_for_local_pointer(geometry.track_w + 500.0),
+            max_scroll_x
+        );
     }
 }

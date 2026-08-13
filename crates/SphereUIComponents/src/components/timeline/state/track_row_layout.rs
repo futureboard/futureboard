@@ -97,6 +97,13 @@ impl TrackRowLayoutEntry {
     }
 }
 
+/// Vertical arrangement geometry for every track, in track order.
+///
+/// `rows` is 1:1 with `TimelineState::tracks` (`rows[i].index == i`), including
+/// mixer-only channels, which are kept as zero-height entries so indices never
+/// drift. Because each row starts where the previous one ends, `rows` is sorted
+/// by `y`, and by `y + block_height()` — every content-y lookup here is a binary
+/// search so a 2k-track arrangement costs the same per frame as a 20-track one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackRowLayout {
     pub rows: Vec<TrackRowLayoutEntry>,
@@ -161,13 +168,15 @@ impl TrackRowLayout {
         if content_y < 0.0 {
             return None;
         }
-        self.rows.iter().find(|row| {
-            // The whole vertical block (parent row + its automation sub-lanes)
-            // resolves to the same track, so selecting / dragging over a sub-lane
-            // still targets the owning track.
-            let bottom = row.y + row.block_height();
-            content_y >= row.y && content_y < bottom
-        })
+        // The whole vertical block (parent row + its automation sub-lanes)
+        // resolves to the same track, so selecting / dragging over a sub-lane
+        // still targets the owning track. Row bottoms are non-decreasing, so the
+        // first row whose bottom is past `content_y` is the only candidate;
+        // zero-height (mixer-only) rows have bottom == y and are skipped.
+        let index = self
+            .rows
+            .partition_point(|row| row.y + row.block_height() <= content_y);
+        self.rows.get(index).filter(|row| content_y >= row.y)
     }
 
     pub fn insert_index_at_content_y(&self, content_y: f32) -> usize {
@@ -175,13 +184,10 @@ impl TrackRowLayout {
             return 0;
         }
         let content_y = content_y.max(0.0);
-        for (i, row) in self.rows.iter().enumerate() {
-            let mid = row.y + row.block_height() * 0.5;
-            if content_y < mid {
-                return i;
-            }
-        }
-        self.rows.len()
+        // Row midpoints are non-decreasing: insert before the first row whose
+        // midpoint the pointer has not yet passed.
+        self.rows
+            .partition_point(|row| row.y + row.block_height() * 0.5 <= content_y)
     }
 }
 
@@ -543,6 +549,171 @@ mod tests {
             });
         }
         state
+    }
+
+    /// Reference implementation of the pre-binary-search lookups, kept in the
+    /// tests so the O(log n) versions are checked against the linear semantics
+    /// they replaced rather than against hand-picked expectations.
+    fn linear_track_at_content_y(
+        layout: &TrackRowLayout,
+        content_y: f32,
+    ) -> Option<&TrackRowLayoutEntry> {
+        if content_y < 0.0 {
+            return None;
+        }
+        layout
+            .rows
+            .iter()
+            .find(|row| content_y >= row.y && content_y < row.y + row.block_height())
+    }
+
+    fn linear_insert_index_at_content_y(layout: &TrackRowLayout, content_y: f32) -> usize {
+        if layout.rows.is_empty() {
+            return 0;
+        }
+        let content_y = content_y.max(0.0);
+        layout
+            .rows
+            .iter()
+            .position(|row| content_y < row.y + row.block_height() * 0.5)
+            .unwrap_or(layout.rows.len())
+    }
+
+    fn linear_visible_range(
+        layout: &TrackRowLayout,
+        scroll_y: f32,
+        viewport_height: f32,
+        overscan: usize,
+    ) -> (usize, usize) {
+        let count = layout.rows.len();
+        let start = layout
+            .rows
+            .iter()
+            .position(|row| row.y + row.block_height() > scroll_y)
+            .unwrap_or(count)
+            .saturating_sub(overscan);
+        let end = layout
+            .rows
+            .iter()
+            .position(|row| row.y >= scroll_y + viewport_height)
+            .unwrap_or(count)
+            .saturating_add(overscan)
+            .min(count);
+        (start, end)
+    }
+
+    /// A 2k-channel session shaped like the reported one: audio/MIDI arrangement
+    /// rows interleaved with mixer-only channels (zero-height rows) and some
+    /// resized rows, so the monotonicity the binary searches rely on is
+    /// exercised against ties and varying heights.
+    fn dense_session(track_count: usize) -> TimelineState {
+        let mut state = TimelineState::default();
+        for index in 0..track_count {
+            let track_type = match index % 4 {
+                0 => TrackType::Audio,
+                1 => TrackType::Midi,
+                2 => TrackType::Bus, // mixer-only: zero-height arrangement row
+                _ => TrackType::Instrument,
+            };
+            state.create_track(CreateTrackOptions {
+                name: format!("Track {index}"),
+                track_type,
+                color: crate::theme::Colors::track_color_for_index(index),
+                volume: 1.0,
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+        }
+        // Vary a few row heights so rows are not a uniform stride.
+        for index in (0..track_count).step_by(7) {
+            let id = state.tracks[index].id.clone();
+            state.set_track_row_height(&id, TRACK_HEIGHT_LARGE);
+        }
+        state
+    }
+
+    #[test]
+    fn binary_search_lookups_match_the_linear_scan_they_replaced() {
+        let state = dense_session(2_000);
+        let layout = state.track_row_layout();
+        assert!(layout.total_height > 0.0);
+
+        // Row tops and bottoms must be non-decreasing — the invariant every
+        // binary search here depends on.
+        for pair in layout.rows.windows(2) {
+            assert!(pair[1].y >= pair[0].y);
+            assert_eq!(pair[1].y, pair[0].y + pair[0].block_height());
+        }
+
+        let probes = [
+            -10.0,
+            0.0,
+            1.0,
+            layout.total_height * 0.25,
+            layout.total_height * 0.5,
+            layout.total_height - 1.0,
+            layout.total_height,
+            layout.total_height + 500.0,
+        ];
+        for content_y in probes {
+            assert_eq!(
+                layout.track_at_content_y(content_y).map(|row| row.index),
+                linear_track_at_content_y(&layout, content_y).map(|row| row.index),
+                "track_at_content_y diverged at {content_y}"
+            );
+            assert_eq!(
+                layout.insert_index_at_content_y(content_y),
+                linear_insert_index_at_content_y(&layout, content_y),
+                "insert_index_at_content_y diverged at {content_y}"
+            );
+        }
+
+        // Every row boundary, not just sampled points.
+        for row in &layout.rows {
+            for probe in [row.y, row.y + row.block_height() * 0.5] {
+                assert_eq!(
+                    layout.track_at_content_y(probe).map(|r| r.index),
+                    linear_track_at_content_y(&layout, probe).map(|r| r.index),
+                    "track_at_content_y diverged on row {} at {probe}",
+                    row.index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visible_row_range_matches_the_linear_scan_and_stays_bounded() {
+        use crate::components::timeline::track_resize::visible_track_row_range;
+
+        let state = dense_session(2_000);
+        let layout = state.track_row_layout();
+        let viewport_height = 520.0;
+
+        for scroll_y in [
+            0.0,
+            10.0,
+            layout.total_height * 0.5,
+            layout.total_height - viewport_height,
+            layout.total_height + 1_000.0,
+        ] {
+            let (start, end, top_spacer, bottom_spacer) =
+                visible_track_row_range(&layout, scroll_y, viewport_height, 2);
+            assert_eq!(
+                (start, end),
+                linear_visible_range(&layout, scroll_y, viewport_height, 2),
+                "visible range diverged at scroll_y={scroll_y}"
+            );
+            assert!(start <= end);
+            assert!(top_spacer >= 0.0 && bottom_spacer >= 0.0);
+            // Virtualization budget: a 2k-track arrangement must never hand the
+            // renderer more rows than a screenful plus overscan.
+            assert!(
+                end - start <= 24,
+                "visible row window grew to {} rows at scroll_y={scroll_y}",
+                end - start
+            );
+        }
     }
 
     #[test]

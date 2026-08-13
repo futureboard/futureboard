@@ -1355,6 +1355,18 @@ impl Timeline {
     }
 
     pub(super) fn scroll_geometry(&self, window: &Window) -> (f32, f32, (f32, f32)) {
+        self.scroll_geometry_with_content_height(window, self.state.total_track_rows_height())
+    }
+
+    /// Scroll geometry against an already-known arrangement content height.
+    ///
+    /// The repaint path passes the height from the frame's shared row layout so
+    /// the O(track_count) layout build does not run a second time per frame.
+    pub(super) fn scroll_geometry_with_content_height(
+        &self,
+        window: &Window,
+        content_h: f32,
+    ) -> (f32, f32, (f32, f32)) {
         let window_size = window.bounds().size;
         let window_w: f32 = window_size.width.into();
         let window_h: f32 = window_size.height.into();
@@ -1374,7 +1386,6 @@ impl Timeline {
             + m.status_bar_height;
         let track_view_h = (window_h - used_v).max(DEFAULT_TRACK_HEIGHT);
         let content_w = self.timeline_content_width();
-        let content_h = self.state.total_track_rows_height();
 
         if std::env::var_os("FUTUREBOARD_TIMELINE_VIEWPORT_DEBUG").is_some() {
             eprintln!(

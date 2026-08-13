@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use super::viewport::TimelineViewport;
 use crate::components::timeline::timeline_state::{
-    clip_output_local_to_source_sample, is_arrangement_hidden_track, ClipState, ClipType,
-    GridLineLevel, TimelineState, TrackRowLayoutEntry, TrackState, DEFAULT_TRACK_HEIGHT,
+    clip_output_local_to_source_sample, ClipState, ClipType, GridLineLevel, TimelineState,
+    TrackState, DEFAULT_TRACK_HEIGHT,
 };
 use crate::components::timeline::waveform_cache::{
     self, WaveformDisplayStatus, CHUNK_PEAKS, PEAK_FINE_SPP,
@@ -145,7 +145,24 @@ impl Default for SnapshotBuildOptions {
 }
 
 impl TimelineRenderSnapshot {
+    /// Build a snapshot, deriving the arrangement row geometry from `state`.
+    /// Prefer [`Self::from_row_layout`] on the render path, where the caller
+    /// already holds this frame's layout.
     pub fn from_state(state: &TimelineState, options: SnapshotBuildOptions) -> Self {
+        let row_layout = state.track_row_layout();
+        Self::from_row_layout(state, &row_layout, options)
+    }
+
+    /// Build a snapshot against an already-built row layout.
+    ///
+    /// Row layout is O(track_count) and owns cloned track ids. The timeline
+    /// repaint builds it once and shares it between the scroll geometry, the
+    /// GPUI track list, and this snapshot.
+    pub fn from_row_layout(
+        state: &TimelineState,
+        row_layout: &crate::components::timeline::timeline_state::TrackRowLayout,
+        options: SnapshotBuildOptions,
+    ) -> Self {
         let grid_width = state.viewport.viewport_width.max(1.0);
         let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
         let seconds_per_beat = state.seconds_per_beat();
@@ -162,18 +179,14 @@ impl TimelineRenderSnapshot {
             seconds_per_beat,
         );
 
-        // Row layout is O(track_count) and owns cloned track ids. Build it once
-        // per snapshot; 1k-track sessions previously rebuilt it four times for
-        // visibility, lanes, clips, and the drag insertion marker.
-        let row_layout = state.track_row_layout();
-        let visible_tracks = visible_track_range(state, &row_layout, options.track_overscan);
+        let visible_tracks = visible_track_range(state, row_layout, options.track_overscan);
         let visible_beats = VisibleBeatRange {
             start_beat: viewport.visible_beat_range().0,
             end_beat: viewport.visible_beat_range().1,
         };
 
-        let lanes = build_lanes(state, &row_layout, &visible_tracks);
-        let clips = build_clips(state, &row_layout, &visible_tracks, &viewport);
+        let lanes = build_lanes(state, row_layout, &visible_tracks);
+        let clips = build_clips(state, row_layout, &visible_tracks, &viewport);
         let grid_lines = state
             .get_arrangement_grid_lines(grid_width)
             .into_iter()
@@ -254,23 +267,20 @@ fn build_lanes(
     state.tracks[range.start_index..range.end_index]
         .iter()
         .enumerate()
-        // Mixer-only channels (Bus/Return + VSTi multi-out children) are excluded
-        // from the arrangement canvas the same way the GPUI track list does.
-        .filter(|(_, track)| !is_arrangement_hidden_track(track))
-        .map(|(rel, track)| {
+        .filter_map(|(rel, track)| {
+            // `row_layout.rows` is 1:1 with `state.tracks`, so this is an index
+            // lookup, not an id scan.
             let index = range.start_index + rel;
-            let row = row_layout
-                .row_for_track(&track.id)
-                .cloned()
-                .unwrap_or_else(|| TrackRowLayoutEntry {
-                    track_id: track.id.clone(),
-                    index,
-                    y: index as f32 * DEFAULT_TRACK_HEIGHT,
-                    height: DEFAULT_TRACK_HEIGHT,
-                    automation_height: 0.0,
-                });
+            let row = row_layout.row_for_index(index)?;
+            // Mixer-only channels (Bus/Return + VSTi multi-out children) and
+            // collapsed group children are excluded from the arrangement canvas
+            // the same way the GPUI track list excludes them: the layout already
+            // collapsed them to zero height.
+            if row.height <= 0.0 {
+                return None;
+            }
             let y = row.y - state.viewport.scroll_y;
-            RenderLaneSnapshot {
+            Some(RenderLaneSnapshot {
                 track_index: index,
                 track_id: track.id.clone(),
                 y,
@@ -278,7 +288,7 @@ fn build_lanes(
                 even_row: index % 2 == 0,
                 selected: state.selection.selected_track_id.as_deref() == Some(track.id.as_str()),
                 color: rgba_to_array(track.color),
-            }
+            })
         })
         .collect()
 }
@@ -295,21 +305,16 @@ fn build_clips(
         .iter()
         .enumerate()
     {
-        // Mixer-only channels never carry arrangement clips.
-        if is_arrangement_hidden_track(track) {
+        let track_index = range.start_index + rel;
+        // Index lookup: `row_layout.rows` is 1:1 with `state.tracks`.
+        let Some(row) = row_layout.row_for_index(track_index) else {
+            continue;
+        };
+        // Mixer-only channels never carry arrangement clips, and collapsed group
+        // children have no arrangement row — both are zero height in the layout.
+        if row.height <= 0.0 {
             continue;
         }
-        let track_index = range.start_index + rel;
-        let row = row_layout
-            .row_for_track(&track.id)
-            .cloned()
-            .unwrap_or_else(|| TrackRowLayoutEntry {
-                track_id: track.id.clone(),
-                index: track_index,
-                y: track_index as f32 * DEFAULT_TRACK_HEIGHT,
-                height: DEFAULT_TRACK_HEIGHT,
-                automation_height: 0.0,
-            });
         let clip_h = row.height - pad * 2.0;
         for clip in &track.clips {
             let clip_left = viewport.beat_to_x(clip.start_beat);
@@ -496,12 +501,11 @@ mod stress_tests {
         CreateTrackOptions, InputMonitorMode, TrackType,
     };
 
-    #[test]
-    fn snapshot_virtualizes_one_thousand_tracks() {
+    fn stress_state(track_count: usize) -> TimelineState {
         let mut state = TimelineState::default();
         state.viewport.viewport_width = 1_200.0;
         state.viewport.viewport_height = 500.0;
-        for index in 0..1_000 {
+        for index in 0..track_count {
             state.create_track(CreateTrackOptions {
                 track_type: if index % 2 == 0 {
                     TrackType::Audio
@@ -516,6 +520,12 @@ mod stress_tests {
                 input_monitor: InputMonitorMode::Off,
             });
         }
+        state
+    }
+
+    #[test]
+    fn snapshot_virtualizes_one_thousand_tracks() {
+        let state = stress_state(1_000);
 
         let snapshot = TimelineRenderSnapshot::from_state(&state, SnapshotBuildOptions::default());
         assert_eq!(state.tracks.len(), 1_000);
@@ -524,5 +534,48 @@ mod stress_tests {
             snapshot.visible_tracks.end_index - snapshot.visible_tracks.start_index <= 12,
             "vertical overscan must stay bounded independently of track count"
         );
+    }
+
+    #[test]
+    fn snapshot_virtualizes_two_thousand_tracks_when_scrolled_deep() {
+        let mut state = stress_state(2_000);
+        // Park the viewport in the middle of the arrangement — the worst case
+        // for any lookup that scans from the top of the track list.
+        state.viewport.scroll_y = state.total_track_rows_height() * 0.5;
+
+        let snapshot = TimelineRenderSnapshot::from_state(&state, SnapshotBuildOptions::default());
+        assert_eq!(state.tracks.len(), 2_000);
+        assert!(snapshot.lanes.len() <= 12, "only viewport rows are drawn");
+        assert!(
+            snapshot.clips.len() <= 12 * 4,
+            "clip build must stay inside the visible row window"
+        );
+        let first_lane = snapshot
+            .lanes
+            .first()
+            .expect("a scrolled viewport has rows");
+        assert!(
+            first_lane.track_index > 100,
+            "deep scroll must resolve to deep rows, got {}",
+            first_lane.track_index
+        );
+    }
+
+    /// The render path builds the row layout once and hands it to the snapshot.
+    /// That shared-layout build must produce exactly what the self-contained one
+    /// does, or the arrangement canvas would drift from the GPUI track list.
+    #[test]
+    fn shared_row_layout_snapshot_matches_the_self_contained_one() {
+        let mut state = stress_state(64);
+        state.viewport.scroll_y = 300.0;
+
+        let owned = TimelineRenderSnapshot::from_state(&state, SnapshotBuildOptions::default());
+        let row_layout = state.track_row_layout();
+        let shared = TimelineRenderSnapshot::from_row_layout(
+            &state,
+            &row_layout,
+            SnapshotBuildOptions::default(),
+        );
+        assert_eq!(owned, shared);
     }
 }

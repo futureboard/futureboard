@@ -13,13 +13,21 @@ fn playhead_debug_enabled() -> bool {
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _tl_scope = crate::perf::PerfScope::enter("Timeline");
-        let (viewport_w, viewport_h, (scroll_max_x, scroll_max_y)) = self.scroll_geometry(window);
+        // One arrangement row layout per repaint. The build is O(track_count)
+        // and clones every track id, so the scroll geometry, the GPUI track
+        // list, and the arrangement snapshot all share this instance instead of
+        // rebuilding it three times. Row heights cannot change during a repaint;
+        // only `scroll_y` moves below, and it is refreshed after clamping.
+        let mut row_layout = self.state.track_row_layout();
+        let (viewport_w, viewport_h, (scroll_max_x, scroll_max_y)) =
+            self.scroll_geometry_with_content_height(window, row_layout.total_height);
         self.state.update_viewport_size(viewport_w, viewport_h);
         self.state.clamp_scroll(scroll_max_x, scroll_max_y);
         let scrolling = self.state.smooth_scroll_towards_target();
         if scrolling {
             cx.notify();
         }
+        row_layout.scroll_y = self.state.viewport.scroll_y;
         if self.focus_lost_subscription.is_none() {
             self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
                 if this.range_select_drag.is_some()
@@ -39,14 +47,18 @@ impl Render for Timeline {
             }));
         }
 
-        crate::perf::count(
-            "clips",
-            self.state
-                .tracks
-                .iter()
-                .map(|t| t.clips.len() as u64)
-                .sum::<u64>(),
-        );
+        // Diagnostic only, and it walks every track: skip the sum entirely when
+        // the perf collector is off.
+        if crate::perf::enabled() {
+            crate::perf::count(
+                "clips",
+                self.state
+                    .tracks
+                    .iter()
+                    .map(|t| t.clips.len() as u64)
+                    .sum::<u64>(),
+            );
+        }
 
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
@@ -1294,7 +1306,7 @@ impl Render for Timeline {
         // position to that point — gives a functional scrollbar without
         // needing a stateful drag.
         let content_w = self.timeline_content_width();
-        let content_h = self.state.total_track_rows_height().max(1.0);
+        let content_h = row_layout.total_height.max(1.0);
         let lane_view_h = viewport_h.max(DEFAULT_TRACK_HEIGHT);
         let lane_view_w = viewport_w.max(1.0);
         let toolbar_default = (16.0, (content_top + lane_view_h - 48.0).max(16.0));
@@ -1972,6 +1984,7 @@ impl Render for Timeline {
             // 2. Track List Scroll Area
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,
+                &row_layout,
                 header_callbacks.clone(),
                 on_track_height_resize_arm.clone(),
                 on_track_height_resize_reset.clone(),

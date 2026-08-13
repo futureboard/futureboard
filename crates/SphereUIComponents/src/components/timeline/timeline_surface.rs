@@ -9,7 +9,7 @@ use crate::components::timeline::render::{
     snapshot::SnapshotBuildOptions, snapshot::TimelineRenderSnapshot, TimelineRenderer,
     TimelineRendererBackend,
 };
-use crate::components::timeline::timeline_state::TimelineState;
+use crate::components::timeline::timeline_state::{TimelineState, TrackRowLayout};
 
 thread_local! {
     static TIMELINE_RENDERER: RefCell<Option<(TimelineRendererBackend, Box<dyn TimelineRenderer>)>> =
@@ -86,8 +86,12 @@ pub fn active_timeline_renderer_backend() -> &'static str {
 }
 
 /// Scrollable arrangement grid layer (behind track lanes / clips).
+///
+/// `row_layout` is the frame's arrangement geometry, shared with the track list
+/// so a single O(track_count) build serves the whole timeline repaint.
 pub fn timeline_surface(
     state: &TimelineState,
+    row_layout: &TrackRowLayout,
     grid_width: f32,
     grid_height: f32,
 ) -> impl IntoElement {
@@ -96,7 +100,7 @@ pub fn timeline_surface(
     let mut options = SnapshotBuildOptions::default();
     options.scale_factor = 1.0;
 
-    let mut snapshot = TimelineRenderSnapshot::from_state(state, options);
+    let mut snapshot = TimelineRenderSnapshot::from_row_layout(state, row_layout, options);
     snapshot.viewport.width = grid_width.max(1.0);
     snapshot.viewport.height = grid_height.max(1.0);
 
