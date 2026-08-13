@@ -112,7 +112,44 @@ fn parse_parent_pid() -> Option<u32> {
     None
 }
 
+/// Widen the default stack new Rust threads get in this process, before any
+/// plugin is loaded or its threads spawned.
+///
+/// A VST3 editor opens on the GTK thread (`editor_linux.cpp`'s
+/// `gtk_thread_main`), which calls into the plug-in's `IPlugView::attached()`.
+/// A Rust-built plug-in whose editor spawns its own thread on Rust's default
+/// (2 MiB, `std::thread::spawn` with no explicit `stack_size`) can overflow it
+/// there: Mesa's GLX/DRI path — `glXChooseFBConfig` walking into driver setup
+/// that parses `drirc` via libexpat — is far deeper on Linux than the
+/// equivalent WGL call on Windows, which never re-enters into a Rust-thread
+/// stack budget like this at all. Confirmed by reproduction: EQUZX.vst3
+/// (nih_plug + baseview + egui_glow) segfaults inside `glXChooseFBConfig`
+/// with the fault address landing on the thread's own stack pointer — the
+/// signature of exhausting it, not a data race — and setting `RUST_MIN_STACK`
+/// before that thread exists prevents the crash.
+///
+/// `RUST_MIN_STACK` is read from the process environment (via libc getenv),
+/// which is shared by every `dlopen`'d plug-in in this process regardless of
+/// which copy of the Rust runtime it statically links, so setting it here
+/// covers any Rust-built plug-in that relies on the default rather than just
+/// this one. Only raises it — an explicit caller override always wins.
+#[cfg(target_os = "linux")]
+fn raise_default_thread_stack_for_plugin_editors() {
+    const MIN_STACK_BYTES: &str = "16777216"; // 16 MiB, well past the ~2 MiB default.
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: called first thing in `main`, before any other thread
+        // (including the plug-in threads this exists to protect) is spawned.
+        unsafe {
+            std::env::set_var("RUST_MIN_STACK", MIN_STACK_BYTES);
+        }
+        eprintln!("[plugin-host] RUST_MIN_STACK={MIN_STACK_BYTES} (linux GLX/DRI stack headroom)");
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    raise_default_thread_stack_for_plugin_editors();
+
     let selftest = std::env::args().any(|a| a == "--selftest");
     let parent_pid = parse_parent_pid();
 
