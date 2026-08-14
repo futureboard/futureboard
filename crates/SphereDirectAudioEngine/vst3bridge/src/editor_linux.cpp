@@ -332,6 +332,17 @@ void install_transport_key_handlers(GtkWidget* window) {
 
 /// Entry point for the dedicated GTK event-loop thread.
 void gtk_thread_main() {
+    // Must run before any other Xlib call in the process. Xlib is not
+    // thread-safe by default, and a plug-in editor may open its own GLX
+    // context on its own render thread once attached (e.g. a baseview/glow
+    // editor), concurrently with GDK's own X11 traffic on this thread.
+    // Defensive: the specific SIGSEGV-in-glXChooseFBConfig crash this file was
+    // last debugged for turned out to be a plug-in-thread stack overflow (see
+    // `raise_default_thread_stack_for_plugin_editors` in
+    // futureboard_plugin_host.rs), not an unguarded-Xlib race — but running two
+    // X11 clients on separate threads in one process without this is still
+    // undefined per the Xlib spec, so it stays.
+    XInitThreads();
     gtk_init(); // GTK4: no argc/argv
 
     {
