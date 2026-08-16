@@ -48,6 +48,7 @@ mod frame_diagnostics;
 mod helpers;
 mod input_ops;
 mod inspector_ops;
+mod midi_export_ops;
 mod midi_input_router;
 mod mixer_ops;
 mod stem_extract_ops;
@@ -1589,6 +1590,7 @@ impl StudioLayout {
             self.create_bus_track_immediate(cx);
             return;
         }
+
         match command_id {
             "noop" => {}
 
@@ -2136,6 +2138,12 @@ impl StudioLayout {
             "file:export-arrangement" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }
+            "file:export-midi" => self.export_arrangement_midi_file(cx),
+            // Offered from the MIDI editor status bar and the arrangement's
+            // clip context menu. Both mean "the clip in front of me", which is
+            // the context clip in the arrangement and the selected clip in the
+            // editor — exactly what this resolves.
+            "midi:export-clip" => self.export_midi_clip_file(cx),
             "audio:stem-extractor" | "tools:stem-extractor" => {
                 self.open_stem_extractor_external_window(owner_bounds, cx)
             }

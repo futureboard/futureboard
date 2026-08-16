@@ -151,6 +151,21 @@
           "children": []
         },
         {
+          "id": "file.export_midi",
+          "kind": "normal",
+          "label": "Export MIDI File...",
+          "icon": "download",
+          "shortcut": "Ctrl+Alt+E",
+          "command": "file:export-midi",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": null,
+          "children": []
+        },
+        {
           "id": "file.sep.close",
           "kind": "separator",
           "enabled": true,

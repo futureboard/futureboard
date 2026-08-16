@@ -15,6 +15,7 @@
     "file:import-audio": "Ctrl+I",
     "file:export-arrangement": "Ctrl+E",
     "file:export-stems": "Ctrl+Shift+E",
+    "file:export-midi": "Ctrl+Alt+E",
     "project:close": "Ctrl+W",
     "app:quit": "Alt+F4",
     "edit:undo": "Ctrl+Z",

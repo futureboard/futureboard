@@ -286,6 +286,25 @@ impl Render for MidiEditorWindow {
                     .text_color(Colors::text_muted())
                     .child(status)
                     .child(div().flex_1())
+                    .child({
+                        // The editor always shows the selected clip, which is
+                        // exactly what the command resolves, so no id has to be
+                        // threaded through the &'static str command channel.
+                        let dispatch_command = dispatch_command.clone();
+                        div()
+                            .id("midi-editor-export-midi")
+                            .px(px(8.0))
+                            .py(px(2.0))
+                            .rounded_md()
+                            .text_size(px(10.0))
+                            .text_color(Colors::text_secondary())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .on_click(move |_, _window, cx| {
+                                (dispatch_command)("midi:export-clip", cx);
+                            })
+                            .child("Export MIDI...")
+                    })
                     .child(
                         div()
                             .id("midi-editor-pop-in")

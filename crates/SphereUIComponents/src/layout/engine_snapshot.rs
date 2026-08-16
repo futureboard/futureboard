@@ -18,13 +18,13 @@ use DirectAudio::types::{
 /// Per-channel `(start, pitch)` of every unmuted note in a clip, sorted by
 /// start beat. Built once per clip at snapshot time so legato can find "the
 /// next note on this channel" with a binary search instead of an O(n²) scan.
-struct ArticulationLegatoIndex {
+pub(crate) struct ArticulationLegatoIndex {
     /// `by_channel[ch]` = sorted `(start_beats, pitch)` for engine channel `ch`.
     by_channel: [Vec<(f32, u8)>; 16],
 }
 
 impl ArticulationLegatoIndex {
-    fn build(
+    pub(crate) fn build(
         notes: &[timeline_state::MidiNoteState],
         output_mode: timeline_state::MidiOutputChannelMode,
     ) -> Self {
@@ -56,7 +56,7 @@ impl ArticulationLegatoIndex {
 /// start (no overlap): the runtime sorts NoteOff before NoteOn at the same
 /// sample, so the retrigger stays clean instead of the off killing the new
 /// voice.
-fn articulated_note_playback(
+pub(crate) fn articulated_note_playback(
     note: &timeline_state::MidiNoteState,
     articulations: &[timeline_state::MidiArticulationEvent],
     channel: u8,

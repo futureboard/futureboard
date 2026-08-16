@@ -1178,6 +1178,11 @@ impl StudioLayout {
                         "midi:quantize",
                         exists,
                     ));
+                    entries.push(menu_item_enabled(
+                        "Export MIDI File...",
+                        "midi:export-clip",
+                        exists,
+                    ));
                     // Applies to the notes selected in the MIDI editor.
                     entries.push(ContextMenuEntry::Separator);
                     entries.push(ContextMenuEntry::Header("Articulation".to_string()));
