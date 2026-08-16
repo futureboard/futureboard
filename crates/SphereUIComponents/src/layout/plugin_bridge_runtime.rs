@@ -15,6 +15,10 @@ pub(crate) struct BridgePluginDescriptor {
     pub plugin_path: String,
     pub class_id: String,
     pub display_name: String,
+    /// Module format label (`"VST3"` / `"VST2"`) forwarded to the host so it
+    /// instantiates through the right native bridge. `None` leaves the host to
+    /// detect it from `plugin_path`.
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -406,12 +410,14 @@ impl PluginBridgeRuntime {
         self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
         let plugin_path = descriptor.plugin_path.clone();
         let class_id = descriptor.class_id.clone();
+        let format = descriptor.format.clone();
         self.client.load_plugin(
             instance.clone(),
             plugin_path,
             class_id,
             sample_rate,
             max_block_size,
+            format,
         )?;
         self.loaded.insert(
             instance.clone(),

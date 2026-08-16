@@ -514,6 +514,8 @@ impl PluginHostClient {
         ipc::write_frame(&mut self.stdin, cmd).map_err(PluginHostClientError::Spawn)
     }
 
+    /// `format` is the registry's module format label (`"VST3"` / `"VST2"`).
+    /// `None` leaves the host to detect it from `plugin_path`.
     pub fn load_plugin(
         &mut self,
         plugin_instance_id: impl Into<String>,
@@ -521,6 +523,7 @@ impl PluginHostClient {
         class_id: impl Into<String>,
         sample_rate: u32,
         max_block_size: u32,
+        format: Option<String>,
     ) -> Result<(), PluginHostClientError> {
         self.send(&HostCommand::LoadPlugin {
             plugin_instance_id: plugin_instance_id.into(),
@@ -528,6 +531,7 @@ impl PluginHostClient {
             class_id: class_id.into(),
             sample_rate,
             max_block_size,
+            format,
         })
     }
 

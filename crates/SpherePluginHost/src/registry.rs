@@ -1,4 +1,4 @@
-//! Platform-neutral plugin registry types and VST3/CLAP scan for native GPUI.
+//! Platform-neutral plugin registry types and VST3/VST2/CLAP scan for native GPUI.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ use crate::types::PluginInfo;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PluginFormat {
     Vst3,
+    Vst2,
     Clap,
     Au,
     Lv2,
@@ -32,6 +33,7 @@ impl PluginFormat {
     pub fn label(self) -> &'static str {
         match self {
             Self::Vst3 => "VST3",
+            Self::Vst2 => "VST2",
             Self::Clap => "CLAP",
             Self::Au => "AU",
             Self::Lv2 => "LV2",
@@ -42,6 +44,7 @@ impl PluginFormat {
     pub fn from_str_lossy(s: &str) -> Self {
         match s.to_ascii_uppercase().as_str() {
             "VST3" => Self::Vst3,
+            "VST2" => Self::Vst2,
             "CLAP" => Self::Clap,
             "AU" => Self::Au,
             "LV2" => Self::Lv2,
@@ -166,19 +169,22 @@ impl RegistryPlugin {
         (self.is_builtin()
             || matches!(
                 self.format,
-                PluginFormat::Vst3 | PluginFormat::Clap | PluginFormat::Au
+                PluginFormat::Vst3 | PluginFormat::Vst2 | PluginFormat::Clap | PluginFormat::Au
             ))
             && self.status == PluginStatus::PresetReady
     }
 
     /// Editor window: built-ins use the embedded CEF (`mikoplugin://`) editor;
-    /// external plug-ins use the native host-owned window (VST3 only today,
-    /// matching the Electron lifecycle).
+    /// external plug-ins use the native host-owned window. Every module format
+    /// (VST3, VST2, CLAP) has one; an Audio Unit does not yet.
     pub fn supports_editor(&self) -> bool {
         if self.is_builtin() {
             return crate::builtin::builtin_has_editor(&self.id);
         }
-        self.format == PluginFormat::Vst3 && self.supports_insert()
+        matches!(
+            self.format,
+            PluginFormat::Vst3 | PluginFormat::Vst2 | PluginFormat::Clap
+        ) && self.supports_insert()
     }
 }
 
@@ -198,7 +204,9 @@ pub fn display_category(
 
     let has = |needle: &str| tags.iter().any(|t| t.eq_ignore_ascii_case(needle));
 
-    if format == PluginFormat::Vst3 {
+    // VST2 declares its role the same way (`Instrument` / `Fx` leading tag),
+    // so it shares the VST3 tag reading rather than getting a parallel copy.
+    if format == PluginFormat::Vst3 || format == PluginFormat::Vst2 {
         if has("Instrument") {
             return "Instrument".to_string();
         }
@@ -310,7 +318,9 @@ pub fn classify_kind(
     let has_tag = |needle: &str| tags.iter().any(|tag| tag.eq_ignore_ascii_case(needle));
 
     match format {
-        PluginFormat::Vst3 => {
+        // VST2 reports `effFlagsIsSynth` / `effGetPlugCategory`, which the
+        // scanner folds into the same `Instrument` / `Fx` leading tag VST3 uses.
+        PluginFormat::Vst3 | PluginFormat::Vst2 => {
             // `Instrument` wins over a co-declared `Fx` (e.g. `Instrument|Synth|Fx`
             // on synths that also offer an FX mode).
             if has_tag("Instrument") {
@@ -369,6 +379,10 @@ pub fn default_scan_paths() -> Vec<PathBuf> {
             let pf = PathBuf::from(pf);
             paths.push(pf.join("Common Files").join("VST3"));
             paths.push(pf.join("Common Files").join("CLAP"));
+            // Conventional 64-bit VST2 locations. `VSTPlugins` and
+            // `Steinberg\VSTPlugins` were already scanned; `Common Files\VST2`
+            // is the third layout installers use.
+            paths.push(pf.join("Common Files").join("VST2"));
             paths.push(pf.join("VSTPlugins"));
             paths.push(pf.join("Steinberg").join("VSTPlugins"));
         }
@@ -387,9 +401,11 @@ pub fn default_scan_paths() -> Vec<PathBuf> {
     {
         paths.push(PathBuf::from("/Library/Audio/Plug-Ins/VST3"));
         paths.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
+        paths.push(PathBuf::from("/Library/Audio/Plug-Ins/VST"));
         if let Some(home) = dirs::home_dir() {
             paths.push(home.join("Library/Audio/Plug-Ins/VST3"));
             paths.push(home.join("Library/Audio/Plug-Ins/CLAP"));
+            paths.push(home.join("Library/Audio/Plug-Ins/VST"));
         }
     }
     #[cfg(target_os = "linux")]
@@ -519,6 +535,7 @@ fn preset_path_for_plugin(
     name: &str,
 ) -> PathBuf {
     let fmt_dir = match format {
+        PluginFormat::Vst2 => "VST2",
         PluginFormat::Clap => "CLAP",
         PluginFormat::Au => "AU",
         _ => "VST3",
@@ -674,9 +691,11 @@ pub fn native_host_status() -> NativeHostStatus {
         true,
         "native".to_string(),
         if cfg!(target_os = "macos") {
-            "Native plugin scanner ready (VST3, CLAP, AudioUnit)."
+            "Native plugin scanner ready (VST3, VST2, CLAP, AudioUnit)."
+        } else if cfg!(target_os = "windows") {
+            "Native plugin scanner ready (VST3, VST2, CLAP). AudioUnit unavailable on this platform."
         } else {
-            "Native plugin scanner ready (VST3, CLAP). AudioUnit unavailable on this platform."
+            "Native plugin scanner ready (VST3, CLAP). VST2 and AudioUnit unavailable on this platform."
         }
         .to_string(),
     );
@@ -832,10 +851,15 @@ impl PluginRegistry {
         options: ScanOptions,
         mut on_progress: impl FnMut(ScanProgress) + Send,
     ) -> RegistryScanResult {
+        // Every file-based format shares one bundle sweep, so requesting any of
+        // them runs it.
         let scan_vst3_clap = options.formats_only.as_ref().is_none_or(|formats| {
-            formats
-                .iter()
-                .any(|format| matches!(format, PluginFormat::Vst3 | PluginFormat::Clap))
+            formats.iter().any(|format| {
+                matches!(
+                    format,
+                    PluginFormat::Vst3 | PluginFormat::Vst2 | PluginFormat::Clap
+                )
+            })
         });
         let scan_au_requested = options.include_au
             && options
@@ -1235,6 +1259,49 @@ mod tests {
             ),
             PluginKind::Instrument,
         );
+    }
+
+    #[test]
+    fn vst2_kind_comes_from_the_scanner_synth_flag() {
+        // The VST2 scanner folds `effFlagsIsSynth` / `effGetPlugCategory` into
+        // the same `Instrument` / `Fx` leading tag VST3 uses.
+        assert_eq!(
+            classify_kind(PluginFormat::Vst2, "Instrument", Some("Instrument"), true),
+            PluginKind::Instrument,
+        );
+        assert_eq!(
+            classify_kind(PluginFormat::Vst2, "Effect", Some("Fx"), true),
+            PluginKind::Effect,
+        );
+        // A module that could not be opened declared nothing.
+        assert_eq!(
+            classify_kind(PluginFormat::Vst2, "Effect", Some("Fx"), false),
+            PluginKind::Unknown,
+        );
+    }
+
+    #[test]
+    fn clap_round_trips_through_the_format_label() {
+        assert_eq!(PluginFormat::from_str_lossy("CLAP"), PluginFormat::Clap);
+        assert_eq!(PluginFormat::from_str_lossy("clap"), PluginFormat::Clap);
+        assert_eq!(PluginFormat::Clap.label(), "CLAP");
+        assert!(PluginFormat::Clap.has_module_file());
+        // Every module format has to stay distinct: the DB stores this string,
+        // so a collision would send a plug-in down the wrong native bridge on
+        // restore.
+        assert_ne!(PluginFormat::Clap, PluginFormat::Vst3);
+        assert_ne!(PluginFormat::Clap, PluginFormat::Vst2);
+    }
+
+    #[test]
+    fn vst2_round_trips_through_the_format_label() {
+        assert_eq!(PluginFormat::from_str_lossy("VST2"), PluginFormat::Vst2);
+        assert_eq!(PluginFormat::from_str_lossy("vst2"), PluginFormat::Vst2);
+        assert_eq!(PluginFormat::Vst2.label(), "VST2");
+        // Distinct from VST3 — the DB stores this string, so a collision would
+        // silently send VST2 rows down the VST3 bridge on restore.
+        assert_ne!(PluginFormat::Vst2, PluginFormat::Vst3);
+        assert!(PluginFormat::Vst2.has_module_file());
     }
 
     #[test]

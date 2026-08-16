@@ -9,6 +9,7 @@ use crate::registry::PluginFormat;
 #[serde(rename_all = "lowercase")]
 pub enum PluginScanFormat {
     Vst3,
+    Vst2,
     Clap,
     #[serde(rename = "audiounit")]
     AudioUnit,
@@ -18,6 +19,7 @@ impl PluginScanFormat {
     pub fn cli_arg(self) -> &'static str {
         match self {
             Self::Vst3 => "vst3",
+            Self::Vst2 => "vst2",
             Self::Clap => "clap",
             Self::AudioUnit => "audiounit",
         }
@@ -26,6 +28,7 @@ impl PluginScanFormat {
     pub fn from_cli(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "vst3" => Some(Self::Vst3),
+            "vst2" => Some(Self::Vst2),
             "clap" => Some(Self::Clap),
             "audiounit" | "au" => Some(Self::AudioUnit),
             _ => None,
@@ -35,6 +38,7 @@ impl PluginScanFormat {
     pub fn registry_format(self) -> PluginFormat {
         match self {
             Self::Vst3 => PluginFormat::Vst3,
+            Self::Vst2 => PluginFormat::Vst2,
             Self::Clap => PluginFormat::Clap,
             Self::AudioUnit => PluginFormat::Au,
         }
@@ -43,6 +47,10 @@ impl PluginScanFormat {
     pub fn available_on_current_platform(self) -> bool {
         match self {
             Self::Vst3 | Self::Clap => true,
+            // No VST2 module loader on Linux — the runtime bridge reports the
+            // same, so listing plug-ins that could never be instantiated would
+            // be a lie.
+            Self::Vst2 => cfg!(any(target_os = "windows", target_os = "macos")),
             Self::AudioUnit => cfg!(target_os = "macos"),
         }
     }

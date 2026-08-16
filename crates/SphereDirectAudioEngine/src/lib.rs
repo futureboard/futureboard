@@ -25,6 +25,7 @@ mod audio_file;
 mod audio_graph;
 mod audio_source;
 pub mod backend;
+pub mod clap_processor;
 mod command;
 pub mod device;
 mod dsp;
@@ -38,6 +39,7 @@ pub mod input_ring;
 mod latency_graph;
 pub mod monitor;
 pub mod native;
+pub mod plugin_backend;
 pub mod plugin_bridge;
 pub mod recording;
 mod runtime;
@@ -46,6 +48,7 @@ pub mod tempo_map;
 pub mod time_signature_map;
 pub mod transport;
 pub mod types;
+pub mod vst2_processor;
 pub mod vst3_processor;
 
 // ── Native Rust facade ───────────────────────────────────────────────────
@@ -88,6 +91,7 @@ pub use crate::native::{
     EngineDebugSnapshot, EngineDeviceInfo, EngineInsertStatus, EngineStats, DEFAULT_BUFFER_SIZE,
     DEFAULT_SAMPLE_RATE,
 };
+pub use crate::plugin_backend::PluginModuleFormat;
 /// Shared automation curve shaping — the UI lane renderer calls this so the drawn
 /// curve matches realtime playback and offline export exactly.
 pub use crate::runtime::automation_curve_factor;

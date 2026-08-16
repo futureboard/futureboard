@@ -3183,9 +3183,17 @@ fn dispatch(
             class_id,
             sample_rate,
             max_block_size,
+            format,
         } => {
+            // The engine labels every bridged insert with its real format; an
+            // older frame without the field falls back to path detection.
+            let module_format = format
+                .as_deref()
+                .and_then(DirectAudio::PluginModuleFormat::from_label)
+                .unwrap_or_else(|| DirectAudio::PluginModuleFormat::detect(&plugin_path));
             hlog!(
-                "[plugin-host] LoadPlugin instance={plugin_instance_id} path={plugin_path} class_id={class_id} sr={sample_rate} block={max_block_size}"
+                "[plugin-host] LoadPlugin instance={plugin_instance_id} path={plugin_path} class_id={class_id} sr={sample_rate} block={max_block_size} format={}",
+                module_format.label()
             );
             if !std::path::Path::new(&plugin_path).exists() {
                 let error = format!("plugin path not found: {plugin_path}");
@@ -3242,10 +3250,11 @@ fn dispatch(
                     platform::current_thread_id()
                 );
                 let started = Instant::now();
-                let processor = DirectAudio::vst3_processor::Vst3RuntimeProcessor::new(
+                let processor = DirectAudio::vst3_processor::Vst3RuntimeProcessor::new_with_format(
                     &plugin_path,
                     &class_id,
                     sample_rate,
+                    module_format,
                 );
                 let elapsed = started.elapsed();
                 let error = if processor.is_some() {
@@ -3281,6 +3290,7 @@ fn dispatch(
                 name,
                 sample_rate,
                 max_block_size,
+                module_format,
                 pending_plugin_loads,
                 load_result_tx,
             );
@@ -4200,13 +4210,15 @@ fn schedule_plugin_load(
     name: String,
     sample_rate: u32,
     max_block_size: u32,
+    module_format: DirectAudio::PluginModuleFormat,
     pending_plugin_loads: &mut HashMap<String, PendingPluginLoad>,
     load_result_tx: &crossbeam_channel::Sender<PluginLoadResult>,
 ) {
     let request_id = NEXT_PLUGIN_LOAD_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
     eprintln!(
-        "[PLUGIN LOAD REQUEST]\nrequest_id={request_id}\nplugin_class_id={class_id}\nplugin_name={name}\nvendor=(unknown)\nformat=VST3\npath={plugin_path}\nproject_track_id=(unknown)\nrequested_by=user\nthread_id={}\nui_thread_blocked = false",
+        "[PLUGIN LOAD REQUEST]\nrequest_id={request_id}\nplugin_class_id={class_id}\nplugin_name={name}\nvendor=(unknown)\nformat={}\npath={plugin_path}\nproject_track_id=(unknown)\nrequested_by=user\nthread_id={}\nui_thread_blocked = false",
+        module_format.label(),
         platform::current_thread_id()
     );
     pending_plugin_loads.insert(
@@ -4237,8 +4249,12 @@ fn schedule_plugin_load(
                 "[PLUGIN LOAD STAGE]\nrequest_id={request_id}\nplugin_instance_id_optional={plugin_instance_id}\nplugin_name={name}\nstage=create_instance\nstarted_at_ms=0\nended_at_ms=0\nduration_ms=0\nresult=begin\nthread_id={thread_id}\ntimeout_ms={}\nlock_held_names=none\nipc_responsive=true\nui_responsive=true",
                 CREATE_INSTANCE_TIMEOUT.as_millis()
             );
-            let processor =
-                DirectAudio::vst3_processor::Vst3RuntimeProcessor::new(&plugin_path, &class_id, sample_rate);
+            let processor = DirectAudio::vst3_processor::Vst3RuntimeProcessor::new_with_format(
+                &plugin_path,
+                &class_id,
+                sample_rate,
+                module_format,
+            );
             let elapsed = stage_started.elapsed();
             let error = if processor.is_some() {
                 None

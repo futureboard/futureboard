@@ -1070,6 +1070,9 @@ impl StudioLayout {
                                                 RegistryPluginFormat::Vst3 => {
                                                     InsertPluginFormat::Vst3
                                                 }
+                                                RegistryPluginFormat::Vst2 => {
+                                                    InsertPluginFormat::Vst2
+                                                }
                                                 RegistryPluginFormat::Clap => {
                                                     InsertPluginFormat::Clap
                                                 }
@@ -1098,7 +1101,12 @@ impl StudioLayout {
                                             timeline
                                                 .state
                                                 .set_insert_plugin_role(&id, &slot_id, true);
-                                            if format == InsertPluginFormat::Vst3 {
+                                            if matches!(
+                                                format,
+                                                InsertPluginFormat::Vst3
+                                                    | InsertPluginFormat::Vst2
+                                                    | InsertPluginFormat::Clap
+                                            ) {
                                                 // Auto-open the editor for a freshly
                                                 // added instrument: mark the slot
                                                 // pending so the host editor shell

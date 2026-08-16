@@ -57,6 +57,12 @@ fn main() {
             .join("include/sphere_plugin_host_vst3.h")
             .display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("../SphereDirectAudioEngine/vst2bridge/include/sphere_vst2_abi.h")
+            .display()
+    );
 
     // Baseline x64 only — do not add /arch:AVX2 or target-cpu=native here.
     // Distributed plugin host must run on CPUs without AVX2.
@@ -72,6 +78,9 @@ fn main() {
         .include(sdk_root.join("public.sdk/source"))
         .include(clap_root.join("include"))
         .include(clap_helpers_root.join("include"))
+        // Shared VST2 ABI header — same file the runtime bridge uses, so the
+        // scanner and the host can never disagree about the AEffect layout.
+        .include(manifest_dir.join("../SphereDirectAudioEngine/vst2bridge/include"))
         .file(backend_root.join("src/vst3_scanner.cpp"))
         .file(sdk_root.join("pluginterfaces/base/coreiids.cpp"))
         .file(sdk_root.join("pluginterfaces/base/funknown.cpp"))

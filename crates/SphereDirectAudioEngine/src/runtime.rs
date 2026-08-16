@@ -1743,15 +1743,18 @@ impl RuntimeProject {
         for t in &snapshot.tracks {
             let mut inserts: Vec<RuntimeInsert> = Vec::with_capacity(t.inserts.len());
             for insert in &t.inserts {
-                let is_native_vst3 = insert.kind.eq_ignore_ascii_case("native-plugin")
+                // Both external module formats take the in-process native path;
+                // `Vst3RuntimeProcessor` resolves which bridge to use from this
+                // same `format` param.
+                let is_native_module_plugin = insert.kind.eq_ignore_ascii_case("native-plugin")
                     && insert
                         .params
                         .get("format")
                         .and_then(Value::as_str)
-                        .map(|f| f.eq_ignore_ascii_case("VST3"))
-                        .unwrap_or(false);
+                        .and_then(crate::plugin_backend::PluginModuleFormat::from_label)
+                        .is_some();
 
-                let vst3 = if is_native_vst3 {
+                let vst3 = if is_native_module_plugin {
                     let new_path = insert
                         .params
                         .get("modulePath")

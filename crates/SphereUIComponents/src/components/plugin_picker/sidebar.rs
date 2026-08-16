@@ -84,6 +84,14 @@ pub fn plugin_filter_sidebar(
         PickerFilter::Format(PluginFormat::Vst3),
     ));
     col = col.child(sidebar_item(
+        "pp-filter-vst2",
+        "VST2",
+        Some(counts.vst2),
+        active == &PickerFilter::Format(PluginFormat::Vst2),
+        filter_cb.clone(),
+        PickerFilter::Format(PluginFormat::Vst2),
+    ));
+    col = col.child(sidebar_item(
         "pp-filter-clap",
         "CLAP",
         Some(counts.clap),

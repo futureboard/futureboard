@@ -698,6 +698,7 @@ impl PluginHostPreviewEngine {
         class_id: &str,
         sample_rate: u32,
         max_block_size: u32,
+        module_format: DirectAudio::PluginModuleFormat,
     ) -> bool {
         self.sample_rate = sample_rate.max(44_100);
         self.block_size = max_block_size.clamp(64, 2048);
@@ -717,8 +718,12 @@ impl PluginHostPreviewEngine {
         eprintln!(
             "[plugin-host-vst3] create entered instance={plugin_instance_id} path={plugin_path}"
         );
-        let Some(processor) = Vst3RuntimeProcessor::new(plugin_path, class_id, self.sample_rate)
-        else {
+        let Some(processor) = Vst3RuntimeProcessor::new_with_format(
+            plugin_path,
+            class_id,
+            self.sample_rate,
+            module_format,
+        ) else {
             eprintln!(
                 "[plugin-host-midi] preview processor create failed instance={plugin_instance_id}"
             );

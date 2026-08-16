@@ -150,7 +150,7 @@ fn resize_contract_with_real_plugin() {
     );
 
     client
-        .load_plugin(instance, &plugin_path, &class_id, 48_000, 256)
+        .load_plugin(instance, &plugin_path, &class_id, 48_000, 256, None)
         .expect("send LoadPlugin");
     assert!(
         wait_for(&client, Duration::from_secs(60), |ev| matches!(

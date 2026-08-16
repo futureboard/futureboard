@@ -1,4 +1,4 @@
-//! Sphere plug-in host: VST3/CLAP scan (N-API cdylib for Electron, rlib for native GPUI).
+//! Sphere plug-in host: VST3/VST2/CLAP scan (N-API cdylib for Electron, rlib for native GPUI).
 //!
 //! Electron loads `sphere_plugin_host` as `PluginHost.node`; GPUI links the rlib and uses
 //! [`registry`] for types and VST3/CLAP registry scan.
@@ -111,7 +111,7 @@ pub fn init_plugin_host() -> napi::Result<HostStatus> {
         vst3_sdk: vst3_sdk_path.exists(),
         clap_sdk: clap_sdk_path.exists(),
         clap_helpers: clap_helpers_path.exists(),
-        message: "SpherePluginHost initialized. VST3 and CLAP metadata scanners are available."
+        message: "SpherePluginHost initialized. VST3, VST2, and CLAP scanners are available."
             .to_string(),
     })
 }

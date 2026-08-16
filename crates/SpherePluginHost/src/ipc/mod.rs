@@ -52,6 +52,12 @@ pub enum HostCommand {
         class_id: String,
         sample_rate: u32,
         max_block_size: u32,
+        /// Module format label (`"VST3"` / `"VST2"`) selecting which native
+        /// bridge instantiates the plug-in. Optional and defaulted so an older
+        /// host binary still parses the frame; the host then falls back to
+        /// detecting the format from `plugin_path`.
+        #[serde(default)]
+        format: Option<String>,
     },
     /// Create a Futureboard built-in DSP instance in the host process. Built-ins
     /// use the same per-instance shared-memory audio exchange as VST3 plugins,
@@ -547,6 +553,7 @@ mod tests {
             class_id: "ABCDEF0123456789".into(),
             sample_rate: 48_000,
             max_block_size: 256,
+            format: Some("VST3".into()),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &cmd).unwrap();

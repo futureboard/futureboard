@@ -160,6 +160,7 @@ pub fn vsti_output_bus_strip_indices(bus_counts: &[u8]) -> Vec<u8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertPluginFormat {
     Vst3,
+    Vst2,
     Clap,
     Au,
     Lv2,
@@ -170,6 +171,7 @@ impl InsertPluginFormat {
     pub fn label(self) -> &'static str {
         match self {
             InsertPluginFormat::Vst3 => "VST3",
+            InsertPluginFormat::Vst2 => "VST2",
             InsertPluginFormat::Clap => "CLAP",
             InsertPluginFormat::Au => "AU",
             InsertPluginFormat::Lv2 => "LV2",
@@ -362,16 +364,27 @@ impl InsertSlotState {
         if self.plugin_id.as_deref() == Some(crate::components::plugin_picker::STUB_PLUGIN_ID) {
             return false;
         }
+        // Listed exhaustively on purpose. This gate decides whether an insert is
+        // ever handed to the host process, so a format missing from it presents
+        // as "the plug-in is in the project but its editor never opens" — which
+        // is exactly how VST2 and CLAP first shipped.
         match self.plugin_format {
-            Some(InsertPluginFormat::Vst3) => self
+            // Module formats the native bridge can instantiate: addressed by a
+            // file on disk.
+            Some(
+                InsertPluginFormat::Vst3 | InsertPluginFormat::Vst2 | InsertPluginFormat::Clap,
+            ) => self
                 .plugin_path
                 .as_ref()
                 .is_some_and(|path| !path.as_os_str().is_empty()),
+            // An Audio Unit has no module file — it is addressed by component id.
             Some(InsertPluginFormat::Au) => self
                 .plugin_id
                 .as_deref()
                 .is_some_and(|component_id| !component_id.trim().is_empty()),
-            _ => false,
+            // LV2 is scanned but not hosted; `Unknown` is a built-in or an
+            // undeclared plug-in, and built-ins take the built-in path instead.
+            Some(InsertPluginFormat::Lv2) | Some(InsertPluginFormat::Unknown) | None => false,
         }
     }
 }
@@ -1282,6 +1295,58 @@ impl TimelineState {
             }
         }
         pending
+    }
+}
+
+#[cfg(test)]
+mod bridge_hosted_module_tests {
+    use super::{InsertPluginFormat, InsertSlotState};
+
+    fn slot_with(format: InsertPluginFormat, path: Option<&str>) -> InsertSlotState {
+        let mut slot = InsertSlotState::empty("slot-1");
+        slot.plugin_id = Some("plugin.id".to_string());
+        slot.plugin_path = path.map(std::path::PathBuf::from);
+        slot.plugin_format = Some(format);
+        slot
+    }
+
+    /// Regression guard: this gate decides whether an insert is handed to the
+    /// host process at all. When VST2 and CLAP were missing from it, both loaded
+    /// nowhere and their editors silently never opened.
+    #[test]
+    fn every_hosted_module_format_is_bridge_hosted() {
+        for format in [
+            InsertPluginFormat::Vst3,
+            InsertPluginFormat::Vst2,
+            InsertPluginFormat::Clap,
+        ] {
+            let slot = slot_with(format, Some("C:/plugins/Thing.dll"));
+            assert!(
+                slot.is_bridge_hosted_external_module(),
+                "{format:?} must be recognised as a bridge-hosted module"
+            );
+            // No module path means nothing to load, whatever the format says.
+            assert!(!slot_with(format, None).is_bridge_hosted_external_module());
+        }
+    }
+
+    #[test]
+    fn audio_unit_is_bridge_hosted_by_component_id_not_path() {
+        let mut slot = slot_with(InsertPluginFormat::Au, None);
+        slot.plugin_id = Some("au:aufx:dely:appl".to_string());
+        assert!(slot.is_bridge_hosted_external_module());
+    }
+
+    #[test]
+    fn unhosted_formats_are_not_bridge_hosted() {
+        // LV2 is scanned but has no runtime bridge; `Unknown` is a built-in or
+        // an undeclared plug-in and takes a different path.
+        for format in [InsertPluginFormat::Lv2, InsertPluginFormat::Unknown] {
+            assert!(
+                !slot_with(format, Some("C:/plugins/Thing.so")).is_bridge_hosted_external_module(),
+                "{format:?} must not be routed to the native bridge"
+            );
+        }
     }
 }
 

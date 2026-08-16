@@ -1,8 +1,10 @@
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_double, c_float};
+use std::os::raw::c_double;
 use std::sync::Arc;
 
 use serde_json::Value;
+
+use crate::plugin_backend::{backend, PluginModuleFormat};
 
 /// `FUTUREBOARD_VST3_MIDI_DEBUG=1` enables VST3 MIDI bridge traces.
 pub fn vst3_midi_debug_enabled() -> bool {
@@ -32,7 +34,7 @@ pub enum Vst3MidiEventKind {
     ControlChange = 2,
 }
 
-/// C-compatible MIDI event for `sphere_daux_vst3_process_stereo_block_with_midi`.
+/// C-compatible MIDI event for the bridges' *_process_stereo_block_with_midi.\n///\n/// Shared verbatim by all three native bridges (VST3, VST2, CLAP) so the engine\n/// builds one event buffer regardless of which one is loaded.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Vst3MidiEvent {
@@ -134,172 +136,256 @@ impl RuntimeTransportContext {
 }
 
 #[repr(C)]
-struct SphereDauxVst3Processor {
+pub(crate) struct SphereDauxVst3Processor {
     _private: [u8; 0],
 }
 
-extern "C" {
-    fn sphere_daux_vst3_bridge_probe() -> i32;
-    fn sphere_daux_vst3_last_error() -> *const c_char;
-    fn sphere_daux_vst3_create(
-        plugin_path: *const c_char,
-        class_id: *const c_char,
-        sample_rate: c_double,
-    ) -> *mut SphereDauxVst3Processor;
-    fn sphere_daux_vst3_destroy(processor: *mut SphereDauxVst3Processor);
-    fn sphere_daux_vst3_process_stereo_sample(
-        processor: *mut SphereDauxVst3Processor,
-        in_l: c_float,
-        in_r: c_float,
-        out_l: *mut c_float,
-        out_r: *mut c_float,
-    ) -> i32;
-    #[allow(dead_code)]
-    fn sphere_daux_vst3_process_stereo_block(
-        processor: *mut SphereDauxVst3Processor,
-        in_l: *const c_float,
-        in_r: *const c_float,
-        out_l: *mut c_float,
-        out_r: *mut c_float,
-        frames: i32,
-    ) -> i32;
-    fn sphere_daux_vst3_process_stereo_block_with_midi(
-        processor: *mut SphereDauxVst3Processor,
-        in_l: *const c_float,
-        in_r: *const c_float,
-        out_l: *mut c_float,
-        out_r: *mut c_float,
-        frames: i32,
-        events: *const Vst3MidiEvent,
-        event_count: i32,
-    ) -> i32;
-    fn sphere_daux_vst3_process_main_output_block_with_midi(
-        processor: *mut SphereDauxVst3Processor,
-        in_l: *const c_float,
-        in_r: *const c_float,
-        out_interleaved: *mut c_float,
-        frames: i32,
-        output_channels: i32,
-        events: *const Vst3MidiEvent,
-        event_count: i32,
-    ) -> i32;
-    fn sphere_daux_vst3_event_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_audio_input_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_audio_output_bus_count(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_main_audio_input_channel_count(
-        processor: *mut SphereDauxVst3Processor,
-    ) -> i32;
-    fn sphere_daux_vst3_main_audio_output_channel_count(
-        processor: *mut SphereDauxVst3Processor,
-    ) -> i32;
-    fn sphere_daux_vst3_output_bus_channel_counts(
-        processor: *mut SphereDauxVst3Processor,
-        out_counts: *mut i32,
-        max_count: i32,
-    ) -> i32;
-    fn sphere_daux_vst3_process_count(processor: *mut SphereDauxVst3Processor) -> u64;
-    fn sphere_daux_vst3_last_input_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
-    fn sphere_daux_vst3_last_output_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
-    fn sphere_daux_vst3_last_difference_peak(processor: *mut SphereDauxVst3Processor) -> c_double;
-    /// Enqueue a normalized (0..1) VST3 parameter change.
-    /// Delivered to IAudioProcessor via inputParameterChanges on the next process call.
-    fn sphere_daux_vst3_set_param(
-        processor: *mut SphereDauxVst3Processor,
-        param_id: u32,
-        value: c_double,
-    );
-    fn sphere_daux_vst3_open_editor(
-        processor: *mut SphereDauxVst3Processor,
-        window_id: *const c_char,
-        title: *const c_char,
-        width: i32,
-        height: i32,
-    ) -> u64;
-    fn sphere_daux_vst3_close_editor(processor: *mut SphereDauxVst3Processor);
-    fn sphere_daux_vst3_focus_editor(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_get_latency_samples(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_set_process_context(
-        processor: *mut SphereDauxVst3Processor,
-        tempo: c_double,
-        time_sig_num: i32,
-        time_sig_den: i32,
-        project_time_samples: i64,
-        ppq: c_double,
-        bar_ppq: c_double,
-        playing: i32,
-        recording: i32,
-    );
-    // GPUI-embedded editor (Windows): attaches the existing instance's view.
-    fn sphere_daux_vst3_embed_editor(
-        processor: *mut SphereDauxVst3Processor,
-        parent_hwnd: u64,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    ) -> u64;
-    fn sphere_daux_vst3_embed_set_bounds(
-        processor: *mut SphereDauxVst3Processor,
-        x: i32,
-        y: i32,
-        width: i32,
-        height: i32,
-    );
-    fn sphere_daux_vst3_embed_refresh(processor: *mut SphereDauxVst3Processor);
-    fn sphere_daux_vst3_embed_attach_hwnd(processor: *mut SphereDauxVst3Processor) -> u64;
-    fn sphere_daux_vst3_embed_detach(processor: *mut SphereDauxVst3Processor);
-    fn sphere_daux_vst3_embed_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_embed_has_visible_ui(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_embed_host_kind(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_embed_take_user_close(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_embed_set_waiting_stage(
-        processor: *mut SphereDauxVst3Processor,
-        stage: *const c_char,
-    );
-    fn sphere_daux_vst3_embed_content_size(
-        processor: *mut SphereDauxVst3Processor,
-        out_width: *mut i32,
-        out_height: *mut i32,
-    ) -> i32;
-    fn sphere_daux_vst3_embed_set_instance_label(
-        processor: *mut SphereDauxVst3Processor,
-        instance_id: *const c_char,
-    );
-    fn sphere_daux_vst3_set_editor_title(
-        processor: *mut SphereDauxVst3Processor,
-        title: *const c_char,
-    );
-    fn sphere_daux_vst3_prepare_editor_view(
-        processor: *mut SphereDauxVst3Processor,
-        out_width: *mut i32,
-        out_height: *mut i32,
-    ) -> i32;
-    fn sphere_daux_vst3_take_pending_shell_resize(
-        processor: *mut SphereDauxVst3Processor,
-        out_width: *mut i32,
-        out_height: *mut i32,
-    ) -> i32;
-    fn sphere_daux_vst3_editor_resizable(processor: *mut SphereDauxVst3Processor) -> i32;
-    fn sphere_daux_vst3_get_state(
-        processor: *mut SphereDauxVst3Processor,
-        out_component: *mut *mut u8,
-        out_component_len: *mut i32,
-        out_controller: *mut *mut u8,
-        out_controller_len: *mut i32,
-    ) -> i32;
-    fn sphere_daux_vst3_set_state(
-        processor: *mut SphereDauxVst3Processor,
-        component_data: *const u8,
-        component_len: i32,
-        controller_data: *const u8,
-        controller_len: i32,
-    ) -> i32;
-    fn sphere_daux_vst3_state_free(data: *mut u8);
-    fn sphere_daux_vst3_list_parameters_json(
-        processor: *mut SphereDauxVst3Processor,
-    ) -> *mut c_char;
-    fn sphere_daux_vst3_parameters_json_free(data: *mut c_char);
+/// Raw VST3 bridge entry points.
+///
+/// Wrapped in a module so `vst2_processor::backend` can name them while they
+/// stay crate-private; call sites go through that dispatch layer, never here.
+pub(crate) mod ffi {
+    use super::{SphereDauxVst3Processor, Vst3MidiEvent};
+    use std::os::raw::{c_char, c_double, c_float};
+
+    extern "C" {
+        pub(crate) fn sphere_daux_vst3_bridge_probe() -> i32;
+        pub(crate) fn sphere_daux_vst3_last_error() -> *const c_char;
+        pub(crate) fn sphere_daux_vst3_create(
+            plugin_path: *const c_char,
+            class_id: *const c_char,
+            sample_rate: c_double,
+        ) -> *mut SphereDauxVst3Processor;
+        pub(crate) fn sphere_daux_vst3_destroy(processor: *mut SphereDauxVst3Processor);
+        pub(crate) fn sphere_daux_vst3_process_stereo_sample(
+            processor: *mut SphereDauxVst3Processor,
+            in_l: c_float,
+            in_r: c_float,
+            out_l: *mut c_float,
+            out_r: *mut c_float,
+        ) -> i32;
+        #[allow(dead_code)]
+        pub(crate) fn sphere_daux_vst3_process_stereo_block(
+            processor: *mut SphereDauxVst3Processor,
+            in_l: *const c_float,
+            in_r: *const c_float,
+            out_l: *mut c_float,
+            out_r: *mut c_float,
+            frames: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_process_stereo_block_with_midi(
+            processor: *mut SphereDauxVst3Processor,
+            in_l: *const c_float,
+            in_r: *const c_float,
+            out_l: *mut c_float,
+            out_r: *mut c_float,
+            frames: i32,
+            events: *const Vst3MidiEvent,
+            event_count: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_process_main_output_block_with_midi(
+            processor: *mut SphereDauxVst3Processor,
+            in_l: *const c_float,
+            in_r: *const c_float,
+            out_interleaved: *mut c_float,
+            frames: i32,
+            output_channels: i32,
+            events: *const Vst3MidiEvent,
+            event_count: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_event_input_bus_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_audio_input_bus_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_audio_output_bus_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_main_audio_input_channel_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_main_audio_output_channel_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_output_bus_channel_counts(
+            processor: *mut SphereDauxVst3Processor,
+            out_counts: *mut i32,
+            max_count: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_process_count(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> u64;
+        pub(crate) fn sphere_daux_vst3_last_input_peak(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> c_double;
+        pub(crate) fn sphere_daux_vst3_last_output_peak(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> c_double;
+        pub(crate) fn sphere_daux_vst3_last_difference_peak(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> c_double;
+        /// Enqueue a normalized (0..1) VST3 parameter change.
+        /// Delivered to IAudioProcessor via inputParameterChanges on the next process call.
+        pub(crate) fn sphere_daux_vst3_set_param(
+            processor: *mut SphereDauxVst3Processor,
+            param_id: u32,
+            value: c_double,
+        );
+        pub(crate) fn sphere_daux_vst3_open_editor(
+            processor: *mut SphereDauxVst3Processor,
+            window_id: *const c_char,
+            title: *const c_char,
+            width: i32,
+            height: i32,
+        ) -> u64;
+        pub(crate) fn sphere_daux_vst3_close_editor(processor: *mut SphereDauxVst3Processor);
+        pub(crate) fn sphere_daux_vst3_focus_editor(processor: *mut SphereDauxVst3Processor)
+            -> i32;
+        pub(crate) fn sphere_daux_vst3_is_valid(processor: *mut SphereDauxVst3Processor) -> i32;
+        pub(crate) fn sphere_daux_vst3_get_latency_samples(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_set_process_context(
+            processor: *mut SphereDauxVst3Processor,
+            tempo: c_double,
+            time_sig_num: i32,
+            time_sig_den: i32,
+            project_time_samples: i64,
+            ppq: c_double,
+            bar_ppq: c_double,
+            playing: i32,
+            recording: i32,
+        );
+        // GPUI-embedded editor (Windows): attaches the existing instance's view.
+        pub(crate) fn sphere_daux_vst3_embed_editor(
+            processor: *mut SphereDauxVst3Processor,
+            parent_hwnd: u64,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+        ) -> u64;
+        pub(crate) fn sphere_daux_vst3_embed_set_bounds(
+            processor: *mut SphereDauxVst3Processor,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+        );
+        pub(crate) fn sphere_daux_vst3_embed_refresh(processor: *mut SphereDauxVst3Processor);
+        pub(crate) fn sphere_daux_vst3_embed_attach_hwnd(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> u64;
+        pub(crate) fn sphere_daux_vst3_embed_detach(processor: *mut SphereDauxVst3Processor);
+        pub(crate) fn sphere_daux_vst3_embed_is_valid(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_embed_has_visible_ui(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_embed_host_kind(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_embed_take_user_close(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_embed_set_waiting_stage(
+            processor: *mut SphereDauxVst3Processor,
+            stage: *const c_char,
+        );
+        pub(crate) fn sphere_daux_vst3_embed_content_size(
+            processor: *mut SphereDauxVst3Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_embed_set_instance_label(
+            processor: *mut SphereDauxVst3Processor,
+            instance_id: *const c_char,
+        );
+        pub(crate) fn sphere_daux_vst3_set_editor_title(
+            processor: *mut SphereDauxVst3Processor,
+            title: *const c_char,
+        );
+        pub(crate) fn sphere_daux_vst3_prepare_editor_view(
+            processor: *mut SphereDauxVst3Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_take_pending_shell_resize(
+            processor: *mut SphereDauxVst3Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_editor_resizable(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_get_state(
+            processor: *mut SphereDauxVst3Processor,
+            out_component: *mut *mut u8,
+            out_component_len: *mut i32,
+            out_controller: *mut *mut u8,
+            out_controller_len: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_set_state(
+            processor: *mut SphereDauxVst3Processor,
+            component_data: *const u8,
+            component_len: i32,
+            controller_data: *const u8,
+            controller_len: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_state_free(data: *mut u8);
+        pub(crate) fn sphere_daux_vst3_list_parameters_json(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> *mut c_char;
+        pub(crate) fn sphere_daux_vst3_parameters_json_free(data: *mut c_char);
+    }
+
+    // Short aliases so `vst2_processor::backend` can name both bridges'
+    // entry points with one identifier per operation.
+    pub(crate) use self::{
+        sphere_daux_vst3_audio_input_bus_count as audio_input_bus_count,
+        sphere_daux_vst3_audio_output_bus_count as audio_output_bus_count,
+        sphere_daux_vst3_bridge_probe as bridge_probe,
+        sphere_daux_vst3_close_editor as close_editor, sphere_daux_vst3_create as create,
+        sphere_daux_vst3_destroy as destroy, sphere_daux_vst3_editor_resizable as editor_resizable,
+        sphere_daux_vst3_embed_attach_hwnd as embed_attach_hwnd,
+        sphere_daux_vst3_embed_content_size as embed_content_size,
+        sphere_daux_vst3_embed_detach as embed_detach,
+        sphere_daux_vst3_embed_editor as embed_editor,
+        sphere_daux_vst3_embed_has_visible_ui as embed_has_visible_ui,
+        sphere_daux_vst3_embed_host_kind as embed_host_kind,
+        sphere_daux_vst3_embed_is_valid as embed_is_valid,
+        sphere_daux_vst3_embed_refresh as embed_refresh,
+        sphere_daux_vst3_embed_set_bounds as embed_set_bounds,
+        sphere_daux_vst3_embed_set_instance_label as embed_set_instance_label,
+        sphere_daux_vst3_embed_set_waiting_stage as embed_set_waiting_stage,
+        sphere_daux_vst3_embed_take_user_close as embed_take_user_close,
+        sphere_daux_vst3_event_input_bus_count as event_input_bus_count,
+        sphere_daux_vst3_focus_editor as focus_editor,
+        sphere_daux_vst3_get_latency_samples as get_latency_samples,
+        sphere_daux_vst3_get_state as get_state, sphere_daux_vst3_is_valid as is_valid,
+        sphere_daux_vst3_last_difference_peak as last_difference_peak,
+        sphere_daux_vst3_last_error as last_error,
+        sphere_daux_vst3_last_input_peak as last_input_peak,
+        sphere_daux_vst3_last_output_peak as last_output_peak,
+        sphere_daux_vst3_list_parameters_json as list_parameters_json,
+        sphere_daux_vst3_main_audio_input_channel_count as main_audio_input_channel_count,
+        sphere_daux_vst3_main_audio_output_channel_count as main_audio_output_channel_count,
+        sphere_daux_vst3_open_editor as open_editor,
+        sphere_daux_vst3_output_bus_channel_counts as output_bus_channel_counts,
+        sphere_daux_vst3_parameters_json_free as parameters_json_free,
+        sphere_daux_vst3_prepare_editor_view as prepare_editor_view,
+        sphere_daux_vst3_process_count as process_count,
+        sphere_daux_vst3_process_main_output_block_with_midi as process_main_output_block_with_midi,
+        sphere_daux_vst3_process_stereo_block_with_midi as process_stereo_block_with_midi,
+        sphere_daux_vst3_process_stereo_sample as process_stereo_sample,
+        sphere_daux_vst3_set_editor_title as set_editor_title,
+        sphere_daux_vst3_set_param as set_param,
+        sphere_daux_vst3_set_process_context as set_process_context,
+        sphere_daux_vst3_set_state as set_state, sphere_daux_vst3_state_free as state_free,
+        sphere_daux_vst3_take_pending_shell_resize as take_pending_shell_resize,
+    };
 }
 
 /// Metadata for one VST3 parameter returned by [`Vst3RuntimeProcessor::list_parameters`].
@@ -456,6 +542,9 @@ pub struct Vst3RuntimeProcessor {
 #[derive(Debug)]
 struct Vst3RuntimeProcessorInner {
     raw: *mut SphereDauxVst3Processor,
+    /// Which native bridge produced (and must service) `raw`. Resolved once at
+    /// construction so the process path never re-derives it.
+    format: PluginModuleFormat,
     plugin_path: String,
     class_id: String,
     sample_rate: u32,
@@ -491,19 +580,48 @@ impl Vst3RuntimeProcessor {
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim();
-        Self::new(plugin_path, class_id, sample_rate)
+        // The graph builder already labels every bridged insert with its real
+        // format; fall back to path detection only for legacy snapshots that
+        // predate the label.
+        let format = params
+            .get("format")
+            .and_then(Value::as_str)
+            .and_then(PluginModuleFormat::from_label)
+            .unwrap_or_else(|| PluginModuleFormat::detect(plugin_path));
+        Self::new_with_format(plugin_path, class_id, sample_rate, format)
     }
 
+    /// Create a processor, detecting the plug-in format from the module path.
+    /// Prefer [`Self::new_with_format`] wherever the format is already known.
     pub fn new(plugin_path: &str, class_id: &str, sample_rate: u32) -> Option<Self> {
-        let log_tag = if std::env::var("FUTUREBOARD_PROCESS_ROLE")
-            .map(|v| v == "plugin_host")
-            .unwrap_or(false)
-        {
-            "[plugin-host-vst3]"
-        } else {
-            "[SphereVST3]"
+        Self::new_with_format(
+            plugin_path,
+            class_id,
+            sample_rate,
+            PluginModuleFormat::detect(plugin_path),
+        )
+    }
+
+    pub fn new_with_format(
+        plugin_path: &str,
+        class_id: &str,
+        sample_rate: u32,
+        format: PluginModuleFormat,
+    ) -> Option<Self> {
+        let log_tag = match (
+            std::env::var("FUTUREBOARD_PROCESS_ROLE")
+                .map(|v| v == "plugin_host")
+                .unwrap_or(false),
+            format,
+        ) {
+            (true, PluginModuleFormat::Vst3) => "[plugin-host-vst3]",
+            (true, PluginModuleFormat::Vst2) => "[plugin-host-vst2]",
+            (true, PluginModuleFormat::Clap) => "[plugin-host-clap]",
+            (false, PluginModuleFormat::Vst3) => "[SphereVST3]",
+            (false, PluginModuleFormat::Vst2) => "[SphereVST2]",
+            (false, PluginModuleFormat::Clap) => "[SphereCLAP]",
         };
-        let bridge_probe = unsafe { sphere_daux_vst3_bridge_probe() };
+        let bridge_probe = backend::bridge_probe(format);
         eprintln!("{log_tag} bridge probe result=0x{bridge_probe:x}");
         eprintln!(
             "{log_tag} create request path='{}' exists={} classId='{}' sr={}",
@@ -513,14 +631,16 @@ impl Vst3RuntimeProcessor {
             sample_rate.max(1)
         );
         eprintln!(
-            "[vst3-setup] plugin=\"{}\" sample_rate={}",
+            "[{}-setup] plugin=\"{}\" sample_rate={}",
+            format.label().to_ascii_lowercase(),
             plugin_path,
             sample_rate.max(1)
         );
         let path = CString::new(plugin_path).ok()?;
         let class_id_c = CString::new(class_id).ok()?;
         let raw = unsafe {
-            sphere_daux_vst3_create(
+            backend::create(
+                format,
                 path.as_ptr(),
                 class_id_c.as_ptr(),
                 sample_rate.max(1) as c_double,
@@ -528,7 +648,7 @@ impl Vst3RuntimeProcessor {
         };
         if raw.is_null() {
             let reason = unsafe {
-                let ptr = sphere_daux_vst3_last_error();
+                let ptr = backend::last_error(format);
                 if ptr.is_null() {
                     String::new()
                 } else {
@@ -541,13 +661,13 @@ impl Vst3RuntimeProcessor {
             );
             return None;
         }
-        let event_input_bus_count = unsafe { sphere_daux_vst3_event_input_bus_count(raw) };
-        let audio_input_bus_count = unsafe { sphere_daux_vst3_audio_input_bus_count(raw) };
-        let audio_output_bus_count = unsafe { sphere_daux_vst3_audio_output_bus_count(raw) };
+        let event_input_bus_count = unsafe { backend::event_input_bus_count(format, raw) };
+        let audio_input_bus_count = unsafe { backend::audio_input_bus_count(format, raw) };
+        let audio_output_bus_count = unsafe { backend::audio_output_bus_count(format, raw) };
         let main_audio_input_channel_count =
-            unsafe { sphere_daux_vst3_main_audio_input_channel_count(raw) };
+            unsafe { backend::main_audio_input_channel_count(format, raw) };
         let main_audio_output_channel_count =
-            unsafe { sphere_daux_vst3_main_audio_output_channel_count(raw) };
+            unsafe { backend::main_audio_output_channel_count(format, raw) };
         eprintln!(
             "{log_tag} create ok path='{}' classId='{}' handle=0x{:x} eventInputBuses={} audioInBuses={} audioOutBuses={} mainInChannels={} mainOutChannels={}",
             plugin_path,
@@ -562,6 +682,7 @@ impl Vst3RuntimeProcessor {
         Some(Self {
             inner: Arc::new(Vst3RuntimeProcessorInner {
                 raw,
+                format,
                 plugin_path: plugin_path.to_string(),
                 class_id: class_id.to_string(),
                 sample_rate: sample_rate.max(1),
@@ -583,7 +704,14 @@ impl Vst3RuntimeProcessor {
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
         let ok = unsafe {
-            sphere_daux_vst3_process_stereo_sample(self.inner.raw, l, r, &mut out_l, &mut out_r)
+            backend::process_stereo_sample(
+                self.inner.format,
+                self.inner.raw,
+                l,
+                r,
+                &mut out_l,
+                &mut out_r,
+            )
         };
         if ok == 0 {
             None
@@ -641,7 +769,8 @@ impl Vst3RuntimeProcessor {
         const MAX_BUSES: usize = 32;
         let mut counts = [0i32; MAX_BUSES];
         let n = unsafe {
-            sphere_daux_vst3_output_bus_channel_counts(
+            backend::output_bus_channel_counts(
+                self.inner.format,
                 self.inner.raw,
                 counts.as_mut_ptr(),
                 MAX_BUSES as i32,
@@ -673,7 +802,8 @@ impl Vst3RuntimeProcessor {
             (midi_events.as_ptr(), midi_events.len() as i32)
         };
         let ok = unsafe {
-            sphere_daux_vst3_process_stereo_block_with_midi(
+            backend::process_stereo_block_with_midi(
+                self.inner.format,
                 self.inner.raw,
                 in_l.as_ptr(),
                 in_r.as_ptr(),
@@ -710,7 +840,8 @@ impl Vst3RuntimeProcessor {
             (midi_events.as_ptr(), midi_events.len() as i32)
         };
         let got_channels = unsafe {
-            sphere_daux_vst3_process_main_output_block_with_midi(
+            backend::process_main_output_block_with_midi(
+                self.inner.format,
                 self.inner.raw,
                 in_l.as_ptr(),
                 in_r.as_ptr(),
@@ -735,7 +866,7 @@ impl Vst3RuntimeProcessor {
             return None;
         }
         unsafe {
-            let ptr = sphere_daux_vst3_last_error();
+            let ptr = backend::last_error(self.inner.format);
             if ptr.is_null() {
                 None
             } else {
@@ -782,7 +913,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             0
         } else {
-            unsafe { sphere_daux_vst3_process_count(self.inner.raw) }
+            unsafe { backend::process_count(self.inner.format, self.inner.raw) }
         }
     }
 
@@ -791,7 +922,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             0.0
         } else {
-            unsafe { sphere_daux_vst3_last_input_peak(self.inner.raw) as f64 }
+            unsafe { backend::last_input_peak(self.inner.format, self.inner.raw) as f64 }
         }
     }
 
@@ -800,7 +931,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             0.0
         } else {
-            unsafe { sphere_daux_vst3_last_output_peak(self.inner.raw) as f64 }
+            unsafe { backend::last_output_peak(self.inner.format, self.inner.raw) as f64 }
         }
     }
 
@@ -809,7 +940,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             0.0
         } else {
-            unsafe { sphere_daux_vst3_last_difference_peak(self.inner.raw) as f64 }
+            unsafe { backend::last_difference_peak(self.inner.format, self.inner.raw) as f64 }
         }
     }
 
@@ -826,7 +957,14 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return;
         }
-        unsafe { sphere_daux_vst3_set_param(self.inner.raw, param_id, value as c_double) }
+        unsafe {
+            backend::set_param(
+                self.inner.format,
+                self.inner.raw,
+                param_id,
+                value as c_double,
+            )
+        }
     }
 
     /// Mark this processor for destruction with a reason string logged at drop time.
@@ -844,7 +982,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return false;
         }
-        unsafe { sphere_daux_vst3_is_valid(self.inner.raw) != 0 }
+        unsafe { backend::is_valid(self.inner.format, self.inner.raw) != 0 }
     }
 
     /// Returns the plugin's reported latency in samples.
@@ -854,7 +992,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return 0;
         }
-        unsafe { sphere_daux_vst3_get_latency_samples(self.inner.raw) }
+        unsafe { backend::get_latency_samples(self.inner.format, self.inner.raw) }
     }
 
     /// Push the current transport state into the plugin's VST3 `ProcessContext`
@@ -878,7 +1016,8 @@ impl Vst3RuntimeProcessor {
             );
         }
         unsafe {
-            sphere_daux_vst3_set_process_context(
+            backend::set_process_context(
+                self.inner.format,
                 self.inner.raw,
                 ctx.tempo_bpm,
                 ctx.time_sig_num as i32,
@@ -906,7 +1045,8 @@ impl Vst3RuntimeProcessor {
         let mut controller_ptr: *mut u8 = std::ptr::null_mut();
         let mut controller_len: i32 = 0;
         let ok = unsafe {
-            sphere_daux_vst3_get_state(
+            backend::get_state(
+                self.inner.format,
                 self.inner.raw,
                 &mut component_ptr,
                 &mut component_len,
@@ -930,8 +1070,8 @@ impl Vst3RuntimeProcessor {
             controller: copy(controller_ptr, controller_len),
         };
         unsafe {
-            sphere_daux_vst3_state_free(component_ptr);
-            sphere_daux_vst3_state_free(controller_ptr);
+            backend::state_free(self.inner.format, component_ptr);
+            backend::state_free(self.inner.format, controller_ptr);
         }
         Some(state)
     }
@@ -942,14 +1082,14 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return None;
         }
-        let json_ptr = unsafe { sphere_daux_vst3_list_parameters_json(self.inner.raw) };
+        let json_ptr = unsafe { backend::list_parameters_json(self.inner.format, self.inner.raw) };
         if json_ptr.is_null() {
             return None;
         }
         let json = unsafe {
             let cstr = std::ffi::CStr::from_ptr(json_ptr);
             let owned = cstr.to_string_lossy().into_owned();
-            sphere_daux_vst3_parameters_json_free(json_ptr);
+            backend::parameters_json_free(self.inner.format, json_ptr);
             owned
         };
         serde_json::from_str(&json).ok()
@@ -974,7 +1114,14 @@ impl Vst3RuntimeProcessor {
             (state.controller.as_ptr(), state.controller.len() as i32)
         };
         unsafe {
-            sphere_daux_vst3_set_state(self.inner.raw, comp_ptr, comp_len, ctrl_ptr, ctrl_len) != 0
+            backend::set_state(
+                self.inner.format,
+                self.inner.raw,
+                comp_ptr,
+                comp_len,
+                ctrl_ptr,
+                ctrl_len,
+            ) != 0
         }
     }
 
@@ -991,7 +1138,8 @@ impl Vst3RuntimeProcessor {
         let window_id = CString::new(window_id).ok()?;
         let title = CString::new(title).ok()?;
         let handle = unsafe {
-            sphere_daux_vst3_open_editor(
+            backend::open_editor(
+                self.inner.format,
                 self.inner.raw,
                 window_id.as_ptr(),
                 title.as_ptr(),
@@ -1010,14 +1158,14 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return;
         }
-        unsafe { sphere_daux_vst3_close_editor(self.inner.raw) };
+        unsafe { backend::close_editor(self.inner.format, self.inner.raw) };
     }
 
     pub fn focus_editor(&mut self) -> bool {
         if self.inner.raw.is_null() {
             return false;
         }
-        unsafe { sphere_daux_vst3_focus_editor(self.inner.raw) != 0 }
+        unsafe { backend::focus_editor(self.inner.format, self.inner.raw) != 0 }
     }
 
     // ── GPUI-embedded editor ──────────────────────────────────────────────
@@ -1042,7 +1190,15 @@ impl Vst3RuntimeProcessor {
             return None;
         }
         let handle = unsafe {
-            sphere_daux_vst3_embed_editor(self.inner.raw, parent_hwnd, x, y, width, height)
+            backend::embed_editor(
+                self.inner.format,
+                self.inner.raw,
+                parent_hwnd,
+                x,
+                y,
+                width,
+                height,
+            )
         };
         if handle == 0 {
             None
@@ -1055,14 +1211,16 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return;
         }
-        unsafe { sphere_daux_vst3_embed_set_bounds(self.inner.raw, x, y, width, height) };
+        unsafe {
+            backend::embed_set_bounds(self.inner.format, self.inner.raw, x, y, width, height)
+        };
     }
 
     pub fn embed_refresh(&self) {
         if self.inner.raw.is_null() {
             return;
         }
-        unsafe { sphere_daux_vst3_embed_refresh(self.inner.raw) };
+        unsafe { backend::embed_refresh(self.inner.format, self.inner.raw) };
     }
 
     /// Real Win32 HWND of the embed content child (`IPlugView::attached`
@@ -1073,7 +1231,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return 0;
         }
-        unsafe { sphere_daux_vst3_embed_attach_hwnd(self.inner.raw) }
+        unsafe { backend::embed_attach_hwnd(self.inner.format, self.inner.raw) }
     }
 
     /// Detach the embedded view and destroy the host window. The processor
@@ -1082,21 +1240,21 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return;
         }
-        unsafe { sphere_daux_vst3_embed_detach(self.inner.raw) };
+        unsafe { backend::embed_detach(self.inner.format, self.inner.raw) };
     }
 
     pub fn embed_is_valid(&self) -> bool {
         if self.inner.raw.is_null() {
             return false;
         }
-        unsafe { sphere_daux_vst3_embed_is_valid(self.inner.raw) != 0 }
+        unsafe { backend::embed_is_valid(self.inner.format, self.inner.raw) != 0 }
     }
 
     pub fn embed_has_visible_ui(&self) -> bool {
         if self.inner.raw.is_null() {
             return false;
         }
-        unsafe { sphere_daux_vst3_embed_has_visible_ui(self.inner.raw) != 0 }
+        unsafe { backend::embed_has_visible_ui(self.inner.format, self.inner.raw) != 0 }
     }
 
     /// 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level, -1 = none.
@@ -1104,7 +1262,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return -1;
         }
-        unsafe { sphere_daux_vst3_embed_host_kind(self.inner.raw) }
+        unsafe { backend::embed_host_kind(self.inner.format, self.inner.raw) }
     }
 
     /// Detached mode only: `true` (and resets) when the user closed the
@@ -1113,7 +1271,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return false;
         }
-        unsafe { sphere_daux_vst3_embed_take_user_close(self.inner.raw) != 0 }
+        unsafe { backend::embed_take_user_close(self.inner.format, self.inner.raw) != 0 }
     }
 
     pub fn embed_set_waiting_stage(&self, stage: &str) {
@@ -1122,7 +1280,7 @@ impl Vst3RuntimeProcessor {
         }
         if let Ok(stage) = CString::new(stage) {
             unsafe {
-                sphere_daux_vst3_embed_set_waiting_stage(self.inner.raw, stage.as_ptr());
+                backend::embed_set_waiting_stage(self.inner.format, self.inner.raw, stage.as_ptr());
             }
         }
     }
@@ -1133,8 +1291,9 @@ impl Vst3RuntimeProcessor {
         }
         let mut width = 0;
         let mut height = 0;
-        let ok =
-            unsafe { sphere_daux_vst3_embed_content_size(self.inner.raw, &mut width, &mut height) };
+        let ok = unsafe {
+            backend::embed_content_size(self.inner.format, self.inner.raw, &mut width, &mut height)
+        };
         if ok != 0 && width > 0 && height > 0 {
             Some((width, height))
         } else {
@@ -1148,7 +1307,11 @@ impl Vst3RuntimeProcessor {
         }
         if let Ok(label) = CString::new(instance_id) {
             unsafe {
-                sphere_daux_vst3_embed_set_instance_label(self.inner.raw, label.as_ptr());
+                backend::embed_set_instance_label(
+                    self.inner.format,
+                    self.inner.raw,
+                    label.as_ptr(),
+                );
             }
         }
     }
@@ -1162,7 +1325,7 @@ impl Vst3RuntimeProcessor {
         }
         if let Ok(title) = CString::new(title) {
             unsafe {
-                sphere_daux_vst3_set_editor_title(self.inner.raw, title.as_ptr());
+                backend::set_editor_title(self.inner.format, self.inner.raw, title.as_ptr());
             }
         }
     }
@@ -1175,7 +1338,7 @@ impl Vst3RuntimeProcessor {
         let mut width = 0;
         let mut height = 0;
         let ok = unsafe {
-            sphere_daux_vst3_prepare_editor_view(self.inner.raw, &mut width, &mut height)
+            backend::prepare_editor_view(self.inner.format, self.inner.raw, &mut width, &mut height)
         };
         if ok != 0 && width > 0 && height > 0 {
             Some((width, height))
@@ -1192,7 +1355,12 @@ impl Vst3RuntimeProcessor {
         let mut width = 0;
         let mut height = 0;
         let ok = unsafe {
-            sphere_daux_vst3_take_pending_shell_resize(self.inner.raw, &mut width, &mut height)
+            backend::take_pending_shell_resize(
+                self.inner.format,
+                self.inner.raw,
+                &mut width,
+                &mut height,
+            )
         };
         if ok != 0 && width > 0 && height > 0 {
             Some((width, height))
@@ -1208,7 +1376,7 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return None;
         }
-        match unsafe { sphere_daux_vst3_editor_resizable(self.inner.raw) } {
+        match unsafe { backend::editor_resizable(self.inner.format, self.inner.raw) } {
             1 => Some(true),
             0 => Some(false),
             _ => None,
@@ -1302,7 +1470,7 @@ impl Drop for Vst3RuntimeProcessorInner {
             "[SphereVST3] destroying shared processor path='{}' classId='{}' sr={} reason={}",
             self.plugin_path, self.class_id, self.sample_rate, reason
         );
-        unsafe { sphere_daux_vst3_destroy(self.raw) };
+        unsafe { backend::destroy(self.format, self.raw) };
         self.raw = std::ptr::null_mut();
         eprintln!(
             "[SphereVST3] destroyed shared processor path='{}' classId='{}' sr={} reason={}",

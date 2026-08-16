@@ -11,7 +11,7 @@ use crate::scan::types::{
     PluginDescriptor, PluginScanError, PluginScanFormat, PluginScanStatus, ScanFailureRecord,
     ScanResultPayload,
 };
-use crate::scanner::{scan_clap_paths, scan_vst3_paths};
+use crate::scanner::{scan_clap_paths, scan_vst2_paths, scan_vst3_paths};
 use crate::types::PluginInfo;
 
 /// Marker the scanner child prints immediately before its JSON payload.
@@ -299,6 +299,11 @@ fn bundle_scan_format(bundle: &Path) -> Option<PluginScanFormat> {
     match ext.to_ascii_lowercase().as_str() {
         "vst3" => Some(PluginScanFormat::Vst3),
         "clap" => Some(PluginScanFormat::Clap),
+        // VST2: a `.vst` bundle on macOS, a bare `.dll` on Windows. A `.dll`
+        // candidate is not necessarily a plug-in — the native scanner probes it
+        // for a VST2 entry point and returns nothing when it is just a support
+        // library sitting in the same folder.
+        "vst" | "vst2" | "dll" => Some(PluginScanFormat::Vst2),
         _ => None,
     }
 }
@@ -615,6 +620,7 @@ fn run_inprocess_scan(
         .collect();
     let infos = match format {
         PluginScanFormat::Vst3 => scan_vst3_paths(&path_strings),
+        PluginScanFormat::Vst2 => scan_vst2_paths(&path_strings),
         PluginScanFormat::Clap => scan_clap_paths(&path_strings),
         PluginScanFormat::AudioUnit => {
             return Err(PluginScanError::AudioUnitUnavailable);

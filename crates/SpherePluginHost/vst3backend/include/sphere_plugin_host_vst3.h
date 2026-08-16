@@ -15,6 +15,10 @@ struct SpherePluginHostString {
 
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_vst3_scan_path_json(const char* path);
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_clap_scan_path_json(const char* path);
+/// Scan a folder (or a single module) for 64-bit VST2 plug-ins. Windows
+/// candidates are `.dll` files probed for a VST2 entry point; macOS candidates
+/// are `.vst` bundles. Shell modules expand to one entry per sub-plug-in.
+SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_vst2_scan_path_json(const char* path);
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_au_scan_json();
 SPHERE_PLUGIN_HOST_API SpherePluginHostString sphere_au_validate_component_json(
     const char* component_id);

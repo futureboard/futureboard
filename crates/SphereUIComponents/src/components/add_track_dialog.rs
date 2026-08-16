@@ -599,6 +599,7 @@ fn midi_input_select_options(devices: &[String]) -> Vec<SelectOption> {
 fn plugin_format_label(format: PluginFormat) -> &'static str {
     match format {
         PluginFormat::Vst3 => "VST3",
+        PluginFormat::Vst2 => "VST2",
         PluginFormat::Clap => "CLAP",
         PluginFormat::Au => "AU",
         PluginFormat::Lv2 => "LV2",
@@ -611,17 +612,21 @@ fn instrument_plugin_options(plugins: &[RegistryPlugin]) -> Vec<SelectOption> {
         return vec![SelectOption::new("", "No Instrument")
             .description("Open Plugin Manager to scan instruments")];
     }
-    // Prefer VST3 when the same instrument ships as CLAP/LV2 too โ€” native
-    // host-owned editors are VST3-only today, and identical display names made
-    // the dropdown pick CLAP first during Surge XT testing.
+    // Prefer VST3 when the same instrument ships in several formats: identical
+    // display names made the dropdown pick CLAP first during Surge XT testing,
+    // and VST3 is the most exercised of the hosted bridges.
     let mut sorted: Vec<&RegistryPlugin> = plugins.iter().collect();
     sorted.sort_by(|a, b| {
         let fmt_rank = |f: PluginFormat| match f {
             PluginFormat::Vst3 => 0u8,
             PluginFormat::Clap => 1,
             PluginFormat::Au => 2,
-            PluginFormat::Lv2 => 3,
-            PluginFormat::Unknown => 4,
+            // Below the rest: when the same instrument ships in several
+            // formats, VST2 is the legacy one and should only win if nothing
+            // else exists.
+            PluginFormat::Vst2 => 3,
+            PluginFormat::Lv2 => 4,
+            PluginFormat::Unknown => 5,
         };
         a.name
             .to_ascii_lowercase()

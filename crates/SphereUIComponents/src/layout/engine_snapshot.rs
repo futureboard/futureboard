@@ -329,10 +329,18 @@ fn build_engine_inserts_for(
                 let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(plugin_id);
                 let is_audio_unit =
                     !is_builtin && slot.plugin_format == Some(InsertPluginFormat::Au);
-                if !is_builtin
-                    && !is_audio_unit
-                    && slot.plugin_format != Some(InsertPluginFormat::Vst3)
-                {
+                // VST3, VST2 and CLAP are the module formats the native bridge
+                // can instantiate; all three travel the same external-bridge
+                // path.
+                let is_module_plugin = matches!(
+                    slot.plugin_format,
+                    Some(
+                        InsertPluginFormat::Vst3
+                            | InsertPluginFormat::Vst2
+                            | InsertPluginFormat::Clap
+                    )
+                );
+                if !is_builtin && !is_audio_unit && !is_module_plugin {
                     return None;
                 }
                 // Neither a built-in nor an Audio Unit has a module path; the AU
@@ -359,6 +367,10 @@ fn build_engine_inserts_for(
                         "BuiltIn"
                     } else if is_audio_unit {
                         "AU"
+                    } else if slot.plugin_format == Some(InsertPluginFormat::Vst2) {
+                        "VST2"
+                    } else if slot.plugin_format == Some(InsertPluginFormat::Clap) {
+                        "CLAP"
                     } else {
                         "VST3"
                     }),
@@ -407,10 +419,14 @@ fn build_engine_inserts_for(
             if plugin_id == STUB_PLUGIN_ID {
                 return None;
             }
-            // Only VST3 with a real module path is instantiable today.
-            if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
-                return None;
-            }
+            // Only a module format with a real path is instantiable in-process;
+            // AU and the built-ins take other routes.
+            let format_label = match slot.plugin_format {
+                Some(InsertPluginFormat::Vst3) => "VST3",
+                Some(InsertPluginFormat::Vst2) => "VST2",
+                Some(InsertPluginFormat::Clap) => "CLAP",
+                _ => return None,
+            };
             let path = slot
                 .plugin_path
                 .as_ref()
@@ -419,7 +435,7 @@ fn build_engine_inserts_for(
 
             let mut params: std::collections::HashMap<String, serde_json::Value> =
                 std::collections::HashMap::new();
-            params.insert("format".to_string(), serde_json::json!("VST3"));
+            params.insert("format".to_string(), serde_json::json!(format_label));
             params.insert("modulePath".to_string(), serde_json::json!(path));
             params.insert("path".to_string(), serde_json::json!(path));
             params.insert("classId".to_string(), serde_json::json!(plugin_id));

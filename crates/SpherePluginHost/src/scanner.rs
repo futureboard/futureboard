@@ -14,6 +14,7 @@ struct SpherePluginHostString {
 extern "C" {
     fn sphere_vst3_scan_path_json(path: *const c_char) -> SpherePluginHostString;
     fn sphere_clap_scan_path_json(path: *const c_char) -> SpherePluginHostString;
+    fn sphere_vst2_scan_path_json(path: *const c_char) -> SpherePluginHostString;
     fn sphere_plugin_host_free_string(value: SpherePluginHostString);
 }
 
@@ -50,10 +51,15 @@ pub fn scan_clap_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
     scan_paths_for_format(paths, PluginFormat::Clap)
 }
 
+pub fn scan_vst2_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
+    scan_paths_for_format(paths, PluginFormat::Vst2)
+}
+
 #[allow(dead_code)]
 pub fn scan_audio_plugin_paths(paths: &[String]) -> Result<Vec<PluginInfo>, String> {
     let mut plugins = scan_paths_for_format(paths, PluginFormat::Vst3)?;
     plugins.append(&mut scan_paths_for_format(paths, PluginFormat::Clap)?);
+    plugins.append(&mut scan_paths_for_format(paths, PluginFormat::Vst2)?);
     sort_and_dedup(&mut plugins);
     Ok(plugins)
 }
@@ -61,6 +67,7 @@ pub fn scan_audio_plugin_paths(paths: &[String]) -> Result<Vec<PluginInfo>, Stri
 #[derive(Clone, Copy)]
 enum PluginFormat {
     Vst3,
+    Vst2,
     Clap,
 }
 
@@ -68,13 +75,18 @@ impl PluginFormat {
     fn label(self) -> &'static str {
         match self {
             Self::Vst3 => "VST3",
+            Self::Vst2 => "VST2",
             Self::Clap => "CLAP",
         }
     }
 
+    /// Bundle extension for this format. VST2 only has one on macOS (`.vst`);
+    /// on Windows a VST2 plug-in is a bare `.dll`, which is why VST2 is
+    /// discovered by scanning folders rather than by matching bundle names.
     fn id_prefix(self) -> &'static str {
         match self {
             Self::Vst3 => "vst3",
+            Self::Vst2 => "vst",
             Self::Clap => "clap",
         }
     }
@@ -129,6 +141,7 @@ fn scan_native_root(path: &str, format: PluginFormat) -> Result<Vec<PluginInfo>,
     let native = unsafe {
         match format {
             PluginFormat::Vst3 => sphere_vst3_scan_path_json(c_path.as_ptr()),
+            PluginFormat::Vst2 => sphere_vst2_scan_path_json(c_path.as_ptr()),
             PluginFormat::Clap => sphere_clap_scan_path_json(c_path.as_ptr()),
         }
     };
@@ -220,10 +233,41 @@ pub fn discover_plugin_bundles(roots: &[PathBuf]) -> Vec<PathBuf> {
     found
 }
 
+/// Formats whose plug-ins are addressable as a single bundle path, so the
+/// isolated scanner can be pointed at one plug-in at a time.
+///
+/// VST2 qualifies only on macOS, where a plug-in is a `.vst` bundle. On Windows
+/// it is a bare `.dll` that cannot be told apart from any other library by name,
+/// so VST2 there is discovered by scanning whole folders instead.
+const BUNDLE_FORMATS: &[PluginFormat] = if cfg!(target_os = "macos") {
+    &[PluginFormat::Vst3, PluginFormat::Clap, PluginFormat::Vst2]
+} else {
+    &[PluginFormat::Vst3, PluginFormat::Clap]
+};
+
+fn is_any_plugin_bundle(path: &Path) -> bool {
+    BUNDLE_FORMATS
+        .iter()
+        .any(|format| is_plugin_bundle(path, *format))
+        || is_windows_vst2_candidate(path)
+}
+
+/// A Windows VST2 plug-in is a bare `.dll`, indistinguishable from a support
+/// library by name. Every `.dll` under a scan root is therefore offered to the
+/// isolated scanner, which loads it, probes for a VST2 entry point, and returns
+/// nothing when it is not a plug-in. That subprocess-per-file cost is the price
+/// of the format having no manifest; it is also what keeps a malformed DLL from
+/// taking down the app.
+fn is_windows_vst2_candidate(path: &Path) -> bool {
+    cfg!(target_os = "windows")
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll") || ext.eq_ignore_ascii_case("vst2"))
+}
+
 fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
-    if is_plugin_bundle(current, PluginFormat::Vst3)
-        || is_plugin_bundle(current, PluginFormat::Clap)
-    {
+    if is_any_plugin_bundle(current) {
         found.push(current.to_path_buf());
         return;
     }
@@ -235,9 +279,7 @@ fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if is_plugin_bundle(&path, PluginFormat::Vst3)
-            || is_plugin_bundle(&path, PluginFormat::Clap)
-        {
+        if is_any_plugin_bundle(&path) {
             found.push(path);
             continue;
         }
@@ -247,19 +289,19 @@ fn discover_bundles_recursive(current: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// Scan one `.vst3` or `.clap` bundle via the native metadata scanner.
+/// Scan one plug-in bundle (`.vst3`, `.clap`, or `.vst` on macOS) via the
+/// native metadata scanner.
 pub fn scan_plugin_bundle(bundle_path: &Path) -> Result<Vec<PluginInfo>, String> {
     let path = bundle_path.to_string_lossy().into_owned();
-    if is_plugin_bundle(bundle_path, PluginFormat::Vst3) {
-        return scan_native_root(&path, PluginFormat::Vst3);
+    for format in BUNDLE_FORMATS {
+        if is_plugin_bundle(bundle_path, *format) {
+            return scan_native_root(&path, *format);
+        }
     }
-    if is_plugin_bundle(bundle_path, PluginFormat::Clap) {
-        return scan_native_root(&path, PluginFormat::Clap);
+    if is_windows_vst2_candidate(bundle_path) {
+        return scan_native_root(&path, PluginFormat::Vst2);
     }
-    Err(format!(
-        "Not a VST3 or CLAP bundle: {}",
-        bundle_path.display()
-    ))
+    Err(format!("Not a plug-in bundle: {}", bundle_path.display()))
 }
 
 fn is_plugin_bundle(path: &Path, format: PluginFormat) -> bool {

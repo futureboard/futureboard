@@ -21,6 +21,7 @@ pub struct FilterCounts {
     /// Subset of `effects` that never declared a class.
     pub unknown: usize,
     pub vst3: usize,
+    pub vst2: usize,
     pub clap: usize,
     pub au: usize,
     pub builtin: usize,
@@ -148,6 +149,7 @@ fn update_counts(
     } else {
         match plugin.format {
             PluginFormat::Vst3 => counts.vst3 += 1,
+            PluginFormat::Vst2 => counts.vst2 += 1,
             PluginFormat::Clap => counts.clap += 1,
             PluginFormat::Au => counts.au += 1,
             _ => {}

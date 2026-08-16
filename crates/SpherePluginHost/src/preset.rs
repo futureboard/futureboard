@@ -50,7 +50,7 @@ struct PresetPluginState {
     source: &'static str,
 }
 
-/// Ensure `Documents/Futureboard Studio/Audio Plug-ins/{VST3,CLAP}/{Instruments,Effects}` exist.
+/// Ensure `Documents/Futureboard Studio/Audio Plug-ins/{VST3,VST2,CLAP}/{Instruments,Effects}` exist.
 pub fn ensure_preset_folders() -> Result<(), String> {
     for folder in preset_subfolders() {
         fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -63,6 +63,8 @@ pub fn preset_subfolders() -> Vec<PathBuf> {
     [
         "VST3/Instruments",
         "VST3/Effects",
+        "VST2/Instruments",
+        "VST2/Effects",
         "CLAP/Instruments",
         "CLAP/Effects",
     ]

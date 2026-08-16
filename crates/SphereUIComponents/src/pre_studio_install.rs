@@ -282,6 +282,7 @@ fn restore_bridge_target(
         plugin_path: path_string,
         class_id: slot.plugin_id.clone().unwrap_or_default(),
         display_name: slot.display_name.clone(),
+        format: slot.plugin_format.map(|f| f.label().to_string()),
     };
 
     let Ok(mut bridge) = runtime.lock() else {

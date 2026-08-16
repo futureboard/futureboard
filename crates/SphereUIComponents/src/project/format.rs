@@ -451,6 +451,10 @@ fn encode_plugin_format(w: &mut FbWriter, f: PluginFormat) {
         PluginFormat::Clap => 1,
         PluginFormat::Au => 2,
         PluginFormat::Lv2 => 3,
+        // New tag, never a reuse: an older build decodes 4 as `Unknown` and
+        // treats the insert as unloadable rather than silently sending a VST2
+        // module down the VST3 bridge.
+        PluginFormat::Vst2 => 4,
         PluginFormat::Unknown => 0xFF,
     });
 }
@@ -1336,6 +1340,7 @@ fn decode_plugin_format(r: &mut FbReader) -> Result<PluginFormat, ProjectError> 
         1 => PluginFormat::Clap,
         2 => PluginFormat::Au,
         3 => PluginFormat::Lv2,
+        4 => PluginFormat::Vst2,
         _ => PluginFormat::Unknown,
     })
 }

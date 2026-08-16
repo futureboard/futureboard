@@ -1927,7 +1927,10 @@ impl StudioLayout {
         // file path.
         let path = plugin_path.filter(|p| !p.trim().is_empty());
         let editable = match plugin_format {
-            Some(InsertPluginFormat::Vst3) => path.is_some() && plugin_id.is_some(),
+            // Every module format has a native editor and a module file.
+            Some(
+                InsertPluginFormat::Vst3 | InsertPluginFormat::Vst2 | InsertPluginFormat::Clap,
+            ) => path.is_some() && plugin_id.is_some(),
             Some(InsertPluginFormat::Au) => plugin_id.is_some(),
             _ => false,
         };
@@ -2896,12 +2899,16 @@ impl StudioLayout {
                 .as_ref()
                 .and_then(|plugins| plugins.iter().find(|p| p.id == plugin_id))
                 .map(|reg| {
+                    // Exhaustive on purpose: a format that falls through to
+                    // `Unknown` here is never recognised as bridge-hosted, so it
+                    // silently never loads and its editor never opens.
                     let format = match reg.format {
                         RegFmt::Vst3 => InsertPluginFormat::Vst3,
+                        RegFmt::Vst2 => InsertPluginFormat::Vst2,
                         RegFmt::Clap => InsertPluginFormat::Clap,
                         RegFmt::Au => InsertPluginFormat::Au,
                         RegFmt::Lv2 => InsertPluginFormat::Lv2,
-                        _ => InsertPluginFormat::Unknown,
+                        RegFmt::Unknown => InsertPluginFormat::Unknown,
                     };
                     let id = reg.class_id.clone().unwrap_or_else(|| reg.id.clone());
                     (
@@ -2988,7 +2995,14 @@ impl StudioLayout {
             let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&bridge_class_id);
             let is_audio_unit = !is_builtin && plugin_format == InsertPluginFormat::Au;
             let bridge_enabled = super::plugin_bridge_runtime::bridge_enabled()
-                && (is_builtin || is_audio_unit || plugin_format == InsertPluginFormat::Vst3);
+                && (is_builtin
+                    || is_audio_unit
+                    || matches!(
+                        plugin_format,
+                        InsertPluginFormat::Vst3
+                            | InsertPluginFormat::Vst2
+                            | InsertPluginFormat::Clap
+                    ));
             if bridge_enabled {
                 use crate::components::timeline::timeline_state::{
                     PluginRuntimeBackend, PluginRuntimeState,
@@ -3022,6 +3036,7 @@ impl StudioLayout {
                     plugin_path: path.clone(),
                     class_id: bridge_class_id.clone(),
                     display_name: log_display_name.clone(),
+                    format: Some(plugin_format.label().to_string()),
                 };
                 match super::plugin_bridge_runtime::PluginBridgeRuntime::ensure_shared(
                     &mut self.plugin_editors.bridge_runtime,
@@ -3412,7 +3427,10 @@ impl StudioLayout {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
         if matches!(
             plugin_format,
-            InsertPluginFormat::Vst3 | InsertPluginFormat::Au
+            InsertPluginFormat::Vst3
+                | InsertPluginFormat::Vst2
+                | InsertPluginFormat::Clap
+                | InsertPluginFormat::Au
         ) && super::plugin_bridge_runtime::bridge_enabled()
         {
             let display_name = self
@@ -3446,6 +3464,7 @@ impl StudioLayout {
 
         let plugin_format = match reg.format {
             RegFmt::Vst3 => InsertPluginFormat::Vst3,
+            RegFmt::Vst2 => InsertPluginFormat::Vst2,
             RegFmt::Clap => InsertPluginFormat::Clap,
             RegFmt::Au => InsertPluginFormat::Au,
             RegFmt::Lv2 => InsertPluginFormat::Lv2,
@@ -4029,7 +4048,11 @@ impl StudioLayout {
         let class_id = slot.plugin_id.clone().unwrap_or_default();
         let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&class_id);
         let is_audio_unit = !is_builtin && slot.plugin_format == Some(InsertPluginFormat::Au);
-        if !is_builtin && !is_audio_unit && slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+        let is_module_plugin = matches!(
+            slot.plugin_format,
+            Some(InsertPluginFormat::Vst3 | InsertPluginFormat::Vst2 | InsertPluginFormat::Clap)
+        );
+        if !is_builtin && !is_audio_unit && !is_module_plugin {
             return false;
         }
         let path = slot.plugin_path.as_ref();
@@ -4082,6 +4105,7 @@ impl StudioLayout {
             plugin_path: path_string.clone(),
             class_id: class_id.clone(),
             display_name: display_name.clone(),
+            format: slot.plugin_format.map(|f| f.label().to_string()),
         };
 
         match super::plugin_bridge_runtime::PluginBridgeRuntime::ensure_shared(

@@ -72,6 +72,7 @@ pub struct FilterCounts {
     pub instruments: usize,
     pub effects: usize,
     pub vst3: usize,
+    pub vst2: usize,
     pub clap: usize,
     pub au: usize,
 }
@@ -342,6 +343,11 @@ impl PluginManagerDialogState {
                 .plugins
                 .iter()
                 .filter(|p| p.format == PluginFormat::Vst3)
+                .count(),
+            vst2: self
+                .plugins
+                .iter()
+                .filter(|p| p.format == PluginFormat::Vst2)
                 .count(),
             clap: self
                 .plugins
@@ -903,6 +909,7 @@ pub fn plugin_manager_panel(
     let sidebar_inst = filter_cb.clone();
     let sidebar_fx = filter_cb.clone();
     let sidebar_vst3 = filter_cb.clone();
+    let sidebar_vst2 = filter_cb.clone();
     let sidebar_clap = filter_cb.clone();
     let sidebar_au = filter_cb.clone();
 
@@ -1253,6 +1260,22 @@ pub fn plugin_manager_panel(
                                                             move |_, w, cx| {
                                                                 sidebar_vst3(
                                                                     &SidebarFilter::Format(PluginFormat::Vst3),
+                                                                    w,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        )
+                                                        .into_any_element(),
+                                                        sidebar_item(
+                                                            "pm-filter-vst2",
+                                                            "VST2",
+                                                            counts.vst2,
+                                                            state.sidebar_filter
+                                                                == SidebarFilter::Format(PluginFormat::Vst2),
+                                                            false,
+                                                            move |_, w, cx| {
+                                                                sidebar_vst2(
+                                                                    &SidebarFilter::Format(PluginFormat::Vst2),
                                                                     w,
                                                                     cx,
                                                                 )

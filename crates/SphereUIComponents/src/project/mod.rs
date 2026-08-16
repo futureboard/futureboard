@@ -223,6 +223,7 @@ fn controller_kind_from_project(k: MidiControllerKind) -> TlControllerKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginFormat {
     Vst3,
+    Vst2,
     Clap,
     Au,
     Lv2,
@@ -780,6 +781,7 @@ fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInse
     let plugin = slot.plugin_id.as_ref().map(|pid| {
         let format = match slot.plugin_format {
             Some(InsertPluginFormat::Vst3) => PluginFormat::Vst3,
+            Some(InsertPluginFormat::Vst2) => PluginFormat::Vst2,
             Some(InsertPluginFormat::Clap) => PluginFormat::Clap,
             Some(InsertPluginFormat::Au) => PluginFormat::Au,
             Some(InsertPluginFormat::Lv2) => PluginFormat::Lv2,
@@ -825,6 +827,7 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
         Some(plugin) => {
             let plugin_format = match plugin.format {
                 PluginFormat::Vst3 => InsertPluginFormat::Vst3,
+                PluginFormat::Vst2 => InsertPluginFormat::Vst2,
                 PluginFormat::Clap => InsertPluginFormat::Clap,
                 PluginFormat::Au => InsertPluginFormat::Au,
                 PluginFormat::Lv2 => InsertPluginFormat::Lv2,
@@ -834,7 +837,10 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
             let bridge = SpherePluginHost::plugin_host_client::plugin_host_bridge_enabled()
                 && (matches!(
                     plugin_format,
-                    InsertPluginFormat::Vst3 | InsertPluginFormat::Au
+                    InsertPluginFormat::Vst3
+                        | InsertPluginFormat::Vst2
+                        | InsertPluginFormat::Clap
+                        | InsertPluginFormat::Au
                 ) || is_builtin);
             // Only a format with a module file can be missing from disk; an
             // Audio Unit's absence surfaces when the host tries to instantiate
@@ -3464,6 +3470,120 @@ mod vsti_substrip_persistence_tests {
             fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
             Some(json_state),
             "built-in plugin's JSON state bytes must survive save/load"
+        );
+    }
+
+    /// A VST2 insert must come back as VST2, not as VST3 or Unknown: the format
+    /// is what selects the native bridge on reload, so a collision in the
+    /// on-disk tag would send a `.dll` to the VST3 loader and fail silently.
+    #[test]
+    fn vst2_insert_round_trips_format_and_opaque_state() {
+        use crate::components::timeline::timeline_state::PluginRuntimeBackend;
+
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Keys".into(),
+            color: crate::color::auto_color_for_index(0),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "vst2:1400136302".to_string(),
+            Some(PathBuf::from("C:/Program Files/VSTPlugins/Legacy.dll")),
+            InsertPluginFormat::Vst2,
+            None,
+            "Legacy".to_string(),
+        );
+        // `effGetChunk` bank bytes — opaque to the host, so they must survive
+        // byte for byte.
+        let chunk = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        {
+            let slots = state.insert_slots_mut(&track_id).expect("slots");
+            let fx = slots.iter_mut().find(|s| s.id == slot).expect("fx slot");
+            fx.vst3_state = Some(std::sync::Arc::new(chunk.clone()));
+        }
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let fx = restored
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.inserts.iter().find(|s| s.id == slot))
+            .expect("vst2 insert restored");
+        assert_eq!(fx.plugin_format, Some(InsertPluginFormat::Vst2));
+        assert_eq!(fx.runtime_backend, PluginRuntimeBackend::ExternalBridge);
+        assert_eq!(
+            fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
+            Some(chunk),
+            "the VST2 chunk bytes must survive save/load"
+        );
+    }
+
+    /// A CLAP insert must come back as CLAP and bridge-hosted, carrying its
+    /// `clap.state` blob. Same reasoning as the VST2 case: the format is what
+    /// selects the native bridge on reload.
+    #[test]
+    fn clap_insert_round_trips_format_and_opaque_state() {
+        use crate::components::timeline::timeline_state::PluginRuntimeBackend;
+
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Pad".into(),
+            color: crate::color::auto_color_for_index(0),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "com.example.synth".to_string(),
+            Some(PathBuf::from(
+                "C:/Program Files/Common Files/CLAP/Example.clap",
+            )),
+            InsertPluginFormat::Clap,
+            None,
+            "Example".to_string(),
+        );
+        // `clap.state` bytes — opaque to the host, so they must survive byte
+        // for byte.
+        let blob = vec![0x01u8, 0x02, 0x03, 0x04, 0x05];
+        {
+            let slots = state.insert_slots_mut(&track_id).expect("slots");
+            let fx = slots.iter_mut().find(|s| s.id == slot).expect("fx slot");
+            fx.vst3_state = Some(std::sync::Arc::new(blob.clone()));
+        }
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let fx = restored
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .and_then(|t| t.inserts.iter().find(|s| s.id == slot))
+            .expect("clap insert restored");
+        assert_eq!(fx.plugin_format, Some(InsertPluginFormat::Clap));
+        assert_eq!(fx.runtime_backend, PluginRuntimeBackend::ExternalBridge);
+        assert_eq!(
+            fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
+            Some(blob),
+            "the CLAP state bytes must survive save/load"
         );
     }
 

@@ -51,7 +51,7 @@ fn text_format_badge(format: PluginFormat) -> AnyElement {
     let (fg, bg, border) = match format {
         // A hosted format with no brand icon: read as a plain identity label,
         // not as the warning tone reserved for formats we cannot load.
-        PluginFormat::Au => (
+        PluginFormat::Au | PluginFormat::Vst2 => (
             Colors::text_secondary(),
             Colors::surface_input(),
             Colors::border_default(),

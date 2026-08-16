@@ -7,6 +7,10 @@
 #include "clap/clap.h"
 #include "clap/factory/plugin-factory.h"
 
+// Single source of the VST2 ABI, shared with the runtime bridge in
+// SphereDirectAudioEngine so scanner and host can never drift.
+#include "sphere_vst2_abi.h"
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -287,6 +291,269 @@ std::filesystem::path clap_executable_path(const std::filesystem::path& plugin_p
   return plugin_path;
 }
 #endif
+
+// ── VST2 ─────────────────────────────────────────────────────────────────────
+//
+// VST2 has no factory to interrogate: metadata only exists on an *instantiated*
+// AEffect. So the scan opens each candidate with a minimal audioMaster, reads
+// its name/vendor/category/IO, and closes it again — still no processing, no
+// editor, no realtime audio. This runs inside the isolating scanner subprocess
+// (see scan/isolation.rs), which is what makes loading unknown binaries safe.
+
+bool is_vst2_module(const std::filesystem::path& path) {
+#ifdef __APPLE__
+  // macOS VST2 is a `.vst` bundle.
+  return lower_extension(path) == ".vst";
+#else
+  // Windows VST2 is a bare `.dll` — indistinguishable by name from any other
+  // library, so `vst2_entry_point` below is what actually decides.
+  const auto ext = lower_extension(path);
+  return ext == ".dll" || ext == ".vst2";
+#endif
+}
+
+std::filesystem::path vst2_executable_path(const std::filesystem::path& plugin_path) {
+#ifdef __APPLE__
+  if (!std::filesystem::is_directory(plugin_path)) {
+    return plugin_path;
+  }
+  return plugin_path / "Contents" / "MacOS" / plugin_path.stem().string();
+#else
+  return plugin_path;
+#endif
+}
+
+/// Empty when the module is loadable here. Otherwise a reason to report, so a
+/// 32-bit plug-in says so instead of failing as a generic load error.
+std::string vst2_arch_mismatch_reason(const std::filesystem::path& module_path) {
+#ifdef _WIN32
+  std::FILE* file = nullptr;
+  if (_wfopen_s(&file, module_path.wstring().c_str(), L"rb") != 0 || !file) {
+    return {};
+  }
+  unsigned char dos[64] = {};
+  std::string reason;
+  if (std::fread(dos, 1, sizeof(dos), file) == sizeof(dos) && dos[0] == 'M' &&
+      dos[1] == 'Z') {
+    const long pe_offset = static_cast<long>(dos[60]) |
+                           (static_cast<long>(dos[61]) << 8) |
+                           (static_cast<long>(dos[62]) << 16) |
+                           (static_cast<long>(dos[63]) << 24);
+    unsigned char pe[6] = {};
+    if (std::fseek(file, pe_offset, SEEK_SET) == 0 &&
+        std::fread(pe, 1, sizeof(pe), file) == sizeof(pe) && pe[0] == 'P' &&
+        pe[1] == 'E') {
+      const unsigned machine =
+          static_cast<unsigned>(pe[4]) | (static_cast<unsigned>(pe[5]) << 8);
+      constexpr unsigned kAmd64 = 0x8664;
+      constexpr unsigned kArm64 = 0xAA64;
+      if (machine != kAmd64 && machine != kArm64) {
+        reason =
+            "Plug-in is a 32-bit VST2 build; Futureboard hosts 64-bit VST2 only";
+      }
+    }
+  }
+  std::fclose(file);
+  return reason;
+#else
+  (void)module_path;
+  return {};
+#endif
+}
+
+using Vst2EntryProc = AEffect*(SPHERE_VST2_CC*)(AudioMasterCallback);
+
+Vst2EntryProc vst2_entry_point(const SharedLibrary& library) {
+  static const char* kNames[] = {"VSTPluginMain", "main", "main_macho",
+                                 "main_plugin"};
+  for (const char* name : kNames) {
+    if (auto* symbol = library.symbol(name)) {
+      return reinterpret_cast<Vst2EntryProc>(symbol);
+    }
+  }
+  return nullptr;
+}
+
+/// Shell sub-plug-in id the next instantiation should select. VST2 asks for it
+/// from inside the entry point, before any AEffect exists, so it has to be
+/// reachable without one.
+thread_local int32_t g_scan_shell_id = 0;
+
+/// Minimal host callback for scanning. Answers only what a plug-in needs to
+/// finish `open()`; everything else is declined so nothing is claimed that the
+/// scanner does not actually provide.
+intptr_t SPHERE_VST2_CC vst2_scan_audio_master(AEffect*, int32_t opcode, int32_t,
+                                               intptr_t, void* ptr, float) {
+  switch (opcode) {
+    case audioMasterVersion:
+      return 2400;
+    case audioMasterCurrentId:
+      return g_scan_shell_id;
+    case audioMasterGetSampleRate:
+      return 44100;
+    case audioMasterGetBlockSize:
+      return 512;
+    case audioMasterGetCurrentProcessLevel:
+      return kVstProcessLevelUser;
+    case audioMasterGetVendorString:
+      if (ptr) {
+        std::snprintf(static_cast<char*>(ptr), 64, "%s", "Futureboard");
+        return 1;
+      }
+      return 0;
+    case audioMasterGetProductString:
+      if (ptr) {
+        std::snprintf(static_cast<char*>(ptr), 64, "%s", "Futureboard Studio");
+        return 1;
+      }
+      return 0;
+    case audioMasterGetVendorVersion:
+      return 1;
+    case audioMasterCanDo:
+      if (ptr) {
+        const std::string feature(static_cast<const char*>(ptr));
+        if (feature == "shellCategory" || feature == "sendVstEvents" ||
+            feature == "sendVstMidiEvent") {
+          return 1;
+        }
+      }
+      return -1;
+    case audioMasterIdle:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+std::string vst2_dispatch_string(AEffect* effect, int32_t opcode, int32_t index) {
+  if (!effect || !effect->dispatcher) {
+    return {};
+  }
+  // 256 rather than the documented 64: some plug-ins overrun the spec'd size.
+  char buffer[256] = {};
+  effect->dispatcher(effect, opcode, index, 0, buffer, 0.f);
+  buffer[sizeof(buffer) - 1] = '\0';
+  return std::string(buffer);
+}
+
+const char* vst2_category_name(intptr_t plug_category, bool is_synth) {
+  if (is_synth) {
+    return "Instrument";
+  }
+  switch (plug_category) {
+    case kPlugCategSynth:
+    case kPlugCategGenerator:
+      return "Instrument";
+    case kPlugCategAnalysis:
+      return "Analyzer";
+    case kPlugCategMastering:
+      return "Mastering";
+    case kPlugCategSpacializer:
+    case kPlugCategRoomFx:
+    case kPlugSurroundFx:
+      return "Spatial";
+    case kPlugCategRestoration:
+      return "Restoration";
+    case kPlugCategEffect:
+      return "Effect";
+    default:
+      return "Effect";
+  }
+}
+
+struct Vst2ScanEntry {
+  std::string name;
+  std::string vendor;
+  std::string category;
+  std::string sub_categories;
+  std::string class_id;
+  std::string version;
+  bool is_shell_child = false;
+};
+
+/// Open one (optionally shell-selected) plug-in and read its metadata.
+/// `out_shell_children` is filled only for a shell module's first pass.
+bool vst2_read_entry(Vst2EntryProc entry, int32_t shell_id,
+                     const std::filesystem::path& plugin_path,
+                     Vst2ScanEntry* out,
+                     std::vector<int32_t>* out_shell_children) {
+  g_scan_shell_id = shell_id;
+  AEffect* effect = entry(&vst2_scan_audio_master);
+  g_scan_shell_id = 0;
+  if (!effect || effect->magic != kEffectMagic || !effect->dispatcher) {
+    return false;
+  }
+
+  effect->dispatcher(effect, effOpen, 0, 0, nullptr, 0.f);
+
+  const bool is_synth = (effect->flags & effFlagsIsSynth) != 0;
+  const auto plug_category =
+      effect->dispatcher(effect, effGetPlugCategory, 0, 0, nullptr, 0.f);
+
+  std::string name = vst2_dispatch_string(effect, effGetEffectName, 0);
+  if (name.empty()) {
+    name = vst2_dispatch_string(effect, effGetProductString, 0);
+  }
+  if (name.empty()) {
+    name = plugin_path.stem().string();
+  }
+  std::string vendor = vst2_dispatch_string(effect, effGetVendorString, 0);
+  if (vendor.empty()) {
+    vendor = "Unknown Vendor";
+  }
+  const auto vendor_version =
+      effect->dispatcher(effect, effGetVendorVersion, 0, 0, nullptr, 0.f);
+
+  if (out_shell_children && plug_category == kPlugCategShell) {
+    // Shell module (Waves, Kontakt): enumerate the sub-plug-ins it hosts.
+    // Bounded so a plug-in that never returns 0 cannot spin the scanner.
+    constexpr int kMaxShellChildren = 1024;
+    for (int i = 0; i < kMaxShellChildren; ++i) {
+      char child_name[128] = {};
+      const auto child_id = effect->dispatcher(effect, effShellGetNextPlugin, 0,
+                                               0, child_name, 0.f);
+      if (child_id == 0) {
+        break;
+      }
+      out_shell_children->push_back(static_cast<int32_t>(child_id));
+    }
+  }
+
+  out->name = std::move(name);
+  out->vendor = std::move(vendor);
+  out->category = vst2_category_name(plug_category, is_synth);
+  out->sub_categories = is_synth ? "Instrument" : "Fx";
+  out->version = vendor_version > 0 ? std::to_string(vendor_version) : "";
+  out->class_id = "vst2:" + std::to_string(shell_id != 0 ? shell_id
+                                                         : effect->uniqueID);
+  out->is_shell_child = shell_id != 0;
+
+  effect->dispatcher(effect, effClose, 0, 0, nullptr, 0.f);
+  return true;
+}
+
+void append_vst2_entry(std::string& json, bool& first,
+                       const std::filesystem::path& plugin_path,
+                       const Vst2ScanEntry& entry) {
+  if (!first) {
+    json += ",";
+  }
+  first = false;
+  const auto path_string = plugin_path.string();
+  json += "{\"name\":\"" + escape_json(entry.name) + "\",";
+  json += "\"vendor\":\"" + escape_json(entry.vendor) + "\",";
+  json += "\"category\":\"" + escape_json(entry.category) + "\",";
+  json += "\"subCategories\":\"" + escape_json(entry.sub_categories) + "\",";
+  json += "\"format\":\"VST2\",";
+  json += "\"path\":\"" + escape_json(path_string) + "\",";
+  json += "\"modulePath\":\"" + escape_json(path_string) + "\",";
+  json += "\"classId\":\"" + escape_json(entry.class_id) + "\",";
+  json += "\"version\":\"" + escape_json(entry.version) + "\",";
+  json += "\"sdkVersion\":\"VST 2.4\",";
+  json += "\"isShellChild\":" +
+          std::string(entry.is_shell_child ? "true" : "false") + ",";
+  json += "\"sdkMetadataLoaded\":true}";
+}
 
 } // namespace
 
@@ -602,6 +869,102 @@ extern "C" SpherePluginHostString sphere_clap_scan_path_json(const char* path) {
     for (; !ec && it != end; it.increment(ec)) {
       if (is_clap_plugin(it->path())) {
         append(it->path());
+        it.disable_recursion_pending();
+      }
+    }
+  }
+
+  json += "]";
+  return make_string(json);
+}
+
+extern "C" SpherePluginHostString sphere_vst2_scan_path_json(const char* path) {
+  if (!path) {
+    return make_string("[]");
+  }
+
+  const bool debug = std::getenv("SPHERE_PLUGIN_HOST_DEBUG") != nullptr;
+  std::filesystem::path root(path);
+  if (!std::filesystem::exists(root)) {
+    return make_string("[]");
+  }
+
+  std::string json = "[";
+  bool first = true;
+
+  const auto append = [&](const std::filesystem::path& plugin_path) {
+    if (debug) {
+      std::fprintf(stderr, "[SpherePluginHost] Scanning VST2: %s\n",
+                   plugin_path.string().c_str());
+    }
+
+    const auto executable_path = vst2_executable_path(plugin_path);
+    const auto arch_reason = vst2_arch_mismatch_reason(executable_path);
+    if (!arch_reason.empty()) {
+      append_fallback_entry(json, first, plugin_path, "VST2", arch_reason);
+      return;
+    }
+
+    SharedLibrary library(executable_path);
+    if (!library.valid()) {
+      // On Windows every `.dll` in a VST2 folder reaches here, including
+      // support libraries the plug-ins ship beside themselves. A load failure
+      // is only worth reporting once we know it is a VST2 module, which we
+      // cannot know without loading it — so stay silent rather than fill the
+      // browser with failures for files that were never plug-ins.
+      if (debug) {
+        std::fprintf(stderr, "[SpherePluginHost]   VST2 module load failed\n");
+      }
+      return;
+    }
+
+    auto entry = vst2_entry_point(library);
+    if (!entry) {
+      // Not a VST2 plug-in — just another DLL sitting in the folder. Skipping
+      // silently is the whole point of probing the export.
+      if (debug) {
+        std::fprintf(stderr,
+                     "[SpherePluginHost]   no VST2 entry point (not a plug-in)\n");
+      }
+      return;
+    }
+
+    std::vector<int32_t> shell_children;
+    Vst2ScanEntry scanned;
+    if (!vst2_read_entry(entry, 0, plugin_path, &scanned, &shell_children)) {
+      append_fallback_entry(json, first, plugin_path, "VST2",
+                            "VST2 entry point returned no valid AEffect");
+      return;
+    }
+
+    if (shell_children.empty()) {
+      append_vst2_entry(json, first, plugin_path, scanned);
+      return;
+    }
+
+    // A shell module is a container, not a plug-in: emit one row per
+    // sub-plug-in, each re-instantiated so its own name and category are real
+    // rather than the shell's.
+    for (const int32_t child_id : shell_children) {
+      Vst2ScanEntry child;
+      if (vst2_read_entry(entry, child_id, plugin_path, &child, nullptr)) {
+        append_vst2_entry(json, first, plugin_path, child);
+      }
+    }
+  };
+
+  if (std::filesystem::is_regular_file(root) || is_vst2_module(root)) {
+    append(root);
+  } else if (std::filesystem::is_directory(root)) {
+    std::error_code ec;
+    auto it = std::filesystem::recursive_directory_iterator(
+        root, std::filesystem::directory_options::skip_permission_denied, ec);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; !ec && it != end; it.increment(ec)) {
+      if (is_vst2_module(it->path())) {
+        append(it->path());
+        // A macOS `.vst` bundle holds its own executable; recursing into a
+        // matched bundle would report it twice.
         it.disable_recursion_pending();
       }
     }

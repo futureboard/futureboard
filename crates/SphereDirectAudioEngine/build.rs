@@ -61,7 +61,116 @@ fn main() {
     apply_vst3_platform_config(&mut build, &sdk_root, &bridge_root);
 
     build.compile("sphere_daux_vst3_processor");
+
+    build_vst2_bridge(&manifest_dir, &bridge_root);
+    build_clap_bridge(&manifest_dir, &bridge_root);
+
     napi_build::setup();
+}
+
+/// CLAP runtime bridge. Like the VST2 bridge it is its own static lib: it
+/// shares no Steinberg SDK sources with the VST3 bridge, only the
+/// platform-neutral native editor shell (`editor_windows.hpp`), whose
+/// implementation the VST3 build already links in.
+fn build_clap_bridge(manifest_dir: &std::path::Path, vst3_bridge_root: &std::path::Path) {
+    let root = manifest_dir.join("clapbridge");
+    let clap_root = manifest_dir.join("../../external/clap");
+
+    for name in &[
+        "include/sphere_daux_clap_processor.h",
+        "include/clap_processor_internal.hpp",
+        "src/clap_processor.cpp",
+        "src/clap_editor_windows.cpp",
+        "src/clap_editor_mac.mm",
+        "src/clap_editor_stub.cpp",
+    ] {
+        println!("cargo:rerun-if-changed={}", root.join(name).display());
+    }
+
+    // Baseline x64 — no /arch:AVX2 or target-cpu=native, same as the other
+    // bridges: the distributed plugin host must run on CPUs without AVX2.
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++20")
+        .flag_if_supported("/Zc:char8_t-")
+        .flag_if_supported("/EHsc")
+        .include(root.join("include"))
+        .include(clap_root.join("include"))
+        // For editor_windows.hpp — the shared native editor shell.
+        .include(vst3_bridge_root.join("include"))
+        .file(root.join("src/clap_processor.cpp"));
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "windows" => {
+            build.file(root.join("src/clap_editor_windows.cpp"));
+        }
+        "macos" => {
+            build
+                .flag("-fobjc-arc")
+                .file(root.join("src/clap_editor_mac.mm"));
+        }
+        _ => {
+            // Linux and anything else: CLAP plug-ins still load and process;
+            // only the embedded editor is stubbed out.
+            build.file(root.join("src/clap_editor_stub.cpp"));
+        }
+    }
+
+    build.compile("sphere_daux_clap_processor");
+}
+
+/// VST2 runtime bridge. Built as its own static lib because it shares no
+/// Steinberg SDK sources with the VST3 bridge — only the platform-neutral
+/// native editor shell (`editor_windows.hpp`), whose implementation is already
+/// linked in by the VST3 build above.
+fn build_vst2_bridge(manifest_dir: &std::path::Path, vst3_bridge_root: &std::path::Path) {
+    let root = manifest_dir.join("vst2bridge");
+
+    for name in &[
+        "include/sphere_vst2_abi.h",
+        "include/sphere_daux_vst2_processor.h",
+        "include/vst2_processor_internal.hpp",
+        "src/vst2_processor.cpp",
+        "src/vst2_editor_windows.cpp",
+        "src/vst2_editor_mac.mm",
+        "src/vst2_editor_stub.cpp",
+    ] {
+        println!("cargo:rerun-if-changed={}", root.join(name).display());
+    }
+
+    // Baseline x64 — no /arch:AVX2 or target-cpu=native, same as the VST3
+    // bridge: the distributed plugin host must run on CPUs without AVX2.
+    let mut build = cc::Build::new();
+    build
+        .cpp(true)
+        .std("c++20")
+        .flag_if_supported("/Zc:char8_t-")
+        .flag_if_supported("/EHsc")
+        .include(root.join("include"))
+        // For editor_windows.hpp — the shared native editor shell.
+        .include(vst3_bridge_root.join("include"))
+        .file(root.join("src/vst2_processor.cpp"));
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "windows" => {
+            build.file(root.join("src/vst2_editor_windows.cpp"));
+        }
+        "macos" => {
+            build
+                .flag("-fobjc-arc")
+                .file(root.join("src/vst2_editor_mac.mm"));
+        }
+        _ => {
+            // Linux and anything else: create() reports "unsupported platform"
+            // and the editor entry points are inert stubs.
+            build.file(root.join("src/vst2_editor_stub.cpp"));
+        }
+    }
+
+    build.compile("sphere_daux_vst2_processor");
 }
 
 fn apply_vst3_platform_config(

@@ -610,6 +610,7 @@ fn format_chip(label: &'static str) -> impl IntoElement {
 fn plugin_format_label(slot: &InsertSlotState) -> &'static str {
     match slot.plugin_format.unwrap_or(InsertPluginFormat::Unknown) {
         InsertPluginFormat::Vst3 => "VST3",
+        InsertPluginFormat::Vst2 => "VST2",
         InsertPluginFormat::Clap => "CLAP",
         InsertPluginFormat::Au => "AU",
         InsertPluginFormat::Lv2 => "LV2",
@@ -631,5 +632,9 @@ fn plugin_state_label(slot: &InsertSlotState) -> String {
 }
 
 fn editor_available(slot: &InsertSlotState) -> bool {
-    matches!(slot.plugin_format, Some(InsertPluginFormat::Vst3)) && !slot.is_empty()
+    // Every module format has a native editor the host can embed.
+    matches!(
+        slot.plugin_format,
+        Some(InsertPluginFormat::Vst3 | InsertPluginFormat::Vst2 | InsertPluginFormat::Clap)
+    ) && !slot.is_empty()
 }
