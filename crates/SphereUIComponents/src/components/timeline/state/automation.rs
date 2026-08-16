@@ -18,6 +18,9 @@ pub struct AutomationPointDrag {
     /// Set once the point has actually moved, so a pure click (select only)
     /// never marks the project dirty.
     pub moved: bool,
+    /// Lane snapshot taken before the gesture, so the whole drag collapses into
+    /// one undo entry rather than one per frame (or none at all).
+    pub undo_before: Vec<AutomationLaneState>,
 }
 
 /// In-flight automation curve-tension drag. Shapes one segment by adjusting the
@@ -35,6 +38,8 @@ pub struct AutomationCurveDrag {
     pub start_value: f32,
     /// Set once tension actually changed, so a pure click never dirties.
     pub changed: bool,
+    /// Lane snapshot taken before the gesture. See [`AutomationPointDrag`].
+    pub undo_before: Vec<AutomationLaneState>,
 }
 
 /// Transient hover state for an automation lane — which point or curve segment
@@ -1033,6 +1038,42 @@ impl TimelineState {
         let playhead = self.transport.playhead_beats;
         self.recompute_effective_volumes(playhead, "lanes_clear_all");
         removed
+    }
+
+    /// Every automation lane on `track_id`, cloned for an undo snapshot.
+    ///
+    /// Taken once at the start and once at the end of a gesture — never
+    /// per-frame — so the clone cost is a gesture-rate concern, not a drag-rate
+    /// one.
+    pub fn capture_automation_lanes(&self, track_id: &str) -> Vec<AutomationLaneState> {
+        self.tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .map(|t| t.automation_lanes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace a track's automation lanes wholesale. The undo/redo counterpart
+    /// to [`Self::capture_automation_lanes`]; keeps the selected target valid
+    /// and recomputes effective volumes so playback follows the restored curve.
+    pub fn set_track_automation_lanes(&mut self, track_id: &str, lanes: Vec<AutomationLaneState>) {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return;
+        };
+        track.automation_lanes = lanes;
+        // A restored lane set may no longer contain the selected target (undoing
+        // the creation of the lane that was selected), so re-point it rather
+        // than leaving a selection that resolves to nothing.
+        let selected_still_present = track
+            .selected_automation_target
+            .as_ref()
+            .is_some_and(|t| track.automation_lanes.iter().any(|l| l.target == *t));
+        if !selected_still_present {
+            track.selected_automation_target =
+                track.automation_lanes.first().map(|l| l.target.clone());
+        }
+        let playhead = self.transport.playhead_beats;
+        self.recompute_effective_volumes(playhead, "automation_lanes_restore");
     }
 
     /// Last touched VST3 parameter for `track_id`, if any.

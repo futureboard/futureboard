@@ -154,6 +154,10 @@ pub struct Timeline {
     on_media_changed: Option<TimelineProjectChangedCb>,
     on_add_track: Option<TimelineAddTrackCb>,
     on_plugin_preset_drop: Option<TimelinePluginPresetDropCb>,
+    /// Asks the owner to confirm what a dropped MIDI file should bring in
+    /// besides its notes. Unset (tests, embedded editors) imports everything,
+    /// which is what a drop did before the dialog existed.
+    on_midi_import_prompt: Option<TimelineMidiImportPromptCb>,
     /// Window-space position of the last drag-move event while files are
     /// being dragged. We need this because `on_drop::<ExternalPaths>` does
     /// not carry the drop position itself — gpui translates the submit into
@@ -297,6 +301,24 @@ pub type TimelineAddTrackCb =
 pub type TimelinePluginPresetDropCb = std::sync::Arc<
     dyn Fn(&(std::path::PathBuf, String), &mut gpui::Window, &mut gpui::App) + 'static,
 >;
+
+/// A dropped MIDI file that carries optional payload (markers, controller
+/// lanes, SysEx), parked until the user says what to bring in.
+///
+/// Carries the resolved lane coordinates rather than relying on
+/// `last_drag_position`, which is cleared as soon as the drop is handled — the
+/// clip still has to land where it was dropped when the dialog closes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineMidiImportPrompt {
+    pub path: std::path::PathBuf,
+    pub file_name: String,
+    pub summary: crate::components::timeline::midi_import::MidiImportSummary,
+    pub drop_x: f32,
+    pub drop_y: f32,
+}
+
+pub type TimelineMidiImportPromptCb =
+    std::sync::Arc<dyn Fn(&TimelineMidiImportPrompt, &mut gpui::Window, &mut gpui::App) + 'static>;
 
 pub type TimelineProjectChangedCb = std::sync::Arc<dyn Fn(&mut gpui::App) + 'static>;
 

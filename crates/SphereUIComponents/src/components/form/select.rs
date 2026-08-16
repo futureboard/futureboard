@@ -49,6 +49,16 @@ pub enum SelectMenuPlacement {
 /// the dialog footer, and any scroll container that would otherwise clip it.
 const SELECT_MENU_PRIORITY: usize = 100;
 
+/// Upper bound on the open menu's height.
+///
+/// The menu sizes itself to its options — a five-entry list is five rows tall,
+/// not a scroll box — so ordinary dropdowns never scroll. This is only a guard
+/// for lists long enough to run off the window (device and channel pickers can
+/// be dozens of entries): the menu is painted `deferred`, so without a cap the
+/// overflow would not be clipped, it would simply be unreachable. Roughly 13
+/// plain rows, which clears every fixed list in the app.
+const SELECT_MENU_MAX_HEIGHT: f32 = 420.0;
+
 pub fn select(
     id: &'static str,
     selected_id: Option<&str>,
@@ -194,7 +204,7 @@ pub fn select_with_placement_and_header(
                 .absolute()
                 .left_0()
                 .right_0()
-                .max_h(px(144.0))
+                .max_h(px(SELECT_MENU_MAX_HEIGHT))
                 .rounded_md()
                 .border(px(1.0))
                 .border_color(Colors::border_default())
@@ -342,4 +352,40 @@ pub fn select_dismiss_backdrop(
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             on_dismiss(&(), window, cx);
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Height of one plain option row: `min_h(24)` content plus `py(4)`.
+    const PLAIN_ROW_HEIGHT: f32 = 24.0 + 4.0 + 4.0;
+    /// The menu's own `p(4)` top and bottom.
+    const MENU_PADDING: f32 = 8.0;
+
+    fn menu_height_for(rows: usize) -> f32 {
+        MENU_PADDING + PLAIN_ROW_HEIGHT * rows as f32
+    }
+
+    /// Regression guard: the cap used to be 144px, which is 4 rows — so a
+    /// five-entry list (the keymap profile picker) scrolled and clipped its last
+    /// item instead of simply being five rows tall.
+    #[test]
+    fn ordinary_dropdowns_fit_without_scrolling() {
+        for rows in 1..=12 {
+            assert!(
+                menu_height_for(rows) <= SELECT_MENU_MAX_HEIGHT,
+                "{rows} options should size to content, not scroll (needs {}px)",
+                menu_height_for(rows)
+            );
+        }
+    }
+
+    /// The cap still has to engage somewhere: a `deferred` menu is not clipped
+    /// by the window, so an unbounded one would paint items off-screen where
+    /// they cannot be reached at all.
+    #[test]
+    fn very_long_lists_stay_bounded() {
+        assert!(menu_height_for(40) > SELECT_MENU_MAX_HEIGHT);
+    }
 }

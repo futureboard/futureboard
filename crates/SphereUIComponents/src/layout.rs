@@ -49,11 +49,13 @@ mod helpers;
 mod input_ops;
 mod inspector_ops;
 mod midi_export_ops;
+mod midi_import_ops;
 mod midi_input_router;
 mod mixer_ops;
 mod stem_extract_ops;
 pub(crate) use mixer_ops::{clone_track_for_mixer, clone_track_for_mixer_summary};
 pub(crate) mod plugin_bridge_runtime;
+mod plugin_load_progress;
 mod plugin_ops;
 mod plugin_picker_window;
 mod plugin_restore;
@@ -951,6 +953,28 @@ impl StudioLayout {
                             cx,
                             move |this, _window, cx| {
                                 this.apply_dropped_plugin_preset(&track_id, &preset_path, cx);
+                            },
+                        );
+                    },
+                )));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_midi_import_prompt_callback(Some(Arc::new(
+                    move |request, window, cx| {
+                        // Deferred for the same nested-update reason as the
+                        // other timeline callbacks: this fires from inside a
+                        // `Timeline::update`, and opening the dialog re-enters
+                        // the layout entity.
+                        let request = request.clone();
+                        StudioLayout::defer_update_in_window(
+                            &target,
+                            window,
+                            cx,
+                            move |this, _window, cx| {
+                                this.open_midi_import_dialog_for_drop(&request, cx);
                             },
                         );
                     },
@@ -2138,7 +2162,7 @@ impl StudioLayout {
             "file:export-arrangement" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }
-            "file:export-midi" => self.export_arrangement_midi_file(cx),
+            "file:export-midi" => self.open_export_midi_dialog(owner_bounds, cx),
             // Offered from the MIDI editor status bar and the arrangement's
             // clip context menu. Both mean "the clip in front of me", which is
             // the context clip in the arrangement and the selected clip in the

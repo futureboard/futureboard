@@ -36,6 +36,8 @@ pub mod menu_bar;
 pub mod menu_dropdown;
 pub mod message_box_dialog;
 pub mod midi_editor_window;
+pub mod midi_export_dialog;
+pub mod midi_import_dialog;
 pub mod mixer_master_strip_view;
 pub mod mixer_panel;
 pub mod mixer_panel_view;
@@ -144,6 +146,10 @@ pub use message_box_dialog::{
     MessageBoxResult, MessageBoxWindow, MESSAGE_BOX_WIDTH,
 };
 pub use midi_editor_window::{open_midi_editor_window, MidiEditorTarget, MidiEditorWindow};
+pub use midi_export_dialog::{
+    open_midi_export_dialog, MidiExportDialog, MidiExportDialogSetup, MidiExportTrackChoice,
+};
+pub use midi_import_dialog::{open_midi_import_dialog, MidiImportDialog, MidiImportDialogSetup};
 pub use mixer_master_strip_view::MixerMasterStripView;
 pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};

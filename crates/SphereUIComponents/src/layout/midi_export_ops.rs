@@ -12,25 +12,108 @@
 //! serialized from that owned snapshot, so no timeline entity is held across
 //! the file dialog await.
 
-use gpui::Context;
+use std::sync::Arc;
+
+use gpui::{Bounds, Context};
 
 use super::StudioLayout;
+use crate::components::midi_export_dialog::{
+    open_midi_export_dialog, MidiExportDialogSetup, MidiExportTrackChoice,
+};
 use crate::components::timeline::midi_export::{
-    build_arrangement_export, build_clip_export, MidiExport,
+    build_arrangement_export, build_clip_export, default_export_options, exportable_tracks,
+    loop_export_range, MidiExport, MidiExportOptions,
 };
 
 impl StudioLayout {
-    /// File ▸ Export MIDI File… — the whole arrangement, or the loop span when
-    /// looping is enabled.
-    pub(super) fn export_arrangement_midi_file(&mut self, cx: &mut Context<Self>) {
+    /// File ▸ Export MIDI File… — opens the options dialog; the export itself
+    /// runs when the user confirms.
+    pub(super) fn open_export_midi_dialog(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        // Focus an already-open dialog rather than spawning a second one.
+        if let Some(handle) = self.external_windows.export_midi.clone() {
+            if handle
+                .update(cx, |_w, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.export_midi = None;
+        }
         self.dismiss_menus_for_export();
+
+        // Snapshot under a short borrow: the dialog holds no timeline entity.
+        let (options, tracks, loop_range) = {
+            let state = &self.timeline.read(cx).state;
+            (
+                default_export_options(state),
+                exportable_tracks(state),
+                loop_export_range(state),
+            )
+        };
+        if tracks.is_empty() {
+            eprintln!("[MidiExport] arrangement has no MIDI content to export");
+        }
+
+        let setup = MidiExportDialogSetup {
+            options,
+            tracks: tracks
+                .into_iter()
+                .map(|(id, name)| MidiExportTrackChoice {
+                    id,
+                    name,
+                    selected: true,
+                })
+                .collect(),
+            has_loop_range: loop_range.is_some(),
+            loop_range_label: loop_range.map(|range| {
+                format!(
+                    "beats {:.0}–{:.0}",
+                    range.start_beats + 1.0,
+                    range.end_beats + 1.0
+                )
+            }),
+        };
+
+        let this = cx.entity().clone();
+        let on_export = Arc::new(
+            move |options: MidiExportOptions, _window: &mut gpui::Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |layout, cx| {
+                    layout.external_windows.export_midi = None;
+                    layout.run_arrangement_midi_export(options, cx);
+                });
+            },
+        );
+        let closed = cx.entity().clone();
+        let on_close = Arc::new(move |_window: &mut gpui::Window, cx: &mut gpui::App| {
+            let _ = closed.update(cx, |layout, _cx| {
+                layout.external_windows.export_midi = None;
+            });
+        });
+
+        let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
+            owner_bounds,
+            self.studio_window_bounds(cx),
+            cx,
+        );
+        match open_midi_export_dialog(owner_bounds, setup, on_export, on_close, cx) {
+            Ok(handle) => self.external_windows.export_midi = Some(handle),
+            Err(err) => eprintln!("[MidiExport] failed to open export dialog: {err}"),
+        }
+    }
+
+    /// Build and save with the options the dialog returned.
+    fn run_arrangement_midi_export(&mut self, options: MidiExportOptions, cx: &mut Context<Self>) {
         let project_name = self.project_session.name.clone();
         let export = {
             let state = &self.timeline.read(cx).state;
-            build_arrangement_export(state, &project_name)
+            build_arrangement_export(state, &project_name, &options)
         };
         if export.tracks.is_empty() {
-            eprintln!("[MidiExport] arrangement has no MIDI content to export");
+            eprintln!("[MidiExport] nothing selected to export");
         }
         self.save_midi_export(export, sanitize_file_stem(&project_name), cx);
     }

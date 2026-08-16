@@ -3,8 +3,9 @@
 use std::collections::VecDeque;
 
 use crate::components::timeline::timeline_state::{
-    AudioClipStretchState, ClipState, MidiArticulationEvent, MidiControllerKind,
-    MidiControllerPoint, MidiNoteState, SongTextEvent, TimelineState, TrackState,
+    AudioClipStretchState, AutomationLaneState, ClipState, MidiArticulationEvent,
+    MidiControllerKind, MidiControllerPoint, MidiNoteState, SongTextEvent, TimelineState,
+    TrackState,
 };
 
 /// Snapshot of a clip plus its owning track for undo/redo.
@@ -107,6 +108,17 @@ pub enum EditCommand {
         clip_id: String,
         prev: Vec<MidiNoteState>,
         next: Vec<MidiNoteState>,
+    },
+    /// Replace a track's automation lanes (point add / move / curve / delete,
+    /// and lane create / clear / remove / show-hide). One entry per gesture.
+    ///
+    /// Snapshots the whole `automation_lanes` vec rather than a single lane's
+    /// points because drawing the first point *creates* the lane — a
+    /// points-only command would leave an empty lane behind on undo.
+    SetTrackAutomationLanes {
+        track_id: String,
+        prev: Vec<AutomationLaneState>,
+        next: Vec<AutomationLaneState>,
     },
     /// Replace a controller lane's points (draw / erase gesture). One entry per
     /// gesture; `prev`/`next` are full point snapshots of the lane.
@@ -234,6 +246,7 @@ impl EditCommand {
                 }
             }
             EditCommand::EditMidiNotes { .. } => "Edit MIDI Notes",
+            EditCommand::SetTrackAutomationLanes { .. } => "Edit Automation",
             EditCommand::SetControllerPoints { .. } => "Edit CC Lane",
             EditCommand::SetMidiArticulations { .. } => "Edit Articulations",
             EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
@@ -334,6 +347,9 @@ impl EditCommand {
             }
             EditCommand::EditMidiNotes { clip_id, next, .. } => {
                 state.overwrite_midi_notes(clip_id, next);
+            }
+            EditCommand::SetTrackAutomationLanes { track_id, next, .. } => {
+                state.set_track_automation_lanes(track_id, next.clone());
             }
             EditCommand::SetControllerPoints {
                 clip_id,
@@ -464,6 +480,9 @@ impl EditCommand {
             }
             EditCommand::EditMidiNotes { clip_id, prev, .. } => {
                 state.overwrite_midi_notes(clip_id, prev);
+            }
+            EditCommand::SetTrackAutomationLanes { track_id, prev, .. } => {
+                state.set_track_automation_lanes(track_id, prev.clone());
             }
             EditCommand::SetControllerPoints {
                 clip_id,
@@ -651,6 +670,131 @@ mod inspector_gesture_command_tests {
         assert!(!history.undo(&mut state), "one drag must create one entry");
         assert!(history.redo(&mut state));
         assert!((state.find_track(&track_id).unwrap().pan - 0.6).abs() < 1.0e-6);
+    }
+
+    /// Set up a track with one volume automation lane holding `beats` points.
+    fn track_with_automation(beats: &[f32]) -> (TimelineState, String, String) {
+        use crate::components::timeline::timeline_state::AutomationTarget;
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_audio_track();
+        let lane_id = state
+            .ensure_automation_lane(&track_id, AutomationTarget::TrackVolume)
+            .expect("lane");
+        for beat in beats {
+            state.add_automation_point(&track_id, &lane_id, *beat, 0.5);
+        }
+        (state, track_id, lane_id)
+    }
+
+    fn point_count(state: &TimelineState, track_id: &str, lane_id: &str) -> usize {
+        state
+            .automation_lane(track_id, lane_id)
+            .map(|lane| lane.points.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn automation_point_edits_are_undoable_and_redoable() {
+        let (mut state, track_id, lane_id) = track_with_automation(&[0.0, 1.0]);
+        let prev = state.capture_automation_lanes(&track_id);
+        assert_eq!(point_count(&state, &track_id, &lane_id), 2);
+
+        // A drag-style edit: mutate live, then record the result.
+        state.add_automation_point(&track_id, &lane_id, 2.0, 0.9);
+        let next = state.capture_automation_lanes(&track_id);
+        assert_eq!(point_count(&state, &track_id, &lane_id), 3);
+
+        let mut history = EditHistory::new(8);
+        history.push(EditCommand::SetTrackAutomationLanes {
+            track_id: track_id.clone(),
+            prev,
+            next,
+        });
+
+        assert!(history.undo(&mut state));
+        assert_eq!(point_count(&state, &track_id, &lane_id), 2);
+        assert!(!history.undo(&mut state), "one gesture is one entry");
+        assert!(history.redo(&mut state));
+        assert_eq!(point_count(&state, &track_id, &lane_id), 3);
+    }
+
+    #[test]
+    fn undoing_the_first_point_removes_the_lane_it_created() {
+        use crate::components::timeline::timeline_state::AutomationTarget;
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_audio_track();
+        // Baseline captured before the lane exists — this is the case a
+        // points-only command could not express.
+        let prev = state.capture_automation_lanes(&track_id);
+        assert!(prev.is_empty());
+
+        let lane_id = state
+            .ensure_automation_lane(&track_id, AutomationTarget::TrackVolume)
+            .expect("lane");
+        state.add_automation_point(&track_id, &lane_id, 0.0, 0.75);
+        let next = state.capture_automation_lanes(&track_id);
+
+        let mut history = EditHistory::new(8);
+        history.push(EditCommand::SetTrackAutomationLanes {
+            track_id: track_id.clone(),
+            prev,
+            next,
+        });
+        assert!(history.undo(&mut state));
+        assert!(
+            state.capture_automation_lanes(&track_id).is_empty(),
+            "undo must remove the lane, not leave it empty"
+        );
+        assert!(history.redo(&mut state));
+        assert_eq!(point_count(&state, &track_id, &lane_id), 1);
+    }
+
+    #[test]
+    fn clearing_and_removing_lanes_is_undoable() {
+        let (mut state, track_id, lane_id) = track_with_automation(&[0.0, 1.0, 2.0]);
+        let mut history = EditHistory::new(8);
+
+        let prev = state.capture_automation_lanes(&track_id);
+        assert!(state.clear_automation_lane(&track_id, &lane_id) > 0);
+        history.push(EditCommand::SetTrackAutomationLanes {
+            track_id: track_id.clone(),
+            prev,
+            next: state.capture_automation_lanes(&track_id),
+        });
+        assert_eq!(point_count(&state, &track_id, &lane_id), 0);
+        assert!(history.undo(&mut state));
+        assert_eq!(point_count(&state, &track_id, &lane_id), 3);
+
+        let prev = state.capture_automation_lanes(&track_id);
+        assert!(state.remove_automation_lane(&track_id, &lane_id));
+        history.push(EditCommand::SetTrackAutomationLanes {
+            track_id: track_id.clone(),
+            prev,
+            next: state.capture_automation_lanes(&track_id),
+        });
+        assert!(state.automation_lane(&track_id, &lane_id).is_none());
+        assert!(history.undo(&mut state));
+        assert_eq!(point_count(&state, &track_id, &lane_id), 3);
+    }
+
+    #[test]
+    fn restoring_lanes_keeps_the_selected_target_valid() {
+        use crate::components::timeline::timeline_state::AutomationTarget;
+        let (mut state, track_id, lane_id) = track_with_automation(&[0.0]);
+        state.set_track_automation_target(&track_id, AutomationTarget::TrackVolume);
+
+        let prev = state.capture_automation_lanes(&track_id);
+        assert!(state.remove_automation_lane(&track_id, &lane_id));
+        // The selected target pointed at the lane that just went away; it must
+        // not be left dangling after a restore either.
+        state.set_track_automation_lanes(&track_id, prev);
+        let track = state.find_track(&track_id).unwrap();
+        assert!(track
+            .selected_automation_target
+            .as_ref()
+            .is_some_and(|t| track.automation_lanes.iter().any(|l| l.target == *t)));
     }
 
     #[test]

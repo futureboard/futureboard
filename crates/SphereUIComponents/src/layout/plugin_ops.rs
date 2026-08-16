@@ -79,6 +79,10 @@ pub(crate) struct PluginEditorWindows {
     /// the cap, the editor open is forced terminal (spec `[EDITOR_LOOP_GUARD]`)
     /// so a re-queue source can never spin forever.
     pub flush_attempts: std::collections::HashMap<String, u32>,
+    /// Plug-in instances the host is still loading, as
+    /// `(plugin_instance_id, display_name)` in the order they were added.
+    /// Drives the indeterminate load dialog; empty closes it.
+    pub loading: Vec<(String, String)>,
 }
 
 impl PluginEditorWindows {
@@ -342,6 +346,7 @@ impl StudioLayout {
                     if let Ok(mut bridge) = runtime.lock() {
                         bridge.mark_plugin_loaded(&plugin_instance_id);
                     }
+                    self.end_plugin_load_progress(&plugin_instance_id, cx);
                     changed |= self.on_bridge_plugin_host_ready(
                         &plugin_instance_id,
                         &name,
@@ -361,6 +366,7 @@ impl StudioLayout {
                     if let Ok(mut bridge) = runtime.lock() {
                         bridge.mark_plugin_loaded(&plugin_instance_id);
                     }
+                    self.end_plugin_load_progress(&plugin_instance_id, cx);
                     changed |= self.on_bridge_plugin_host_ready(
                         &plugin_instance_id,
                         &name,
@@ -431,6 +437,7 @@ impl StudioLayout {
                     if let Ok(mut bridge) = runtime.lock() {
                         bridge.mark_plugin_load_failed(&plugin_instance_id);
                     }
+                    self.end_plugin_load_progress(&plugin_instance_id, cx);
                     if let Some(engine) = self.audio_bridge.engine.as_ref() {
                         let _ = engine.set_plugin_bridge_sink(plugin_instance_id.clone(), None);
                     }
@@ -487,6 +494,8 @@ impl StudioLayout {
                 }
                 ClientEvent::Disconnected => {
                     eprintln!("[plugin-runtime] external bridge host disconnected");
+                    // Nothing in flight will report back through a dead host.
+                    self.cancel_all_plugin_load_progress(cx);
                 }
                 ClientEvent::Host(HostEvent::AudioBridgeConfigured {
                     sample_rate,
@@ -3008,6 +3017,14 @@ impl StudioLayout {
                     PluginRuntimeBackend, PluginRuntimeState,
                 };
                 eprintln!("[plugin-runtime] backend=external_bridge reason=forced_default");
+                // Effects and instruments both load through the bridge, so both
+                // get the indeterminate load dialog — a click that appears to do
+                // nothing for ten seconds is the confusing part, not the format.
+                // Built-ins are excluded: they come up in milliseconds, and a
+                // dialog that only flashes is noise rather than reassurance.
+                if !is_builtin {
+                    self.begin_plugin_load_progress(&slot_id, &log_display_name, cx);
+                }
                 self.open_loading_editor_for_bound_insert(
                     &track_id,
                     &slot_id,
@@ -3057,6 +3074,7 @@ impl StudioLayout {
                         // the audio engine so plugin DSP output mixes into the
                         // master (gated by FUTUREBOARD_PLUGIN_BRIDGE_AUDIO).
                         let mut bridge_sink = None;
+                        let mut load_dispatch_failed = false;
                         match runtime.lock() {
                             Ok(mut runtime) => {
                                 let load_result = if is_builtin {
@@ -3092,6 +3110,7 @@ impl StudioLayout {
                                 };
                                 if let Err(error) = load_result {
                                     eprintln!("[plugin-runtime] external bridge LoadPlugin failed: {error}");
+                                    load_dispatch_failed = true;
                                     let _ = self.timeline.update(cx, |timeline, _cx| {
                                         timeline.state.set_insert_runtime(
                                             &track_id,
@@ -3107,7 +3126,14 @@ impl StudioLayout {
                             }
                             Err(_) => {
                                 eprintln!("[plugin-runtime] external bridge runtime lock poisoned");
+                                load_dispatch_failed = true;
                             }
+                        }
+                        // The request never reached the host, so no PluginLoaded
+                        // / PluginLoadFailed will ever arrive to take the dialog
+                        // down. Close it here instead of leaving it spinning.
+                        if load_dispatch_failed {
+                            self.end_plugin_load_progress(&slot_id, cx);
                         }
                         crate::forensic_trace::log_trace_plugin(&track_id, &slot_id);
                         let timeline_state = self.timeline.read(cx).state.clone();
@@ -3135,6 +3161,7 @@ impl StudioLayout {
                         eprintln!(
                             "[plugin-runtime] refusing in-process fallback while bridge is enabled"
                         );
+                        self.end_plugin_load_progress(&slot_id, cx);
                         let _ = self.timeline.update(cx, |timeline, _cx| {
                             timeline.state.set_insert_runtime(
                                 &track_id,
@@ -3440,10 +3467,24 @@ impl StudioLayout {
                 .find_insert_slot(track_id, slot_id)
                 .map(|slot| slot.display_name.clone())
                 .unwrap_or_else(|| "Plugin".to_string());
+            // Built-ins load instantly (see `apply_plugin_pick`) — no dialog.
+            let is_builtin = self
+                .timeline
+                .read(cx)
+                .state
+                .find_insert_slot(track_id, slot_id)
+                .and_then(|slot| slot.plugin_id.clone())
+                .is_some_and(|id| SpherePluginHost::builtin_audio_bridge_supported(&id));
+            if !is_builtin {
+                self.begin_plugin_load_progress(slot_id, &display_name, cx);
+            }
             self.open_loading_editor_for_bound_insert(track_id, slot_id, &display_name, None, cx);
             if self.load_bridge_insert_for_slot(track_id, slot_id, cx) {
                 return;
             }
+            // The load was never dispatched, so no host event will close the
+            // dialog.
+            self.end_plugin_load_progress(slot_id, cx);
         }
         self.mark_dirty();
         self.audio_bridge.project_dirty = true;

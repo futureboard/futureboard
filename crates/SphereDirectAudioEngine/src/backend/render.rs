@@ -737,14 +737,13 @@ pub fn drain_commands(
                 if callback_debug_enabled() {
                     eprintln!("[DAUx] SetTrackMute track={track_id} muted={muted}");
                 }
-                // Scoped note-off (mirrors the cpal path): only newly-inaudible
-                // tracks release notes; other tracks keep sounding.
+                // No note-off (mirrors the cpal path): the render pass keeps a
+                // muted/unsoloed track's instrument running under the silence,
+                // so its notes play on and resume audibly on release.
                 runtime.update_track_mute(&track_id, muted);
-                runtime.notes_off_for_inaudible_tracks("track_mute");
             }
             EngineCommand::SetTrackSolo { track_id, solo } => {
                 runtime.update_track_solo(&track_id, solo);
-                runtime.notes_off_for_inaudible_tracks("track_solo");
             }
             EngineCommand::SetTrackInputState {
                 track_index,

@@ -2296,55 +2296,6 @@ impl RuntimeProject {
         }
     }
 
-    /// Release active notes only on tracks that are currently *inaudible*
-    /// under the manual mute/solo state — the scoped alternative to
-    /// [`Self::all_notes_off`] for live mute/solo toggles, so flipping one
-    /// track's mute no longer cuts every sounding voice in the project.
-    ///
-    /// Audibility mirrors the scheduling predicate in the render pass (manual
-    /// mute, global solo, soloed multi-out child keeps the parent alive).
-    /// Mute *automation* is intentionally not consulted here: this runs on a
-    /// discrete toggle command, not per block. Runs on the audio thread —
-    /// no allocation (take/restore keeps each Vec's capacity), no locks.
-    pub fn notes_off_for_inaudible_tracks(&mut self, reason: &str) {
-        let debug = midi_engine_debug_enabled();
-        for mt_ix in 0..self.midi_tracks.len() {
-            if self.midi_tracks[mt_ix].active.is_empty()
-                && self.midi_tracks[mt_ix].preview_active.is_empty()
-            {
-                continue;
-            }
-            let audible = match self.midi_tracks[mt_ix].track_index {
-                Some(ti) => {
-                    let manual_muted = self.tracks.get(ti).is_some_and(|t| t.muted);
-                    let solo_silenced = self.has_solo
-                        && self.tracks.get(ti).is_some_and(|t| !t.solo)
-                        && !has_soloed_vsti_output_child(self, ti);
-                    !manual_muted && !solo_silenced
-                }
-                // Unresolved track: nothing routes its notes anyway.
-                None => true,
-            };
-            if audible {
-                continue;
-            }
-            let mut active = std::mem::take(&mut self.midi_tracks[mt_ix].active);
-            if debug {
-                eprintln!(
-                    "[MidiPanic] track={} reason={} active_notes_cleared={} scope=inaudible",
-                    self.midi_tracks[mt_ix].track_id,
-                    reason,
-                    active.len()
-                );
-            }
-            let track_index = self.midi_tracks[mt_ix].track_index;
-            push_all_notes_off_for_track(self, track_index, &active, 0);
-            active.clear();
-            self.midi_tracks[mt_ix].active = active;
-            self.midi_tracks[mt_ix].preview_active.clear();
-        }
-    }
-
     /// Schedule the MIDI events that fall inside `[base_sample, base_sample +
     /// frames)`. Runs once per audio block from the callback. No heap
     /// allocation on the steady-state path (event lists are preallocated; the
@@ -4495,10 +4446,10 @@ mod midi_tests {
     }
 
     #[test]
-    fn mute_note_off_is_scoped_to_the_muted_track() {
-        // Two MIDI tracks with identical note timing. Muting track-1 must
-        // release only track-1's notes; track-2 keeps sounding (the old global
-        // all_notes_off cut both).
+    fn mute_and_solo_leave_sounding_notes_alone() {
+        // Mute/solo silence a track's output, not its instrument: neither may
+        // release the notes that are already sounding, and scheduling keeps
+        // running underneath so the parts stay in sync with the transport.
         let mut clip2 = clip_with_one_note();
         clip2.id = "mc2".into();
         clip2.track_id = "track-2".into();
@@ -4514,40 +4465,21 @@ mod midi_tests {
         assert_eq!(p.midi_tracks[1].active.len(), 1);
 
         p.update_track_mute("track-1", true);
-        p.notes_off_for_inaudible_tracks("track_mute");
-        assert!(p.midi_tracks[0].active.is_empty());
+        assert_eq!(p.midi_tracks[0].active.len(), 1, "mute must not cut notes");
         assert_eq!(p.midi_tracks[1].active.len(), 1);
 
-        // Unmuting must not kill anything.
         p.update_track_mute("track-1", false);
-        p.notes_off_for_inaudible_tracks("track_mute");
+        p.update_track_solo("track-2", true);
+        assert_eq!(
+            p.midi_tracks[0].active.len(),
+            1,
+            "soloing another track must not cut this one's notes"
+        );
         assert_eq!(p.midi_tracks[1].active.len(), 1);
-    }
 
-    #[test]
-    fn solo_note_off_silences_only_unsoloed_tracks() {
-        let mut clip2 = clip_with_one_note();
-        clip2.id = "mc2".into();
-        clip2.track_id = "track-2".into();
-        let mut p = project_with(vec![clip_with_one_note(), clip2]);
-        p.tracks = vec![
-            bridged_instrument_track("track-1"),
-            bridged_instrument_track("track-2"),
-        ];
-        p.resolve_indices();
-        p.reset_midi_playback(96_000);
-        p.schedule_midi_block(96_000, 512);
-
-        p.update_track_solo("track-1", true);
-        p.notes_off_for_inaudible_tracks("track_solo");
-        // Soloed track keeps its notes; the other track is silenced.
+        p.update_track_solo("track-2", false);
         assert_eq!(p.midi_tracks[0].active.len(), 1);
-        assert!(p.midi_tracks[1].active.is_empty());
-
-        // Releasing solo makes everything audible again — no further kills.
-        p.update_track_solo("track-1", false);
-        p.notes_off_for_inaudible_tracks("track_solo");
-        assert_eq!(p.midi_tracks[0].active.len(), 1);
+        assert_eq!(p.midi_tracks[1].active.len(), 1);
     }
 
     #[test]

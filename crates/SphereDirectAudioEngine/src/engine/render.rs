@@ -554,6 +554,36 @@ fn process_track_block(
     route_main_output(runtime, track_index, frames, output, channels);
 }
 
+/// Keep an inaudible track's hosted instrument running, then throw the audio
+/// away.
+///
+/// Mute and solo silence a track's **output**, not its instrument. Skipping the
+/// chain outright meant the block's MIDI was never delivered: a note that
+/// started while the track was muted (or while another track was soloed) was
+/// dropped for good, and a note already sounding froze mid-voice instead of
+/// playing on underneath. Running the chain and clearing the block before
+/// sends, fader, meters, and routing keeps the notes moving with the transport
+/// while nothing reaches the mix — so lifting the mute or solo drops back in
+/// mid-phrase instead of restarting or staying silent.
+///
+/// Tracks with no instrument route hold no note state, so they stay skipped and
+/// cost nothing. Realtime-safe: same work the audible path already does, plus
+/// two slice fills.
+fn render_inaudible_instrument_block(
+    runtime: &mut RuntimeProject,
+    track_index: usize,
+    frames: usize,
+    transport: RuntimeTransportContext,
+) {
+    let track = &mut runtime.tracks[track_index];
+    if track.midi_instrument_insert_ix.is_none() && track.soundfont_player.is_none() {
+        return;
+    }
+    apply_track_chain_block(track, frames, transport);
+    track.block_l[..frames].fill(0.0);
+    track.block_r[..frames].fill(0.0);
+}
+
 /// Add the source track's block (`block_*`, holding either the post-insert or
 /// post-fader signal depending on `pre_fader`) into each accepted send target's
 /// receive buffer (`recv_*`), scaled by the send level. Only sends whose
@@ -1134,6 +1164,7 @@ fn render_project_block_interleaved_core(
                 && !runtime.tracks[track_index].solo
                 && !has_soloed_vsti_output_child(runtime, track_index))
         {
+            render_inaudible_instrument_block(runtime, track_index, frames, transport);
             continue;
         }
         if callback_debug_enabled()
@@ -2963,6 +2994,96 @@ mod soundfont_instrument_tests {
         runtime.fader_smoothing = false;
         runtime.midi_preview_note_on("sf-1", 0, 60, 100);
         assert!(render_peak(&mut runtime) < 1.0e-6);
+    }
+
+    /// One block plus the per-callback `midi_block_events` clear the real
+    /// backends do after rendering, so a queued preview note is delivered once
+    /// rather than re-triggered every block.
+    fn render_peak_consuming_events(runtime: &mut RuntimeProject) -> f32 {
+        let peak = render_peak(runtime);
+        for track in &mut runtime.tracks {
+            track.midi_block_events.clear();
+        }
+        peak
+    }
+
+    #[test]
+    fn a_muted_instrument_track_keeps_its_voices_running_underneath() {
+        // Mute/solo silence the output, not the instrument. Under the old skip
+        // the muted track never processed its block, so the note-on was
+        // dropped with that block's events and unmuting produced silence until
+        // the next note. Now the voice runs (and its attack advances) under the
+        // mute, so lifting it lands mid-note.
+        let font = FontFile::new("mute-continuity");
+        let envelope = SoundfontEnvelope {
+            attack_ms: 250.0,
+            ..SoundfontEnvelope::default()
+        };
+        let mut muted = runtime_with_shaping(
+            &font,
+            test_font::MELODIC_PRESET,
+            envelope,
+            SoundfontRenderQuality::Standard,
+        );
+        muted.fader_smoothing = false;
+        muted.tracks[0].muted = true;
+        muted.midi_preview_note_on("sf-1", 0, 60, 100);
+
+        // ~0.25 s of muted playback: nothing audible, but the note is running.
+        let blocks = (SAMPLE_RATE as f32 * 0.25 / FRAMES as f32).ceil() as usize;
+        for _ in 0..blocks {
+            assert!(
+                render_peak_consuming_events(&mut muted) < 1.0e-6,
+                "a muted track must stay silent"
+            );
+        }
+        muted.tracks[0].muted = false;
+        let resumed = render_peak_consuming_events(&mut muted);
+        assert!(resumed > 0.001, "unmuting must resume the sounding note");
+
+        // Same note started fresh at that moment would still be inside its
+        // attack, so "resumed mid-note" has to be clearly louder than "restarted".
+        let mut restarted = runtime_with_shaping(
+            &font,
+            test_font::MELODIC_PRESET,
+            envelope,
+            SoundfontRenderQuality::Standard,
+        );
+        restarted.fader_smoothing = false;
+        restarted.midi_preview_note_on("sf-1", 0, 60, 100);
+        let first_block = render_peak_consuming_events(&mut restarted);
+        assert!(
+            resumed > first_block * 2.0,
+            "the muted voice must have advanced its attack: resumed={resumed} restart={first_block}"
+        );
+    }
+
+    #[test]
+    fn a_soloed_track_does_not_stop_another_tracks_notes() {
+        let font = FontFile::new("solo-continuity");
+        let mut runtime = build_runtime(vec![
+            soundfont_track("sf-1", &font, test_font::MELODIC_PRESET),
+            soundfont_track("sf-2", &font, test_font::MELODIC_PRESET),
+            master_track(),
+        ]);
+        runtime.fader_smoothing = false;
+
+        // Solo the *other* track, then start a note on this one — exactly what
+        // happens when the transport rolls into a new phrase while something
+        // else is soloed. The old skip threw the note-on away with the block's
+        // events, so releasing solo produced silence until the next note.
+        runtime.update_track_solo("sf-2", true);
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(
+            render_peak_consuming_events(&mut runtime) < 1.0e-6,
+            "an unsoloed track must be silent"
+        );
+
+        runtime.update_track_solo("sf-2", false);
+        assert!(
+            render_peak_consuming_events(&mut runtime) > 0.001,
+            "releasing solo must reveal the note that started under it"
+        );
     }
 
     #[test]

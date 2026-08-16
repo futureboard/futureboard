@@ -178,6 +178,7 @@ impl Timeline {
             on_media_changed: None,
             on_add_track: None,
             on_plugin_preset_drop: None,
+            on_midi_import_prompt: None,
             last_drag_position: None,
             file_drop_hint: None,
             clip_clone_hint: None,
@@ -230,6 +231,7 @@ impl Timeline {
             on_media_changed: None,
             on_add_track: None,
             on_plugin_preset_drop: None,
+            on_midi_import_prompt: None,
             last_drag_position: None,
             file_drop_hint: None,
             clip_clone_hint: None,
@@ -282,6 +284,32 @@ impl Timeline {
         self.edit_history.push(cmd);
         self.mark_control_state_changed(cx);
         cx.notify();
+    }
+
+    /// Record an automation edit that has already been applied, given the lane
+    /// snapshot taken before it.
+    ///
+    /// No-ops when the lanes are unchanged, so a gesture that ended up doing
+    /// nothing (a click that selected but moved nothing, a clear on an empty
+    /// lane) never buries a real edit under a dead undo step.
+    pub fn record_automation_lanes_edit(
+        &mut self,
+        track_id: &str,
+        prev: Vec<crate::components::timeline::timeline_state::AutomationLaneState>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let next = self.state.capture_automation_lanes(track_id);
+        if next == prev {
+            return;
+        }
+        self.record_executed_command(
+            EditCommand::SetTrackAutomationLanes {
+                track_id: track_id.to_string(),
+                prev,
+                next,
+            },
+            cx,
+        );
     }
 
     /// Record a command whose effect has already been applied to the state
@@ -452,6 +480,13 @@ impl Timeline {
         callback: Option<TimelinePluginPresetDropCb>,
     ) {
         self.on_plugin_preset_drop = callback;
+    }
+
+    pub fn set_midi_import_prompt_callback(
+        &mut self,
+        callback: Option<TimelineMidiImportPromptCb>,
+    ) {
+        self.on_midi_import_prompt = callback;
     }
 
     pub fn set_project_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
@@ -924,6 +959,10 @@ impl Timeline {
         if self.state.track_lane_mode(track_id) != TrackLaneMode::Automation {
             return;
         }
+        // Undo baseline for whatever this gesture turns out to be. Captured
+        // before any mutation because drawing the first point *creates* the
+        // lane, and undo has to remove it again.
+        let lanes_before = self.state.capture_automation_lanes(track_id);
         // Focus the editor on the clicked lane and make sure it exists.
         self.state.activate_automation_lane(track_id, lane_id);
         if self.state.automation_lane(track_id, lane_id).is_none() {
@@ -948,6 +987,7 @@ impl Timeline {
                 lane_id,
                 point_id,
                 moved: false,
+                undo_before: lanes_before,
             });
             cx.notify();
             return;
@@ -973,7 +1013,7 @@ impl Timeline {
                         .state
                         .reset_automation_segment_curve(track_id, &lane_id, left_id)
                     {
-                        self.mark_project_changed(cx);
+                        self.record_automation_lanes_edit(track_id, lanes_before.clone(), cx);
                     }
                     self.automation_hover = Some(AutomationHover {
                         track_id: track_id.to_string(),
@@ -993,6 +1033,7 @@ impl Timeline {
                         start_tension,
                         start_value: value,
                         changed: false,
+                        undo_before: lanes_before.clone(),
                     });
                     // Mark the segment active so the renderer shows the strong
                     // drag highlight (hover updates are suppressed during a drag).
@@ -1027,6 +1068,7 @@ impl Timeline {
                         lane_id,
                         point_id,
                         moved: true,
+                        undo_before: lanes_before,
                     });
                 }
                 cx.notify();
@@ -1131,13 +1173,16 @@ impl Timeline {
         let mut handled = false;
         if let Some(drag) = self.automation_drag.take() {
             if drag.moved {
-                self.mark_project_changed(cx);
+                // One history entry for the whole drag: the points were mutated
+                // live, so record the already-applied result rather than
+                // re-executing it.
+                self.record_automation_lanes_edit(&drag.track_id, drag.undo_before, cx);
             }
             handled = true;
         }
         if let Some(drag) = self.automation_curve_drag.take() {
             if drag.changed {
-                self.mark_project_changed(cx);
+                self.record_automation_lanes_edit(&drag.track_id, drag.undo_before, cx);
             }
             // Relax the strong drag highlight back to plain hover; the cursor is
             // still on the segment, so keep it hovered (next move re-tests).
@@ -1791,39 +1836,75 @@ impl Timeline {
         &mut self,
         path: &std::path::Path,
         force_new_track: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if !is_supported_midi_ext(path) {
             return false;
         }
-
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!(
-                    "[MidiImport] read failed path={} err={error}",
-                    path.display()
-                );
-                return false;
-            }
+        let Some(imported_tracks) = read_and_parse_midi_file(path) else {
+            return false;
         };
-        let imported_tracks = match super::super::midi_import::parse_smf_tracks(&bytes) {
-            Ok(imported) => imported,
-            Err(error) => {
-                eprintln!(
-                    "[MidiImport] parse failed path={} err={error}",
-                    path.display()
-                );
-                return false;
-            }
-        };
-        let clip_name = path
-            .file_stem()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "Imported MIDI".to_string());
         let (drop_x, drop_y) = self.drop_position_or_new_track(force_new_track);
+
+        // A file that carries markers, controller lanes, or SysEx goes through
+        // the import dialog first — a song file can ship hundreds of markers,
+        // and dropping them all onto the ruler unasked is what made this
+        // unusable. A plain note-only file has nothing to ask about, so it
+        // still lands on the drop.
+        let summary = super::super::midi_import::MidiImportSummary::of(&imported_tracks);
+        if summary.has_optional_payload() {
+            if let Some(prompt) = self.on_midi_import_prompt.clone() {
+                let request = TimelineMidiImportPrompt {
+                    path: path.to_path_buf(),
+                    file_name: midi_import_display_name(path),
+                    summary,
+                    drop_x,
+                    drop_y,
+                };
+                prompt(&request, window, cx);
+                return true;
+            }
+        }
+
+        self.apply_midi_import(
+            path,
+            imported_tracks,
+            super::super::midi_import::MidiImportOptions::default(),
+            drop_x,
+            drop_y,
+            cx,
+        )
+    }
+
+    /// Import a MIDI file with the options the import dialog returned, at the
+    /// lane coordinates its drop resolved to. Re-reads the file so nothing has
+    /// to be parked across the dialog.
+    pub fn import_midi_path_with_options(
+        &mut self,
+        path: &std::path::Path,
+        options: super::super::midi_import::MidiImportOptions,
+        drop_x: f32,
+        drop_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(imported_tracks) = read_and_parse_midi_file(path) else {
+            return false;
+        };
+        self.apply_midi_import(path, imported_tracks, options, drop_x, drop_y, cx)
+    }
+
+    fn apply_midi_import(
+        &mut self,
+        path: &std::path::Path,
+        mut imported_tracks: Vec<super::super::midi_import::ImportedMidiTrack>,
+        options: super::super::midi_import::MidiImportOptions,
+        drop_x: f32,
+        drop_y: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        super::super::midi_import::apply_import_options(&mut imported_tracks, options);
+        let clip_name = midi_import_display_name(path);
         let clips = self
             .state
             .import_midi_tracks_at(clip_name, imported_tracks, drop_x, drop_y);
@@ -1900,4 +1981,40 @@ impl Timeline {
             _ => (0.0, 1.0e9_f32),
         }
     }
+}
+
+/// Read and parse a Standard MIDI File, reporting the failing stage. `None`
+/// means nothing was imported — the caller falls through to the next handler.
+fn read_and_parse_midi_file(
+    path: &std::path::Path,
+) -> Option<Vec<crate::components::timeline::midi_import::ImportedMidiTrack>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "[MidiImport] read failed path={} err={error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    match crate::components::timeline::midi_import::parse_smf_tracks(&bytes) {
+        Ok(imported) => Some(imported),
+        Err(error) => {
+            eprintln!(
+                "[MidiImport] parse failed path={} err={error}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// File stem used both as the imported clip's base name and as the dialog's
+/// subject line.
+fn midi_import_display_name(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "Imported MIDI".to_string())
 }

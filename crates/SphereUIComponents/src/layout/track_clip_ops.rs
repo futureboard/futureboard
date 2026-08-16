@@ -199,8 +199,9 @@ impl StudioLayout {
                 if timeline.state.track_lane_mode(&track_id) == TrackLaneMode::Automation
                     && timeline.state.selected_automation_point_count(&track_id) > 0
                 {
+                    let prev = timeline.state.capture_automation_lanes(&track_id);
                     if timeline.state.delete_selected_automation_points(&track_id) > 0 {
-                        timeline.mark_project_changed(cx);
+                        timeline.record_automation_lanes_edit(&track_id, prev, cx);
                         cx.notify();
                     }
                     return;
@@ -584,8 +585,13 @@ impl StudioLayout {
                 return;
             }
             let _ = owner.update(cx, |this, cx| {
-                let removed = this.timeline.update(cx, |timeline, _cx| {
-                    timeline.state.clear_all_automation_lanes(&track_id)
+                let removed = this.timeline.update(cx, |timeline, cx| {
+                    let prev = timeline.state.capture_automation_lanes(&track_id);
+                    let removed = timeline.state.clear_all_automation_lanes(&track_id);
+                    if removed > 0 {
+                        timeline.record_automation_lanes_edit(&track_id, prev, cx);
+                    }
+                    removed
                 });
                 if removed > 0 {
                     this.mark_dirty();

@@ -215,6 +215,16 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::plugin_manager::PluginManagerWindow>>,
     /// Export Arrangement window.
     pub export_arrangement: Option<gpui::WindowHandle<crate::export::ExportArrangementWindow>>,
+    /// Export MIDI File options dialog.
+    pub export_midi:
+        Option<gpui::WindowHandle<crate::components::midi_export_dialog::MidiExportDialog>>,
+    /// Import MIDI File options dialog, opened by a drop that carries markers /
+    /// controller lanes / SysEx.
+    pub import_midi:
+        Option<gpui::WindowHandle<crate::components::midi_import_dialog::MidiImportDialog>>,
+    /// Indeterminate progress while a plug-in loads in the host process.
+    pub plugin_loading:
+        Option<gpui::WindowHandle<crate::components::progress_dialog::ProgressDialogWindow>>,
     /// Stem Extractor (MDX-NET) dialog window.
     pub stem_extractor:
         Option<gpui::WindowHandle<crate::components::stem_extractor_dialog::StemExtractorWindow>>,

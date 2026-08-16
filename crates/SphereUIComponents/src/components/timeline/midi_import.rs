@@ -41,6 +41,95 @@ pub struct ImportedMidiMarker {
     pub beat: f32,
 }
 
+/// What an import brings in besides the notes.
+///
+/// Notes are never optional — everything here is payload a file may carry in
+/// bulk (a type-0 song file routinely ships hundreds of markers and a dense
+/// CC/bend stream), which the import dialog offers per file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MidiImportOptions {
+    pub include_markers: bool,
+    /// CC, pitch bend, and channel pressure lanes.
+    pub include_controllers: bool,
+    pub include_sysex: bool,
+}
+
+impl Default for MidiImportOptions {
+    /// Everything — the behavior before the dialog existed.
+    fn default() -> Self {
+        Self {
+            include_markers: true,
+            include_controllers: true,
+            include_sysex: true,
+        }
+    }
+}
+
+impl MidiImportOptions {
+    pub const NOTES_ONLY: Self = Self {
+        include_markers: false,
+        include_controllers: false,
+        include_sysex: false,
+    };
+}
+
+/// How much of each optional payload a parsed file carries, so the import
+/// dialog can name the amount instead of asking about an unknown quantity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MidiImportSummary {
+    pub tracks: usize,
+    pub notes: usize,
+    pub markers: usize,
+    pub controller_lanes: usize,
+    pub controller_points: usize,
+    pub sysex_events: usize,
+}
+
+impl MidiImportSummary {
+    pub fn of(tracks: &[ImportedMidiTrack]) -> Self {
+        let mut summary = Self {
+            tracks: tracks.len(),
+            ..Self::default()
+        };
+        for track in tracks {
+            summary.notes += track.clip.notes.len();
+            summary.markers += track.clip.markers.len();
+            summary.controller_lanes += track.clip.controller_lanes.len();
+            summary.controller_points += track
+                .clip
+                .controller_lanes
+                .iter()
+                .map(|lane| lane.points.len())
+                .sum::<usize>();
+            summary.sysex_events += track.clip.sysex_events.len();
+        }
+        summary
+    }
+
+    /// True when the file carries something worth asking about. A plain
+    /// note-only export has nothing optional in it, so it still imports on the
+    /// drop without a dialog in the way.
+    pub fn has_optional_payload(&self) -> bool {
+        self.markers > 0 || self.controller_lanes > 0 || self.sysex_events > 0
+    }
+}
+
+/// Drop the payload the user turned off. Applied after parsing so the same
+/// parse answers both the dialog's counts and the import itself.
+pub fn apply_import_options(tracks: &mut [ImportedMidiTrack], options: MidiImportOptions) {
+    for track in tracks {
+        if !options.include_markers {
+            track.clip.markers.clear();
+        }
+        if !options.include_controllers {
+            track.clip.controller_lanes.clear();
+        }
+        if !options.include_sysex {
+            track.clip.sysex_events.clear();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MidiImportError {
     Truncated(&'static str),
@@ -108,22 +197,26 @@ pub fn parse_smf_tracks(data: &[u8]) -> Result<Vec<ImportedMidiTrack>, MidiImpor
         let len = r.read_u32()? as usize;
         let track_data = r.read_exact(len)?;
         let mut clip = empty_imported_clip();
+        let mut channel_lanes = ChannelControllerLanes::new();
         let mut track_name = None;
         let mut max_tick = 0u64;
         parse_track(
             track_data,
             ticks_per_beat,
             &mut clip.notes,
-            &mut clip.controller_lanes,
+            &mut channel_lanes,
             &mut clip.sysex_events,
             &mut clip.markers,
             &mut max_tick,
             &mut track_name,
         )?;
         clip.duration_beats = max_tick as f32 / ticks_per_beat as f32;
-        finalize_imported_clip(&mut clip, ticks_per_beat);
         let track_name = track_name.filter(|name| !name.is_empty());
-        imported_tracks.extend(split_imported_track_by_channel(track_name, clip));
+        imported_tracks.extend(split_imported_track_by_channel(
+            track_name,
+            clip,
+            &channel_lanes,
+        ));
     }
 
     Ok(imported_tracks)
@@ -162,9 +255,50 @@ fn finalize_imported_clip(clip: &mut ImportedMidiClip, _ticks_per_beat: u32) {
     clip.duration_beats = clip.duration_beats.max(note_end).max(controller_end);
 }
 
+/// Controller lanes gathered per source MIDI channel while one MTrk is parsed.
+///
+/// A clip's lane model is channel-less, so a type-0 file that packs several
+/// channels into a single MTrk has to keep the streams apart *here*. Handing
+/// every split clip the whole track's controller data gave each one every other
+/// channel's pitch bend, which detunes the notes it does own — the reason a
+/// dragged-in multi-channel file played out of tune.
+struct ChannelControllerLanes {
+    per_channel: [Vec<MidiControllerLane>; MidiChannel::COUNT as usize],
+}
+
+impl ChannelControllerLanes {
+    fn new() -> Self {
+        Self {
+            per_channel: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+
+    fn push(&mut self, channel: u8, kind: MidiControllerKind, beat: f32, value: f32) {
+        let lanes = &mut self.per_channel[(channel & 0x0f) as usize];
+        push_controller_point(lanes, kind, beat, value);
+    }
+
+    /// Only this channel's lanes — what a channel-split clip owns.
+    fn for_channel(&self, channel: MidiChannel) -> Vec<MidiControllerLane> {
+        self.per_channel[channel.raw() as usize].clone()
+    }
+
+    /// Every channel folded together. Used only when the track has no notes to
+    /// attribute the streams to (a conductor / controller-only track), where
+    /// dropping them would lose the data outright.
+    fn merged(&self) -> Vec<MidiControllerLane> {
+        let mut merged = Vec::new();
+        for lanes in &self.per_channel {
+            merge_controller_lanes(&mut merged, lanes.clone());
+        }
+        merged
+    }
+}
+
 fn split_imported_track_by_channel(
     track_name: Option<String>,
     clip: ImportedMidiClip,
+    channel_lanes: &ChannelControllerLanes,
 ) -> Vec<ImportedMidiTrack> {
     let mut channels: Vec<MidiChannel> = Vec::new();
     for note in &clip.notes {
@@ -175,6 +309,12 @@ fn split_imported_track_by_channel(
     channels.sort_by_key(|channel| channel.raw());
 
     if channels.len() <= 1 {
+        let mut clip = clip;
+        clip.controller_lanes = match channels.first() {
+            Some(channel) => channel_lanes.for_channel(*channel),
+            None => channel_lanes.merged(),
+        };
+        finalize_imported_clip(&mut clip, 1);
         return vec![ImportedMidiTrack {
             name: track_name,
             channel_hint: channels.first().copied(),
@@ -184,7 +324,8 @@ fn split_imported_track_by_channel(
 
     channels
         .into_iter()
-        .map(|channel| {
+        .enumerate()
+        .map(|(index, channel)| {
             let mut channel_clip = ImportedMidiClip {
                 notes: clip
                     .notes
@@ -192,12 +333,21 @@ fn split_imported_track_by_channel(
                     .filter(|note| note.channel == channel)
                     .cloned()
                     .collect(),
-                // The current controller-lane model is clip-global, so keep CC /
-                // pitch-bend data available on each split channel clip instead of
-                // silently dropping it during a type-0/channel-split import.
-                controller_lanes: clip.controller_lanes.clone(),
-                sysex_events: clip.sysex_events.clone(),
-                markers: clip.markers.clone(),
+                controller_lanes: channel_lanes.for_channel(channel),
+                // SysEx and markers belong to the source track once, not once
+                // per channel it happens to carry. Copying them onto every
+                // split clip is what turned a handful of markers in a type-0
+                // file into a wall of them on the ruler.
+                sysex_events: if index == 0 {
+                    clip.sysex_events.clone()
+                } else {
+                    Vec::new()
+                },
+                markers: if index == 0 {
+                    clip.markers.clone()
+                } else {
+                    Vec::new()
+                },
                 duration_beats: clip.duration_beats,
             };
             finalize_imported_clip(&mut channel_clip, 1);
@@ -224,7 +374,7 @@ fn parse_track(
     data: &[u8],
     ticks_per_beat: u32,
     notes: &mut Vec<MidiNoteState>,
-    controller_lanes: &mut Vec<MidiControllerLane>,
+    controller_lanes: &mut ChannelControllerLanes,
     sysex_events: &mut Vec<ImportedSysExEvent>,
     markers: &mut Vec<ImportedMidiMarker>,
     max_tick: &mut u64,
@@ -277,17 +427,18 @@ fn parse_track(
                 running_status = Some(status);
                 let data1 = r.read_u8()?;
                 let data2 = r.read_u8()?;
+                let channel = status & 0x0f;
                 match status & 0xf0 {
-                    0xb0 => push_controller_point(
-                        controller_lanes,
+                    0xb0 => controller_lanes.push(
+                        channel,
                         MidiControllerKind::CC(data1.min(127)),
                         ticks_to_beats(tick, ticks_per_beat),
                         data2.min(127) as f32 / 127.0,
                     ),
                     0xe0 => {
                         let value14 = ((data2 as u16) << 7) | data1 as u16;
-                        push_controller_point(
-                            controller_lanes,
+                        controller_lanes.push(
+                            channel,
                             MidiControllerKind::PitchBend,
                             ticks_to_beats(tick, ticks_per_beat),
                             value14 as f32 / 16383.0,
@@ -304,8 +455,8 @@ fn parse_track(
                 running_status = Some(status);
                 let data = r.read_u8()?;
                 if status & 0xf0 == 0xd0 {
-                    push_controller_point(
-                        controller_lanes,
+                    controller_lanes.push(
+                        status & 0x0f,
                         MidiControllerKind::ChannelPressure,
                         ticks_to_beats(tick, ticks_per_beat),
                         data.min(127) as f32 / 127.0,
@@ -607,6 +758,82 @@ mod tests {
         assert_eq!(imported.sysex_events[1].kind, ImportedSysExKind::Escaped);
         assert!((imported.sysex_events[1].beat - 1.0).abs() < 1.0e-4);
         assert_eq!(imported.sysex_events[1].data, vec![0x7d, 0x01]);
+    }
+
+    /// One MTrk carrying notes on channels 1 and 2, a pitch bend on channel 2
+    /// only, a marker, and a SysEx block.
+    fn multichannel_track_with_channel_two_bend() -> Vec<u8> {
+        smf(&[
+            0, 0xff, 0x03, 4, b'S', b'o', b'n', b'g', // marker at tick 0
+            0, 0xff, 0x06, 5, b'I', b'n', b't', b'r', b'o', // SysEx at tick 0
+            0, 0xf0, 2, 0x7d, 0x01, // notes on ch 1 and ch 2
+            0, 0x90, 60, 100, 0, 0x91, 48, 96, // full-up bend on channel 2 only
+            0, 0xe1, 0x7f, 0x7f, 0x83, 0x60, 0x80, 60, 0, 0, 0x81, 48, 0, 0, 0xff, 0x2f, 0,
+        ])
+    }
+
+    #[test]
+    fn a_channels_pitch_bend_stays_on_that_channels_clip() {
+        // Regression: every split clip used to inherit the whole track's
+        // controller lanes, so channel 2's bend also bent channel 1 and the
+        // dragged-in file played out of tune.
+        let tracks = parse_smf_tracks(&multichannel_track_with_channel_two_bend()).unwrap();
+        assert_eq!(tracks.len(), 2);
+
+        let bend = |track: &ImportedMidiTrack| {
+            track
+                .clip
+                .controller_lanes
+                .iter()
+                .any(|lane| lane.kind == MidiControllerKind::PitchBend)
+        };
+        assert!(!bend(&tracks[0]), "channel 1 must not inherit ch 2's bend");
+        assert!(bend(&tracks[1]), "channel 2 keeps its own bend");
+    }
+
+    #[test]
+    fn markers_and_sysex_are_not_duplicated_across_split_channels() {
+        // Regression: markers/SysEx were cloned onto every channel clip, so a
+        // 16-channel type-0 file imported each marker sixteen times.
+        let tracks = parse_smf_tracks(&multichannel_track_with_channel_two_bend()).unwrap();
+        let markers: usize = tracks.iter().map(|t| t.clip.markers.len()).sum();
+        let sysex: usize = tracks.iter().map(|t| t.clip.sysex_events.len()).sum();
+        assert_eq!(markers, 1);
+        assert_eq!(sysex, 1);
+
+        let summary = MidiImportSummary::of(&tracks);
+        assert_eq!(summary.markers, 1);
+        assert_eq!(summary.sysex_events, 1);
+        assert_eq!(summary.notes, 2);
+        assert!(summary.has_optional_payload());
+    }
+
+    #[test]
+    fn import_options_drop_only_what_was_turned_off() {
+        let mut tracks = parse_smf_tracks(&multichannel_track_with_channel_two_bend()).unwrap();
+        apply_import_options(
+            &mut tracks,
+            MidiImportOptions {
+                include_markers: false,
+                include_controllers: true,
+                include_sysex: false,
+            },
+        );
+        let summary = MidiImportSummary::of(&tracks);
+        assert_eq!(summary.markers, 0);
+        assert_eq!(summary.sysex_events, 0);
+        assert_eq!(summary.notes, 2, "notes are never optional");
+        assert_eq!(summary.controller_lanes, 1, "the bend lane is kept");
+
+        apply_import_options(&mut tracks, MidiImportOptions::NOTES_ONLY);
+        assert_eq!(MidiImportSummary::of(&tracks).controller_lanes, 0);
+    }
+
+    #[test]
+    fn a_note_only_file_has_nothing_to_ask_about() {
+        let data = smf(&[0, 0x90, 60, 100, 0x83, 0x60, 0x80, 60, 0, 0, 0xff, 0x2f, 0]);
+        let tracks = parse_smf_tracks(&data).unwrap();
+        assert!(!MidiImportSummary::of(&tracks).has_optional_payload());
     }
 
     #[test]

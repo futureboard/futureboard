@@ -4610,16 +4610,16 @@ where
                             if callback_debug_enabled() {
                                 eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
                             }
-                            // Scoped note-off: only tracks that are inaudible
-                            // after the toggle release their notes. The old
-                            // global all_notes_off cut every sounding voice on
-                            // any mute toggle — an audible stutter by itself.
+                            // No note-off: mute silences the output, and the
+                            // render pass keeps the instrument running under
+                            // it, so unmuting drops back in mid-note instead
+                            // of waiting for the next note-on.
                             runtime.update_track_mute(&track_id, muted);
-                            runtime.notes_off_for_inaudible_tracks("track_mute");
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
+                            // Same rule as mute: soloing another track must not
+                            // cut this one's sounding notes.
                             runtime.update_track_solo(&track_id, solo);
-                            runtime.notes_off_for_inaudible_tracks("track_solo");
                         }
                         EngineCommand::SetTrackInputState {
                             track_index,

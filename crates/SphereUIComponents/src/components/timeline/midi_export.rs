@@ -377,23 +377,111 @@ impl ExportRange {
 /// conductor track.
 const TEMPO_CURVE_SAMPLE_BEATS: f64 = 0.25;
 
-/// The span File ▸ Export MIDI File writes.
-///
-/// The loop range is honoured only when the loop is actually **enabled**: a
-/// stale loop left over from earlier editing must not silently narrow an
-/// export the user asked for as a whole.
-pub fn arrangement_export_range(state: &TimelineState) -> ExportRange {
+/// Which span of the arrangement to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MidiExportSpan {
+    /// Everything from bar 1 to the end of the last MIDI clip.
+    #[default]
+    WholeArrangement,
+    /// Just the loop range, shifted so it starts at bar 1.
+    LoopRange,
+}
+
+/// What the arrangement export includes. Presented by the export dialog; the
+/// defaults are "everything", so an untouched dialog writes the same file the
+/// direct export used to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiExportOptions {
+    pub span: MidiExportSpan,
+    /// Set-tempo events. Off writes a file that follows the receiving DAW's
+    /// tempo instead of carrying this project's.
+    pub include_tempo_map: bool,
+    pub include_time_signatures: bool,
+    pub include_markers: bool,
+    /// CC, pitch-bend, and channel-pressure lanes.
+    pub include_controllers: bool,
+    pub include_sysex: bool,
+    /// Track ids to write. `None` means every MIDI track — distinct from
+    /// `Some(empty)`, which is an explicit "no tracks" the dialog can produce.
+    pub track_ids: Option<Vec<String>>,
+}
+
+impl Default for MidiExportOptions {
+    fn default() -> Self {
+        Self {
+            span: MidiExportSpan::default(),
+            include_tempo_map: true,
+            include_time_signatures: true,
+            include_markers: true,
+            include_controllers: true,
+            include_sysex: true,
+            track_ids: None,
+        }
+    }
+}
+
+impl MidiExportOptions {
+    fn includes_track(&self, track_id: &str) -> bool {
+        match &self.track_ids {
+            None => true,
+            Some(ids) => ids.iter().any(|id| id == track_id),
+        }
+    }
+}
+
+/// Whether this project has a loop span the export dialog can offer.
+pub fn loop_export_range(state: &TimelineState) -> Option<ExportRange> {
     let transport = &state.transport;
-    if transport.loop_enabled && transport.loop_end_beats > transport.loop_start_beats {
-        return ExportRange {
-            start_beats: transport.loop_start_beats.max(0.0) as f64,
-            end_beats: transport.loop_end_beats as f64,
-        };
+    (transport.loop_end_beats > transport.loop_start_beats).then(|| ExportRange {
+        start_beats: transport.loop_start_beats.max(0.0) as f64,
+        end_beats: transport.loop_end_beats as f64,
+    })
+}
+
+/// The span File ▸ Export MIDI File writes for the chosen [`MidiExportSpan`].
+///
+/// Asking for the loop range when the project has none falls back to the whole
+/// arrangement rather than writing an empty file.
+pub fn arrangement_export_range(state: &TimelineState, span: MidiExportSpan) -> ExportRange {
+    if span == MidiExportSpan::LoopRange {
+        if let Some(range) = loop_export_range(state) {
+            return range;
+        }
     }
     ExportRange {
         start_beats: 0.0,
         end_beats: arrangement_content_end_beats(state).max(1e-6),
     }
+}
+
+/// Default options for this project: the loop span is preselected when looping
+/// is actually **enabled**, so a stale loop left over from earlier editing never
+/// silently narrows the export — but the dialog still offers it either way.
+pub fn default_export_options(state: &TimelineState) -> MidiExportOptions {
+    MidiExportOptions {
+        span: if state.transport.loop_enabled && loop_export_range(state).is_some() {
+            MidiExportSpan::LoopRange
+        } else {
+            MidiExportSpan::WholeArrangement
+        },
+        ..MidiExportOptions::default()
+    }
+}
+
+/// Every track the export dialog can offer, in arrangement order: those holding
+/// at least one MIDI clip.
+pub fn exportable_tracks(state: &TimelineState) -> Vec<(String, String)> {
+    state
+        .tracks
+        .iter()
+        .filter(|track| {
+            track
+                .clips
+                .iter()
+                .any(|clip| matches!(clip.clip_type, ClipType::Midi { .. }))
+        })
+        .map(|track| (track.id.clone(), track.name.clone()))
+        .collect()
 }
 
 fn arrangement_content_end_beats(state: &TimelineState) -> f64 {
@@ -411,20 +499,39 @@ fn arrangement_content_end_beats(state: &TimelineState) -> f64 {
 /// Notes carry the same articulation treatment as playback — the exported file
 /// is what you hear, not the raw stored durations, because the receiving DAW
 /// has no way to reproduce Futureboard articulations.
-pub fn build_arrangement_export(state: &TimelineState, sequence_name: &str) -> MidiExport {
-    let range = arrangement_export_range(state);
+pub fn build_arrangement_export(
+    state: &TimelineState,
+    sequence_name: &str,
+    options: &MidiExportOptions,
+) -> MidiExport {
+    let range = arrangement_export_range(state, options.span);
     let tracks = state
         .tracks
         .iter()
-        .filter_map(|track| build_track(track, &range))
+        .filter(|track| options.includes_track(&track.id))
+        .filter_map(|track| build_track(track, &range, options))
         .filter(|track| !track.is_empty())
         .collect();
 
     MidiExport {
         sequence_name: sequence_name.to_string(),
-        tempo_points: collect_tempo_points(state, &range),
-        time_signatures: collect_time_signatures(state, &range),
-        markers: collect_markers(state, &range),
+        // A conductor track with no tempo at all is legal — the reader then
+        // uses its own — so an unchecked box really does omit the events.
+        tempo_points: if options.include_tempo_map {
+            collect_tempo_points(state, &range)
+        } else {
+            Vec::new()
+        },
+        time_signatures: if options.include_time_signatures {
+            collect_time_signatures(state, &range)
+        } else {
+            Vec::new()
+        },
+        markers: if options.include_markers {
+            collect_markers(state, &range)
+        } else {
+            Vec::new()
+        },
         tracks,
     }
 }
@@ -466,7 +573,15 @@ pub fn build_clip_export(
         },
         ..Default::default()
     };
-    append_clip(&mut export_track, track, clip, &range);
+    // A single clip carries everything it has: the include toggles belong to
+    // the arrangement dialog, which this path does not go through.
+    append_clip(
+        &mut export_track,
+        track,
+        clip,
+        &range,
+        &MidiExportOptions::default(),
+    );
 
     let signature = state.time_signature_map.time_signature_at_beat(clip_start);
     Some(MidiExport {
@@ -492,13 +607,17 @@ pub fn build_clip_export(
     })
 }
 
-fn build_track(track: &TrackState, range: &ExportRange) -> Option<ExportTrack> {
+fn build_track(
+    track: &TrackState,
+    range: &ExportRange,
+    options: &MidiExportOptions,
+) -> Option<ExportTrack> {
     let mut export_track = ExportTrack {
         name: track.name.clone(),
         ..Default::default()
     };
     for clip in &track.clips {
-        append_clip(&mut export_track, track, clip, range);
+        append_clip(&mut export_track, track, clip, range, options);
     }
     Some(export_track)
 }
@@ -512,6 +631,7 @@ fn append_clip(
     track: &TrackState,
     clip: &ClipState,
     range: &ExportRange,
+    options: &MidiExportOptions,
 ) {
     if clip.muted {
         return;
@@ -559,6 +679,7 @@ fn append_clip(
 
     for lane in controller_lanes
         .iter()
+        .filter(|_| options.include_controllers)
         .filter(|lane| !lane.points.is_empty())
     {
         for point in &lane.points {
@@ -575,7 +696,11 @@ fn append_clip(
         }
     }
 
-    for sysex in sysex_events.iter().filter(|s| !s.data.is_empty()) {
+    for sysex in sysex_events
+        .iter()
+        .filter(|_| options.include_sysex)
+        .filter(|s| !s.data.is_empty())
+    {
         let absolute = clip_start + sysex.beat.max(0.0) as f64;
         if !range.contains_start(absolute) {
             continue;
@@ -975,7 +1100,7 @@ mod tests {
             state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
             state.add_midi_note(&clip_id, 64, 2.0, 1.0, 100).unwrap();
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
             let track = export.tracks.first().expect("one track");
             let starts: Vec<f64> = track.notes.iter().map(|n| n.start_beats).collect();
             assert_eq!(starts, vec![8.0, 10.0]);
@@ -988,7 +1113,7 @@ mod tests {
             state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
             state.set_midi_notes_muted(&clip_id, &[muted], true);
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
             let track = export.tracks.first().expect("track");
             assert_eq!(track.notes.len(), 1);
             assert_eq!(track.notes[0].pitch, 64);
@@ -1003,7 +1128,7 @@ mod tests {
             state.transport.loop_start_beats = 2.0;
             state.transport.loop_end_beats = 4.0;
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &default_export_options(&state));
             let track = export.tracks.first().expect("track");
             assert_eq!(track.notes.len(), 1, "only the in-range note");
             assert_eq!(track.notes[0].pitch, 64);
@@ -1023,7 +1148,7 @@ mod tests {
             state.transport.loop_start_beats = 2.0;
             state.transport.loop_end_beats = 4.0;
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &default_export_options(&state));
             assert_eq!(export.tracks[0].notes.len(), 2);
         }
 
@@ -1035,7 +1160,7 @@ mod tests {
             state.transport.loop_start_beats = 0.0;
             state.transport.loop_end_beats = 2.0;
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &default_export_options(&state));
             let note = &export.tracks[0].notes[0];
             assert!(
                 (note.duration_beats - 2.0).abs() < 1e-9,
@@ -1078,7 +1203,7 @@ mod tests {
                 TimeSignaturePoint::new(2.0, 3, 4),
             ];
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
             assert_eq!(export.tempo_points.len(), 2);
             assert!((export.tempo_points[0].bpm - 120.0).abs() < 1e-9);
             assert!((export.tempo_points[1].beat - 2.0).abs() < 1e-9);
@@ -1096,7 +1221,7 @@ mod tests {
                 TempoPoint::new(3.5, 60.0, TempoCurve::Hold),
             ];
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
             // SMF has no ramp, so the segment must appear as many small steps
             // rather than one jump at the end.
             assert!(
@@ -1132,17 +1257,191 @@ mod tests {
             state.transport.loop_start_beats = 0.5;
             state.transport.loop_end_beats = 4.0;
 
-            let export = build_arrangement_export(&state, "Song");
+            let export = build_arrangement_export(&state, "Song", &default_export_options(&state));
             assert_eq!(export.markers.len(), 1);
             assert_eq!(export.markers[0].text, "Intro");
             assert!((export.markers[0].beat - 0.5).abs() < 1e-9);
         }
 
         #[test]
+        fn unchecking_an_include_omits_only_that_part() {
+            let (mut state, clip_id) = state_with_clip(0.0);
+            state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+            state.markers = vec![TimelineMarkerState {
+                id: "m1".to_string(),
+                beat: 1.0,
+                name: "Intro".to_string(),
+                color_hex: "#fff".to_string(),
+            }];
+
+            let all = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
+            assert!(!all.markers.is_empty());
+            assert!(!all.tempo_points.is_empty());
+            assert!(!all.time_signatures.is_empty());
+
+            let no_markers = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    include_markers: false,
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert!(no_markers.markers.is_empty());
+            // Unchecking one box must not disturb the others.
+            assert_eq!(no_markers.tempo_points, all.tempo_points);
+            assert_eq!(no_markers.time_signatures, all.time_signatures);
+            assert_eq!(no_markers.tracks, all.tracks);
+
+            let no_tempo = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    include_tempo_map: false,
+                    include_time_signatures: false,
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert!(no_tempo.tempo_points.is_empty());
+            assert!(no_tempo.time_signatures.is_empty());
+            // Still a readable file with no conductor content at all.
+            assert!(crate::components::timeline::midi_import::parse_smf_tracks(
+                &no_tempo.to_smf_bytes()
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn unchecking_controllers_and_sysex_drops_them_but_keeps_notes() {
+            let (mut state, clip_id) = state_with_clip(0.0);
+            state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+            state.put_controller_point(&clip_id, MidiControllerKind::CC(1), 0.5, 0.75);
+
+            let with_cc = build_arrangement_export(&state, "Song", &MidiExportOptions::default());
+            assert!(!with_cc.tracks[0].controller_points.is_empty());
+
+            let without = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    include_controllers: false,
+                    include_sysex: false,
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert!(without.tracks[0].controller_points.is_empty());
+            assert!(without.tracks[0].sysex.is_empty());
+            assert_eq!(without.tracks[0].notes.len(), 1, "notes are unaffected");
+        }
+
+        #[test]
+        fn a_track_selection_writes_only_the_named_tracks() {
+            let (mut state, clip_a) = state_with_clip(0.0);
+            state.add_midi_note(&clip_a, 60, 0.0, 1.0, 100).unwrap();
+            let track_a = state.tracks[0].id.clone();
+            // A second instrument track with its own clip.
+            let track_b = state.create_track(CreateTrackOptions {
+                track_type: TrackType::Instrument,
+                name: "Second".to_string(),
+                color: gpui::Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                volume: 1.0,
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+            let clip_b = state.build_midi_clip(&track_b, 0.0, 4.0).expect("clip");
+            let clip_b_id = clip_b.id.clone();
+            EditCommand::CreateClip {
+                track_id: track_b.clone(),
+                clip: clip_b,
+            }
+            .execute(&mut state);
+            state.add_midi_note(&clip_b_id, 72, 0.0, 1.0, 100).unwrap();
+
+            assert_eq!(exportable_tracks(&state).len(), 2);
+
+            let only_b = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    track_ids: Some(vec![track_b.clone()]),
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert_eq!(only_b.tracks.len(), 1);
+            assert_eq!(only_b.tracks[0].name, "Second");
+
+            // An empty selection is an explicit "nothing", not "everything".
+            let none = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    track_ids: Some(Vec::new()),
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert!(none.tracks.is_empty());
+            let _ = track_a;
+        }
+
+        #[test]
+        fn the_dialog_preselects_the_loop_span_only_when_looping_is_on() {
+            let (mut state, clip_id) = state_with_clip(0.0);
+            state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+            state.transport.loop_start_beats = 1.0;
+            state.transport.loop_end_beats = 3.0;
+
+            state.transport.loop_enabled = false;
+            assert_eq!(
+                default_export_options(&state).span,
+                MidiExportSpan::WholeArrangement
+            );
+            state.transport.loop_enabled = true;
+            assert_eq!(
+                default_export_options(&state).span,
+                MidiExportSpan::LoopRange
+            );
+            // The dialog can still offer the span either way.
+            assert!(loop_export_range(&state).is_some());
+        }
+
+        #[test]
+        fn asking_for_a_loop_span_that_does_not_exist_falls_back_to_the_whole_arrangement() {
+            let (mut state, clip_id) = state_with_clip(0.0);
+            state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+            state.add_midi_note(&clip_id, 64, 2.0, 1.0, 100).unwrap();
+            // A new project ships with a default loop range, which is exactly
+            // why the span is an explicit choice rather than inferred; clear it
+            // so there is genuinely nothing to fall back to.
+            state.transport.loop_start_beats = 0.0;
+            state.transport.loop_end_beats = 0.0;
+            assert!(loop_export_range(&state).is_none());
+
+            let export = build_arrangement_export(
+                &state,
+                "Song",
+                &MidiExportOptions {
+                    span: MidiExportSpan::LoopRange,
+                    ..MidiExportOptions::default()
+                },
+            );
+            assert_eq!(
+                export.tracks[0].notes.len(),
+                2,
+                "must not write an empty file"
+            );
+        }
+
+        #[test]
         fn a_project_with_no_midi_still_writes_a_readable_file() {
             let mut state = TimelineState::default();
             state.tracks.clear();
-            let export = build_arrangement_export(&state, "Empty");
+            let export = build_arrangement_export(&state, "Empty", &MidiExportOptions::default());
             let bytes = export.to_smf_bytes();
             let tracks =
                 crate::components::timeline::midi_import::parse_smf_tracks(&bytes).expect("parse");
