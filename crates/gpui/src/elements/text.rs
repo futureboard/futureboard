@@ -618,6 +618,10 @@ struct TextLayoutInner {
     lines: SmallVec<[WrappedLine; 1]>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
+    /// Truncation width this layout was produced with, so a later measure pass
+    /// can tell "already truncated to exactly this width" from "truncated to
+    /// something else, or not truncated at all".
+    truncate_width: Option<Pixels>,
     size: Option<Size<Pixels>>,
     bounds: Option<Bounds<Pixels>>,
 }
@@ -677,12 +681,20 @@ impl TextLayout {
                 // Only use cached layout if:
                 // 1. We have a cached size
                 // 2. wrap_width matches (or both are None)
-                // 3. truncate_width is None (if truncate_width is Some, we need to re-layout
-                //    because the previous layout may have been computed without truncation)
+                // 3. truncate_width matches what the cached layout was built with
+                //
+                // (3) used to require `truncate_width.is_none()`, which disabled
+                // the cache outright for any truncating text — the layout was
+                // redone on every measure pass because a cached layout *might*
+                // have been produced without truncation. Recording the width it
+                // was produced with answers that instead of assuming the worst,
+                // so truncating labels stop re-wrapping on every pass. Taffy
+                // measures a node more than once per frame, and UI chrome
+                // truncates nearly every label it draws.
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
                     && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
-                    && truncate_width.is_none()
+                    && truncate_width == text_layout.truncate_width
                 {
                     return size;
                 }
@@ -730,6 +742,7 @@ impl TextLayout {
                         len: 0,
                         line_height,
                         wrap_width,
+                        truncate_width,
                         size: Some(Size::default()),
                         bounds: None,
                     });
@@ -748,6 +761,7 @@ impl TextLayout {
                     len,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
                 });

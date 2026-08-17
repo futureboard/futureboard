@@ -44,6 +44,21 @@ can walk a large tree while emitting few primitives.
 Cost is a handful of `Instant::now()` calls per frame plus one per shaping cache
 miss; no behavior change.
 
+## Truncating Text Re-Measured Every Pass
+
+`TextLayout::layout` refused its own cached size whenever the style truncated,
+because a cached layout *might* have been produced without truncation. Taffy
+measures a node more than once per frame and Futureboard truncates nearly every
+label it draws (track names, clip names, mixer channels), so those elements
+re-ran line wrapping and truncation on every measure pass of every frame.
+
+`TextLayoutInner` now records the truncation width its layout was produced with,
+so the guard compares widths instead of disabling the cache. Same output, and a
+layout is reused only when it was built for exactly the width being asked for.
+
+Measured on a 31-track session: layout measure callbacks cost 13.5 ms per frame
+across 3,637 calls, inside a 20.9 ms layout solve.
+
 ## Maintenance Notes
 
 When updating GPUI from upstream, preserve this Futureboard patch or port it
