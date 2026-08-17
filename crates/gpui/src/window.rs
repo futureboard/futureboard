@@ -2743,6 +2743,7 @@ impl Window {
     }
 
     fn draw_roots(&mut self, cx: &mut App) {
+        let prepaint_started = Instant::now();
         self.invalidator.set_phase(DrawPhase::Prepaint);
         self.tooltip_bounds.take();
 
@@ -2799,6 +2800,8 @@ impl Window {
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
 
         // Now actually paint the elements.
+        let prepaint_us = prepaint_started.elapsed().as_micros() as u64;
+        let paint_started = Instant::now();
         self.invalidator.set_phase(DrawPhase::Paint);
         root_element.paint(self, cx);
 
@@ -2817,6 +2820,9 @@ impl Window {
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         self.paint_inspector_hitbox(cx);
+
+        let paint_us = paint_started.elapsed().as_micros() as u64;
+        let a11y_started = Instant::now();
 
         // a11y may have been activated/deactivated halfway through the frame
         let a11y_active_start_of_frame = self.a11y.is_active();
@@ -2837,6 +2843,12 @@ impl Window {
                 self.platform_window.a11y_tree_update(tree_update);
             }
         }
+
+        crate::frame_profile::record_phases(
+            prepaint_us,
+            paint_us,
+            a11y_started.elapsed().as_micros() as u64,
+        );
     }
 
     fn prepaint_tooltip(&mut self, cx: &mut App) -> Option<AnyElement> {

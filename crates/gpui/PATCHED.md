@@ -33,11 +33,16 @@ only element construction. Without this hook a 40 ms frame containing 0.2 ms of
 app work is indistinguishable from a broken profiler, and there is nothing to
 optimize against.
 
-It also reports two direct readings of *why* a draw is expensive: microseconds
-spent shaping text that missed the two-frame line-layout cache
-(`text_system/line_layout.rs`), and the primitive count of the finished scene.
-Cost is two `Instant::now()` calls per frame plus one per shaping cache miss; no
-behavior change.
+It also splits the draw into its phases — prepaint (element tree build plus
+layout), paint, and accessibility-tree rebuild — and reports the readings that
+say *why* a phase is expensive: microseconds spent shaping text that missed the
+two-frame line-layout cache (`text_system/line_layout.rs`), the layout node
+count (`taffy.rs`), and the primitive count of the finished scene. Layout nodes
+matter more than primitives here: containers lay out without drawing, so a frame
+can walk a large tree while emitting few primitives.
+
+Cost is a handful of `Instant::now()` calls per frame plus one per shaping cache
+miss; no behavior change.
 
 ## Maintenance Notes
 

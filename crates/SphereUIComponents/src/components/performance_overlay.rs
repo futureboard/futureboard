@@ -120,8 +120,41 @@ fn frame_accounting_rows(cpu_ms: f32, frame_ms: f32) -> Vec<gpui::AnyElement> {
             pct(unaccounted),
         )
         .into_any_element(),
-        // Two direct readings of *why* a draw is expensive: how much text the
-        // frame had to re-shape, and how many primitives it emitted.
+        // The draw split. `prepaint` builds the element tree and lays it out
+        // (the app's own render functions run inside it); `paint` walks the
+        // laid-out tree emitting primitives; `a11y` rebuilds the accessibility
+        // tree when a client has switched it on.
+        section_label("Draw split"),
+        overlay_scope_row(
+            "prepaint+layout",
+            &format!(
+                "{:.2} ms  {:.0}%",
+                profile.prepaint_ms(),
+                pct(profile.prepaint_ms())
+            ),
+            pct(profile.prepaint_ms()),
+        )
+        .into_any_element(),
+        overlay_scope_row(
+            "paint",
+            &format!(
+                "{:.2} ms  {:.0}%",
+                profile.paint_ms(),
+                pct(profile.paint_ms())
+            ),
+            pct(profile.paint_ms()),
+        )
+        .into_any_element(),
+        overlay_scope_row(
+            "a11y tree",
+            &format!(
+                "{:.2} ms  {:.0}%",
+                profile.a11y_ms(),
+                pct(profile.a11y_ms())
+            ),
+            pct(profile.a11y_ms()),
+        )
+        .into_any_element(),
         overlay_scope_row(
             "Text shape",
             &format!(
@@ -133,7 +166,12 @@ fn frame_accounting_rows(cpu_ms: f32, frame_ms: f32) -> Vec<gpui::AnyElement> {
             pct(profile.shape_ms()),
         )
         .into_any_element(),
-        overlay_line("Primitives", &format!("{}", profile.scene_primitives)).into_any_element(),
+        // Layout nodes, not primitives, is what prepaint cost scales with.
+        overlay_line(
+            "Nodes / prims",
+            &format!("{} / {}", profile.layout_nodes, profile.scene_primitives),
+        )
+        .into_any_element(),
     ]
 }
 
@@ -193,13 +231,14 @@ mod tests {
     /// perf window has completed (cpu 0.0) and on a degenerate frame time.
     #[test]
     fn breakdown_always_renders_every_row() {
-        // label + UI CPU + GPUI draw + GPUI present + Unaccounted
-        // + Text shape + Primitives
-        assert_eq!(frame_accounting_rows(0.2, 40.0).len(), 7);
-        assert_eq!(frame_accounting_rows(0.0, 0.0).len(), 7);
+        // Frame breakdown: label + UI CPU + draw + present + unaccounted.
+        // Draw split: label + prepaint + paint + a11y + text + node counts.
+        const EXPECTED_ROWS: usize = 11;
+        assert_eq!(frame_accounting_rows(0.2, 40.0).len(), EXPECTED_ROWS);
+        assert_eq!(frame_accounting_rows(0.0, 0.0).len(), EXPECTED_ROWS);
         // A frame cheaper than the measured CPU (clock jitter) must not
         // produce a negative remainder or panic.
-        assert_eq!(frame_accounting_rows(5.0, 1.0).len(), 7);
+        assert_eq!(frame_accounting_rows(5.0, 1.0).len(), EXPECTED_ROWS);
     }
 
     #[test]

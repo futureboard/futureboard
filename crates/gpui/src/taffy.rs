@@ -55,7 +55,18 @@ impl TaffyLayoutEngine {
         }
     }
 
+    /// Layout nodes built for the frame being cleared.
+    ///
+    /// This is the size of the tree the layout pass actually walked, which is
+    /// what a frame's prepaint cost scales with — and it is much larger than
+    /// the scene's primitive count, because containers lay out without drawing
+    /// anything.
+    pub fn node_count(&self) -> usize {
+        self.taffy.total_node_count()
+    }
+
     pub fn clear(&mut self) {
+        crate::frame_profile::record_layout_nodes(self.taffy.total_node_count() as u64);
         self.taffy.clear();
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();

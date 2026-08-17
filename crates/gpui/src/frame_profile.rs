@@ -15,6 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static DRAW_US: AtomicU64 = AtomicU64::new(0);
 static PRESENT_US: AtomicU64 = AtomicU64::new(0);
 static SCENE_PRIMITIVES: AtomicU64 = AtomicU64::new(0);
+static LAYOUT_NODES: AtomicU64 = AtomicU64::new(0);
+static PREPAINT_US: AtomicU64 = AtomicU64::new(0);
+static PAINT_US: AtomicU64 = AtomicU64::new(0);
+static A11Y_US: AtomicU64 = AtomicU64::new(0);
 /// Accumulated during the frame in progress.
 static SHAPE_US_ACC: AtomicU64 = AtomicU64::new(0);
 static SHAPE_MISSES_ACC: AtomicU64 = AtomicU64::new(0);
@@ -38,6 +42,18 @@ pub struct FrameProfile {
     /// Primitives in the finished scene. The direct measure of "how much is
     /// this frame actually drawing".
     pub scene_primitives: u64,
+    /// Nodes the layout pass walked. Containers lay out without drawing, so
+    /// this is normally far larger than `scene_primitives` — and it, not the
+    /// primitive count, is what prepaint cost tracks.
+    pub layout_nodes: u64,
+    /// Building the element tree and laying it out. Includes the app's own
+    /// `render` functions, which GPUI calls during this phase.
+    pub prepaint_us: u64,
+    /// Walking the laid-out tree and emitting scene primitives.
+    pub paint_us: u64,
+    /// Building the accessibility tree, when a client has activated it. Scales
+    /// with the element tree, so it can rival the whole rest of the frame.
+    pub a11y_us: u64,
 }
 
 impl FrameProfile {
@@ -51,6 +67,18 @@ impl FrameProfile {
 
     pub fn shape_ms(self) -> f32 {
         self.shape_us as f32 / 1000.0
+    }
+
+    pub fn prepaint_ms(self) -> f32 {
+        self.prepaint_us as f32 / 1000.0
+    }
+
+    pub fn paint_ms(self) -> f32 {
+        self.paint_us as f32 / 1000.0
+    }
+
+    pub fn a11y_ms(self) -> f32 {
+        self.a11y_us as f32 / 1000.0
     }
 
     /// True once at least one frame has been measured.
@@ -78,6 +106,16 @@ pub(crate) fn record_scene_primitives(count: u64) {
     SCENE_PRIMITIVES.store(count, Ordering::Relaxed);
 }
 
+pub(crate) fn record_layout_nodes(count: u64) {
+    LAYOUT_NODES.store(count, Ordering::Relaxed);
+}
+
+pub(crate) fn record_phases(prepaint_us: u64, paint_us: u64, a11y_us: u64) {
+    PREPAINT_US.store(prepaint_us, Ordering::Relaxed);
+    PAINT_US.store(paint_us, Ordering::Relaxed);
+    A11Y_US.store(a11y_us, Ordering::Relaxed);
+}
+
 /// Add one cache-missing text shape to the frame in progress.
 pub(crate) fn record_text_shape(micros: u64) {
     SHAPE_US_ACC.fetch_add(micros, Ordering::Relaxed);
@@ -92,6 +130,10 @@ pub fn frame_profile() -> FrameProfile {
         shape_us: SHAPE_US.load(Ordering::Relaxed),
         shape_misses: SHAPE_MISSES.load(Ordering::Relaxed),
         scene_primitives: SCENE_PRIMITIVES.load(Ordering::Relaxed),
+        layout_nodes: LAYOUT_NODES.load(Ordering::Relaxed),
+        prepaint_us: PREPAINT_US.load(Ordering::Relaxed),
+        paint_us: PAINT_US.load(Ordering::Relaxed),
+        a11y_us: A11Y_US.load(Ordering::Relaxed),
     }
 }
 
