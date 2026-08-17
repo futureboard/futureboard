@@ -7,6 +7,7 @@
 //! Normal UI (menus, dialogs, headers, lanes as interactive GPUI elements) stays
 //! in GPUI; dense paint (grid, future clip/waveform batches) routes here.
 
+pub mod clip_geometry;
 pub mod gpui_paint;
 pub mod renderer;
 pub mod snapshot;
