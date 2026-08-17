@@ -46,10 +46,27 @@ const ROOT_CHILDREN: &[&str] = &[
     "StatusBar",
 ];
 
+/// Completed 1-second window, kept so readers get stable per-second figures
+/// instead of whatever has accumulated since the last reset.
+#[derive(Default, Clone)]
+struct WindowSummary {
+    scopes: Vec<ScopeSample>,
+    /// Instrumented wall time per frame in the window.
+    cpu_ms_per_frame: f32,
+    /// Measured frame interval in the window.
+    frame_ms: f32,
+}
+
 struct Collector {
     enabled: bool,
+    /// Whether to also write the once-per-second stderr dump + log file.
+    /// Env-driven only: turning the on-screen overlay on collects data but
+    /// must not start writing to the terminal behind the user's back.
+    dump: bool,
     /// Aggregated time per named scope this window.
     scopes: BTreeMap<&'static str, ScopeAgg>,
+    /// Last completed window, for the Profiler overlay.
+    last_window: WindowSummary,
     /// Latest-value counters (e.g. visible_browser_rows, grid_lines).
     /// We store the most recent sample plus max-this-window so the log
     /// is meaningful even when the value bounces.
@@ -114,11 +131,15 @@ impl NotifyAgg {
 impl Collector {
     fn new() -> Self {
         let now = Instant::now();
-        let enabled = std::env::var_os("FUTUREBOARD_UI_PERF").is_some()
-            || std::env::var_os("FUTUREBOARD_UI_PROFILE").is_some();
+        // A thread that first touches the collector after the overlay is
+        // already open must start collecting too, or its scopes stay invisible.
+        let enabled = env_collection_enabled()
+            || COLLECT_REQUESTED.load(std::sync::atomic::Ordering::Relaxed);
         Self {
             enabled,
+            dump: env_collection_enabled(),
             scopes: BTreeMap::new(),
+            last_window: WindowSummary::default(),
             counters: BTreeMap::new(),
             frame_count: 0,
             frame_total_ms: 0.0,
@@ -266,6 +287,42 @@ impl Collector {
 
         let total_ns: u64 = ranked.iter().map(|(_, a)| a.total_ns).sum();
         let window_ns = (elapsed * 1_000_000_000.0) as u64;
+
+        // Publish the completed window for the overlay. Readers must never see
+        // the partially-filled current window — a fresh reset makes every scope
+        // look like it ran once, which reads as "nothing is expensive" whether
+        // or not that is true.
+        self.last_window = WindowSummary {
+            scopes: ranked
+                .iter()
+                .take(8)
+                .map(|(name, agg)| ScopeSample {
+                    name: if *name == ROOT_SCOPE {
+                        "StudioLayout(self)"
+                    } else {
+                        name
+                    },
+                    total_ms: agg.total_ns as f32 / 1_000_000.0,
+                    percent: if total_ns > 0 {
+                        100.0 * agg.total_ns as f32 / total_ns as f32
+                    } else {
+                        0.0
+                    },
+                    count: agg.count,
+                })
+                .collect(),
+            cpu_ms_per_frame: if self.frame_count > 0 {
+                total_ns as f32 / 1_000_000.0 / self.frame_count as f32
+            } else {
+                0.0
+            },
+            frame_ms: avg_ms,
+        };
+
+        if !self.dump {
+            self.reset_window();
+            return;
+        }
 
         if !ranked.is_empty() {
             let mut line = String::from("[ui-perf] ranked: ");
@@ -664,6 +721,117 @@ pub fn debug_clip_outline() -> Option<gpui::Div> {
 /// disabled, though `count` is already a no-op when disabled.
 pub fn enabled() -> bool {
     COLLECTOR.try_with(|c| c.borrow().enabled).unwrap_or(false)
+}
+
+/// Build identity of the running executable: its own file timestamp.
+///
+/// Resolved once at runtime, so it needs no build script and can never drift
+/// from the binary it describes. Shown in the Profiler so "is this the build I
+/// just made?" is answerable from the screen instead of by inference.
+pub fn running_build_stamp() -> &'static str {
+    static STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    STAMP.get_or_init(|| {
+        let modified = std::env::current_exe()
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|meta| meta.modified().ok());
+        let Some(modified) = modified else {
+            return "unknown".to_string();
+        };
+        let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            return "unknown".to_string();
+        };
+        // Local wall clock is not available without a date crate; seconds since
+        // the epoch is enough to tell two builds apart, and the derived
+        // day-relative time makes it readable.
+        let secs = since_epoch.as_secs();
+        let days = secs / 86_400;
+        let rem = secs % 86_400;
+        format!(
+            "d{} {:02}:{:02}:{:02}Z",
+            days,
+            rem / 3600,
+            (rem % 3600) / 60,
+            rem % 60
+        )
+    })
+}
+
+/// Runtime request for scope collection, independent of the env vars.
+///
+/// Set while the Profiler overlay is on screen so its "where is the frame
+/// going" rows have data to show. The env flags stay authoritative for the
+/// once-per-second stderr dump; this only turns the in-memory aggregation on.
+static COLLECT_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turn scope aggregation on/off at runtime. Idempotent and cheap; the cost
+/// while on is one `Instant::now()` plus a small map update per scope.
+pub fn set_collection_requested(on: bool) {
+    COLLECT_REQUESTED.store(on, std::sync::atomic::Ordering::Relaxed);
+    let _ = COLLECTOR.try_with(|c| {
+        let mut c = c.borrow_mut();
+        if on {
+            c.enabled = true;
+        } else if !env_collection_enabled() {
+            c.enabled = false;
+            c.scopes.clear();
+            c.last_window = WindowSummary::default();
+        }
+    });
+}
+
+fn env_collection_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_UI_PERF").is_some()
+            || std::env::var_os("FUTUREBOARD_UI_PROFILE").is_some()
+    })
+}
+
+/// One ranked scope for the Profiler overlay.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeSample {
+    pub name: &'static str,
+    /// Wall time spent in this scope during the current window.
+    pub total_ms: f32,
+    /// Share of all instrumented time in the window.
+    pub percent: f32,
+    /// Times the scope was entered in the window.
+    pub count: u64,
+}
+
+/// Top `limit` scopes from the last **completed** one-second window, most
+/// expensive first, with the same root self-time correction the log applies.
+pub fn top_scopes(limit: usize) -> Vec<ScopeSample> {
+    COLLECTOR
+        .try_with(|c| {
+            let c = c.borrow();
+            if !c.enabled {
+                return Vec::new();
+            }
+            c.last_window.scopes.iter().take(limit).cloned().collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Instrumented CPU time per frame from the last completed window.
+///
+/// Deliberately does **not** report a frame duration: the overlay already has
+/// an authoritative one from its own frame diagnostics, and gating this on the
+/// collector's internal frame counter meant a window that rolled over with too
+/// few samples silently hid the whole accounting block — exactly when it is
+/// most needed. Returns 0.0 before the first completed window rather than
+/// `None`, so callers can always render the row.
+pub fn instrumented_cpu_ms_per_frame() -> f32 {
+    COLLECTOR
+        .try_with(|c| {
+            let c = c.borrow();
+            if !c.enabled {
+                return 0.0;
+            }
+            c.last_window.cpu_ms_per_frame
+        })
+        .unwrap_or(0.0)
 }
 
 /// Record a named counter (visible row count, grid line count, etc.).

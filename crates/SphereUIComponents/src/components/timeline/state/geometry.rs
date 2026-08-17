@@ -14,6 +14,121 @@ pub fn snap_beat(beat: f64, snap: SnapSettings) -> f64 {
     super::musical_snap::snap_beat(beat, snap.to_musical(), false).max(0.0)
 }
 
+/// Snap a beat against `snap`, resolving bar length from the meter marker in
+/// force *at that beat* rather than at the playhead.
+///
+/// Shared by [`TimelineState::snap_beats_with_bypass`] and
+/// [`TimelineGestureContext`] so a gesture closure snaps identically whether it
+/// captured the full state or only this frame's geometry.
+pub fn snap_beat_against_meter(
+    beats: f32,
+    snap: SnapSettings,
+    time_signature_map: &TimeSignatureMap,
+    bypass: bool,
+) -> f32 {
+    let mut snap = snap;
+    snap.beats_per_bar = time_signature_map.beats_per_bar_at_beat(beats as f64);
+    super::musical_snap::snap_beat(beats as f64, snap.to_musical(), bypass) as f32
+}
+
+/// Snap a wall-clock second offset to the current grid. Shared by
+/// [`TimelineState::snap_time`] and [`TimelineGestureContext::snap_time`].
+pub fn snap_seconds(seconds: f32, seconds_per_beat: f32, snap: SnapSettings) -> f32 {
+    if !snap.enabled || snap.division == SnapDivision::Off {
+        return seconds;
+    }
+    let beats_per_bar = snap.beats_per_bar as f32;
+    let sub_div = match snap.division {
+        SnapDivision::Auto => snap.auto_step_beats as f32,
+        SnapDivision::Bar1 => beats_per_bar,
+        other => other.step_beats(beats_per_bar),
+    };
+    if sub_div <= 0.0 {
+        return seconds;
+    }
+    let spb = seconds_per_beat.max(1.0e-6);
+    let total_beats = seconds / spb;
+    ((total_beats / sub_div).round() * sub_div * spb).max(0.0)
+}
+
+/// Per-frame coordinate + snap inputs for pointer gestures.
+///
+/// GPUI event closures must be `'static`, so a lane / clip / automation / ruler
+/// handler cannot borrow `TimelineState` — it has to own what it reads. Owning
+/// it by `state.clone()` deep-copies every track, clip, MIDI note, controller
+/// lane, and plugin chain in the project, **per rendered row, per frame**; on a
+/// dense arrangement that alone dominates the frame budget.
+///
+/// This carries only what a gesture actually resolves — the viewport transform,
+/// the snap grid, and the meter map — so cloning it is O(meter markers) instead
+/// of O(project). Build it once per repaint (see `Timeline::render`) and share
+/// it with `Rc`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineGestureContext {
+    pub viewport: TimelineViewport,
+    pub bpm: f32,
+    pub snap: SnapSettings,
+    pub time_signature_map: TimeSignatureMap,
+    /// Precomputed [`TimelineState::arrangement_content_top`].
+    pub content_top: f32,
+}
+
+impl TimelineGestureContext {
+    pub fn from_state(state: &TimelineState) -> Self {
+        Self {
+            viewport: state.viewport.clone(),
+            bpm: state.bpm,
+            snap: SnapSettings::from_timeline(state),
+            time_signature_map: state.time_signature_map.clone(),
+            content_top: state.arrangement_content_top(),
+        }
+    }
+
+    pub fn seconds_per_beat(&self) -> f32 {
+        60.0 / self.bpm.max(1.0)
+    }
+
+    pub fn beats_to_x(&self, beats: f32) -> f32 {
+        beat_to_x(beats as f64, &self.viewport)
+    }
+
+    pub fn x_to_beats(&self, x: f32) -> f32 {
+        x_to_beat(x, &self.viewport) as f32
+    }
+
+    pub fn x_to_beat(&self, x: f32) -> f64 {
+        x_to_beat(x, &self.viewport)
+    }
+
+    pub fn lane_origin_x(&self) -> f32 {
+        self.viewport.panel_origin_x + HEADER_WIDTH
+    }
+
+    pub fn lane_x_from_window_x(&self, window_x: f32) -> f32 {
+        window_x - self.lane_origin_x()
+    }
+
+    pub fn beats_from_window_x(&self, window_x: f32) -> f32 {
+        self.x_to_beats(self.lane_x_from_window_x(window_x))
+    }
+
+    pub fn snap_beats(&self, beats: f32) -> f32 {
+        self.snap_beats_with_bypass(beats, false)
+    }
+
+    pub fn snap_beats_with_bypass(&self, beats: f32, bypass: bool) -> f32 {
+        snap_beat_against_meter(beats, self.snap, &self.time_signature_map, bypass)
+    }
+
+    pub fn snap_time(&self, seconds: f32) -> f32 {
+        snap_seconds(seconds, self.seconds_per_beat(), self.snap)
+    }
+
+    pub fn arrangement_content_top(&self) -> f32 {
+        self.content_top
+    }
+}
+
 pub fn track_at_y(y: f32, layout: &TrackLayout) -> Option<TrackId> {
     let content_y = y + layout.scroll_y;
     layout
@@ -95,23 +210,11 @@ impl TimelineState {
     }
 
     pub fn snap_time(&self, seconds: f32) -> f32 {
-        if !self.snap_to_grid || self.grid_division == SnapDivision::Off {
-            return seconds;
-        }
-        let ppb = self.viewport.pixels_per_second * self.seconds_per_beat();
-        let bpb = self.beats_per_bar();
-        let sub_div = match self.grid_division {
-            SnapDivision::Auto => self.get_grid_sub_beats(ppb),
-            SnapDivision::Bar1 => bpb,
-            _ => self.grid_division.step_beats(bpb),
-        };
-        if sub_div <= 0.0 {
-            return seconds;
-        }
-        let spb = self.seconds_per_beat();
-        let total_beats = seconds / spb;
-        let snapped = (total_beats / sub_div).round() * sub_div;
-        (snapped * spb).max(0.0)
+        snap_seconds(
+            seconds,
+            self.seconds_per_beat(),
+            SnapSettings::from_timeline(self),
+        )
     }
 
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
@@ -121,8 +224,16 @@ impl TimelineState {
 
     /// Snap a beat value, optionally bypassing the grid (Shift held during drag).
     pub fn snap_beats_with_bypass(&self, beats: f32, bypass: bool) -> f32 {
-        let mut snap = SnapSettings::from_timeline(self);
-        snap.beats_per_bar = self.beats_per_bar_at_beat(beats as f64);
-        super::musical_snap::snap_beat(beats as f64, snap.to_musical(), bypass) as f32
+        snap_beat_against_meter(
+            beats,
+            SnapSettings::from_timeline(self),
+            &self.time_signature_map,
+            bypass,
+        )
+    }
+
+    /// This frame's gesture geometry — see [`TimelineGestureContext`].
+    pub fn gesture_context(&self) -> TimelineGestureContext {
+        TimelineGestureContext::from_state(self)
     }
 }

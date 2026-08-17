@@ -1523,6 +1523,15 @@ impl Render for Timeline {
         let on_clip_resize_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<ClipResizeDrag>, _window, cx| {
                 let drag = event.drag(cx).clone();
+                // Capture the pre-gesture clip once, before the first mutation.
+                // This is what the drop turns into the undo step's `previous`.
+                if this
+                    .clip_resize_origin
+                    .as_ref()
+                    .is_none_or(|origin| origin.clip.id != drag.clip_id)
+                {
+                    this.clip_resize_origin = ClipSnapshot::capture(&this.state, &drag.clip_id);
+                }
                 let beat = this.beat_from_window_x(event.event.position.x.into());
                 this.state.resize_clip_with_bypass(
                     &drag.clip_id,
@@ -1534,11 +1543,14 @@ impl Render for Timeline {
             },
         );
         let on_clip_resize_drop = cx.listener(|this, drag: &ClipResizeDrag, _window, cx| {
-            if let Some(next) = ClipSnapshot::capture(&this.state, &drag.clip_id) {
-                let previous = ClipSnapshot {
-                    track_id: next.track_id.clone(),
-                    clip: drag.original.clone(),
-                };
+            // No drag-move means nothing was resized, so there is no undo step.
+            let origin = this
+                .clip_resize_origin
+                .take()
+                .filter(|origin| origin.clip.id == drag.clip_id);
+            if let (Some(previous), Some(next)) =
+                (origin, ClipSnapshot::capture(&this.state, &drag.clip_id))
+            {
                 if previous.clip != next.clip {
                     this.record_executed_command(EditCommand::UpdateClip { previous, next }, cx);
                     this.mark_project_changed(cx);

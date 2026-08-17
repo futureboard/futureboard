@@ -743,6 +743,9 @@ impl StudioLayout {
             has_sample: self.frame_diag.has_sample(),
             repaint_reason: repaint_reason.to_string(),
             audio: self.status_audio_label(),
+            top_scopes: crate::perf::top_scopes(4),
+            ui_cpu_ms: crate::perf::instrumented_cpu_ms_per_frame(),
+            build_stamp: crate::perf::running_build_stamp().to_string(),
         }
     }
 

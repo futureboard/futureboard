@@ -133,6 +133,7 @@ impl Timeline {
         self.clip_clone_hint = None;
         self.song_text_drag_preview = None;
         self.clip_drag_origin = None;
+        self.clip_resize_origin = None;
         self.clip_drag_target_track_index = None;
         self.clip_clone_drag_id = None;
         self.pen_clip_draw = None;
@@ -185,6 +186,7 @@ impl Timeline {
             song_text_drag_preview: None,
             song_text_drag_cancelled: false,
             clip_drag_origin: None,
+            clip_resize_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
             pen_clip_draw: None,
@@ -238,6 +240,7 @@ impl Timeline {
             song_text_drag_preview: None,
             song_text_drag_cancelled: false,
             clip_drag_origin: None,
+            clip_resize_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
             pen_clip_draw: None,

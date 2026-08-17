@@ -1853,6 +1853,10 @@ impl Render for StudioLayout {
             .children({
                 let show_perf_overlay = self.settings.read(cx).current.performance.show_performance_overlay
                     || crate::perf::perf_hud_enabled();
+                // Scope aggregation costs a timestamp per instrumented scope, so
+                // it follows the overlay: on while the user is looking at it,
+                // off (and cleared) the moment it closes.
+                crate::perf::set_collection_requested(show_perf_overlay);
                 if show_perf_overlay {
                     let snapshot = self.performance_overlay_snapshot(reason_static);
                     Some(components::performance_overlay(&snapshot).into_any_element())

@@ -2603,6 +2603,8 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        let draw_started = Instant::now();
+        crate::frame_profile::begin_frame();
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
@@ -2695,6 +2697,8 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        crate::frame_profile::record_scene_primitives(self.rendered_frame.scene.len() as u64);
+        crate::frame_profile::record_draw(draw_started.elapsed().as_micros() as u64);
 
         ArenaClearNeeded::new(&cx.element_arena)
     }
@@ -2723,7 +2727,9 @@ impl Window {
 
     #[profiling::function]
     fn present(&mut self) {
+        let started = Instant::now();
         self.platform_window.draw(&self.rendered_frame.scene);
+        crate::frame_profile::record_present(started.elapsed().as_micros() as u64);
         #[cfg(feature = "input-latency-histogram")]
         self.input_latency_tracker.record_frame_presented();
         self.needs_present.set(false);

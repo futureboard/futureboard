@@ -87,14 +87,12 @@ pub fn video_clip(
         edge: ClipEdge::Left,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
-        original: clip.clone(),
     };
     let resize_right = ClipResizeDrag {
         clip_id: clip.id.clone(),
         edge: ClipEdge::Right,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
-        original: clip.clone(),
     };
 
     let label_color = if unresolved {
