@@ -4,7 +4,8 @@ use crate::components::timeline::audio_clip::{
 };
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
-    ClipState, ClipType, TimelineState, TimelineTool, TrackState, TrackType, HEADER_WIDTH,
+    ClipState, ClipType, TimelineGestureContext, TimelineState, TimelineTool, TrackState,
+    TrackType, HEADER_WIDTH,
 };
 use crate::components::timeline::video_clip::video_clip;
 use crate::theme::Colors;
@@ -15,6 +16,7 @@ pub fn track_lane(
     track: &TrackState,
     track_index: usize,
     state: &TimelineState,
+    gesture: &std::rc::Rc<TimelineGestureContext>,
     row_height: f32,
     on_select_track: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     on_select_clip: std::sync::Arc<
@@ -159,7 +161,11 @@ pub fn track_lane(
     } else {
         gpui::CursorStyle::Arrow
     };
-    let state_ref = state.clone();
+    // Gesture closures must own their coordinate inputs. Cloning the whole
+    // `TimelineState` here deep-copied every clip and MIDI note in the project
+    // once per visible row per frame; the shared per-frame context carries only
+    // the viewport transform and snap grid.
+    let state_ref = std::rc::Rc::clone(gesture);
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

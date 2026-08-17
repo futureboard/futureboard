@@ -194,6 +194,84 @@ pub struct WgpuOffscreenFrame {
     pub texture: wgpu::Texture,
 }
 
+/// Color target format. Non-sRGB so the snapshot's theme colors land in the
+/// texture with the same numeric values GPUI paints, keeping the two backends
+/// visually identical once the texture is composited.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Bytes per instance: `rect` (4 x f32) + `color` (4 x f32).
+const QUAD_INSTANCE_SIZE: u64 = 32;
+
+/// Every arrangement-surface primitive is an axis-aligned rectangle, so the
+/// whole pass is one instanced draw. `rect` is `(x, y, w, h)` in physical
+/// pixels with the origin at the top-left of the arrangement body.
+const ARRANGEMENT_SHADER: &str = r#"
+struct Globals {
+    viewport: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> globals: Globals;
+
+struct Instance {
+    @location(0) rect: vec4<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> VertexOutput {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+    );
+    let corner = corners[vertex_index];
+    let pixel = instance.rect.xy + corner * instance.rect.zw;
+    // Pixel space (y down) -> clip space (y up).
+    let ndc = vec2<f32>(
+        pixel.x / max(globals.viewport.x, 1.0) * 2.0 - 1.0,
+        1.0 - pixel.y / max(globals.viewport.y, 1.0) * 2.0,
+    );
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.color = instance.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+/// Pipeline plus the buffers reused across frames.
+struct ArrangementPipeline {
+    pipeline: wgpu::RenderPipeline,
+    globals: wgpu::Buffer,
+    globals_bind_group: wgpu::BindGroup,
+    instances: wgpu::Buffer,
+    /// Instance capacity of `instances`, in instances (not bytes).
+    capacity: u64,
+}
+
+/// Cached offscreen color target. Recreated only when the arrangement body
+/// changes size, so steady-state rendering allocates nothing.
+struct OffscreenTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
 pub struct WgpuTimelineRenderer {
     instance: wgpu::Instance,
     preference: TimelineGpuPreference,
@@ -204,6 +282,11 @@ pub struct WgpuTimelineRenderer {
     queue: Option<wgpu::Queue>,
     max_texture_dimension_2d: u32,
     init_error: Option<String>,
+    pipeline: Option<ArrangementPipeline>,
+    target: Option<OffscreenTarget>,
+    /// Scratch instance bytes, reused so building a frame's quads does not
+    /// allocate once the buffer has grown to its working size.
+    instance_bytes: Vec<u8>,
 }
 
 impl WgpuTimelineRenderer {
@@ -229,6 +312,9 @@ impl WgpuTimelineRenderer {
             queue: None,
             max_texture_dimension_2d: wgpu::Limits::downlevel_defaults().max_texture_dimension_2d,
             init_error: None,
+            pipeline: None,
+            target: None,
+            instance_bytes: Vec::new(),
         }
     }
 
@@ -368,8 +454,6 @@ impl WgpuTimelineRenderer {
         snapshot: &TimelineRenderSnapshot,
     ) -> Result<WgpuOffscreenFrame, String> {
         self.ensure_device()?;
-        let device = self.device.as_ref().expect("device");
-        let queue = self.queue.as_ref().expect("queue");
 
         let width = snapshot.viewport.width.max(1.0) as u32;
         let height = snapshot.viewport.height.max(1.0) as u32;
@@ -380,8 +464,107 @@ impl WgpuTimelineRenderer {
                 width, height, max_texture_dimension_2d
             ));
         }
-        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let format = OFFSCREEN_FORMAT;
 
+        // Build this frame's quads before touching the GPU, so a snapshot that
+        // paints nothing still produces a correctly cleared target.
+        let mut instance_bytes = std::mem::take(&mut self.instance_bytes);
+        instance_bytes.clear();
+        let instance_count =
+            build_arrangement_instances(snapshot, width as f32, height as f32, &mut instance_bytes);
+
+        self.ensure_target(width, height)?;
+        self.ensure_pipeline(instance_count)?;
+        let device = self.device.as_ref().expect("device");
+        let queue = self.queue.as_ref().expect("queue");
+        let target = self.target.as_ref().expect("target");
+        let pipeline = self.pipeline.as_ref().expect("pipeline");
+
+        queue.write_buffer(
+            &pipeline.globals,
+            0,
+            &globals_bytes(width as f32, height as f32),
+        );
+        if instance_count > 0 {
+            queue.write_buffer(&pipeline.instances, 0, &instance_bytes);
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("timeline-arrangement"),
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("timeline-arrangement-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(rgba_to_wgpu(
+                            crate::theme::Colors::timeline_content_background(),
+                        )),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if instance_count > 0 {
+                pass.set_pipeline(&pipeline.pipeline);
+                pass.set_bind_group(0, &pipeline.globals_bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    pipeline
+                        .instances
+                        .slice(..instance_count * QUAD_INSTANCE_SIZE),
+                );
+                pass.draw(0..6, 0..instance_count as u32);
+            }
+        }
+
+        queue.submit(Some(encoder.finish()));
+
+        crate::perf::count("gpu_quad_instances", instance_count);
+        if gpu_debug_enabled() {
+            eprintln!(
+                "[gpu-renderer] WgpuTimelineRenderer offscreen {}x{} quads={} grid={} shades={} clips={} waveform_handles={}",
+                width,
+                height,
+                instance_count,
+                snapshot.grid_lines.len(),
+                snapshot.bar_shades.len(),
+                snapshot.clips.len(),
+                snapshot
+                    .clips
+                    .iter()
+                    .filter(|c| c.waveform.is_some())
+                    .count(),
+            );
+        }
+
+        let texture = target.texture.clone();
+        self.instance_bytes = instance_bytes;
+        Ok(WgpuOffscreenFrame {
+            width,
+            height,
+            format,
+            texture,
+        })
+    }
+
+    /// (Re)create the offscreen color target when the arrangement body resizes.
+    fn ensure_target(&mut self, width: u32, height: u32) -> Result<(), String> {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.width == width && target.height == height)
+        {
+            return Ok(());
+        }
+        let device = self.device.as_ref().ok_or("device not initialized")?;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("timeline-offscreen"),
             size: wgpu::Extent3d {
@@ -392,70 +575,210 @@ impl WgpuTimelineRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: OFFSCREEN_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Timeline arrangement background — matches `Colors::surface_base()` feel.
-        let bg = wgpu::Color {
-            r: 0.043,
-            g: 0.059,
-            b: 0.078,
-            a: 1.0,
-        };
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("timeline-arrangement"),
-        });
-
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("timeline-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(bg),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // Scaffold: grid lines, lane fills, clip rects, and waveform chunks will be
-            // drawn here via instanced pipelines reading `TimelineRenderSnapshot` only.
-        }
-
-        queue.submit(Some(encoder.finish()));
-
-        if gpu_debug_enabled() {
-            eprintln!(
-                "[gpu-renderer] WgpuTimelineRenderer offscreen {}x{} grid={} clips={} waveform_handles={}",
-                width,
-                height,
-                snapshot.grid_lines.len(),
-                snapshot.clips.len(),
-                snapshot
-                    .clips
-                    .iter()
-                    .filter(|c| c.waveform.is_some())
-                    .count(),
-            );
-        }
-
-        Ok(WgpuOffscreenFrame {
+        self.target = Some(OffscreenTarget {
+            texture,
+            view,
             width,
             height,
-            format,
-            texture,
-        })
+        });
+        Ok(())
     }
+
+    /// Build the pipeline once, then only grow the instance buffer when a frame
+    /// needs more quads than the current capacity.
+    fn ensure_pipeline(&mut self, instance_count: u64) -> Result<(), String> {
+        let device = self.device.as_ref().ok_or("device not initialized")?;
+        if self.pipeline.is_none() {
+            self.pipeline = Some(create_arrangement_pipeline(device, instance_count.max(256)));
+            return Ok(());
+        }
+        let pipeline = self.pipeline.as_mut().expect("pipeline");
+        if instance_count > pipeline.capacity {
+            // Grow geometrically so a steadily busier viewport does not
+            // reallocate every frame.
+            let capacity = instance_count.next_power_of_two();
+            pipeline.instances = create_instance_buffer(device, capacity);
+            pipeline.capacity = capacity;
+        }
+        Ok(())
+    }
+}
+
+fn create_instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("timeline-quad-instances"),
+        size: capacity * QUAD_INSTANCE_SIZE,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_arrangement_pipeline(device: &wgpu::Device, capacity: u64) -> ArrangementPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("timeline-arrangement-shader"),
+        source: wgpu::ShaderSource::Wgsl(ARRANGEMENT_SHADER.into()),
+    });
+
+    let globals = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("timeline-arrangement-globals"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("timeline-arrangement-globals-layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+
+    let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("timeline-arrangement-globals-bind-group"),
+        layout: &bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: globals.as_entire_binding(),
+        }],
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("timeline-arrangement-layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("timeline-arrangement-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: QUAD_INSTANCE_SIZE,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 1,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: OFFSCREEN_FORMAT,
+                // Straight (non-premultiplied) alpha, matching how GPUI blends
+                // the same theme colors in the paint fallback.
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    ArrangementPipeline {
+        pipeline,
+        globals,
+        globals_bind_group,
+        instances: create_instance_buffer(device, capacity),
+        capacity,
+    }
+}
+
+fn globals_bytes(width: f32, height: f32) -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    bytes[0..4].copy_from_slice(&width.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&height.to_ne_bytes());
+    bytes
+}
+
+fn push_quad(bytes: &mut Vec<u8>, rect: [f32; 4], color: gpui::Rgba) {
+    for value in rect {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+    for value in [color.r, color.g, color.b, color.a] {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+}
+
+fn rgba_to_wgpu(color: gpui::Rgba) -> wgpu::Color {
+    wgpu::Color {
+        r: color.r as f64,
+        g: color.g as f64,
+        b: color.b as f64,
+        a: color.a as f64,
+    }
+}
+
+/// Serialize the arrangement surface's quads, in paint order.
+///
+/// This is deliberately the same primitive set the GPUI paint fallback draws
+/// (`gpui_paint::paint_grid`): the surface owns the bar shades and the grid
+/// behind the lanes, while clips, notes, and the playhead remain interactive
+/// GPUI elements layered above it. Returns the instance count.
+fn build_arrangement_instances(
+    snapshot: &TimelineRenderSnapshot,
+    width: f32,
+    height: f32,
+    bytes: &mut Vec<u8>,
+) -> u64 {
+    use crate::components::timeline::timeline_state::GridLineLevel;
+    use crate::theme::Colors;
+
+    let mut count = 0u64;
+    for shade in &snapshot.bar_shades {
+        if shade.width <= 0.0 || shade.x >= width || shade.x + shade.width <= 0.0 {
+            continue;
+        }
+        push_quad(
+            bytes,
+            [shade.x, 0.0, shade.width, height],
+            Colors::timeline_region_background(),
+        );
+        count += 1;
+    }
+
+    for line in &snapshot.grid_lines {
+        if line.x < 0.0 || line.x >= width {
+            continue;
+        }
+        let color = match line.level {
+            GridLineLevel::Bar => Colors::timeline_grid_bar(),
+            GridLineLevel::Beat => Colors::timeline_grid_major(),
+            GridLineLevel::Sub => Colors::timeline_grid_minor(),
+        };
+        push_quad(bytes, [line.x, 0.0, 1.0, height], color);
+        count += 1;
+    }
+
+    count
 }
 
 impl TimelineRenderer for WgpuTimelineRenderer {
@@ -472,5 +795,242 @@ impl TimelineRenderer for WgpuTimelineRenderer {
                 super::gpui_paint::GpuiPaintTimelineRenderer::new().render_arrangement(snapshot)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::timeline::render::snapshot::{
+        BarShadeSnapshot, GridLineSnapshot, PlayheadSnapshot, SelectionSnapshot, VisibleBeatRange,
+        VisibleTrackRange,
+    };
+    use crate::components::timeline::render::viewport::TimelineViewport;
+    use crate::components::timeline::timeline_state::GridLineLevel;
+
+    fn test_snapshot(width: f32, height: f32) -> TimelineRenderSnapshot {
+        let mut viewport = TimelineViewport::new(width, height, 1.0, 0.0, 0.0, 40.0, 80.0, 0.5);
+        viewport.width = width;
+        viewport.height = height;
+        TimelineRenderSnapshot {
+            viewport,
+            bpm: 120.0,
+            beats_per_bar: 4.0,
+            time_signature_revision: 0,
+            visible_tracks: VisibleTrackRange {
+                start_index: 0,
+                end_index: 0,
+            },
+            visible_beats: VisibleBeatRange {
+                start_beat: 0.0,
+                end_beat: 8.0,
+            },
+            lanes: Vec::new(),
+            clips: Vec::new(),
+            grid_lines: vec![GridLineSnapshot {
+                x: 40.0,
+                beat: 1.0,
+                level: GridLineLevel::Bar,
+            }],
+            bar_shades: vec![BarShadeSnapshot {
+                x: 0.0,
+                width: 20.0,
+                bar: 0,
+            }],
+            playhead: PlayheadSnapshot { beat: 0.0, x: 0.0 },
+            selection: SelectionSnapshot {
+                selected_track_id: None,
+                selected_clip_ids: Vec::new(),
+            },
+            track_insert_y: None,
+        }
+    }
+
+    fn quad_color(bytes: &[u8], index: usize) -> [f32; 4] {
+        let base = index * QUAD_INSTANCE_SIZE as usize + 16;
+        let mut out = [0.0f32; 4];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let at = base + i * 4;
+            *slot = f32::from_ne_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+        }
+        out
+    }
+
+    /// Instance building is pure CPU work, so it is asserted on every machine —
+    /// including CI without a GPU.
+    #[test]
+    fn every_shade_and_grid_line_becomes_one_quad() {
+        let snapshot = test_snapshot(200.0, 100.0);
+        let mut bytes = Vec::new();
+        let count = build_arrangement_instances(&snapshot, 200.0, 100.0, &mut bytes);
+        assert_eq!(count, 2, "one bar shade + one grid line");
+        assert_eq!(bytes.len() as u64, count * QUAD_INSTANCE_SIZE);
+    }
+
+    #[test]
+    fn quads_outside_the_viewport_are_dropped() {
+        let mut snapshot = test_snapshot(200.0, 100.0);
+        snapshot.grid_lines = vec![
+            GridLineSnapshot {
+                x: -5.0,
+                beat: 0.0,
+                level: GridLineLevel::Bar,
+            },
+            GridLineSnapshot {
+                x: 250.0,
+                beat: 9.0,
+                level: GridLineLevel::Bar,
+            },
+            GridLineSnapshot {
+                x: 100.0,
+                beat: 4.0,
+                level: GridLineLevel::Beat,
+            },
+        ];
+        snapshot.bar_shades = vec![
+            BarShadeSnapshot {
+                x: -40.0,
+                width: 20.0,
+                bar: -2,
+            },
+            BarShadeSnapshot {
+                x: 400.0,
+                width: 20.0,
+                bar: 10,
+            },
+        ];
+        let mut bytes = Vec::new();
+        let count = build_arrangement_instances(&snapshot, 200.0, 100.0, &mut bytes);
+        assert_eq!(count, 1, "only the on-screen grid line survives");
+    }
+
+    /// The wgpu path must be a visual drop-in for `gpui_paint`, so each grid
+    /// level has to carry the same theme color that fallback paints.
+    #[test]
+    fn grid_levels_map_to_their_theme_colors() {
+        let mut snapshot = test_snapshot(200.0, 100.0);
+        snapshot.bar_shades.clear();
+        snapshot.grid_lines = vec![
+            GridLineSnapshot {
+                x: 10.0,
+                beat: 0.0,
+                level: GridLineLevel::Bar,
+            },
+            GridLineSnapshot {
+                x: 20.0,
+                beat: 1.0,
+                level: GridLineLevel::Beat,
+            },
+            GridLineSnapshot {
+                x: 30.0,
+                beat: 2.0,
+                level: GridLineLevel::Sub,
+            },
+        ];
+        let mut bytes = Vec::new();
+        let count = build_arrangement_instances(&snapshot, 200.0, 100.0, &mut bytes);
+        assert_eq!(count, 3);
+
+        let expect = |c: gpui::Rgba| [c.r, c.g, c.b, c.a];
+        assert_eq!(
+            quad_color(&bytes, 0),
+            expect(crate::theme::Colors::timeline_grid_bar())
+        );
+        assert_eq!(
+            quad_color(&bytes, 1),
+            expect(crate::theme::Colors::timeline_grid_major())
+        );
+        assert_eq!(
+            quad_color(&bytes, 2),
+            expect(crate::theme::Colors::timeline_grid_minor())
+        );
+    }
+
+    /// End-to-end GPU check: render the snapshot offscreen, copy the texture
+    /// back, and assert the pixels actually changed where a grid line was
+    /// requested. Skipped (not failed) when the machine has no usable adapter,
+    /// so this runs on developer machines without gating GPU-less CI.
+    #[test]
+    fn offscreen_pass_paints_the_grid_line() {
+        let mut renderer = WgpuTimelineRenderer::new();
+        if !renderer.is_available() {
+            eprintln!("[gpu-renderer] no adapter available; skipping readback test");
+            return;
+        }
+        let width = 64u32;
+        let height = 16u32;
+        let mut snapshot = test_snapshot(width as f32, height as f32);
+        snapshot.bar_shades.clear();
+        snapshot.grid_lines = vec![GridLineSnapshot {
+            x: 10.0,
+            beat: 0.0,
+            level: GridLineLevel::Bar,
+        }];
+
+        let frame = renderer
+            .render_offscreen(&snapshot)
+            .expect("offscreen render");
+        let pixels = read_back_rgba(&renderer, &frame);
+
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * width + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        let background = at(0, 0);
+        assert_ne!(
+            at(10, 8),
+            background,
+            "grid line column must differ from the cleared background"
+        );
+        assert_eq!(at(30, 8), background, "empty columns stay at clear color");
+    }
+
+    fn read_back_rgba(renderer: &WgpuTimelineRenderer, frame: &WgpuOffscreenFrame) -> Vec<u8> {
+        let device = renderer.device.as_ref().expect("device");
+        let queue = renderer.queue.as_ref().expect("queue");
+        // Copy rows must be aligned to COPY_BYTES_PER_ROW_ALIGNMENT.
+        let unpadded = frame.width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("timeline-readback"),
+            size: (padded * frame.height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            frame.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(frame.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: frame.width,
+                height: frame.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let mapped = buffer.slice(..).get_mapped_range();
+        let mut out = Vec::with_capacity((unpadded * frame.height) as usize);
+        for row in 0..frame.height {
+            let start = (row * padded) as usize;
+            out.extend_from_slice(&mapped[start..start + unpadded as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        out
     }
 }

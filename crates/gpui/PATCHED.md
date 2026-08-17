@@ -21,6 +21,44 @@ the minimize button, so the previous unconditional `frame` message was sent to a
 nil button and aborted the process. Futureboard opens non-minimizable windows for
 dialogs and session transactions, so this guard is required.
 
+## Frame Profile Hook
+
+`gpui::frame_profile` publishes the duration of the two phases an embedder
+cannot otherwise see — `Window::draw` (element tree build, layout, prepaint,
+paint) and `Window::present` (handing the scene to the platform) — as relaxed
+atomics from the most recent frame.
+
+Futureboard's Profiler overlay times its own `render` functions, but those cover
+only element construction. Without this hook a 40 ms frame containing 0.2 ms of
+app work is indistinguishable from a broken profiler, and there is nothing to
+optimize against.
+
+It also splits the draw into its phases — prepaint (element tree build plus
+layout), paint, and accessibility-tree rebuild — and reports the readings that
+say *why* a phase is expensive: microseconds spent shaping text that missed the
+two-frame line-layout cache (`text_system/line_layout.rs`), the layout node
+count (`taffy.rs`), and the primitive count of the finished scene. Layout nodes
+matter more than primitives here: containers lay out without drawing, so a frame
+can walk a large tree while emitting few primitives.
+
+Cost is a handful of `Instant::now()` calls per frame plus one per shaping cache
+miss; no behavior change.
+
+## Truncating Text Re-Measured Every Pass
+
+`TextLayout::layout` refused its own cached size whenever the style truncated,
+because a cached layout *might* have been produced without truncation. Taffy
+measures a node more than once per frame and Futureboard truncates nearly every
+label it draws (track names, clip names, mixer channels), so those elements
+re-ran line wrapping and truncation on every measure pass of every frame.
+
+`TextLayoutInner` now records the truncation width its layout was produced with,
+so the guard compares widths instead of disabling the cache. Same output, and a
+layout is reused only when it was built for exactly the width being asked for.
+
+Measured on a 31-track session: layout measure callbacks cost 13.5 ms per frame
+across 3,637 calls, inside a 20.9 ms layout solve.
+
 ## Maintenance Notes
 
 When updating GPUI from upstream, preserve this Futureboard patch or port it

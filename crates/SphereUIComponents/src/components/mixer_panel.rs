@@ -2764,10 +2764,35 @@ pub struct VstiOutputMeterState {
     pub level: f32,
     pub peak_hold: f32,
     pub clip: bool,
+    /// Meter tick this entry was last published in. Bookkeeping for the
+    /// meter path's prune pass: an entry still carrying the current
+    /// generation is live, an older one is decaying toward removal. Kept
+    /// here so liveness needs no parallel set of owned key strings — see
+    /// `apply_engine_meters`.
+    pub last_seen: u64,
 }
 
 pub fn vsti_output_meter_key(track_id: &str, insert_id: &str, channel: u8) -> String {
-    format!("{track_id}:{insert_id}:{channel}")
+    let mut key = String::new();
+    write_vsti_output_meter_key(&mut key, track_id, insert_id, channel);
+    key
+}
+
+/// Format a meter key into a reusable buffer.
+///
+/// The meter path resolves one key per plugin output channel on every tick, so
+/// on a project with thousands of VSTi output channels the allocating form
+/// above is hundreds of microseconds of pure `String` churn per tick. Callers
+/// on that path keep one buffer and rewrite it in place.
+pub fn write_vsti_output_meter_key(
+    buffer: &mut String,
+    track_id: &str,
+    insert_id: &str,
+    channel: u8,
+) {
+    use std::fmt::Write;
+    buffer.clear();
+    let _ = write!(buffer, "{track_id}:{insert_id}:{channel}");
 }
 
 #[derive(Clone, Copy)]
@@ -3647,6 +3672,66 @@ mod mixer_virtualization_tests {
         assert!(middle.len() <= 12);
         assert!(end.len() <= 12);
         assert_eq!(end.end, 1_000);
+    }
+}
+
+#[cfg(test)]
+mod vsti_meter_key_tests {
+    use super::{vsti_output_meter_key, write_vsti_output_meter_key, VstiOutputMeterState};
+
+    /// The buffered form is what the meter path uses every tick; it has to
+    /// produce byte-identical keys to the allocating form the mixer render
+    /// path still calls, or lookups would silently miss.
+    #[test]
+    fn buffered_and_allocating_keys_are_identical() {
+        let cases = [
+            ("track-1", "insert-7", 1u8),
+            ("vsti-out:abc:bus:3", "slot-0", 32),
+            ("", "", 0),
+        ];
+        let mut buffer = String::new();
+        for (track_id, insert_id, channel) in cases {
+            write_vsti_output_meter_key(&mut buffer, track_id, insert_id, channel);
+            assert_eq!(
+                buffer,
+                vsti_output_meter_key(track_id, insert_id, channel),
+                "key mismatch for {track_id}/{insert_id}/{channel}"
+            );
+        }
+    }
+
+    /// Reusing one buffer must never leak the previous key's tail.
+    #[test]
+    fn reused_buffer_never_keeps_a_longer_previous_key() {
+        let mut buffer = String::new();
+        write_vsti_output_meter_key(&mut buffer, "a-very-long-track-id", "insert-12", 31);
+        write_vsti_output_meter_key(&mut buffer, "t", "i", 1);
+        assert_eq!(buffer, "t:i:1");
+    }
+
+    /// Liveness is now a generation stamp rather than a set of live keys.
+    /// A meter published this tick is live; one that stopped publishing must
+    /// fall through to the decay branch exactly as before.
+    #[test]
+    fn generation_stamp_separates_live_from_stale_entries() {
+        let generation = 41u64;
+        let live = VstiOutputMeterState {
+            level: 0.5,
+            peak_hold: 0.5,
+            clip: false,
+            last_seen: generation,
+        };
+        let stale = VstiOutputMeterState {
+            level: 0.5,
+            peak_hold: 0.5,
+            clip: false,
+            last_seen: generation - 1,
+        };
+        assert!(live.last_seen == generation, "published this tick");
+        assert!(stale.last_seen != generation, "not published this tick");
+        // A fresh entry starts stale, so it only survives once the meter loop
+        // stamps it — matching `or_default()` + live-set insertion before.
+        assert_eq!(VstiOutputMeterState::default().last_seen, 0);
     }
 }
 

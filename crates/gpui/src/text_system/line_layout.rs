@@ -605,9 +605,14 @@ impl LineLayoutCache {
             layout
         } else {
             let text = SharedString::from(text);
+            // Cache miss: this line has to be shaped from scratch. Timed so the
+            // profiler HUD can tell "the frame re-shapes its text every frame"
+            // apart from "the frame simply draws a lot".
+            let shape_started = std::time::Instant::now();
             let mut layout = self
                 .platform_text_system
                 .layout_line(&text, font_size, runs);
+            crate::frame_profile::record_text_shape(shape_started.elapsed().as_micros() as u64);
 
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);

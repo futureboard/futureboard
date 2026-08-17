@@ -10,7 +10,7 @@ use crate::components::timeline::automation_lane::{
     automation_lane, AutomationDownCallback, AutomationHoverCallback, AutomationLaneActionCallback,
 };
 use crate::components::timeline::timeline_state::{
-    AutomationHover, AutomationMarquee, TimelineState, TrackRowLayout,
+    AutomationHover, AutomationMarquee, TimelineGestureContext, TimelineState, TrackRowLayout,
     AUTOMATION_CONTROL_LANE_HEIGHT, AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
 use crate::components::timeline::timeline_surface::timeline_surface;
@@ -80,6 +80,10 @@ pub fn track_list(
     automation_hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
+    // One per-frame coordinate/snap snapshot shared by every lane and automation
+    // sub-lane gesture closure. Previously each of those cloned the entire
+    // `TimelineState` (all tracks, clips, and MIDI notes) to satisfy `'static`.
+    let gesture = std::rc::Rc::new(TimelineGestureContext::from_state(state));
     let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
     let total_tracks_height = row_layout.total_height;
@@ -174,6 +178,7 @@ pub fn track_list(
                         lane_y,
                         AUTOMATION_SUBLANE_HEIGHT,
                         state,
+                        &gesture,
                         on_automation_down.clone(),
                         on_automation_lane_action.clone(),
                         on_automation_hover.clone(),
@@ -217,6 +222,7 @@ pub fn track_list(
                                 track,
                                 index,
                                 state,
+                                &gesture,
                                 row_height,
                                 on_select_track.clone(),
                                 on_select_clip.clone(),

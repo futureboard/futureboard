@@ -1,6 +1,7 @@
 use crate::components::timeline::timeline_state::{
     automation_value_to_y, automation_y_to_value, evaluate_automation, AutomationHover,
-    AutomationLaneState, AutomationMarquee, AutomationTarget, TimelineState, HEADER_WIDTH,
+    AutomationLaneState, AutomationMarquee, AutomationTarget, TimelineGestureContext,
+    TimelineState, HEADER_WIDTH,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -102,6 +103,7 @@ pub fn automation_lane(
     lane_y_abs: f32,
     lane_height: f32,
     state: &TimelineState,
+    gesture: &std::rc::Rc<TimelineGestureContext>,
     on_automation_down: Option<AutomationDownCallback>,
     on_lane_action: Option<AutomationLaneActionCallback>,
     on_automation_hover: Option<AutomationHoverCallback>,
@@ -302,7 +304,9 @@ pub fn automation_lane(
     };
 
     let interaction = on_automation_down.clone().map(|cb| {
-        let state_for = state.clone();
+        // Per-frame geometry snapshot, not a full project clone — see
+        // [`TimelineGestureContext`].
+        let state_for = std::rc::Rc::clone(gesture);
         let tid = track_id.clone();
         let lid = lane_id.clone();
         let mut hit = div()
@@ -350,7 +354,7 @@ pub fn automation_lane(
         // clear it when the cursor leaves the lane. Same snapped beat as the click
         // path so the hovered target matches what a click would grab.
         if let Some(hover_cb) = on_automation_hover.clone() {
-            let state_for = state.clone();
+            let state_for = std::rc::Rc::clone(gesture);
             let tid = track_id.clone();
             let lid = lane_id.clone();
             hit = hit.on_mouse_move(move |event: &gpui::MouseMoveEvent, window, cx| {

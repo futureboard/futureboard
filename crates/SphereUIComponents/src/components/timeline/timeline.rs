@@ -171,6 +171,11 @@ pub struct Timeline {
     /// Blocks further drag-move/drop events after Escape or focus-loss cancellation.
     song_text_drag_cancelled: bool,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
+    /// Pre-gesture clip snapshot for the in-flight edge-resize, captured on the
+    /// first drag-move (before any mutation) so the drop can record one exact
+    /// undo step. Kept here rather than inside [`ClipResizeDrag`] so the drag
+    /// payload — rebuilt for every clip on every repaint — stays identity-only.
+    clip_resize_origin: Option<ClipSnapshot>,
     clip_drag_target_track_index: Option<usize>,
     clip_clone_drag_id: Option<String>,
     /// Pen-tool click-drag MIDI clip preview, live until mouse-up creates the clip.

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
-use crate::components::mixer_panel::vsti_output_meter_key;
+use crate::components::mixer_panel::{write_vsti_output_meter_key, VstiOutputMeterState};
 use crate::components::timeline::timeline_state::{ClipType, TrackOutputRouting, TrackType};
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
@@ -102,6 +102,14 @@ pub(crate) struct EngineSyncState {
     /// Device/port discovery is much heavier than draining MIDI messages and
     /// does not need to run at display refresh.
     pub midi_devices_synced_at: Instant,
+    /// `(bar, beat_in_bar)` currently shown by the transport chrome.
+    ///
+    /// The playhead moves every audio block, but the chrome only renders bar
+    /// and beat — at 120 BPM that is two distinct values per second, not one
+    /// per display refresh. Notifying the studio root on playhead motion made
+    /// GPUI re-lay-out and repaint the entire window (timeline, docks, mixer)
+    /// on every tick for a label that had not changed.
+    pub displayed_bar_beat: (i64, u16),
 }
 
 impl Default for EngineSyncState {
@@ -117,6 +125,7 @@ impl Default for EngineSyncState {
             bpm_committed_at: None,
             bridge_reconciled_at: Instant::now() - Duration::from_secs(1),
             midi_devices_synced_at: Instant::now() - Duration::from_secs(1),
+            displayed_bar_beat: (i64::MIN, u16::MAX),
         }
     }
 }
@@ -768,12 +777,27 @@ impl StudioLayout {
         // and append streamed peaks. Self-contained; notifies the timeline.
         self.update_recording_preview(cx);
 
+        let mut transport_display_changed = false;
         if stats.transport_playing {
             let bpm = {
                 let timeline = self.timeline.read(cx);
                 timeline.state.bpm
             };
             let interpolated = self.interpolated_playhead_beat(bpm);
+            // What the transport chrome will actually display for this playhead.
+            // Only a change here justifies repainting the studio root.
+            let bar_beat = {
+                let timeline = self.timeline.read(cx);
+                let bb = timeline
+                    .state
+                    .time_signature_map
+                    .bar_beat_at_beat(interpolated.max(0.0) as f64);
+                (bb.bar, bb.beat_in_bar)
+            };
+            if self.engine_sync.displayed_bar_beat != bar_beat {
+                self.engine_sync.displayed_bar_beat = bar_beat;
+                transport_display_changed = true;
+            }
             let _ = self.timeline.update(cx, move |timeline, cx| {
                 timeline.state.transport.playing = true;
                 // No threshold while playing — even sub-pixel beat motion
@@ -826,7 +850,6 @@ impl StudioLayout {
             crate::perf::count("audio_dropout_recent", new_dropouts);
         }
 
-        let was_playing = stats.transport_playing;
         self.audio_bridge.stats = Some(stats);
 
         if meter_changed {
@@ -844,11 +867,17 @@ impl StudioLayout {
         // its own — auditioning happens with the transport stopped.
         let preview_playhead_moved = self.poll_browser_preview_playhead();
 
-        // While playing the root layout must repaint every tick so the
-        // transport chrome (bar:beat:tick, status line) tracks the
-        // playhead. Meter-only changes route to isolated mixer/timeline
-        // entities and must not invalidate the full studio shell when idle.
-        state_changed || was_playing || preview_playhead_moved
+        // The studio root owns the whole window, so notifying it makes GPUI
+        // re-render, re-lay-out, and repaint every panel under it. Measured on
+        // a 31-track session that pass is ~31 ms — 97% of the frame — which is
+        // why this must be driven by what the root actually *shows*, not by
+        // playhead motion.
+        //
+        // While playing, the only root-visible thing the playhead changes is
+        // the chrome's bar.beat readout, so that is the trigger. The playhead
+        // line, auto-scroll, meters, and the status footer all reach their own
+        // isolated entities above and repaint without the shell.
+        state_changed || transport_display_changed || preview_playhead_moved
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's
@@ -959,13 +988,24 @@ impl StudioLayout {
         }
         let mut changed = self.timeline.update(cx, |timeline, _cx| {
             let mut changed = false;
-            for track_meter in meter_tracks {
-                if let Some(track) = timeline
-                    .state
-                    .tracks
-                    .iter_mut()
-                    .find(|track| track.id == track_meter.track_id)
-                {
+            // Resolve every meter against one prebuilt id -> index map, in a
+            // borrow that ends before the mutation pass below. The per-meter
+            // linear `find` this replaces was O(tracks x meters), and this loop
+            // runs at the display refresh: measured at the reported project
+            // scale (2,103 channels) it cost 3.1 ms per tick versus 0.1 ms
+            // here — several hundred milliseconds per second of UI thread spent
+            // purely resolving ids.
+            let resolved: Vec<Option<usize>> = {
+                let index_by_id = timeline.state.track_index_by_id();
+                meter_tracks
+                    .iter()
+                    .map(|track_meter| {
+                        index_by_id.get(track_meter.track_id.as_str()).copied()
+                    })
+                    .collect()
+            };
+            for (track_meter, index) in meter_tracks.into_iter().zip(resolved) {
+                if let Some(track) = index.and_then(|index| timeline.state.tracks.get_mut(index)) {
                     let next_l = track_meter.peak_l.clamp(0.0, 1.0) as f32;
                     let next_r = track_meter.peak_r.clamp(0.0, 1.0) as f32;
                     if crate::forensic_trace::forensic_trace_enabled()
@@ -1061,15 +1101,26 @@ impl StudioLayout {
             );
             changed
         });
-        // Reuse the persistent scratch set (retains its capacity across ticks)
-        // rather than allocating a fresh `HashSet` every meter update.
-        let mut live_keys = std::mem::take(&mut self.mixer_view.vsti_meter_live_keys);
-        live_keys.clear();
+        // Stamp every meter published this tick with the current generation,
+        // then prune by generation below. The previous shape built two owned
+        // `String`s per plugin output channel per tick (the key, plus a clone
+        // into a live-key set); at the scale multi-output VSTi projects reach
+        // that measured in the hundreds of microseconds per tick, at the
+        // display refresh, on the UI thread.
+        let generation = self.mixer_view.vsti_meter_generation.wrapping_add(1);
+        self.mixer_view.vsti_meter_generation = generation;
+        let mut key_buf = std::mem::take(&mut self.mixer_view.vsti_meter_key_buf);
         for meter in plugin_output_meters {
             let channel = meter.channel.clamp(1, 32) as u8;
-            let key = vsti_output_meter_key(&meter.track_id, &meter.insert_id, channel);
-            live_keys.insert(key.clone());
-            let entry = self.mixer_view.vsti_output_meters.entry(key).or_default();
+            write_vsti_output_meter_key(&mut key_buf, &meter.track_id, &meter.insert_id, channel);
+            let meters = &mut self.mixer_view.vsti_output_meters;
+            if !meters.contains_key(key_buf.as_str()) {
+                meters.insert(key_buf.clone(), VstiOutputMeterState::default());
+            }
+            let entry = meters
+                .get_mut(key_buf.as_str())
+                .expect("entry inserted above");
+            entry.last_seen = generation;
             let next = meter.peak.clamp(0.0, 1.0) as f32;
             if crate::forensic_trace::forensic_trace_enabled() && next > 0.0001 {
                 let bus_index = (channel.saturating_sub(1)) / 2;
@@ -1091,10 +1142,12 @@ impl StudioLayout {
             changed |= update_meter_hold(&mut entry.peak_hold, entry.level, meter_dt);
             changed |= update_meter_clip(&mut entry.clip, meter.peak, meter.peak, entry.peak_hold);
         }
-        self.mixer_view.vsti_output_meters.retain(|key, meter| {
-            if live_keys.contains(key) {
+        self.mixer_view.vsti_output_meters.retain(|_key, meter| {
+            if meter.last_seen == generation {
                 return true;
             }
+            // Not published this tick — ride the same decay to silence the
+            // live-key set drove before, and drop once fully at rest.
             let mut keep = false;
             changed |= smooth_meter_value(&mut meter.level, 0.0, meter_dt);
             changed |= update_meter_hold(&mut meter.peak_hold, meter.level, meter_dt);
@@ -1104,8 +1157,8 @@ impl StudioLayout {
             }
             keep
         });
-        // Hand the scratch set back so its allocation is reused next tick.
-        self.mixer_view.vsti_meter_live_keys = live_keys;
+        // Hand the key buffer back so its allocation is reused next tick.
+        self.mixer_view.vsti_meter_key_buf = key_buf;
         changed
     }
 
@@ -3163,5 +3216,57 @@ mod macos_cursor {
                 y: f64::from(y),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_repaint_tests {
+    use crate::components::timeline::timeline_state::{TimeSignatureMap, TimelineState};
+
+    /// The studio root repaints the whole window, so during playback it must
+    /// follow the chrome's bar.beat readout rather than raw playhead motion.
+    /// At 120 BPM in 4/4 that is 2 distinct values per second — against a poll
+    /// loop running at the display refresh, this is the difference between a
+    /// couple of full-window relayouts per second and 60-144 of them.
+    #[test]
+    fn bar_beat_changes_far_less_often_than_the_playhead() {
+        let mut map = TimeSignatureMap::new();
+        map.add_or_update_point(0.0, 4, 4);
+
+        let bar_beat = |beat: f64| {
+            let bb = map.bar_beat_at_beat(beat);
+            (bb.bar, bb.beat_in_bar)
+        };
+
+        // One second of playback at 120 BPM = 2 beats, polled at 144 Hz.
+        let beats_per_second = 2.0_f64;
+        let polls = 144;
+        let mut distinct = 0usize;
+        let mut previous = (i64::MIN, u16::MAX);
+        for poll in 0..polls {
+            let beat = beats_per_second * (poll as f64 / polls as f64);
+            let current = bar_beat(beat);
+            if current != previous {
+                distinct += 1;
+                previous = current;
+            }
+        }
+        assert_eq!(
+            distinct, 2,
+            "only the beat boundaries should repaint the shell, got {distinct}"
+        );
+    }
+
+    /// Sub-beat motion must not trip the comparison, or the optimization is
+    /// silently a no-op.
+    #[test]
+    fn sub_beat_motion_holds_the_same_display_value() {
+        let state = TimelineState::default();
+        let at = |beat: f64| {
+            let bb = state.time_signature_map.bar_beat_at_beat(beat);
+            (bb.bar, bb.beat_in_bar)
+        };
+        assert_eq!(at(4.01), at(4.99), "same beat, no shell repaint");
+        assert_ne!(at(4.99), at(5.01), "beat boundary does repaint");
     }
 }

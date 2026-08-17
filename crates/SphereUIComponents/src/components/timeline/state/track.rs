@@ -626,6 +626,24 @@ impl TimelineState {
         self.tracks.iter().find(|t| t.id == track_id)
     }
 
+    /// Track id -> index, for callers that resolve **many** ids against the
+    /// same track list in one pass.
+    ///
+    /// [`Self::find_track`] is a linear scan, which is right for a single
+    /// lookup. Resolving a whole batch with it is O(tracks x lookups): a
+    /// project whose instruments expose per-output VSTi channels reaches a few
+    /// thousand channels, and the engine publishes one meter for each, so the
+    /// meter path alone ran millions of string comparisons on the UI thread at
+    /// the display refresh. Building this map once per batch makes that pass
+    /// linear instead.
+    pub fn track_index_by_id(&self) -> std::collections::HashMap<&str, usize> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| (track.id.as_str(), index))
+            .collect()
+    }
+
     pub fn delete_track(&mut self, track_id: &str) {
         if let Some(index) = self.tracks.iter().position(|track| track.id == track_id) {
             let deleting_group = self.tracks[index].track_type == TrackType::Group;

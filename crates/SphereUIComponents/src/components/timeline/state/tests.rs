@@ -1831,4 +1831,107 @@ mod lane_origin_tests {
             clip.duration_beats
         );
     }
+
+    /// The lightweight per-frame gesture context exists so lane/clip/ruler
+    /// closures stop deep-cloning the whole project. It is only safe to swap in
+    /// if it resolves pointer coordinates and snapping bit-for-bit like the
+    /// state it replaced.
+    #[test]
+    fn gesture_context_matches_timeline_state_coordinate_and_snap_math() {
+        let mut state = TimelineState::default();
+        state.bpm = 137.0;
+        state.viewport.pixels_per_second = 92.0;
+        state.viewport.scroll_x = 431.0;
+        state.viewport.panel_origin_x = 210.0;
+        state.sync_pixels_per_beat();
+        state.snap_to_grid = true;
+        state.grid_division = SnapDivision::Div1_8;
+        // A meter change mid-timeline: bar-relative snapping must follow the
+        // marker in force at the snapped beat, not the one at the playhead.
+        state.add_time_signature_point(0.0, 4, 4);
+        state.add_time_signature_point(16.0, 7, 8);
+
+        let ctx = state.gesture_context();
+        for x in [-40.0_f32, 0.0, 17.3, 250.0, 999.0, 4321.0] {
+            assert_eq!(ctx.x_to_beats(x), state.x_to_beats(x), "x_to_beats @ {x}");
+            assert_eq!(ctx.x_to_beat(x), state.x_to_beat(x), "x_to_beat @ {x}");
+            assert_eq!(
+                ctx.lane_x_from_window_x(x),
+                state.lane_x_from_window_x(x),
+                "lane_x @ {x}"
+            );
+            assert_eq!(
+                ctx.beats_from_window_x(x),
+                state.beats_from_window_x(x),
+                "beats_from_window_x @ {x}"
+            );
+        }
+        for beat in [0.0_f32, 0.13, 3.9, 15.99, 16.4, 33.2] {
+            assert_eq!(
+                ctx.snap_beats(beat),
+                state.snap_beats(beat),
+                "snap @ {beat}"
+            );
+            assert_eq!(
+                ctx.snap_beats_with_bypass(beat, true),
+                state.snap_beats_with_bypass(beat, true),
+                "snap bypass @ {beat}"
+            );
+            assert_eq!(
+                ctx.beats_to_x(beat),
+                state.beats_to_x(beat),
+                "beats_to_x @ {beat}"
+            );
+        }
+        for seconds in [0.0_f32, 0.4, 2.7, 11.0] {
+            assert_eq!(
+                ctx.snap_time(seconds),
+                state.snap_time(seconds),
+                "snap_time @ {seconds}"
+            );
+        }
+        assert_eq!(ctx.seconds_per_beat(), state.seconds_per_beat());
+        assert_eq!(ctx.lane_origin_x(), state.lane_origin_x());
+        assert_eq!(
+            ctx.arrangement_content_top(),
+            state.arrangement_content_top()
+        );
+    }
+
+    /// The meter path resolves one id per published meter against the track
+    /// list every tick. That batch must stay linear: at the scale multi-output
+    /// VSTi projects reach (thousands of channels) a per-meter linear scan is
+    /// quadratic and eats the UI thread at the display refresh.
+    #[test]
+    fn track_index_by_id_resolves_every_track_exactly_once() {
+        let mut state = TimelineState::default();
+        for index in 0..64 {
+            state.create_track(CreateTrackOptions {
+                track_type: TrackType::Instrument,
+                name: format!("Track {index}"),
+                color: crate::theme::Colors::track_color_for_index(index),
+                volume: 1.0,
+                pan: 0.0,
+                armed: false,
+                input_monitor: InputMonitorMode::Off,
+            });
+        }
+
+        let index_by_id = state.track_index_by_id();
+        assert_eq!(index_by_id.len(), state.tracks.len(), "one entry per track");
+        for (expected_index, track) in state.tracks.iter().enumerate() {
+            assert_eq!(
+                index_by_id.get(track.id.as_str()).copied(),
+                Some(expected_index),
+                "id {} must map to its own slot",
+                track.id
+            );
+            // The map must agree with the linear lookup it replaces.
+            assert_eq!(
+                state.find_track(&track.id).map(|t| t.id.as_str()),
+                Some(track.id.as_str())
+            );
+        }
+        assert_eq!(index_by_id.get("no-such-track").copied(), None);
+    }
 }

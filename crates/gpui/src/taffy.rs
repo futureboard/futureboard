@@ -56,6 +56,10 @@ impl TaffyLayoutEngine {
     }
 
     pub fn clear(&mut self) {
+        // Node count for the frame being cleared. This is the size of the tree
+        // the layout pass walked, and it is normally much larger than the
+        // scene's primitive count because containers lay out without drawing.
+        crate::frame_profile::record_layout_nodes(self.taffy.total_node_count() as u64);
         self.taffy.clear();
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
@@ -207,6 +211,7 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        let solve_started = std::time::Instant::now();
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
@@ -234,12 +239,20 @@ impl TaffyLayoutEngine {
                         untransform(available_space.height),
                     );
 
+                    // Taffy may call this many times per node across its
+                    // sizing passes, so its call count is a far better signal
+                    // than the node count when layout is unexpectedly slow.
+                    let measure_started = std::time::Instant::now();
                     let measured_size: Size<Pixels> =
                         (node_context.measure)(known_dimensions, available_space, window, cx);
+                    crate::frame_profile::record_layout_measure(
+                        measure_started.elapsed().as_nanos() as u64,
+                    );
                     snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                 },
             )
             .expect(EXPECT_MESSAGE);
+        crate::frame_profile::record_layout_solve(solve_started.elapsed().as_micros() as u64);
     }
 
     // Pixel snapping

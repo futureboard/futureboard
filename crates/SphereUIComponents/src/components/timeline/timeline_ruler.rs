@@ -1,7 +1,8 @@
 use crate::assets;
 use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
-    GridLineLevel, TempoMap, TimeSignatureMap, TimelineState, HEADER_WIDTH, RULER_HEIGHT,
+    GridLineLevel, TempoMap, TimeSignatureMap, TimelineGestureContext, TimelineState, HEADER_WIDTH,
+    RULER_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -107,9 +108,12 @@ pub fn timeline_ruler(
     let scrub_active_drag = scrub_active.clone();
     let scrub_active_up = scrub_active.clone();
     let on_region_drag_move = on_region_drag.clone();
-    let state_for_region_drag = state.clone();
+    // Both drag closures only map pointer x -> snapped beats, so they capture
+    // this frame's geometry instead of a deep clone of the whole project.
+    let gesture = std::rc::Rc::new(TimelineGestureContext::from_state(state));
+    let state_for_region_drag = std::rc::Rc::clone(&gesture);
     let on_loop_drag_move = on_loop_drag.clone();
-    let state_for_loop_drag = state.clone();
+    let state_for_loop_drag = gesture;
 
     div()
         .flex()

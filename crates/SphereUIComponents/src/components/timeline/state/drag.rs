@@ -10,14 +10,19 @@ pub struct ClipDragItem {
 /// In-flight clip edge-resize drag payload (mirrors [`ClipDragItem`]). Carries
 /// the clip identity, which edge is dragged, and the original bounds so the
 /// handler can resolve the new length from the live cursor position.
+///
+/// Deliberately identity-only: the pre-gesture clip snapshot that the undo step
+/// needs is captured by the timeline root on the first drag-move, before it
+/// mutates anything (`Timeline::clip_resize_origin`). Carrying the whole
+/// [`ClipState`] here instead meant cloning every note in the clip on each
+/// repaint — the payload is built during element construction — and again on
+/// each drag-move event.
 #[derive(Debug, Clone)]
 pub struct ClipResizeDrag {
     pub clip_id: String,
     pub edge: ClipEdge,
     pub start_beat: f32,
     pub duration_beats: f32,
-    /// Complete pre-gesture snapshot so trim can create one exact undo step.
-    pub original: ClipState,
 }
 
 #[derive(Debug, Clone)]
