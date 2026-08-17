@@ -19,6 +19,12 @@ static LAYOUT_NODES: AtomicU64 = AtomicU64::new(0);
 static PREPAINT_US: AtomicU64 = AtomicU64::new(0);
 static PAINT_US: AtomicU64 = AtomicU64::new(0);
 static A11Y_US: AtomicU64 = AtomicU64::new(0);
+static SOLVE_US_ACC: AtomicU64 = AtomicU64::new(0);
+static MEASURE_NS_ACC: AtomicU64 = AtomicU64::new(0);
+static MEASURE_CALLS_ACC: AtomicU64 = AtomicU64::new(0);
+static SOLVE_US: AtomicU64 = AtomicU64::new(0);
+static MEASURE_NS: AtomicU64 = AtomicU64::new(0);
+static MEASURE_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Accumulated during the frame in progress.
 static SHAPE_US_ACC: AtomicU64 = AtomicU64::new(0);
 static SHAPE_MISSES_ACC: AtomicU64 = AtomicU64::new(0);
@@ -54,31 +60,54 @@ pub struct FrameProfile {
     /// Building the accessibility tree, when a client has activated it. Scales
     /// with the element tree, so it can rival the whole rest of the frame.
     pub a11y_us: u64,
+    /// Time inside the layout engine's solve, measure callbacks included.
+    pub layout_solve_us: u64,
+    /// Time inside measure callbacks alone.
+    pub measure_ns: u64,
+    /// Measure callbacks invoked. Taffy runs several sizing passes, so this can
+    /// dwarf the node count — and when it does, that is the pathology.
+    pub measure_calls: u64,
 }
 
 impl FrameProfile {
+    /// Element tree build, layout, and paint, in milliseconds.
     pub fn draw_ms(self) -> f32 {
         self.draw_us as f32 / 1000.0
     }
 
+    /// Scene handoff to the platform window, in milliseconds.
     pub fn present_ms(self) -> f32 {
         self.present_us as f32 / 1000.0
     }
 
+    /// Text shaping that missed the line-layout cache, in milliseconds.
     pub fn shape_ms(self) -> f32 {
         self.shape_us as f32 / 1000.0
     }
 
+    /// Element tree build plus layout, in milliseconds.
     pub fn prepaint_ms(self) -> f32 {
         self.prepaint_us as f32 / 1000.0
     }
 
+    /// Primitive emission, in milliseconds.
     pub fn paint_ms(self) -> f32 {
         self.paint_us as f32 / 1000.0
     }
 
+    /// Accessibility tree rebuild, in milliseconds.
     pub fn a11y_ms(self) -> f32 {
         self.a11y_us as f32 / 1000.0
+    }
+
+    /// The layout engine's solve, measure callbacks included, in milliseconds.
+    pub fn layout_solve_ms(self) -> f32 {
+        self.layout_solve_us as f32 / 1000.0
+    }
+
+    /// Measure callbacks alone, in milliseconds.
+    pub fn measure_ms(self) -> f32 {
+        self.measure_ns as f32 / 1_000_000.0
     }
 
     /// True once at least one frame has been measured.
@@ -90,12 +119,27 @@ impl FrameProfile {
 pub(crate) fn begin_frame() {
     SHAPE_US_ACC.store(0, Ordering::Relaxed);
     SHAPE_MISSES_ACC.store(0, Ordering::Relaxed);
+    SOLVE_US_ACC.store(0, Ordering::Relaxed);
+    MEASURE_NS_ACC.store(0, Ordering::Relaxed);
+    MEASURE_CALLS_ACC.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn record_layout_solve(micros: u64) {
+    SOLVE_US_ACC.fetch_add(micros, Ordering::Relaxed);
+}
+
+pub(crate) fn record_layout_measure(nanos: u64) {
+    MEASURE_NS_ACC.fetch_add(nanos, Ordering::Relaxed);
+    MEASURE_CALLS_ACC.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_draw(micros: u64) {
     DRAW_US.store(micros, Ordering::Relaxed);
     SHAPE_US.store(SHAPE_US_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
     SHAPE_MISSES.store(SHAPE_MISSES_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
+    SOLVE_US.store(SOLVE_US_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
+    MEASURE_NS.store(MEASURE_NS_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
+    MEASURE_CALLS.store(MEASURE_CALLS_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
 pub(crate) fn record_present(micros: u64) {
@@ -134,6 +178,9 @@ pub fn frame_profile() -> FrameProfile {
         prepaint_us: PREPAINT_US.load(Ordering::Relaxed),
         paint_us: PAINT_US.load(Ordering::Relaxed),
         a11y_us: A11Y_US.load(Ordering::Relaxed),
+        layout_solve_us: SOLVE_US.load(Ordering::Relaxed),
+        measure_ns: MEASURE_NS.load(Ordering::Relaxed),
+        measure_calls: MEASURE_CALLS.load(Ordering::Relaxed),
     }
 }
 

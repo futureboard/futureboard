@@ -166,6 +166,30 @@ fn frame_accounting_rows(cpu_ms: f32, frame_ms: f32) -> Vec<gpui::AnyElement> {
             pct(profile.shape_ms()),
         )
         .into_any_element(),
+        // Inside prepaint: how much is the layout solve itself, and how much of
+        // that is measure callbacks. Taffy runs several sizing passes, so a
+        // measure count far above the node count is the thing to fix.
+        overlay_scope_row(
+            "layout solve",
+            &format!(
+                "{:.2} ms  {:.0}%",
+                profile.layout_solve_ms(),
+                pct(profile.layout_solve_ms())
+            ),
+            pct(profile.layout_solve_ms()),
+        )
+        .into_any_element(),
+        overlay_scope_row(
+            "measure",
+            &format!(
+                "{:.2} ms  {:.0}%  x{}",
+                profile.measure_ms(),
+                pct(profile.measure_ms()),
+                profile.measure_calls
+            ),
+            pct(profile.measure_ms()),
+        )
+        .into_any_element(),
         // Layout nodes, not primitives, is what prepaint cost scales with.
         overlay_line(
             "Nodes / prims",
@@ -232,8 +256,9 @@ mod tests {
     #[test]
     fn breakdown_always_renders_every_row() {
         // Frame breakdown: label + UI CPU + draw + present + unaccounted.
-        // Draw split: label + prepaint + paint + a11y + text + node counts.
-        const EXPECTED_ROWS: usize = 11;
+        // Draw split: label + prepaint + paint + a11y + text + solve + measure
+        // + node counts.
+        const EXPECTED_ROWS: usize = 13;
         assert_eq!(frame_accounting_rows(0.2, 40.0).len(), EXPECTED_ROWS);
         assert_eq!(frame_accounting_rows(0.0, 0.0).len(), EXPECTED_ROWS);
         // A frame cheaper than the measured CPU (clock jitter) must not
