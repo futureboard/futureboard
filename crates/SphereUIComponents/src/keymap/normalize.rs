@@ -1,4 +1,4 @@
-use gpui::KeyDownEvent;
+use gpui::{KeyDownEvent, Keystroke};
 
 /// Canonicalize an authored accelerator ("Ctrl+Shift+S") into a stable token.
 pub fn canonical_accel(accel: &str) -> Option<String> {
@@ -20,11 +20,42 @@ pub fn canonical_accel(accel: &str) -> Option<String> {
 }
 
 pub fn canonical_event(event: &KeyDownEvent) -> Option<String> {
-    let m = &event.keystroke.modifiers;
+    canonical_keystroke(&event.keystroke)
+}
+
+/// True when the keystroke is a bare modifier press. Those arrive as their own
+/// key events on some platforms and must never terminate a chord recording.
+pub fn is_modifier_only_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "control"
+            | "ctrl"
+            | "shift"
+            | "alt"
+            | "option"
+            | "opt"
+            | "platform"
+            | "cmd"
+            | "command"
+            | "super"
+            | "meta"
+            | "win"
+            | "function"
+            | "fn"
+            | "capslock"
+    )
+}
+
+pub fn canonical_keystroke(keystroke: &Keystroke) -> Option<String> {
+    let m = &keystroke.modifiers;
     let ctrl = m.control || m.platform;
     let shift = m.shift;
     let alt = m.alt;
-    let base = canonical_key(&event.keystroke.key.to_ascii_lowercase());
+    let key = keystroke.key.to_ascii_lowercase();
+    if key.is_empty() || is_modifier_only_key(&key) {
+        return None;
+    }
+    let base = canonical_key(&key);
     if base.is_empty() {
         return None;
     }
@@ -71,6 +102,10 @@ pub fn format_accel_display(token: &str) -> String {
 
 pub fn event_to_accel_string(event: &KeyDownEvent) -> Option<String> {
     canonical_event(event).map(|token| format_accel_display(&token))
+}
+
+pub fn keystroke_to_accel_string(keystroke: &Keystroke) -> Option<String> {
+    canonical_keystroke(keystroke).map(|token| format_accel_display(&token))
 }
 
 fn join_token(ctrl: bool, shift: bool, alt: bool, base: String) -> String {

@@ -22,6 +22,9 @@ pub struct MixerTreeVisibleRow {
     pub selected: bool,
     pub muted: bool,
     pub solo: bool,
+    /// VSTi multi-out channel sounding because its parent instrument is soloed,
+    /// not because its own Solo is engaged. Mirrors the strip's S button state.
+    pub solo_implied: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -195,14 +198,20 @@ impl MixerTreeRenderCache {
         self.rebuild_model_if_needed(tracks, view);
         self.rebuild_visible_rows_if_needed(view);
         for row in &mut self.visible_rows {
-            if let Some(track) = row
-                .channel_id
-                .as_deref()
-                .and_then(|id| tracks.iter().find(|track| track.id == id))
-            {
+            let Some(channel_id) = row.channel_id.as_deref() else {
+                continue;
+            };
+            if let Some(track) = tracks.iter().find(|track| track.id == channel_id) {
                 row.muted = track.muted;
                 row.solo = track.solo;
             }
+            // A VSTi multi-out channel is sounded by its parent instrument's
+            // solo too, so the sidebar S must not read as off while the channel
+            // is audible. Cheap: only `vsti-out:` ids reach the track scan.
+            row.solo_implied = !row.solo
+                && crate::components::timeline::timeline_state::is_vsti_output_solo_implied(
+                    channel_id, tracks,
+                );
         }
     }
 }
@@ -225,6 +234,8 @@ fn visible_row_from_flat(row: MixerTreeRow) -> MixerTreeVisibleRow {
         selected: row.selected,
         muted: row.muted,
         solo: row.solo,
+        // Resolved against the live track list in `recompute`.
+        solo_implied: false,
     }
 }
 

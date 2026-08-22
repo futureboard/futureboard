@@ -526,8 +526,13 @@ fn tree_row_element(
                         px(14.0),
                         px(14.0),
                         px(9.0),
+                        // Three states, matching the strip's S button: engaged,
+                        // sounded by a soloed parent instrument (dimmed accent),
+                        // and off.
                         if row.solo {
                             Colors::accent_primary()
+                        } else if row.solo_implied {
+                            Colors::with_alpha(Colors::accent_primary(), 0.55)
                         } else {
                             Colors::text_faint()
                         },

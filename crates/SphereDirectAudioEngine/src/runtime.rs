@@ -1125,6 +1125,12 @@ pub struct RuntimeProject {
     pub midi_clips: Vec<RuntimeMidiClip>,
     /// Per-track scheduling state driven by the audio callback.
     pub midi_tracks: Vec<RuntimeMidiTrack>,
+    /// Per-track index of the bridged-instrument track that feeds it as a VSTi
+    /// multi-out child ("Out Ch") strip, or `None` for every ordinary track.
+    /// Resolved once in [`Self::resolve_indices`] so the render pass can ask
+    /// "is my parent instrument soloed?" without scanning tracks × inserts ×
+    /// child routes per block. Parallel to [`Self::tracks`].
+    pub vsti_output_parent_indices: Vec<Option<usize>>,
     /// Precomputed pass order and routing validation (Phase O).
     pub audio_graph: RuntimeAudioGraph,
     /// Latency propagation and PDC delays (Phase V/W).
@@ -1232,6 +1238,26 @@ impl RuntimeProject {
             let bindings = build_plugin_param_bindings(&self.tracks[i]);
             self.tracks[i].plugin_param_automation = bindings;
         }
+        // Reverse of the child routes resolved above: for each child "Out Ch"
+        // strip, the instrument track that produces it. Soloing the main VSTi
+        // track must sound every one of its separate-output channels, and the
+        // render pass tests that per block — so it is resolved here, not
+        // searched on the audio thread.
+        let mut vsti_output_parent_indices = vec![None; self.tracks.len()];
+        for (source_index, track) in self.tracks.iter().enumerate() {
+            for insert in &track.inserts {
+                for child in &insert.vsti_output_children {
+                    if let Some(dest_index) = child
+                        .dest_track_index
+                        .filter(|&dest| dest < vsti_output_parent_indices.len())
+                    {
+                        vsti_output_parent_indices[dest_index] = Some(source_index);
+                    }
+                }
+            }
+        }
+        self.vsti_output_parent_indices = vsti_output_parent_indices;
+
         let mut active_source_mask = vec![false; self.tracks.len()];
         for track_index in self.clips.iter().filter_map(|clip| clip.track_index) {
             active_source_mask[track_index] = true;
@@ -2163,6 +2189,8 @@ impl RuntimeProject {
             tempo_map,
             midi_clips,
             midi_tracks,
+            // Filled by `resolve_indices()` below.
+            vsti_output_parent_indices: Vec::new(),
             audio_graph,
             latency_graph,
             pdc_enabled: pdc_active,
@@ -3254,6 +3282,26 @@ pub(crate) fn has_soloed_vsti_output_child(
                 .is_some_and(|track| track.solo)
         })
     })
+}
+
+/// True when `child_track_index` is a VSTi multi-out child ("Out Ch") strip
+/// whose parent instrument track is soloed. Soloing the main VSTi track is a
+/// solo of that instrument as a whole, so every separate-output channel it
+/// feeds stays audible — the inverse of [`has_soloed_vsti_output_child`], which
+/// keeps the parent scheduled when one of its channels is soloed on its own.
+/// Reads the index resolved by [`RuntimeProject::resolve_indices`]; no search.
+#[inline]
+pub(crate) fn has_soloed_vsti_output_parent(
+    runtime: &RuntimeProject,
+    child_track_index: usize,
+) -> bool {
+    runtime
+        .vsti_output_parent_indices
+        .get(child_track_index)
+        .copied()
+        .flatten()
+        .and_then(|parent_index| runtime.tracks.get(parent_index))
+        .is_some_and(|parent| parent.solo)
 }
 
 fn push_all_notes_off_for_track(

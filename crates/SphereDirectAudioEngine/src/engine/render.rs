@@ -203,7 +203,7 @@ fn is_vsti_output_child_track_id(track_id: &str) -> bool {
     track_id.starts_with("vsti-out:")
 }
 
-use crate::runtime::has_soloed_vsti_output_child;
+use crate::runtime::{has_soloed_vsti_output_child, has_soloed_vsti_output_parent};
 
 /// Two distinct mutable elements of a slice without allocation. Panics in
 /// debug if `a == b`; callers guarantee distinct indices.
@@ -1255,9 +1255,15 @@ fn render_project_block_interleaved_core(
         if effective_track_muted(&runtime.tracks[track_index], block_beat) {
             continue;
         }
+        // VSTi multi-out child strips are the only routing tracks that obey
+        // solo: they are the instrument's own channels, not a shared bus. A
+        // channel sounds when it is soloed itself (listen to one drum pad in
+        // isolation) or when its parent instrument track is soloed (solo the
+        // VSTi from the main track and hear all of its channels).
         if runtime.has_solo
             && is_vsti_output_child_track_id(&runtime.tracks[track_index].id)
             && !runtime.tracks[track_index].solo
+            && !has_soloed_vsti_output_parent(runtime, track_index)
         {
             continue;
         }

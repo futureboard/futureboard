@@ -25,6 +25,29 @@ pub fn vsti_output_child_insert_id(track_id: &str) -> Option<&str> {
         .map(|(insert, _)| insert)
 }
 
+/// The instrument track that owns a VSTi multi-out child strip — the "main
+/// track" whose transport-facing state the channel follows. `None` for any
+/// other track id, or when the owning instrument is gone.
+pub fn vsti_output_parent_track<'a>(
+    child_track_id: &str,
+    tracks: &'a [TrackState],
+) -> Option<&'a TrackState> {
+    let insert_id = vsti_output_child_insert_id(child_track_id)?;
+    tracks.iter().find(|track| {
+        track
+            .instrument_insert()
+            .is_some_and(|slot| slot.id == insert_id)
+    })
+}
+
+/// True when this channel is audible only because its parent instrument is
+/// soloed, not because its own Solo is engaged. Mirrors the engine rule in
+/// `has_soloed_vsti_output_parent`: soloing the main VSTi track solos every one
+/// of its output channels, so those channels must *look* soloed too.
+pub fn is_vsti_output_solo_implied(child_track_id: &str, tracks: &[TrackState]) -> bool {
+    vsti_output_parent_track(child_track_id, tracks).is_some_and(|parent| parent.solo)
+}
+
 /// The mixer group key (`track_id:insert_id`) used by [`vsti_output_group_key`]
 /// in the mixer view, for a parent track + instrument insert.
 pub fn vsti_output_group_key(track_id: &str, insert_id: &str) -> String {

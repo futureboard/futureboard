@@ -574,4 +574,39 @@ mod tests {
             .iter()
             .all(|c| c.kind == MixerTreeNodeKind::BusOutput));
     }
+
+    /// Solo on the main VSTi track sounds every one of its output channels
+    /// (engine: `has_soloed_vsti_output_parent`), so the mixer must show those
+    /// channels as soloed-by-parent instead of leaving their S buttons dark
+    /// while they are plainly audible.
+    #[test]
+    fn parent_instrument_solo_implies_solo_on_its_output_channels() {
+        use crate::components::timeline::timeline_state::{
+            is_vsti_output_solo_implied, vsti_output_child_track_id,
+        };
+
+        let (mut state, track_id, slot) = drum_scenario(&[2, 2]);
+        let child_id = vsti_output_child_track_id(&slot, 1);
+
+        assert!(
+            !is_vsti_output_solo_implied(&child_id, &state.tracks),
+            "nothing is soloed yet"
+        );
+
+        state.set_track_solo(&track_id, true);
+        assert!(
+            is_vsti_output_solo_implied(&child_id, &state.tracks),
+            "the instrument's solo must reach its output channels"
+        );
+
+        // A channel soloed on its own is a real solo, not an inherited one: the
+        // parent is clear, so the strip shows the engaged state, not the
+        // implied one.
+        state.set_track_solo(&track_id, false);
+        state.set_track_solo(&child_id, true);
+        assert!(!is_vsti_output_solo_implied(&child_id, &state.tracks));
+
+        // Ordinary tracks never inherit: only `vsti-out:` ids have a parent.
+        assert!(!is_vsti_output_solo_implied(&track_id, &state.tracks));
+    }
 }

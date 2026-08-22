@@ -230,10 +230,35 @@ fn mixer_track_type_label(track_type: TrackType, i18n: I18n) -> String {
 
 // ─── M/S/R/I buttons ────────────────────────────────────────────────────────
 
+/// Visual state of an M/S/R/I toggle.
+///
+/// `Implied` is neither on nor off: this channel's own flag is clear, but the
+/// engine is treating it as engaged because a parent decided for it — a VSTi
+/// multi-out channel under its instrument's solo. It reads as a tinted outline
+/// rather than a solid fill, so "sounding because of the parent" never looks
+/// like "someone clicked this". The button still toggles this channel's own
+/// flag, which is why it keeps full button affordance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToggleState {
+    Off,
+    Implied,
+    On,
+}
+
+impl From<bool> for ToggleState {
+    fn from(active: bool) -> Self {
+        if active {
+            ToggleState::On
+        } else {
+            ToggleState::Off
+        }
+    }
+}
+
 fn msri_button(
     id: gpui::ElementId,
     label: &'static str,
-    active: bool,
+    state: ToggleState,
     active_bg: gpui::Rgba,
     active_fg: gpui::Rgba,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -253,21 +278,47 @@ fn msri_button(
         .on_mouse_down(gpui::MouseButton::Left, on_click)
         .child(label);
 
-    if active {
-        btn = btn.bg(active_bg).text_color(active_fg);
-    } else {
-        btn = btn
-            .bg(Colors::button_bg())
-            .border(px(1.0))
-            .border_color(Colors::button_border())
-            .text_color(Colors::button_text_muted())
-            .hover(|s| s.bg(Colors::button_bg_hover()));
+    match state {
+        ToggleState::On => {
+            btn = btn.bg(active_bg).text_color(active_fg);
+        }
+        ToggleState::Implied => {
+            btn = btn
+                .bg(Colors::with_alpha(active_bg, 0.22))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(active_bg, 0.7))
+                .text_color(active_bg)
+                .hover(|s| s.bg(Colors::with_alpha(active_bg, 0.34)));
+        }
+        ToggleState::Off => {
+            btn = btn
+                .bg(Colors::button_bg())
+                .border(px(1.0))
+                .border_color(Colors::button_border())
+                .text_color(Colors::button_text_muted())
+                .hover(|s| s.bg(Colors::button_bg_hover()));
+        }
     }
     btn
 }
 
-fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> impl IntoElement {
+/// M/S/R/I row. `solo_implied` is set only for a VSTi multi-out channel whose
+/// parent instrument is soloed: the engine sounds the channel, so its S reads
+/// as engaged-by-parent even though `track.solo` is clear.
+fn button_row(
+    track: &TrackState,
+    callbacks: &MixerCallbacks,
+    id_num: usize,
+    solo_implied: bool,
+) -> impl IntoElement {
     let track_id = track.id.clone();
+    let solo_state = if track.solo {
+        ToggleState::On
+    } else if solo_implied {
+        ToggleState::Implied
+    } else {
+        ToggleState::Off
+    };
 
     let on_mute = {
         let id = track_id.clone();
@@ -315,7 +366,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-m-btn", id_num).into(),
             "M",
-            track.muted,
+            track.muted.into(),
             Colors::accent_warning(),
             Colors::text_inverse(),
             on_mute,
@@ -323,7 +374,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-s-btn", id_num).into(),
             "S",
-            track.solo,
+            solo_state,
             Colors::accent_success(),
             Colors::text_inverse(),
             on_solo,
@@ -331,7 +382,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-r-btn", id_num).into(),
             "R",
-            track.armed,
+            track.armed.into(),
             Colors::accent_danger(),
             Colors::text_inverse(),
             on_arm,
@@ -339,7 +390,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-i-btn", id_num).into(),
             "I",
-            track.input_monitor.is_active(track.armed),
+            track.input_monitor.is_active(track.armed).into(),
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_input,
@@ -353,7 +404,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-pfl-btn", id_num).into(),
             "PFL",
-            track.listen == ListenMode::Pfl,
+            (track.listen == ListenMode::Pfl).into(),
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_pfl,
@@ -361,7 +412,7 @@ fn button_row(track: &TrackState, callbacks: &MixerCallbacks, id_num: usize) -> 
         .child(msri_button(
             ("mix-afl-btn", id_num).into(),
             "AFL",
-            track.listen == ListenMode::Afl,
+            (track.listen == ListenMode::Afl).into(),
             Colors::accent_primary(),
             Colors::text_inverse(),
             on_afl,
@@ -1746,7 +1797,7 @@ fn channel_strip(
                 .w_full()
                 .child(pan_section(track, callbacks, is_selected))
                 .child(fader_area(track, callbacks, is_selected))
-                .child(button_row(track, callbacks, id_num)),
+                .child(button_row(track, callbacks, id_num, false)),
         )
         .child(output_button(
             &track.id,
@@ -1921,7 +1972,11 @@ fn vsti_output_sub_strip(
                 .w_full()
                 .child(pan_section(&sub_track, callbacks, is_selected))
                 .child(fader_area(&sub_track, callbacks, is_selected))
-                .child(button_row(&sub_track, callbacks, id_num)),
+                // Solo on the parent instrument sounds every one of its output
+                // channels (engine: `has_soloed_vsti_output_parent`), so this
+                // channel's S shows the inherited state rather than sitting
+                // dark while the channel is plainly audible.
+                .child(button_row(&sub_track, callbacks, id_num, parent_track.solo)),
         )
         .child(strip_footer(&bus_label))
 }

@@ -654,6 +654,137 @@ mod tests {
         }
     }
 
+    /// Bridged multi-out instrument (parent + two `vsti-out:` child bus strips)
+    /// with the solo flags under test. `ConstantMultiOutSink` writes a constant
+    /// per plugin channel: ch1=0.1, ch2=0.2, ch3=0.3, ch4=0.4, so child A peaks
+    /// at 0.2 and child B at 0.4 when audible, and 0 when solo silences them.
+    fn multiout_solo_snapshot(
+        parent_solo: bool,
+        child_solos: [bool; 2],
+    ) -> (
+        EngineProjectSnapshot,
+        crate::plugin_bridge::PluginBridgeSinkMap,
+        [String; 2],
+    ) {
+        use crate::types::{EngineInsertSnapshot, EngineTrackSnapshot};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut snapshot = silence_snapshot(48_000);
+        let child_ids = [
+            "vsti-out:insert-1:bus:0".to_string(),
+            "vsti-out:insert-1:bus:1".to_string(),
+        ];
+
+        let mut params: HashMap<String, serde_json::Value> = HashMap::new();
+        params.insert("role".to_string(), serde_json::json!("instrument"));
+        params.insert(
+            "vstiOutputChildren".to_string(),
+            serde_json::json!([
+                { "trackId": child_ids[0], "channelL": 1, "channelR": 2, "busIndex": 0 },
+                { "trackId": child_ids[1], "channelL": 3, "channelR": 4, "busIndex": 1 },
+            ]),
+        );
+        snapshot.tracks[0].track_type = "instrument".to_string();
+        snapshot.tracks[0].solo = parent_solo;
+        snapshot.tracks[0].inserts.push(EngineInsertSnapshot {
+            id: "insert-1".to_string(),
+            kind: "external-bridge-plugin".to_string(),
+            enabled: true,
+            params,
+            state: None,
+        });
+        for (child_id, solo) in child_ids.iter().zip(child_solos) {
+            snapshot.tracks.push(EngineTrackSnapshot {
+                track_type: "bus".to_string(),
+                solo,
+                ..make_track_snapshot(child_id)
+            });
+        }
+
+        let mut bridge_sinks = crate::plugin_bridge::PluginBridgeSinkMap::new();
+        bridge_sinks.insert(
+            "insert-1".to_string(),
+            Arc::new(ConstantMultiOutSink::default())
+                as crate::plugin_bridge::SharedPluginBridgeSink,
+        );
+        (snapshot, bridge_sinks, child_ids)
+    }
+
+    /// Peak of each `vsti-out:` child stem, in linear amplitude, from one
+    /// single-pass export of the snapshot.
+    fn multiout_child_peaks(
+        snapshot: &EngineProjectSnapshot,
+        bridge_sinks: &crate::plugin_bridge::PluginBridgeSinkMap,
+        child_ids: &[String; 2],
+    ) -> [f32; 2] {
+        let outputs = [temp_path("solo-child-a"), temp_path("solo-child-b")];
+        let targets: Vec<TrackExportTarget> = child_ids
+            .iter()
+            .zip(&outputs)
+            .map(|(track_id, output)| TrackExportTarget {
+                track_id: track_id.clone(),
+                request: wav_request(output.clone(), 1_000),
+            })
+            .collect();
+
+        let summaries = export_tracks_single_pass_with_bridges(
+            snapshot,
+            &targets,
+            &ExportCancelToken::new(),
+            Some(bridge_sinks),
+            |_progress| {},
+        )
+        .unwrap();
+
+        for output in outputs {
+            let _ = std::fs::remove_file(output);
+        }
+        let peak_lin = |db: Option<f32>| db.map(|d| 10f32.powf(d / 20.0)).unwrap_or(0.0);
+        [
+            peak_lin(summaries[0].peak_db),
+            peak_lin(summaries[1].peak_db),
+        ]
+    }
+
+    /// Solo on the main VSTi track is a solo of the whole instrument: every one
+    /// of its separate-output channels stays audible. The child strips carry no
+    /// solo flag of their own here — before the parent link existed they were
+    /// all silenced the moment anything was soloed, so soloing a multi-out
+    /// instrument from its main track produced silence.
+    #[test]
+    fn soloing_parent_vsti_track_sounds_every_multi_out_channel() {
+        let (snapshot, bridge_sinks, child_ids) = multiout_solo_snapshot(true, [false, false]);
+        let [child_a_peak, child_b_peak] =
+            multiout_child_peaks(&snapshot, &bridge_sinks, &child_ids);
+        assert!(
+            (child_a_peak - 0.2).abs() < 1e-3,
+            "parent solo must keep channel pair 1/2 audible, got peak {child_a_peak}"
+        );
+        assert!(
+            (child_b_peak - 0.4).abs() < 1e-3,
+            "parent solo must keep channel pair 3/4 audible, got peak {child_b_peak}"
+        );
+    }
+
+    /// The other half of the contract: a channel soloed on its own is heard by
+    /// itself, so a single drum pad / bus can still be auditioned even though
+    /// its parent instrument is not soloed.
+    #[test]
+    fn soloing_one_multi_out_channel_isolates_that_channel() {
+        let (snapshot, bridge_sinks, child_ids) = multiout_solo_snapshot(false, [false, true]);
+        let [child_a_peak, child_b_peak] =
+            multiout_child_peaks(&snapshot, &bridge_sinks, &child_ids);
+        assert_eq!(
+            child_a_peak, 0.0,
+            "an unsoloed sibling channel must be silent"
+        );
+        assert!(
+            (child_b_peak - 0.4).abs() < 1e-3,
+            "the soloed channel must still be audible, got peak {child_b_peak}"
+        );
+    }
+
     #[test]
     fn cancelled_export_removes_partial_and_leaves_existing_output() {
         let out = temp_path("cancel");

@@ -68,7 +68,10 @@ pub struct KeymapWindow {
     status_message: Option<String>,
     scroll: UniformListScrollHandle,
     focus_handle: FocusHandle,
-    recorder_armed: bool,
+    /// Live only while the key recorder is armed. Keystroke interceptors run
+    /// before binding resolution, so an armed recorder sees chords such as
+    /// `ctrl-s` instead of losing them to the action they are already bound to.
+    recorder_intercept: Option<gpui::Subscription>,
 }
 
 impl KeymapWindow {
@@ -92,7 +95,7 @@ impl KeymapWindow {
             status_message: None,
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
-            recorder_armed: false,
+            recorder_intercept: None,
         }
         .with_json_text(json)
     }
@@ -163,10 +166,69 @@ impl KeymapWindow {
         cx.notify();
     }
 
-    fn save_edit_dialog(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(dialog) = self.edit_dialog.take() else {
+    fn arm_recorder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.edit_dialog.as_mut() else {
             return;
         };
+        dialog.recorder.arm();
+        // The dialog has no inner focusable, so key events only reach this view
+        // while the window root holds focus.
+        self.focus_handle.focus(window, cx);
+
+        let target = window.window_handle();
+        let entity = cx.entity().downgrade();
+        self.recorder_intercept = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != target {
+                return;
+            }
+            let Some(entity) = entity.upgrade() else {
+                return;
+            };
+            let consumed =
+                entity.update(cx, |this, cx| this.record_keystroke(&event.keystroke, cx));
+            if consumed {
+                cx.stop_propagation();
+            }
+        }));
+        cx.notify();
+    }
+
+    fn disarm_recorder(&mut self) {
+        self.recorder_intercept = None;
+        if let Some(dialog) = self.edit_dialog.as_mut() {
+            dialog.recorder.disarm();
+        }
+    }
+
+    /// Feed one intercepted keystroke to the armed recorder. Returns `true` when
+    /// the recorder took it, so the caller can stop action dispatch.
+    fn record_keystroke(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        let Some(dialog) = self.edit_dialog.as_mut() else {
+            return false;
+        };
+        let consumed = dialog.recorder.handle_keystroke(keystroke);
+        let still_armed = dialog.recorder.armed;
+        if consumed {
+            if !still_armed {
+                self.recorder_intercept = None;
+            }
+            cx.notify();
+        }
+        consumed
+    }
+
+    fn close_edit_dialog(&mut self, cx: &mut Context<Self>) {
+        self.recorder_intercept = None;
+        self.edit_dialog = None;
+        cx.notify();
+    }
+
+    fn save_edit_dialog(&mut self, force: bool, cx: &mut Context<Self>) {
+        let Some(mut dialog) = self.edit_dialog.take() else {
+            return;
+        };
+        self.recorder_intercept = None;
+        dialog.recorder.disarm();
         let action_id = dialog.action_id.clone();
         let keys = dialog
             .recorder
@@ -304,8 +366,7 @@ impl KeymapWindow {
             }
             let key = event.keystroke.key.as_str();
             if key == "escape" {
-                self.edit_dialog = None;
-                cx.notify();
+                self.close_edit_dialog(cx);
                 return;
             }
             if matches!(key, "enter" | "numpad_enter") {
@@ -401,6 +462,13 @@ impl KeymapWindow {
 
 impl Render for KeymapWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Nothing in this window is focused on open, and GPUI dispatches key
+        // events only along the focused node's path, so the root has to claim
+        // focus or `on_key_down` below never runs.
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }
+
         let rows = Arc::new(self.visible_rows());
         let row_count = rows.len();
         let selected = self.selected_row_id.clone();
@@ -854,21 +922,13 @@ fn edit_dialog_overlay(
     let on_cancel = {
         let entity = entity.clone();
         move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-            let _ = entity.update(cx, |this, cx| {
-                this.edit_dialog = None;
-                cx.notify();
-            });
+            let _ = entity.update(cx, |this, cx| this.close_edit_dialog(cx));
         }
     };
     let on_arm = {
         let entity = entity.clone();
-        move |_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App| {
-            let _ = entity.update(cx, |this, cx| {
-                if let Some(dialog) = this.edit_dialog.as_mut() {
-                    dialog.recorder.arm();
-                }
-                cx.notify();
-            });
+        move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
+            let _ = entity.update(cx, |this, cx| this.arm_recorder(window, cx));
         }
     };
 
