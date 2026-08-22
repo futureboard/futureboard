@@ -510,18 +510,24 @@ unsafe fn open_exclusive_stream(
             }
         };
 
-        let total = frames as usize * device_ch;
-        if scratch.len() < total {
-            scratch.resize(total, 0.0f32);
-        }
+        let out_len = frames as usize * device_ch;
+        // `scratch` is preallocated to `actual_buf * device_ch` and `frames`
+        // can never exceed `actual_buf` (`saturating_sub` above), so `out_len`
+        // never exceeds `scratch.len()` here. Clamp defensively instead of
+        // growing — growing would allocate on the audio thread.
+        let total = out_len.min(scratch.len());
         let s = &mut scratch[..total];
-        for x in s.iter_mut() {
-            *x = 0.0;
-        }
+        // `fill_output_f32` fully overwrites every sample of `s` on every
+        // reachable path (see `backend/render.rs`) — no pre-zero needed.
         fill_output_f32(s, device_ch, &mut runtime, shared, &mut local);
 
-        let out: &mut [f32] = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, total);
-        out.copy_from_slice(s);
+        let out: &mut [f32] = std::slice::from_raw_parts_mut(buf_ptr as *mut f32, out_len);
+        out[..total].copy_from_slice(s);
+        if total < out_len {
+            // Unreachable in practice (see above) — silence rather than leave
+            // the tail of the exclusive-mode buffer holding stale samples.
+            out[total..].fill(0.0);
+        }
 
         if let Err(e) = render.ReleaseBuffer(frames, 0) {
             eprintln!("[DAUx WASAPI Excl] ReleaseBuffer: {e}");

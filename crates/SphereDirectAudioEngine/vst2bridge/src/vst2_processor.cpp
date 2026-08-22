@@ -19,6 +19,8 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace {

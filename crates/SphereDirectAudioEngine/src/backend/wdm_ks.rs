@@ -809,9 +809,9 @@ unsafe fn render_into_ring(
     while remaining > 0 {
         let chunk = remaining.min(stream.period_frames) as usize;
         let n = chunk * ch;
-        for x in scratch[..n].iter_mut() {
-            *x = 0.0;
-        }
+        // `fill_output_f32` fully overwrites every sample of its output slice
+        // on every reachable path (see `backend/render.rs`) — no pre-zero
+        // needed.
         fill_output_f32(&mut scratch[..n], ch, runtime, shared, local);
 
         for (i, &s) in scratch[..n].iter().enumerate() {

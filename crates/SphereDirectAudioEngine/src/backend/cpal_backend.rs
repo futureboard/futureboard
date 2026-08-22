@@ -420,10 +420,11 @@ where
                     callback_glitch_counter.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
+                // `fill_output_f32` fully overwrites every sample of its output
+                // slice on every reachable path (silence branch, audition-only
+                // branch, and the render paths all zero-then-write or write
+                // every frame) — no pre-zero needed here.
                 let scratch = &mut f32_scratch[..f32_len];
-                for s in scratch.iter_mut() {
-                    *s = 0.0;
-                }
 
                 fill_output_f32(scratch, ch, &mut runtime, &shared, &mut local);
 
