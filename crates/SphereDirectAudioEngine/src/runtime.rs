@@ -830,7 +830,9 @@ pub type InsertDspState = AudioPluginDspState;
 
 const DEFAULT_AUDIO_BLOCK_CAPACITY: usize = 8192;
 const ENABLED_AUDIO_OUTPUT_CHANNELS_PARAM: &str = "enabledAudioOutputChannels";
-const MAX_VSTI_OUTPUT_CHANNELS: u64 = 32;
+/// Also bounds `scratch_multi` pre-sizing in [`RuntimeProject::resolve_bridge_sinks`]
+/// and the audio-thread read in `apply_external_bridge_insert_block` — keep in sync.
+pub(crate) const MAX_VSTI_OUTPUT_CHANNELS: u64 = 32;
 
 fn bridge_enabled_output_channels_from_params(params: &HashMap<String, Value>) -> Vec<u8> {
     let Some(values) = params
@@ -1288,6 +1290,8 @@ impl RuntimeProject {
         let sinks = &self.plugin_bridge_sinks;
         let min_scratch =
             DEFAULT_AUDIO_BLOCK_CAPACITY.max(crate::plugin_bridge::MAX_BRIDGE_BLOCK_FRAMES);
+        // Worst-case interleaved multi-out read: every bridge channel enabled.
+        let min_scratch_multi = min_scratch * MAX_VSTI_OUTPUT_CHANNELS as usize;
         for track in &mut self.tracks {
             for insert in &mut track.inserts {
                 if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
@@ -1297,6 +1301,25 @@ impl RuntimeProject {
                     if insert.scratch_l.len() < min_scratch {
                         insert.scratch_l.resize(min_scratch, 0.0);
                         insert.scratch_r.resize(min_scratch, 0.0);
+                    }
+                    // Only inserts actually routing to child "Out Ch" tracks read
+                    // through `scratch_multi` (see `apply_external_bridge_insert_block`);
+                    // pre-reserving every bridge insert would waste ~1 MiB each on
+                    // the common single-track-fold path.
+                    //
+                    // Reserve *capacity* only, never touch `.len()`: the audio
+                    // thread's `resize(needed, 0.0)` must land `scratch_multi` at
+                    // exactly `frames * channels`, which `scatter_vsti_output_children`
+                    // relies on to recover the channel stride. Reserving capacity
+                    // here makes that `resize` allocation-free without disturbing
+                    // that invariant.
+                    if !insert.vsti_output_children.is_empty() {
+                        let len = insert.scratch_multi.len();
+                        if insert.scratch_multi.capacity() < min_scratch_multi {
+                            insert
+                                .scratch_multi
+                                .reserve(min_scratch_multi.saturating_sub(len));
+                        }
                     }
                 }
             }
