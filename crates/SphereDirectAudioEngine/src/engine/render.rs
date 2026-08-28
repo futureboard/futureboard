@@ -1908,16 +1908,29 @@ pub(crate) fn apply_external_bridge_insert_block(
         // 0). Every active VST3 output bus routes to an explicit child mixer
         // track, including bus 0. With explicit children present the parent
         // instrument track does not receive a fallback downmix.
-        const MAX_BRIDGE_CHANNELS: usize = 32;
-        let channels = (sink.plugin_output_channels() as usize).clamp(1, MAX_BRIDGE_CHANNELS);
+        let channels = (sink.plugin_output_channels() as usize)
+            .clamp(1, crate::runtime::MAX_VSTI_OUTPUT_CHANNELS as usize);
         let needed = frames * channels;
-        insert.scratch_multi.resize(needed, 0.0);
-        let (got, channels) =
-            sink.read_output_multichannel(&mut insert.scratch_multi[..needed], frames);
-        let _ = channels;
-        insert.scratch_l[..got].fill(0.0);
-        insert.scratch_r[..got].fill(0.0);
-        got
+        // `resolve_bridge_sinks` reserves `scratch_multi`'s *capacity* on the
+        // control thread for every insert with `vsti_output_children`, so
+        // `resize` below only ever adjusts `.len()` within that reserved
+        // capacity — it does not allocate on the audio thread.
+        // `scatter_vsti_output_children` recovers the channel stride from
+        // `scratch_multi.len() / frames`, so the resize must still land at
+        // exactly `needed`; skip the read entirely (leaving length/capacity
+        // untouched) in the otherwise-unreached case where capacity falls
+        // short, rather than growing here.
+        if insert.scratch_multi.capacity() < needed {
+            0
+        } else {
+            insert.scratch_multi.resize(needed, 0.0);
+            let (got, channels) =
+                sink.read_output_multichannel(&mut insert.scratch_multi[..needed], frames);
+            let _ = channels;
+            insert.scratch_l[..got].fill(0.0);
+            insert.scratch_r[..got].fill(0.0);
+            got
+        }
     };
 
     // A miss can mean the host still owns the previous request's input buffer.
