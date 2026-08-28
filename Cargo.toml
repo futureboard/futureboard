@@ -6,6 +6,7 @@ members = [
     "apps/native/studio",
     "apps/native/cef_helper",
     "apps/native/livestage",
+    "apps/native/singer",
 
     "crates/SphereAudioEditor",
     "crates/SphereAudioPlugins",
@@ -197,6 +198,20 @@ heapless = "0.9.2"
 memmap2 = "0.9"
 midir = "0.9"
 rustfft = "6"
+
+# Solfege is consumed as a Git workspace so Singer follows the engine's
+# host-neutral runtime and event contracts instead of maintaining a fork here.
+solfege-audio = { path = "../dsp/solfege-engine/crates/solfege-audio" }
+solfege-core = { path = "../dsp/solfege-engine/crates/solfege-core" }
+solfege-engine = { path = "../dsp/solfege-engine/crates/solfege-engine", default-features = false, features = ["fbmx"] }
+solfege-event = { path = "../dsp/solfege-engine/crates/solfege-event" }
+# SFM v1 container reader produced by the DSP workspace. This is format-only;
+# realtime inference still comes from the existing Solfege + FBMX runtimes.
+solfege-model = { path = "../dsp/solfege-engine/crates/solfege-model" }
+solfege-acoustic = { path = "../dsp/solfege-engine/crates/solfege-acoustic" }
+# Shared FBMX container loader used by the DAW's Solfege instrument wrapper.
+# The runtime currently lives beside Futureboard in the DSP workspace.
+fbmx-runtime = { path = "../dsp/crates/fbmx-runtime" }
 # Pure-Rust ONNX inference (CPU) for offline audio analysis. Dual MIT/Apache-2.0.
 # Re-exports `tract_ndarray` via its prelude.
 tract-onnx = "0.21"

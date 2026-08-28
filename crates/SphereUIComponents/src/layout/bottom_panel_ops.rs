@@ -28,6 +28,7 @@ impl StudioLayout {
             WorkspaceActivePanel::ChordDisplay => RightDockTab::ChordDisplay,
             WorkspaceActivePanel::LyricDisplay => RightDockTab::LyricDisplay,
             WorkspaceActivePanel::LyricEditor => RightDockTab::LyricEditor,
+            WorkspaceActivePanel::Solfege => RightDockTab::Solfege,
             _ => self.right_dock_tab,
         };
         if self.active_panel == panel {

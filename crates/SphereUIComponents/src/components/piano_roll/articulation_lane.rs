@@ -280,44 +280,50 @@ impl PianoRoll {
                     .text_color(Colors::text_faint())
                     .child("Insert:"),
             )
-            .children(ArticulationId::ALL.iter().map(|articulation| {
-                let articulation = *articulation;
-                let active = self.insert_articulation == articulation;
-                div()
-                    .id(("pr-art-palette", articulation.to_tag() as usize))
-                    .h(px(16.0))
-                    .px(px(5.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(3.0))
-                    .text_size(px(9.0))
-                    .text_color(if active {
-                        Colors::text_primary()
-                    } else {
-                        Colors::text_secondary()
-                    })
-                    .bg(if active {
-                        Colors::with_alpha(Colors::accent_primary(), 0.35)
-                    } else {
-                        Colors::with_alpha(Colors::text_primary(), 0.0)
-                    })
-                    .border(px(1.0))
-                    .border_color(if active {
-                        Colors::accent_primary()
-                    } else {
-                        Colors::border_subtle()
-                    })
-                    .hover(|s| s.bg(Colors::surface_hover()))
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_mouse_down(MouseButton::Left, |_, _w, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        cx.stop_propagation();
-                        this.insert_articulation = articulation;
-                        cx.notify();
-                    }))
-                    .child(articulation.short_name())
-                    .into_any_element()
-            }));
+            // Capability-filtered like the inspector row and the note menu: a
+            // Wind instrument must not be able to insert Marcato here when no
+            // other surface will show or clear it.
+            .children(
+                self.available_articulations(cx)
+                    .into_iter()
+                    .map(|articulation| {
+                        let active = self.insert_articulation == articulation;
+                        div()
+                            .id(("pr-art-palette", articulation.to_tag() as usize))
+                            .h(px(16.0))
+                            .px(px(5.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(3.0))
+                            .text_size(px(9.0))
+                            .text_color(if active {
+                                Colors::text_primary()
+                            } else {
+                                Colors::text_secondary()
+                            })
+                            .bg(if active {
+                                Colors::with_alpha(Colors::accent_primary(), 0.35)
+                            } else {
+                                Colors::with_alpha(Colors::text_primary(), 0.0)
+                            })
+                            .border(px(1.0))
+                            .border_color(if active {
+                                Colors::accent_primary()
+                            } else {
+                                Colors::border_subtle()
+                            })
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_mouse_down(MouseButton::Left, |_, _w, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.insert_articulation = articulation;
+                                cx.notify();
+                            }))
+                            .child(articulation.short_name())
+                            .into_any_element()
+                    }),
+            );
 
         let empty_state = events.is_empty().then(|| {
             div()

@@ -21,6 +21,7 @@ pub use template::{ProjectCreateOptions, ProjectTemplate};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::solfege::SolfegeTrackState;
 pub use sphere_soundfont_player::{SoundfontEnvelope, SoundfontRenderQuality};
 
 // ── Identifiers ───────────────────────────────────────────────────────────────
@@ -143,6 +144,47 @@ pub struct MidiNote {
     /// Per-note articulation tag ([`ArticulationId::to_tag`]); `0` = none.
     /// Older projects (< v25) have no articulation data and default to `0`.
     pub articulation: u8,
+    /// Continuous pitch performance (v38+). Empty when the note sounds at its
+    /// notated pitch. Points are cent deviations keyed by beats from the note
+    /// start, so they survive transposition and moves.
+    pub pitch_curve: Vec<MidiPitchPoint>,
+    /// Musical accent (v39+). `None` when the note has never been analysed or
+    /// drawn, which is how a pre-v39 project and a freshly drawn note both
+    /// load — an absent accent and a neutral one are different states and the
+    /// re-analysis policy depends on telling them apart.
+    pub accent: Option<MidiAccent>,
+}
+
+/// Serialized per-note accent (project format v39+). Mirrors
+/// [`timeline_state::AccentState`].
+///
+/// Stored as five `f32` and a provenance tag rather than as a single value,
+/// because the four components are independently editable and independently
+/// consumed: writing only `prominence` and re-deriving the rest on load would
+/// silently discard a hand-shaped accent every time the project was saved.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MidiAccent {
+    pub prominence: f32,
+    pub attack: f32,
+    pub agogic: f32,
+    pub timbre: f32,
+    pub confidence: f32,
+    /// [`timeline_state::AccentSource::to_tag`].
+    pub source: u8,
+}
+
+/// Serialized pitch-curve breakpoint (project format v38+). Mirrors
+/// [`timeline_state::PitchPoint`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MidiPitchPoint {
+    /// Stable point identity; `0` on a legacy/foreign writer means "mint".
+    pub id: u64,
+    /// Beats from the owning note's start.
+    pub beat: f32,
+    /// Cent deviation from the owning note's pitch.
+    pub cents: f32,
+    /// [`timeline_state::PitchSegmentShape::to_tag`].
+    pub shape: u8,
 }
 
 /// Serialized direction articulation event. Mirrors
@@ -467,6 +509,8 @@ pub struct ProjectTrack {
     /// Whether the persisted Track Volume automation lane drives the effective
     /// fader value (v32+). Older projects default to enabled.
     pub volume_automation_read: bool,
+    /// Native Solfege instrument state (v37+).
+    pub solfege: Option<ProjectSolfegeEngine>,
 }
 
 /// Persisted state of a track's built-in Soundfont Player.
@@ -500,6 +544,53 @@ impl Default for ProjectSoundfontPlayer {
             polyphony: 64,
             envelope: SoundfontEnvelope::default(),
             quality: SoundfontRenderQuality::default(),
+        }
+    }
+}
+
+/// Persisted state of the DAW's native Solfege instrument wrapper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSolfegeEngine {
+    pub model_path: Option<PathBuf>,
+    pub instrument: String,
+    pub voice: String,
+    pub preset: String,
+    pub bow_pressure: f32,
+    pub vibrato: f32,
+    pub dynamics: f32,
+    pub expression: f32,
+    /// Visible performance-lane layout for the Solfege MIDI editor (v38+).
+    /// Editor layout state; never consumed by the realtime engine.
+    pub visible_lanes: Vec<ProjectSolfegeLane>,
+}
+
+/// Serialized Solfege editor lane row (project format v38+).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSolfegeLane {
+    pub lane_id: String,
+    pub height: f32,
+}
+
+impl Default for ProjectSolfegeEngine {
+    fn default() -> Self {
+        let state = crate::solfege::SolfegeTrackState::violin(None);
+        Self {
+            model_path: None,
+            instrument: state.instrument,
+            voice: state.voice,
+            preset: state.preset,
+            bow_pressure: state.bow_pressure,
+            vibrato: state.vibrato,
+            dynamics: state.dynamics,
+            expression: state.expression,
+            visible_lanes: state
+                .visible_lanes
+                .into_iter()
+                .map(|lane| ProjectSolfegeLane {
+                    lane_id: lane.lane_id,
+                    height: lane.height,
+                })
+                .collect(),
         }
     }
 }
@@ -986,6 +1077,30 @@ impl From<&TimelineState> for FutureboardProject {
                                             .articulation
                                             .map(|a| a.to_tag())
                                             .unwrap_or(0),
+                                        pitch_curve: n
+                                            .pitch_curve
+                                            .as_ref()
+                                            .map(|curve| {
+                                                curve
+                                                    .points
+                                                    .iter()
+                                                    .map(|p| MidiPitchPoint {
+                                                        id: p.id,
+                                                        beat: p.beat,
+                                                        cents: p.cents,
+                                                        shape: p.shape.to_tag(),
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        accent: n.accent.map(|accent| MidiAccent {
+                                            prominence: accent.prominence,
+                                            attack: accent.attack,
+                                            agogic: accent.agogic,
+                                            timbre: accent.timbre,
+                                            confidence: accent.confidence,
+                                            source: accent.source.to_tag(),
+                                        }),
                                     })
                                     .collect(),
                                 controller_lanes: controller_lanes
@@ -1135,6 +1250,24 @@ impl From<&TimelineState> for FutureboardProject {
                         quality: t.soundfont_quality,
                     }),
                     volume_automation_read: t.volume_automation_read,
+                    solfege: t.solfege.as_ref().map(|state| ProjectSolfegeEngine {
+                        model_path: state.model_path.as_ref().map(PathBuf::from),
+                        instrument: state.instrument.clone(),
+                        voice: state.voice.clone(),
+                        preset: state.preset.clone(),
+                        bow_pressure: state.bow_pressure,
+                        vibrato: state.vibrato,
+                        dynamics: state.dynamics,
+                        expression: state.expression,
+                        visible_lanes: state
+                            .visible_lanes
+                            .iter()
+                            .map(|lane| ProjectSolfegeLane {
+                                lane_id: lane.lane_id.clone(),
+                                height: lane.height,
+                            })
+                            .collect(),
+                    }),
                 }
             })
             .collect();
@@ -1308,9 +1441,11 @@ pub fn apply_to_timeline(
         Vec::new();
     let mut unresolved_connections: Vec<(String, String)> = Vec::new();
     use crate::components::timeline::timeline_state::{
-        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiChannel,
+        AccentSource as TlAccentSource, AccentState as TlAccentState, AutomationLaneState,
+        AutomationPoint as TlAutoPoint, ClipState, MidiChannel,
         MidiControllerLane as TlControllerLane, MidiControllerPoint as TlControllerPoint,
-        MidiNoteState, SendSlotState, TrackState,
+        MidiNoteState, PitchCurve as TlPitchCurve, PitchPoint as TlPitchPoint,
+        PitchSegmentShape as TlPitchSegmentShape, SendSlotState, TrackState,
     };
 
     tl.bpm = project.settings.bpm as f32;
@@ -1535,6 +1670,32 @@ pub fn apply_to_timeline(
                                         crate::components::timeline::timeline_state::ArticulationId::from_tag(
                                             n.articulation,
                                         );
+                                    note.pitch_curve = (!n.pitch_curve.is_empty()).then(|| {
+                                        TlPitchCurve::from_points(
+                                            n.pitch_curve
+                                                .iter()
+                                                .map(|p| {
+                                                    TlPitchPoint::from_persisted(
+                                                        p.id,
+                                                        p.beat,
+                                                        p.cents,
+                                                        TlPitchSegmentShape::from_tag(p.shape),
+                                                    )
+                                                })
+                                                .collect(),
+                                        )
+                                    });
+                                    note.accent = n.accent.map(|accent| {
+                                        TlAccentState {
+                                            prominence: accent.prominence,
+                                            attack: accent.attack,
+                                            agogic: accent.agogic,
+                                            timbre: accent.timbre,
+                                            confidence: accent.confidence,
+                                            source: TlAccentSource::from_tag(accent.source),
+                                        }
+                                        .sanitized()
+                                    });
                                     note
                                 })
                                 .collect(),
@@ -1800,6 +1961,30 @@ pub fn apply_to_timeline(
                     .as_ref()
                     .map(|sf| sf.quality)
                     .unwrap_or_default(),
+                solfege: pt.solfege.as_ref().map(|state| SolfegeTrackState {
+                    model_path: state
+                        .model_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    instrument: state.instrument.clone(),
+                    voice: state.voice.clone(),
+                    preset: state.preset.clone(),
+                    bow_pressure: state.bow_pressure,
+                    vibrato: state.vibrato,
+                    dynamics: state.dynamics,
+                    expression: state.expression,
+                    visible_lanes: state
+                        .visible_lanes
+                        .iter()
+                        .map(|lane| {
+                            crate::solfege::SolfegeLaneVisibility {
+                                lane_id: lane.lane_id.clone(),
+                                height: lane.height,
+                            }
+                            .sanitized()
+                        })
+                        .collect(),
+                }),
             }
         })
         .collect();
@@ -2589,10 +2774,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v36"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v39"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 36);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 36);
+        assert_eq!(version, 39);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 39);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────
@@ -3132,7 +3317,9 @@ mod v33_routing_adapter_tests {
 #[cfg(test)]
 mod project_settings_persistence_tests {
     use super::*;
-    use crate::components::timeline::timeline_state::TimelineState;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
+    };
 
     #[test]
     fn project_sample_rate_survives_save_decode_and_timeline_restore() {
@@ -3156,6 +3343,244 @@ mod project_settings_persistence_tests {
         let _ = apply_to_timeline(&project, &mut restored);
 
         assert_eq!(restored.project_sample_rate, 48_000);
+    }
+
+    #[test]
+    fn solfege_track_settings_survive_save_decode_and_timeline_restore() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Solfege Violin".to_string(),
+            color: crate::theme::Colors::accent_primary(),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let expected = crate::solfege::SolfegeTrackState {
+            model_path: Some("C:\\Models\\violin.fbmx".to_string()),
+            instrument: "Violin".to_string(),
+            voice: "Solo Bowed String".to_string(),
+            preset: "VSCO Solo Violin".to_string(),
+            bow_pressure: 0.71,
+            vibrato: 0.29,
+            dynamics: 0.84,
+            expression: 0.93,
+            visible_lanes: vec![
+                crate::solfege::SolfegeLaneVisibility {
+                    lane_id: "velocity".to_string(),
+                    height: 64.0,
+                },
+                crate::solfege::SolfegeLaneVisibility {
+                    lane_id: "bow-pressure".to_string(),
+                    height: 96.0,
+                },
+            ],
+        };
+        assert!(timeline.set_track_solfege_engine(&track_id, Some(expected.clone())));
+
+        let encoded = encode_project(&FutureboardProject::from(&timeline));
+        let decoded = decode_project(&encoded).expect("decode project");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        let track = restored
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("Solfege track restored");
+        assert_eq!(track.solfege, Some(expected));
+        assert!(!track.builtin_soundfont_player);
+    }
+
+    /// A Solfege performance must come back exactly as it was saved: the note
+    /// ids the pitch curves are keyed to, the curves themselves, the per-note
+    /// articulation, and the visible-lane layout.
+    #[test]
+    fn solfege_performance_data_survives_save_and_load() {
+        use crate::components::timeline::timeline_state::{
+            ArticulationId, MidiControllerKind, PitchCurve, PitchPoint, PitchSegmentShape,
+        };
+
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Solfege Violin".to_string(),
+            color: crate::theme::Colors::accent_primary(),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let mut solfege = crate::solfege::SolfegeTrackState::violin(None);
+        solfege.visible_lanes = vec![
+            crate::solfege::SolfegeLaneVisibility {
+                lane_id: "dynamics".to_string(),
+                height: 88.0,
+            },
+            crate::solfege::SolfegeLaneVisibility {
+                lane_id: "bow-pressure".to_string(),
+                height: 61.0,
+            },
+        ];
+        assert!(timeline.set_track_solfege_engine(&track_id, Some(solfege)));
+
+        let clip = timeline
+            .build_midi_clip(&track_id, 0.0, 4.0)
+            .expect("clip builds");
+        let clip_id = clip.id.clone();
+        crate::components::edit::edit_commands::EditCommand::CreateClip {
+            track_id: track_id.clone(),
+            clip,
+        }
+        .execute(&mut timeline);
+
+        let note_id = timeline
+            .add_midi_note(&clip_id, 62, 1.0, 2.0, 96)
+            .expect("note added");
+        {
+            let notes = timeline.midi_clip_notes_mut(&clip_id).unwrap();
+            let note = notes.iter_mut().find(|n| n.id == note_id).unwrap();
+            note.articulation = Some(ArticulationId::Legato);
+            note.pitch_curve = Some(PitchCurve::from_points(vec![
+                PitchPoint::new(0.0, -137.5, PitchSegmentShape::Smooth),
+                PitchPoint::new(0.5, 0.0, PitchSegmentShape::Linear),
+                PitchPoint::new(1.75, 23.25, PitchSegmentShape::Hold),
+            ]));
+        }
+        // A performance lane on the same clip, to prove lanes and pitch travel
+        // together rather than one shadowing the other.
+        timeline.put_controller_point(&clip_id, MidiControllerKind::CC(1), 0.5, 0.8);
+
+        let encoded = crate::project::format::encode_project(&FutureboardProject::from(&timeline));
+        let decoded = crate::project::format::decode_project(&encoded).expect("decode project");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        let track = restored
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .expect("Solfege track restored");
+        let lanes = &track.solfege.as_ref().expect("solfege state").visible_lanes;
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0].lane_id, "dynamics");
+        assert_eq!(lanes[0].height, 88.0);
+        assert_eq!(lanes[1].lane_id, "bow-pressure");
+
+        let note = restored
+            .midi_note(&clip_id, note_id)
+            .expect("note restored under its original id");
+        assert_eq!(note.pitch, 62);
+        assert_eq!(note.articulation, Some(ArticulationId::Legato));
+        let curve = note.pitch_curve.as_ref().expect("pitch curve restored");
+        assert_eq!(curve.points.len(), 3);
+        assert_eq!(curve.points[0].cents, -137.5);
+        assert_eq!(curve.points[0].shape, PitchSegmentShape::Smooth);
+        assert_eq!(curve.points[2].shape, PitchSegmentShape::Hold);
+        assert!((curve.cents_at(1.75) - 23.25).abs() < 0.001);
+
+        let points = restored
+            .controller_lane_points(&clip_id, MidiControllerKind::CC(1))
+            .expect("dynamics lane restored");
+        assert_eq!(points.len(), 1);
+        assert!((points[0].value - 0.8).abs() < 0.001);
+    }
+
+    /// Analyse, save, close, open — and the accents are the ones that were
+    /// analysed, not a fresh analysis and not a row of neutral values.
+    ///
+    /// Provenance survives too, which is the part that matters beyond the
+    /// numbers: a hand-edited accent that came back marked "generated" would be
+    /// quietly overwritten by the next Analyze Accent.
+    #[test]
+    fn accent_survives_save_and_load_including_its_provenance() {
+        use crate::components::timeline::timeline_state::{AccentSource, AccentState};
+
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Solfege Violin".to_string(),
+            color: crate::theme::Colors::accent_primary(),
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        assert!(timeline.set_track_solfege_engine(
+            &track_id,
+            Some(crate::solfege::SolfegeTrackState::violin(None))
+        ));
+        let clip = timeline
+            .build_midi_clip(&track_id, 0.0, 4.0)
+            .expect("clip builds");
+        let clip_id = clip.id.clone();
+        crate::components::edit::edit_commands::EditCommand::CreateClip {
+            track_id: track_id.clone(),
+            clip,
+        }
+        .execute(&mut timeline);
+
+        let generated_id = timeline
+            .add_midi_note(&clip_id, 60, 0.0, 1.0, 96)
+            .expect("note added");
+        let manual_id = timeline
+            .add_midi_note(&clip_id, 64, 1.0, 1.0, 96)
+            .expect("note added");
+        let untouched_id = timeline
+            .add_midi_note(&clip_id, 67, 2.0, 1.0, 96)
+            .expect("note added");
+        {
+            let notes = timeline.midi_clip_notes_mut(&clip_id).unwrap();
+            notes
+                .iter_mut()
+                .find(|note| note.id == generated_id)
+                .unwrap()
+                .accent = Some(AccentState::generated(0.82, 0.71, 0.34, 0.55, 0.63));
+            notes
+                .iter_mut()
+                .find(|note| note.id == manual_id)
+                .unwrap()
+                .accent = Some(AccentState::neutral().with_prominence(0.25));
+        }
+
+        let encoded = crate::project::format::encode_project(&FutureboardProject::from(&timeline));
+        let decoded = crate::project::format::decode_project(&encoded).expect("decode project");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        let generated = restored
+            .midi_note(&clip_id, generated_id)
+            .expect("note restored")
+            .accent
+            .expect("accent restored");
+        assert_eq!(generated.prominence, 0.82);
+        assert_eq!(generated.attack, 0.71);
+        assert_eq!(generated.agogic, 0.34);
+        assert_eq!(generated.timbre, 0.55);
+        assert_eq!(generated.confidence, 0.63);
+        assert_eq!(generated.source, AccentSource::Generated);
+
+        let manual = restored
+            .midi_note(&clip_id, manual_id)
+            .expect("note restored")
+            .accent
+            .expect("accent restored");
+        assert_eq!(manual.prominence, 0.25);
+        assert_eq!(
+            manual.source,
+            AccentSource::Manual,
+            "a hand-edited accent came back as generated and would be overwritten"
+        );
+
+        // A note that was never analysed comes back un-analysed, not neutral:
+        // the two are different states and the re-analysis policy depends on
+        // telling them apart.
+        assert!(restored
+            .midi_note(&clip_id, untouched_id)
+            .expect("note restored")
+            .accent
+            .is_none());
     }
 }
 

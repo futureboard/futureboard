@@ -67,6 +67,7 @@ pub mod project;
 pub mod session_shutdown;
 pub mod settings;
 pub mod shutdown;
+pub mod solfege;
 pub mod soundfont_player;
 pub mod tap_tempo;
 pub mod update_service;

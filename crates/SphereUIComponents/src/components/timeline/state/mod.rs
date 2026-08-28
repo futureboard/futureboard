@@ -4,6 +4,7 @@
 //! re-exported flat so existing `timeline_state::*` imports keep working through
 //! the shim at `super::timeline_state`.
 
+mod accent;
 mod articulation;
 mod audio;
 mod automation;
@@ -25,6 +26,8 @@ mod midi_scale;
 mod mixer;
 mod mixer_tree_state;
 mod musical_snap;
+mod pitch_curve;
+mod pitch_trajectory;
 mod plugin_chain;
 mod recording;
 mod routing;
@@ -39,8 +42,13 @@ mod video;
 mod viewport;
 
 #[cfg(test)]
+mod pitch_bench;
+#[cfg(test)]
+mod pitch_stroke_bench;
+#[cfg(test)]
 mod tests;
 
+pub use accent::*;
 pub use articulation::*;
 pub use automation::*;
 pub use clip::*;
@@ -63,6 +71,8 @@ pub use musical_snap::{
     beats_to_ticks, multi_select_move_delta, snap_beat_with_grab_offset, snap_relative_delta,
     snap_resize_edge, ticks_to_beats, MusicalSnap, SnapShape, TICKS_PER_QUARTER,
 };
+pub use pitch_curve::*;
+pub use pitch_trajectory::*;
 pub use plugin_chain::*;
 pub use routing::*;
 pub use selection::*;

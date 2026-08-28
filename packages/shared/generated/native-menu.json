@@ -524,6 +524,57 @@
           "danger": false,
           "description": null,
           "children": []
+        },
+        {
+          "id": "midi.sep.accent",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "midi.analyze_accent",
+          "kind": "normal",
+          "label": "Analyze Accent",
+          "icon": "wand-sparkles",
+          "shortcut": null,
+          "command": "solfege:analyze-accent",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Estimate how strongly each note should be emphasised, keeping accents edited by hand",
+          "children": []
+        },
+        {
+          "id": "midi.analyze_accent_replace",
+          "kind": "normal",
+          "label": "Analyze Accent (Replace All)",
+          "icon": "wand-sparkles",
+          "shortcut": null,
+          "command": "solfege:analyze-accent-replace-all",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Re-analyse every note, discarding accents edited by hand",
+          "children": []
+        },
+        {
+          "id": "midi.apply_accent",
+          "kind": "normal",
+          "label": "Apply Accent to Performance",
+          "icon": "audio-waveform",
+          "shortcut": null,
+          "command": "solfege:apply-accent",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Write the analysed accents into note timing, velocity and the Dynamics lane",
+          "children": []
         }
       ]
     },

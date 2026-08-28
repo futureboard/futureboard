@@ -138,3 +138,55 @@ impl MenuManifest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commands() -> Vec<String> {
+        fn walk(items: &[MenuItem], out: &mut Vec<String>) {
+            for item in items {
+                if let Some(command) = item.command.as_ref() {
+                    out.push(command.clone());
+                }
+                walk(&item.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        for menu in &MenuManifest::load().menus {
+            walk(&menu.items, &mut out);
+        }
+        out
+    }
+
+    /// The embedded manifest is the one command registry: the menu bar, the
+    /// context menus and the command palette all read it. A command that only
+    /// exists in the dispatcher is a command nobody can find.
+    #[test]
+    fn the_accent_commands_are_discoverable() {
+        let commands = commands();
+        for command in [
+            "solfege:analyze-accent",
+            "solfege:analyze-accent-replace-all",
+            "solfege:apply-accent",
+        ] {
+            assert!(
+                commands.iter().any(|found| found == command),
+                "{command} is dispatched but appears in no menu, so the command \
+                 palette cannot offer it"
+            );
+        }
+    }
+
+    /// A malformed manifest degrades to the fallback shell rather than
+    /// panicking, so this is worth asserting rather than assuming: if the
+    /// embedded JSON ever stops parsing, every menu silently empties.
+    #[test]
+    fn the_embedded_manifest_parses() {
+        let manifest = MenuManifest::load();
+        assert!(
+            manifest.menus.len() > MenuManifest::fallback().menus.len(),
+            "the embedded manifest failed to parse and fell back to the shell"
+        );
+    }
+}

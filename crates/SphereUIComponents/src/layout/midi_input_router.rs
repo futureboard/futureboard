@@ -497,6 +497,18 @@ impl StudioLayout {
         let plugin_instance_id = destination.and_then(instrument_instance_id);
 
         let Some(plugin_instance_id) = plugin_instance_id else {
+            if destination.is_some_and(|destination| destination.solfege.is_some()) {
+                let destination = destination.expect("checked above");
+                return VirtualKeyboardTargetStatus {
+                    target: Some(MidiInputTarget {
+                        track_id: destination.id.clone(),
+                        plugin_instance_id: None,
+                    }),
+                    capture_track_id: Some(track.id.clone()),
+                    label: Some(track.name.clone()),
+                    hint: None,
+                };
+            }
             // The built-in Soundfont Player is a track instrument rather than a
             // hosted plugin, so it has no instance id — the engine's track MIDI
             // preview reaches it directly.
@@ -648,6 +660,15 @@ fn hardware_midi_target_for_track(
                 .as_deref()
                 .is_some_and(|path| !path.is_empty())
     }) {
+        return Some(ResolvedMidiInputTarget {
+            target: MidiInputTarget {
+                track_id: destination.id.clone(),
+                plugin_instance_id: None,
+            },
+            capture_track_id: track.id.clone(),
+        });
+    }
+    if let Some(destination) = destination.filter(|destination| destination.solfege.is_some()) {
         return Some(ResolvedMidiInputTarget {
             target: MidiInputTarget {
                 track_id: destination.id.clone(),

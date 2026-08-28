@@ -807,6 +807,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         });
 
         let project_file = root.join("Portable.fbproj");
@@ -866,6 +867,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         }
     }
 

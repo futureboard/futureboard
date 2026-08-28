@@ -43,6 +43,8 @@ mod browser_ops;
 mod close_ops;
 mod context_menu_ops;
 pub(crate) mod engine_snapshot;
+#[cfg(test)]
+mod engine_snapshot_pitch_tests;
 mod export_ops;
 mod frame_diagnostics;
 mod helpers;
@@ -415,6 +417,9 @@ pub struct StudioLayout {
     piano_roll: Entity<components::piano_roll::PianoRoll>,
     /// Audio clip editor for the bottom panel router.
     audio_editor: Entity<components::AudioEditorHost>,
+    /// Solfege MIDI/Pitch editor. Held here as well as inside the clip-editor
+    /// router so the right dock can read the Pitch tab's note selection.
+    solfege_editor: Entity<components::SolfegeEditorPanel>,
     /// Routes bottom Editor tab between audio / MIDI / empty state.
     clip_editor_panel: Entity<components::ClipEditorPanel>,
     /// Compact Logic-style musical typing / virtual MIDI keyboard.
@@ -667,6 +672,11 @@ impl StudioLayout {
             let timeline = timeline.clone();
             cx.new(|cx| components::piano_roll::PianoRoll::new(timeline, cx))
         };
+        let solfege_editor = {
+            let timeline = timeline.clone();
+            let piano_roll = piano_roll.clone();
+            cx.new(|cx| components::SolfegeEditorPanel::new(timeline, piano_roll, cx))
+        };
         let audio_editor = {
             let timeline = timeline.clone();
             cx.new(|cx| components::AudioEditorHost::new(timeline, cx))
@@ -675,6 +685,7 @@ impl StudioLayout {
             components::ClipEditorPanel::new(
                 timeline.clone(),
                 piano_roll.clone(),
+                solfege_editor.clone(),
                 audio_editor.clone(),
             )
         });
@@ -1015,6 +1026,7 @@ impl StudioLayout {
             timeline,
             piano_roll,
             audio_editor,
+            solfege_editor,
             clip_editor_panel,
             virtual_keyboard,
             virtual_keyboard_last_target: None,
@@ -2336,6 +2348,29 @@ impl StudioLayout {
             // editor (docked or floating) is active, like the entries above.
             cmd if cmd.starts_with("midi:articulation-") || cmd.starts_with("midi:lane-") => {
                 self.dispatch_midi_editor_menu_command(command_id, cx)
+            }
+
+            // ── Solfege accent analysis ──────────────────────────────────
+            // Two commands, not one, because they are two decisions. The
+            // analysis is a reading and is safe to run at any time; applying it
+            // rewrites note timings and velocities, and a musician gets to
+            // choose when that happens.
+            "solfege:analyze-accent" => {
+                self.solfege_editor.update(cx, |editor, editor_cx| {
+                    editor
+                        .analyze_accent(crate::solfege::AccentReplacePolicy::KeepManual, editor_cx);
+                });
+            }
+            "solfege:analyze-accent-replace-all" => {
+                self.solfege_editor.update(cx, |editor, editor_cx| {
+                    editor
+                        .analyze_accent(crate::solfege::AccentReplacePolicy::ReplaceAll, editor_cx);
+                });
+            }
+            "solfege:apply-accent" => {
+                self.solfege_editor.update(cx, |editor, editor_cx| {
+                    editor.apply_accent_to_performance(editor_cx);
+                });
             }
 
             // ── Transport extras (shared menu IDs) ───────────────────────

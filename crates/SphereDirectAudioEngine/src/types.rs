@@ -316,6 +316,21 @@ pub struct EngineMidiControllerLane {
     pub points: Vec<EngineMidiControllerPoint>,
 }
 
+/// One breakpoint of a note's sounding pitch, in absolute frequency.
+///
+/// Hz — not a semitone offset and not a pitch-bend value — because the
+/// instruments that consume this (bowed-string physical models, the indexed
+/// voicebank) drive a resonator/read pointer in Hz, and because the editor's
+/// model is continuous: there is no 12-TET grid to bend away from.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnginePitchPoint {
+    /// Beat relative to the **clip** start, matching every other beat in this
+    /// snapshot.
+    pub beat: f64,
+    pub hz: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineMidiNoteSnapshot {
@@ -327,6 +342,29 @@ pub struct EngineMidiNoteSnapshot {
     pub velocity: u8,
     #[serde(default)]
     pub channel: u8,
+    /// Which recorded articulation this note asks the instrument to play.
+    ///
+    /// A **sampled-instrument** articulation id (pizzicato, spiccato, sustain,
+    /// tremolo — the vocabulary of the recordings in the bank), not the score
+    /// marking the editor shows. The two are different alphabets and the
+    /// snapshot builder is where they are translated, so the engine never has
+    /// to know about notation and the editor never has to know which
+    /// recordings a particular bank happens to contain.
+    ///
+    /// `None` means "whatever the instrument's default is" — the behaviour
+    /// before any articulation reached the engine at all.
+    #[serde(default)]
+    pub articulation: Option<u16>,
+    /// Sounding-pitch trajectory across this note, already composed from the
+    /// notated pitch, the drawn pitch curve and any note-to-note transition.
+    ///
+    /// **Empty means "this note sounds at `pitch`"** — the common case, and the
+    /// reason a project full of untouched notes costs nothing here. Points are
+    /// only emitted where the trajectory actually departs from the notated
+    /// pitch, and are decimated to a musically inaudible tolerance, so this
+    /// stays small even for a heavily drawn phrase.
+    #[serde(default)]
+    pub pitch_points: Vec<EnginePitchPoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +411,59 @@ pub struct EngineTrackSnapshot {
     /// Internal synthesis oversampling for the built-in player.
     #[serde(default)]
     pub soundfont_quality: SoundfontRenderQuality,
+    /// Native Solfege physical/hybrid instrument wrapper. Kept optional so
+    /// existing snapshots remain source-compatible and deserialize unchanged.
+    #[serde(default)]
+    pub solfege_engine: Option<EngineSolfegeSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineSolfegeSnapshot {
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default = "default_solfege_instrument")]
+    pub instrument: String,
+    #[serde(default = "default_solfege_voice")]
+    pub voice: String,
+    #[serde(default = "default_solfege_preset")]
+    pub preset: String,
+    #[serde(default = "default_solfege_parameter")]
+    pub bow_pressure: f32,
+    #[serde(default = "default_solfege_vibrato")]
+    pub vibrato: f32,
+    #[serde(default = "default_solfege_dynamics")]
+    pub dynamics: f32,
+    #[serde(default = "default_solfege_expression")]
+    pub expression: f32,
+}
+
+fn default_solfege_instrument() -> String {
+    "Violin".to_string()
+}
+
+fn default_solfege_voice() -> String {
+    "Solo Bowed String".to_string()
+}
+
+fn default_solfege_preset() -> String {
+    "VSCO Solo Violin".to_string()
+}
+
+fn default_solfege_parameter() -> f32 {
+    0.62
+}
+
+fn default_solfege_vibrato() -> f32 {
+    0.18
+}
+
+fn default_solfege_dynamics() -> f32 {
+    0.78
+}
+
+fn default_solfege_expression() -> f32 {
+    1.0
 }
 
 fn default_soundfont_volume() -> f32 {

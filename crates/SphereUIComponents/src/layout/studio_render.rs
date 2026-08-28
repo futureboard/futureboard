@@ -1289,6 +1289,7 @@ impl Render for StudioLayout {
         // Delete route to the piano roll (its own `on_key_down`) when it holds
         // focus, instead of the global timeline clip commands.
         let midi_editor = self.piano_roll.clone();
+        let solfege_editor = self.solfege_editor.clone();
         // Physical-keyboard musical typing updates the panel entity *directly*
         // (mirroring the mouse path), never nested inside a `StudioLayout`
         // update. The panel's key handler flushes through the event sink, which
@@ -1547,6 +1548,21 @@ impl Render for StudioLayout {
                         }
                         return;
                     }
+                    // Same gate for the Solfege Pitch tab, which replaces the
+                    // piano roll in the dock for a Solfege clip and owns Delete
+                    // for its pitch points.
+                    if is_midi_routable_edit_command(&normalize_command_id(&command_id))
+                        && shortcut_keydown_target.read(cx).docked_midi_editor_visible()
+                        && solfege_editor.read(cx).pitch_grid_is_focused(window)
+                    {
+                        if edit_command_debug() {
+                            eprintln!(
+                                "[edit-command] command={command_id} target=SolfegePitch \
+                                 reason=focus-passthrough (handled by pitch editor)"
+                            );
+                        }
+                        return;
+                    }
                     // Transport shortcuts go through the same dispatcher as the
                     // chrome Play button (transport:play-pause → PlayPause), so
                     // Spacebar and the button are always one command. Only the
@@ -1775,6 +1791,13 @@ impl Render for StudioLayout {
                                     i18n,
                                 ).into_any_element()
                             }
+                            RightDockTab::Solfege => crate::components::panel::solfege_panel(
+                                &tracks,
+                                selected_track_id.as_deref(),
+                                active_panel == WorkspaceActivePanel::Solfege,
+                                self.solfege_editor.read(cx).selected_pitch_summary(cx),
+                            )
+                            .into_any_element(),
                             RightDockTab::ChordDisplay => self.chord_display_panel.clone().into_any_element(),
                             RightDockTab::LyricDisplay => self.lyric_display_panel.clone().into_any_element(),
                             RightDockTab::LyricEditor => self.lyric_editor_panel.clone().into_any_element(),
@@ -1869,7 +1892,7 @@ impl Render for StudioLayout {
 
 fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl IntoElement {
     let popout_kind = match active {
-        RightDockTab::Inspector => None,
+        RightDockTab::Inspector | RightDockTab::Solfege => None,
         RightDockTab::ChordDisplay => Some(components::SongTextPanelKind::ChordDisplay),
         RightDockTab::LyricDisplay => Some(components::SongTextPanelKind::LyricDisplay),
         RightDockTab::LyricEditor => Some(components::SongTextPanelKind::LyricEditor),
@@ -1889,6 +1912,7 @@ fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl
         .bg(Colors::surface_panel());
     for tab in [
         RightDockTab::Inspector,
+        RightDockTab::Solfege,
         RightDockTab::ChordDisplay,
         RightDockTab::LyricDisplay,
         RightDockTab::LyricEditor,
@@ -1929,6 +1953,7 @@ fn right_dock_tab_button(
     let selected = tab == active;
     let label = match tab {
         RightDockTab::Inspector => "Inspect",
+        RightDockTab::Solfege => "Solfege",
         RightDockTab::ChordDisplay => "Chords",
         RightDockTab::LyricDisplay => "Lyrics",
         RightDockTab::LyricEditor => "Edit",

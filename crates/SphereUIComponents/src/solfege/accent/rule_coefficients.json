@@ -1,0 +1,91 @@
+{
+  "calibration": {
+    "gains": {
+      "agogic": 1.940454,
+      "attack": 4.0,
+      "prominence": 4.0,
+      "timbre": 4.0
+    },
+    "max_gain": 4.0,
+    "note": "monotone affine spread match; preserves every ranking, worsens MAE, fitted on the training pool",
+    "raw_means": {
+      "agogic": 0.514595,
+      "attack": 0.492274,
+      "prominence": 0.495798,
+      "timbre": 0.540545
+    },
+    "target_means": {
+      "agogic": 0.508535,
+      "attack": 0.517327,
+      "prominence": 0.507022,
+      "timbre": 0.543403
+    }
+  },
+  "coefficients": {
+    "agogic": {
+      "duration_vs_local": -0.027266,
+      "is_phrase_start": 0.053759,
+      "is_window_peak": -0.028934,
+      "leap_into": 0.267887,
+      "long_after_short": 0.029136,
+      "metrical_strength": 0.027915,
+      "pitch_vs_local": -0.028731,
+      "starts_after_rest": -0.274512,
+      "syncopation": 0.022645
+    },
+    "attack": {
+      "duration_vs_local": -0.097479,
+      "is_phrase_start": -0.010012,
+      "is_window_peak": -0.076153,
+      "leap_into": -0.061135,
+      "long_after_short": -0.020662,
+      "metrical_strength": 0.028442,
+      "pitch_vs_local": -0.041807,
+      "starts_after_rest": 0.063127,
+      "syncopation": -0.026291
+    },
+    "prominence": {
+      "duration_vs_local": -0.124442,
+      "is_phrase_start": 0.011219,
+      "is_window_peak": -0.048982,
+      "leap_into": 0.08375,
+      "long_after_short": 0.021909,
+      "metrical_strength": 0.051586,
+      "pitch_vs_local": -0.051707,
+      "starts_after_rest": -0.108526,
+      "syncopation": 0.011632
+    },
+    "timbre": {
+      "duration_vs_local": -0.005736,
+      "is_phrase_start": -0.005674,
+      "is_window_peak": 0.056472,
+      "leap_into": -0.017411,
+      "long_after_short": 0.040169,
+      "metrical_strength": 0.028117,
+      "pitch_vs_local": 0.010018,
+      "starts_after_rest": 0.028052,
+      "syncopation": 0.066542
+    }
+  },
+  "confidence": 0.5,
+  "feature_schema_version": 1,
+  "features": [
+    "metrical_strength",
+    "syncopation",
+    "duration_vs_local",
+    "starts_after_rest",
+    "is_window_peak",
+    "pitch_vs_local",
+    "leap_into",
+    "is_phrase_start",
+    "long_after_short"
+  ],
+  "fitted_on": "urmp-violin train; early-stopped and calibrated on validation",
+  "intercepts": {
+    "agogic": 0.459452,
+    "attack": 0.495248,
+    "prominence": 0.464196,
+    "timbre": 0.517074
+  },
+  "ridge": 1.0
+}

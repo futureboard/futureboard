@@ -73,6 +73,7 @@ pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
 pub mod slider;
+pub mod solfege_editor;
 pub mod song_text_panel;
 pub mod soundfont_player_mdi;
 pub mod soundfont_player_window;
@@ -187,6 +188,7 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
+pub use solfege_editor::{SolfegeEditorPanel, SolfegeEditorTab};
 pub use song_text_panel::{
     open_song_text_window, SongTextPanelKind, SongTextPanelView, SongTextWindow,
 };

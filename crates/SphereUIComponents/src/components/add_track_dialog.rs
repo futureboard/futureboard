@@ -126,6 +126,7 @@ pub struct AddTrackInputChoice {
 pub enum InstrumentMode {
     Vsti,
     SoundfontPlayer,
+    SolfegeEngine,
 }
 
 impl InstrumentMode {
@@ -133,6 +134,7 @@ impl InstrumentMode {
         match self {
             Self::Vsti => "VSTi",
             Self::SoundfontPlayer => "Soundfont Player",
+            Self::SolfegeEngine => "Solfege Engine",
         }
     }
 }
@@ -141,6 +143,7 @@ impl InstrumentMode {
 pub enum AddTrackSelectId {
     AudioFormat,
     InstrumentPlugin,
+    SolfegeModel,
     Input,
     Output,
     MidiChannel,
@@ -309,6 +312,7 @@ pub struct AddTrackDialogState {
     pub instrument_mode: InstrumentMode,
     pub instrument_plugin_id: Option<String>,
     pub instrument_plugin_name: Option<String>,
+    pub solfege_model_path: Option<String>,
     pub fx_chain: Option<String>,
     pub input_label: String,
     pub output_label: String,
@@ -373,6 +377,8 @@ impl AddTrackDialogState {
             instrument_mode: InstrumentMode::Vsti,
             instrument_plugin_id: None,
             instrument_plugin_name: None,
+            solfege_model_path: crate::solfege::default_model_path()
+                .map(|path| path.to_string_lossy().into_owned()),
             fx_chain: None,
             input_label: kind.default_input().to_string(),
             output_label: "Main".to_string(),
@@ -498,6 +504,7 @@ pub struct AddTrackDialogCallbacks {
     pub on_toggle_select: Arc<dyn Fn(&AddTrackSelectId, &mut Window, &mut App) + 'static>,
     pub on_instrument_mode: InstrumentModeCb,
     pub on_instrument_plugin: StringCb,
+    pub on_solfege_model: StringCb,
     pub on_input_label: StringCb,
     pub on_output_label: StringCb,
     pub on_midi_channel_label: StringCb,
@@ -594,6 +601,26 @@ fn midi_input_select_options(devices: &[String]) -> Vec<SelectOption> {
     );
     options.push(SelectOption::new("None", "None"));
     options
+}
+
+fn solfege_model_options() -> Vec<SelectOption> {
+    let paths = crate::solfege::discover_model_paths();
+    if paths.is_empty() {
+        return vec![SelectOption::new("", "No Solfege models found")
+            .description(crate::solfege::model_directory().display().to_string())];
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let id = path.to_string_lossy().into_owned();
+            let label = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Solfege model")
+                .to_string();
+            SelectOption::new(id, label).description(path.display().to_string())
+        })
+        .collect()
 }
 
 fn plugin_format_label(format: PluginFormat) -> &'static str {
@@ -862,9 +889,13 @@ fn instrument_mode_selector(
 ) -> impl IntoElement {
     let mut row = div().flex().flex_row().gap(px(4.0)).w_full().h(px(28.0));
 
-    for (index, mode) in [InstrumentMode::Vsti, InstrumentMode::SoundfontPlayer]
-        .into_iter()
-        .enumerate()
+    for (index, mode) in [
+        InstrumentMode::Vsti,
+        InstrumentMode::SoundfontPlayer,
+        InstrumentMode::SolfegeEngine,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let active = selected == mode;
         let cb = callbacks.on_instrument_mode.clone();
@@ -1381,7 +1412,9 @@ fn type_fields(
         AddTrackKind::Instrument => {
             let asc_in = callbacks.on_ascending_input.clone();
             let instrument_cb = callbacks.on_instrument_plugin.clone();
+            let solfege_cb = callbacks.on_solfege_model.clone();
             let toggle_instrument = callbacks.on_toggle_select.clone();
+            let toggle_solfege = callbacks.on_toggle_select.clone();
             let input_cb = callbacks.on_input_label.clone();
             let output_cb = callbacks.on_output_label.clone();
             let toggle_input = callbacks.on_toggle_select.clone();
@@ -1429,11 +1462,30 @@ fn type_fields(
                             Arc::new(move |value, w, cx| instrument_cb(value, w, cx)),
                         )
                         .into_any_element()
-                    } else {
+                    } else if state.instrument_mode == InstrumentMode::SoundfontPlayer {
                         locked_select_box("Built-in Soundfont Player".to_string())
                             .into_any_element()
+                    } else {
+                        add_track_select(
+                            "add-track-solfege-model-select",
+                            Some(state.solfege_model_path.as_deref().unwrap_or("")),
+                            "Select Solfege model...",
+                            solfege_model_options(),
+                            add_track_select_open(open_select, AddTrackSelectId::SolfegeModel),
+                            SelectMenuPlacement::Below,
+                            Arc::new(move |_, w, cx| {
+                                toggle_solfege(&AddTrackSelectId::SolfegeModel, w, cx)
+                            }),
+                            Arc::new(move |value, w, cx| solfege_cb(value, w, cx)),
+                        )
+                        .into_any_element()
                     },
                 ))
+                .when(state.instrument_mode == InstrumentMode::SolfegeEngine, |col| {
+                    col.child(disabled_hint(
+                        "SFM and FBMX models are loaded from Documents/Futureboard Studio/Utilities/Model/Solfage.",
+                    ))
+                })
                 .child(fb_form_row(
                     i18n.tr("add-track.routing.midi-in"),
                     add_track_select(
@@ -1843,6 +1895,8 @@ impl AddTrackWindow {
         dialog.instrument_mode = InstrumentMode::Vsti;
         dialog.instrument_plugin_id = None;
         dialog.instrument_plugin_name = None;
+        dialog.solfege_model_path =
+            crate::solfege::default_model_path().map(|path| path.to_string_lossy().into_owned());
         add_track_debug(&format!(
             "dialog open kind={} count={}",
             kind.tab_label(),
@@ -2432,9 +2486,24 @@ impl Render for AddTrackWindow {
                     let mode = *mode;
                     let _ = target.update(cx, |this, cx| {
                         this.state.instrument_mode = mode;
-                        if mode == InstrumentMode::SoundfontPlayer {
-                            this.state.instrument_plugin_id = None;
-                            this.state.instrument_plugin_name = None;
+                        match mode {
+                            InstrumentMode::Vsti => {
+                                this.state.solfege_model_path = None;
+                            }
+                            InstrumentMode::SoundfontPlayer => {
+                                this.state.instrument_plugin_id = None;
+                                this.state.instrument_plugin_name = None;
+                                this.state.solfege_model_path = None;
+                            }
+                            InstrumentMode::SolfegeEngine => {
+                                this.state.instrument_plugin_id = None;
+                                this.state.instrument_plugin_name = None;
+                                if this.state.solfege_model_path.is_none() {
+                                    this.state.solfege_model_path =
+                                        crate::solfege::default_model_path()
+                                            .map(|path| path.to_string_lossy().into_owned());
+                                }
+                            }
                         }
                         this.open_select = None;
                         add_track_debug(&format!("instrument mode={}", mode.label()));
@@ -2467,6 +2536,17 @@ impl Render for AddTrackWindow {
                         }
                         this.open_select = None;
                         this.clear_instrument_search();
+                        cx.notify();
+                    });
+                }
+            }),
+            on_solfege_model: Arc::new({
+                let target = target.clone();
+                move |value: &String, _w, cx| {
+                    let value = value.clone();
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.solfege_model_path = (!value.is_empty()).then_some(value);
+                        this.open_select = None;
                         cx.notify();
                     });
                 }

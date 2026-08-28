@@ -2408,6 +2408,7 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         soundfont_polyphony,
         soundfont_envelope,
         soundfont_quality,
+        solfege,
         sends,
         routing,
     } = track;
@@ -2456,6 +2457,7 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         soundfont_polyphony: *soundfont_polyphony,
         soundfont_envelope: *soundfont_envelope,
         soundfont_quality: *soundfont_quality,
+        solfege: solfege.clone(),
         sends: if include_detail {
             sends.clone()
         } else {

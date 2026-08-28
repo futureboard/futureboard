@@ -33,10 +33,28 @@ fn counter_controller_point() -> &'static std::sync::atomic::AtomicU64 {
     &COUNTER
 }
 
+fn counter_pitch_point() -> &'static std::sync::atomic::AtomicU64 {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    &COUNTER
+}
+
 fn counter_automation_point() -> &'static std::sync::atomic::AtomicU64 {
     use std::sync::atomic::AtomicU64;
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     &COUNTER
+}
+
+/// Monotonic source of pitch-curve point identities. Persisted from project
+/// format v38 onward so a pitch point keeps its identity across save/load,
+/// undo, and note move/copy/split.
+pub fn next_pitch_point_id() -> u64 {
+    mint_counter(counter_pitch_point())
+}
+
+/// Ensure subsequent pitch-point mints do not collide with a loaded id.
+pub fn observe_pitch_point_id(id: u64) {
+    observe_counter(counter_pitch_point(), id);
 }
 
 /// Monotonic source of automation-point identities. Persisted from project

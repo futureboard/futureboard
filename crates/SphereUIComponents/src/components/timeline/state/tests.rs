@@ -1029,7 +1029,7 @@ mod midi_edit_tests {
     use crate::components::edit::{EditCommand, TrackSnapshot};
 
     /// Build an empty state with one MIDI clip and return `(state, clip_id)`.
-    fn state_with_midi_clip() -> (TimelineState, String) {
+    pub(super) fn state_with_midi_clip() -> (TimelineState, String) {
         let mut state = TimelineState::default();
         let track_id = state.create_track(CreateTrackOptions {
             track_type: TrackType::Midi,
@@ -1053,7 +1053,7 @@ mod midi_edit_tests {
         (state, clip_id)
     }
 
-    fn note(state: &TimelineState, clip_id: &str, id: u64) -> MidiNoteState {
+    pub(super) fn note(state: &TimelineState, clip_id: &str, id: u64) -> MidiNoteState {
         state
             .midi_clip_notes(clip_id)
             .unwrap()
@@ -1061,6 +1061,98 @@ mod midi_edit_tests {
             .find(|n| n.id == id)
             .cloned()
             .unwrap()
+    }
+
+    /// Analyze Accent has to be one undoable step, and undoing it has to put
+    /// every note back — including notes it never touched.
+    ///
+    /// Two hundred analysed notes producing two hundred undo entries would make
+    /// Ctrl+Z useless after running it, and an `EditMidiNotes` that forgot to
+    /// carry `accent` would apply and never come back.
+    #[test]
+    fn an_accent_analysis_is_one_undoable_edit_that_restores_every_note() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let ids: Vec<u64> = (0..8)
+            .map(|index| {
+                state
+                    .add_midi_note(&clip_id, 60 + index as u8, index as f32 * 0.5, 0.5, 96)
+                    .expect("note added")
+            })
+            .collect();
+
+        // One note is already hand-edited; a re-analysis that preserves manual
+        // edits must leave it alone, and undo must not resurrect a value it
+        // never wrote.
+        state.set_midi_notes_accent_bulk(&clip_id, &ids[3..4], 0.9);
+        let before: Vec<MidiNoteState> = state.midi_clip_notes(&clip_id).unwrap().clone();
+        assert!(before[3].accent.is_some());
+        assert!(before[0].accent.is_none());
+
+        // What an analysis produces: one accent per note, applied in one go.
+        let analysed: Vec<AccentState> = (0..ids.len())
+            .map(|index| AccentState::generated(0.2 + 0.05 * index as f32, 0.5, 0.5, 0.5, 0.7))
+            .collect();
+        let mut after = before.clone();
+        let changed = crate::solfege::accent::apply_accents(
+            &mut after,
+            &analysed,
+            crate::solfege::AccentReplacePolicy::KeepManual,
+        );
+        assert_eq!(changed, 7, "the hand-edited note was left alone");
+
+        let command = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev: before.clone(),
+            next: after.clone(),
+        };
+        command.execute(&mut state);
+        assert_eq!(
+            note(&state, &clip_id, ids[0]).accent.unwrap().prominence,
+            0.2
+        );
+        assert_eq!(
+            note(&state, &clip_id, ids[3]).accent.unwrap().prominence,
+            0.9,
+            "the hand-set accent survived the analysis"
+        );
+
+        command.undo(&mut state);
+        for (index, id) in ids.iter().enumerate() {
+            assert_eq!(
+                note(&state, &clip_id, *id).accent,
+                before[index].accent,
+                "note {index} did not come back"
+            );
+        }
+        assert!(note(&state, &clip_id, ids[0]).accent.is_none());
+
+        command.execute(&mut state);
+        assert_eq!(
+            note(&state, &clip_id, ids[0]).accent.unwrap().prominence,
+            0.2,
+            "redo did not reapply the analysis"
+        );
+    }
+
+    /// Clearing an accent returns the note to "never analysed", which is a
+    /// different state from "analysed and found neutral" — the first is filled
+    /// in by the next analysis and the second is not.
+    #[test]
+    fn clearing_an_accent_is_distinct_from_setting_it_to_neutral() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state
+            .add_midi_note(&clip_id, 60, 0.0, 1.0, 96)
+            .expect("note added");
+
+        state.set_midi_notes_accent_bulk(&clip_id, &[id], 0.5);
+        let neutral = note(&state, &clip_id, id).accent.expect("an accent");
+        assert!(neutral.is_neutral());
+        assert_eq!(neutral.source, AccentSource::Manual);
+
+        assert_eq!(state.clear_midi_notes_accent(&clip_id, &[id]), 1);
+        assert!(note(&state, &clip_id, id).accent.is_none());
+        // Clearing twice changes nothing, so it cannot record an empty edit.
+        assert_eq!(state.clear_midi_notes_accent(&clip_id, &[id]), 0);
     }
 
     #[test]
@@ -1933,5 +2025,122 @@ mod lane_origin_tests {
             );
         }
         assert_eq!(index_by_id.get("no-such-track").copied(), None);
+    }
+}
+
+// ── Solfege pitch expression: stable-id association and undo ────────────────
+//
+// These cover the editor contract that the MIDI tab and the Pitch tab operate
+// on one set of notes: pitch curves are keyed to a note's stable id, ride the
+// shared `EditMidiNotes` history, and survive musical edits.
+
+#[cfg(test)]
+mod solfege_pitch_expression_tests {
+    use super::midi_edit_tests::{note, state_with_midi_clip};
+    use super::*;
+    use crate::components::edit::EditCommand;
+
+    fn scooped_curve() -> PitchCurve {
+        PitchCurve::from_points(vec![
+            PitchPoint::new(0.0, -100.0, PitchSegmentShape::Smooth),
+            PitchPoint::new(0.5, 0.0, PitchSegmentShape::Linear),
+        ])
+    }
+
+    fn clip_with_expressive_note() -> (TimelineState, String, u64) {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state
+            .add_midi_note(&clip_id, 60, 0.0, 2.0, 100)
+            .expect("note added");
+        let notes = state.midi_clip_notes_mut(&clip_id).unwrap();
+        notes.iter_mut().find(|n| n.id == id).unwrap().pitch_curve = Some(scooped_curve());
+        (state, clip_id, id)
+    }
+
+    #[test]
+    fn a_pitch_curve_is_reached_by_note_id_not_by_index() {
+        let (mut state, clip_id, id) = clip_with_expressive_note();
+        // Insert a note that sorts before the expressive one, moving its index.
+        let _ = state.add_midi_note(&clip_id, 48, 0.0, 1.0, 100);
+        let curve = state.note_pitch_curve(&clip_id, id);
+        assert_eq!(curve.len(), 2);
+        assert!((curve.cents_at(0.0) + 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn transposing_preserves_the_relative_pitch_expression() {
+        let (mut state, clip_id, id) = clip_with_expressive_note();
+        let before = state.note_pitch_curve(&clip_id, id);
+        state.transpose_midi_notes(&clip_id, &[id], 2);
+        let after = state.note_pitch_curve(&clip_id, id);
+        assert_eq!(before.points.len(), after.points.len());
+        for (a, b) in before.points.iter().zip(&after.points) {
+            assert_eq!(a.cents, b.cents);
+            assert_eq!(a.beat, b.beat);
+        }
+        let note = note(&state, &clip_id, id);
+        assert_eq!(note.pitch, 62);
+        // The sounding pitch moved by exactly the transposition.
+        assert!(
+            (TimelineState::note_sounding_pitch(&note, 0.0) - 61.0).abs() < 0.001,
+            "a scoop under D4 must sound a semitone under D4"
+        );
+    }
+
+    #[test]
+    fn moving_a_note_keeps_its_note_relative_curve() {
+        let (mut state, clip_id, id) = clip_with_expressive_note();
+        state.move_midi_notes(&clip_id, &[(id, 1.5, 60)]);
+        let curve = state.note_pitch_curve(&clip_id, id);
+        assert!((curve.cents_at(0.0) + 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn edit_midi_notes_undoes_and_redoes_a_pitch_curve_edit() {
+        let (mut state, clip_id, id) = clip_with_expressive_note();
+        let prev = state.midi_note_snapshot(&clip_id, id).unwrap();
+        let mut next = prev.clone();
+        let mut curve = next.pitch_curve.clone().unwrap();
+        curve.set_point(1.0, 42.0, PitchSegmentShape::Linear, 0.0);
+        next.pitch_curve = Some(curve);
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev: vec![prev.clone()],
+            next: vec![next.clone()],
+        };
+        cmd.execute(&mut state);
+        assert_eq!(state.note_pitch_curve(&clip_id, id).len(), 3);
+
+        cmd.undo(&mut state);
+        assert_eq!(state.note_pitch_curve(&clip_id, id).len(), 2);
+
+        cmd.execute(&mut state);
+        assert!((state.note_pitch_curve(&clip_id, id).cents_at(1.0) - 42.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn deleting_and_undoing_restores_the_expression() {
+        let (mut state, clip_id, id) = clip_with_expressive_note();
+        let snapshot = state.midi_note_snapshot(&clip_id, id).unwrap();
+        let cmd = EditCommand::DeleteMidiNotes {
+            clip_id: clip_id.clone(),
+            notes: vec![snapshot],
+        };
+        cmd.execute(&mut state);
+        assert!(state.midi_note(&clip_id, id).is_none());
+        cmd.undo(&mut state);
+        assert_eq!(state.note_pitch_curve(&clip_id, id).len(), 2);
+    }
+
+    #[test]
+    fn an_untouched_note_sounds_at_its_notated_pitch() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state
+            .add_midi_note(&clip_id, 67, 0.0, 1.0, 100)
+            .expect("note added");
+        let note = note(&state, &clip_id, id);
+        assert!(note.pitch_curve.is_none());
+        assert_eq!(TimelineState::note_sounding_pitch(&note, 0.4), 67.0);
     }
 }

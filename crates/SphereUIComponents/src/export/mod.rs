@@ -73,6 +73,7 @@ mod tests {
                 soundfont_polyphony: 64,
                 soundfont_envelope: Default::default(),
                 soundfont_quality: Default::default(),
+                solfege_engine: None,
             }],
             clips,
             midi_clips: Vec::new(),

@@ -27,11 +27,13 @@ pub enum ArticulationId {
     Tenuto = 5,
     Accent = 6,
     Marcato = 7,
+    Pizzicato = 8,
+    Tremolo = 9,
 }
 
 impl ArticulationId {
     /// Every built-in articulation, in display order.
-    pub const ALL: [ArticulationId; 7] = [
+    pub const ALL: [ArticulationId; 9] = [
         ArticulationId::Sustain,
         ArticulationId::Staccato,
         ArticulationId::Staccatissimo,
@@ -39,6 +41,8 @@ impl ArticulationId {
         ArticulationId::Tenuto,
         ArticulationId::Accent,
         ArticulationId::Marcato,
+        ArticulationId::Pizzicato,
+        ArticulationId::Tremolo,
     ];
 
     /// Persisted tag. `0` means "none" and is never a valid `ArticulationId`.
@@ -57,6 +61,8 @@ impl ArticulationId {
             5 => Some(Self::Tenuto),
             6 => Some(Self::Accent),
             7 => Some(Self::Marcato),
+            8 => Some(Self::Pizzicato),
+            9 => Some(Self::Tremolo),
             _ => None,
         }
     }
@@ -138,7 +144,7 @@ pub struct ArticulationDefinition {
 
 /// Built-in registry, indexed by `tag - 1`. Order must match
 /// [`ArticulationId::ALL`] / the tag values.
-pub static ARTICULATION_REGISTRY: [ArticulationDefinition; 7] = [
+pub static ARTICULATION_REGISTRY: [ArticulationDefinition; 9] = [
     ArticulationDefinition {
         id: ArticulationId::Sustain,
         name: "Sustain",
@@ -212,6 +218,35 @@ pub static ARTICULATION_REGISTRY: [ArticulationDefinition; 7] = [
         playback: ArticulationPlayback {
             gate_ratio: 0.85,
             velocity_delta: 24,
+            legato_overlap_beats: 0.0,
+        },
+        trigger: ArticulationTrigger::PlaybackModifier,
+    },
+    // Playing techniques rather than score markings. They carry no gate or
+    // velocity shaping: the recorded pizzicato already decays on its own and
+    // the recorded tremolo already repeats, so imposing a notation envelope on
+    // top would fight the sample instead of describing it. They exist so the
+    // editor can *say* which technique a note is played with — without them
+    // the two recorded techniques in a bank like Solo Violin are unreachable
+    // from the arrangement, which is 44% of that bank's recordings.
+    ArticulationDefinition {
+        id: ArticulationId::Pizzicato,
+        name: "Pizzicato",
+        short_name: "Pizz.",
+        playback: ArticulationPlayback {
+            gate_ratio: 1.0,
+            velocity_delta: 0,
+            legato_overlap_beats: 0.0,
+        },
+        trigger: ArticulationTrigger::PlaybackModifier,
+    },
+    ArticulationDefinition {
+        id: ArticulationId::Tremolo,
+        name: "Tremolo",
+        short_name: "Trem.",
+        playback: ArticulationPlayback {
+            gate_ratio: 1.0,
+            velocity_delta: 0,
             legato_overlap_beats: 0.0,
         },
         trigger: ArticulationTrigger::PlaybackModifier,

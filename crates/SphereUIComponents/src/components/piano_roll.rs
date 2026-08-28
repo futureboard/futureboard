@@ -34,8 +34,8 @@ use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, ArticulationId, MidiArticulationEvent, MidiChannel, MidiChannelMask,
-    MidiControllerKind, MidiControllerPoint, MidiNoteState, PitchTransformContext, ScaleKind,
-    ScaleRoot, TimelineState, MIN_NOTE_BEATS,
+    MidiControllerKind, MidiControllerPoint, MidiNoteState, PitchCurve, PitchTransformContext,
+    ScaleKind, ScaleRoot, TimelineState, MIN_NOTE_BEATS,
 };
 use crate::theme::Colors;
 
@@ -50,7 +50,10 @@ const DEFAULT_ROW_H: f32 = 14.0;
 /// Legacy alias used by unit tests and denser-zoom comparisons that still mean
 /// "the default row height".
 const ROW_H: f32 = DEFAULT_ROW_H;
-const PITCH_CNT: i32 = 128;
+/// Number of MIDI pitch rows the editor spans (0..=127). Public so a surface
+/// sharing [`PianoRollViewport`] can derive the same vertical extent.
+pub const PITCH_COUNT: i32 = 128;
+const PITCH_CNT: i32 = PITCH_COUNT;
 /// Vertical zoom clamps (px/semitone). Floor keeps notes hittable; ceiling
 /// stops rows from becoming a handful of oversized slabs.
 const PIANO_ROLL_MIN_ROW_H: f32 = 6.0;
@@ -80,6 +83,14 @@ fn local_y_to_pitch(local_y: f32, scroll_y: f32, row_h: f32) -> u8 {
     (PITCH_CNT - 1 - row).clamp(0, PITCH_CNT - 1) as u8
 }
 
+/// Fractional-pitch inverse of the vertical transform. The integer
+/// [`local_y_to_pitch`] snaps to a note row; the Pitch editor needs the
+/// continuous value, so both live here against the same constants.
+fn local_y_to_pitch_f32(local_y: f32, scroll_y: f32, row_h: f32) -> f32 {
+    let row_h = row_h.max(0.0001);
+    (PITCH_CNT - 1) as f32 - (local_y + scroll_y - row_h * 0.5) / row_h
+}
+
 fn clamp_velocity(value: i32) -> u8 {
     value.clamp(1, 127) as u8
 }
@@ -99,6 +110,233 @@ fn interpolate_velocity(from: u8, to: u8, t: f32, curve: VelocityCurve) -> u8 {
     clamp_velocity((from as f32 + (to as f32 - from as f32) * shaped).round() as i32)
 }
 
+/// One label + tick position on the bar/beat ruler.
+///
+/// Produced by [`PianoRollViewport::ruler_marks`] so the piano roll's ruler and
+/// the Solfege Pitch tab's ruler are the same marks at the same pixels —
+/// styling stays with each renderer, the math does not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RulerMark {
+    /// Local x in the grid's coordinate space.
+    pub x: f32,
+    /// Clip-local beat this mark sits on.
+    pub beat: f32,
+    /// Formatted label: bar number alone when labelling bars, `bar.beat` when
+    /// zoomed in far enough to label every beat.
+    pub label: String,
+    /// `true` when this mark falls on a bar line.
+    pub on_bar: bool,
+}
+
+/// Strength tier of a vertical timing gridline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridLineKind {
+    Bar,
+    Beat,
+    Subdivision,
+}
+
+impl GridLineKind {
+    /// Opacity the MIDI editor paints this tier at, over
+    /// [`Colors::text_primary`]. Shared so every surface in the editor draws
+    /// the same grid weight.
+    pub fn alpha(self) -> f32 {
+        match self {
+            Self::Bar => 0.26,
+            Self::Beat => 0.13,
+            Self::Subdivision => 0.06,
+        }
+    }
+}
+
+/// The shared transform of the MIDI editor, handed to surfaces that must stay
+/// aligned with the piano roll (Solfege performance lanes, the Pitch tab)
+/// without owning a second scroll position.
+///
+/// Both axes are here. The Pitch tab shares the *vertical* axis too, so a note
+/// sits on the same screen row in both tabs and scrolling one scrolls the
+/// other — there is exactly one coordinate transform for the whole editor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PianoRollViewport {
+    /// Pixels per beat (Zoom X).
+    pub ppb: f32,
+    /// Horizontal scroll offset in pixels.
+    pub scroll_x: f32,
+    /// Pixels per semitone (Zoom Y).
+    pub row_h: f32,
+    /// Vertical scroll offset in pixels.
+    pub scroll_y: f32,
+    /// Width of the left piano-key gutter, so a lane can align its own header.
+    pub key_lane_width: f32,
+    /// Current snap step in beats; `0.0` when snapping is off.
+    pub snap_step_beats: f32,
+    /// Grid subdivision in beats, independent of the snap toggle — the grid
+    /// stays visible when snapping is off.
+    pub sub_step_beats: f32,
+    /// Width of the note grid in pixels at the last paint.
+    pub grid_width: f32,
+    /// Height of the note grid in pixels at the last paint.
+    pub grid_height: f32,
+}
+
+impl PianoRollViewport {
+    #[inline]
+    pub fn beat_to_x(&self, beat: f32) -> f32 {
+        beat_to_local_x(beat, self.ppb, self.scroll_x)
+    }
+
+    #[inline]
+    pub fn x_to_beat(&self, local_x: f32) -> f32 {
+        local_x_to_beat(local_x, self.ppb, self.scroll_x)
+    }
+
+    /// Snap `beat` to the shared grid. Honors the piano roll's snap toggle, so
+    /// a lane and the notes above it always land on the same divisions.
+    #[inline]
+    pub fn snap(&self, beat: f32) -> f32 {
+        snap_beat_to_step(beat, self.snap_step_beats)
+    }
+
+    /// First and last beat visible in `width` pixels of lane.
+    pub fn visible_beats(&self, width: f32) -> (f32, f32) {
+        (self.x_to_beat(0.0), self.x_to_beat(width.max(1.0)))
+    }
+
+    /// Top edge of a pitch row. Matches the piano roll's own note placement.
+    #[inline]
+    pub fn pitch_row_top(&self, pitch: f32) -> f32 {
+        (PITCH_COUNT - 1) as f32 * self.row_h - pitch * self.row_h - self.scroll_y
+    }
+
+    /// Centre line of a pitch row. This is where a *continuous* pitch of
+    /// exactly `pitch` sits — the Pitch tab draws its trajectory against this,
+    /// so a flat note lands on the middle of its own row.
+    #[inline]
+    pub fn pitch_center_y(&self, pitch: f32) -> f32 {
+        self.pitch_row_top(pitch) + self.row_h * 0.5
+    }
+
+    /// Inverse of [`Self::pitch_center_y`], returning a *fractional* pitch —
+    /// the pitch editor never quantizes the pointer to a semitone.
+    #[inline]
+    pub fn y_to_pitch_continuous(&self, local_y: f32) -> f32 {
+        let row_h = self.row_h.max(0.0001);
+        (PITCH_COUNT - 1) as f32 - (local_y + self.scroll_y - row_h * 0.5) / row_h
+    }
+
+    /// Inclusive semitone range covering `height` pixels, padded by one row so
+    /// partially visible rows still paint.
+    pub fn visible_pitches(&self, height: f32) -> (i32, i32) {
+        let low = self.y_to_pitch_continuous(height.max(1.0)).floor() as i32 - 1;
+        let high = self.y_to_pitch_continuous(0.0).ceil() as i32 + 1;
+        (low.max(0), high.min(PITCH_COUNT - 1))
+    }
+
+    /// Bar/beat marks across `[start_beat, end_beat]`.
+    ///
+    /// Labels each beat when zoomed in past 36 px/beat, otherwise labels bar
+    /// starts, doubling the bar step until labels are at least 56 px apart.
+    /// The single source of ruler geometry for the whole MIDI editor.
+    pub fn ruler_marks(&self, start_beat: f32, end_beat: f32, bpb: f32) -> Vec<RulerMark> {
+        let ppb = self.ppb.max(0.0001);
+        let bpb = bpb.max(1.0);
+        let label_beats = ppb >= 36.0;
+        let step = if label_beats {
+            1.0
+        } else if ppb * bpb >= 56.0 {
+            bpb
+        } else {
+            let mut bars = 2.0_f32;
+            while bars * bpb * ppb < 56.0 && bars < 256.0 {
+                bars *= 2.0;
+            }
+            bpb * bars
+        };
+
+        let mut out = Vec::new();
+        let mut beat = (start_beat / step).floor() * step;
+        let mut guard = 0;
+        while beat <= end_beat + step && guard < 2000 {
+            guard += 1;
+            let b = beat;
+            beat += step;
+            if b < -1.0e-3 {
+                continue;
+            }
+            let bar = (b / bpb).floor() as i32 + 1;
+            let on_bar = is_multiple(b, bpb);
+            let label = if label_beats {
+                let beat_in_bar = (b - (bar - 1) as f32 * bpb).floor() as i32 + 1;
+                format!("{bar}.{beat_in_bar}")
+            } else {
+                format!("{bar}")
+            };
+            out.push(RulerMark {
+                x: self.beat_to_x(b),
+                beat: b,
+                label,
+                on_bar,
+            });
+        }
+        out
+    }
+
+    /// Vertical grid lines across `[start_beat, end_beat]`, thinned by zoom.
+    /// The single source of grid geometry for the whole MIDI editor.
+    pub fn grid_lines(&self, start_beat: f32, end_beat: f32, bpb: f32) -> Vec<(f32, GridLineKind)> {
+        let ppb = self.ppb.max(0.0001);
+        let bpb = bpb.max(1.0);
+        let show_beats = ppb >= 10.0;
+        let sub_step = self.sub_step_beats.max(1.0 / 32.0);
+        let show_subs = show_beats && sub_step * ppb >= 7.0 && ppb >= 24.0;
+        let bar_step = if ppb * bpb >= 18.0 {
+            bpb
+        } else {
+            let mut bars = 2.0_f32;
+            while bars * bpb * ppb < 18.0 && bars < 256.0 {
+                bars *= 2.0;
+            }
+            bpb * bars
+        };
+
+        let iter_step = if show_subs {
+            sub_step
+        } else if show_beats {
+            1.0
+        } else {
+            bar_step
+        };
+
+        let mut out = Vec::new();
+        let mut beat = (start_beat / iter_step).floor() * iter_step;
+        let mut guard = 0;
+        while beat <= end_beat + iter_step && guard < 8000 {
+            guard += 1;
+            let b = beat;
+            beat += iter_step;
+            if b < -1.0e-3 {
+                continue;
+            }
+            let kind = if is_multiple(b, bpb) {
+                GridLineKind::Bar
+            } else if is_multiple(b, 1.0) {
+                GridLineKind::Beat
+            } else {
+                GridLineKind::Subdivision
+            };
+            let keep = match kind {
+                GridLineKind::Bar => is_multiple(b, bar_step),
+                GridLineKind::Beat => show_beats,
+                GridLineKind::Subdivision => show_subs,
+            };
+            if keep {
+                out.push((self.beat_to_x(b), kind));
+            }
+        }
+        out
+    }
+}
+
 fn local_x_to_beat(local_x: f32, pixels_per_beat: f32, scroll_x: f32) -> f32 {
     ((local_x + scroll_x) / pixels_per_beat.max(0.0001)).max(0.0)
 }
@@ -113,6 +351,52 @@ fn snap_beat_to_step(beat: f32, step: f32) -> f32 {
     } else {
         ((beat / step).round() * step).max(0.0)
     }
+}
+
+/// Adaptive grid step from Zoom X: coarser when zoomed out, finer when zoomed
+/// in. Mirrors arrangement `get_grid_sub_beats` thresholds.
+fn adaptive_step_beats(ppb: f32) -> f32 {
+    let ppb = ppb.max(0.0001);
+    if ppb < 8.0 {
+        4.0
+    } else if ppb < 16.0 {
+        2.0
+    } else if ppb < 32.0 {
+        1.0
+    } else if ppb < 64.0 {
+        0.5
+    } else if ppb < 128.0 {
+        0.25
+    } else if ppb < 256.0 {
+        0.125
+    } else {
+        0.0625
+    }
+}
+
+/// Grid step in beats for `grid_res` at Zoom X `ppb`, or `0.0` for `Free`.
+///
+/// The single source of the editor's grid resolution: the notes
+/// ([`PianoRoll::step_beats`]) and the viewport handed to the Solfege lanes and
+/// the Pitch tab ([`viewport_snap_step`]) both resolve through here, so a lane
+/// breakpoint and the note directly above it cannot land on different
+/// divisions.
+fn grid_step_beats(grid_res: GridRes, ppb: f32) -> f32 {
+    match grid_res {
+        GridRes::Free => 0.0,
+        GridRes::Adaptive => adaptive_step_beats(ppb),
+        other => other.fixed_beats(),
+    }
+}
+
+/// Snap step published on [`PianoRollViewport`]. `0.0` when snapping is off or
+/// the grid is `Free` — the same two conditions [`PianoRoll::snap_beats`]
+/// treats as "do not snap".
+fn viewport_snap_step(snap_on: bool, grid_res: GridRes, ppb: f32) -> f32 {
+    if !snap_on || grid_res.is_free() {
+        return 0.0;
+    }
+    grid_step_beats(grid_res, ppb).max(MIN_NOTE_BEATS)
 }
 
 fn restore_velocity_values(notes: &mut [MidiNoteState], snapshot: &[(u64, u8)]) {
@@ -144,7 +428,17 @@ const LANE_H: f32 = 140.0;
 /// editor's scroll/clip containers.
 const LANE_MENU_PRIORITY: usize = 100;
 const RULER_H: f32 = 18.0; // bar/beat ruler header height
-const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
+/// Px on a note's right edge that starts a resize. Sized for a comfortable grab
+/// at workstation density; a note narrower than [`NOTE_RESIZE_MIN_W`] shows no
+/// handle so the move zone never disappears under it.
+const RESIZE_ZONE: f32 = 8.0;
+/// Narrowest note that still offers a resize handle: the handle plus at least
+/// as much move zone beside it.
+const NOTE_RESIZE_MIN_W: f32 = RESIZE_ZONE * 2.0 + 2.0;
+/// Narrowest a note block is ever drawn — and hit-tested. Drawing, clicking,
+/// and marquee selection all use it, so a very short note at low zoom cannot
+/// present a clickable block the rubber band then misses.
+const NOTE_MIN_W: f32 = 5.0;
 /// Pixels of movement before an empty-grid press becomes a marquee drag.
 const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
 /// Default velocity for newly drawn/reset notes. Kept beside the editor gesture
@@ -162,6 +456,9 @@ struct ClipboardNote {
     muted: bool,
     channel: MidiChannel,
     articulation: Option<ArticulationId>,
+    /// v4: the note's continuous pitch performance. Copied by value so a paste
+    /// carries the expression, with fresh point ids so the copy is independent.
+    pitch_curve: Option<PitchCurve>,
 }
 
 /// Internal clipboard format version. Bumped if [`ClipboardNote`] layout or
@@ -169,7 +466,8 @@ struct ClipboardNote {
 /// mis-reading it. The clipboard is process-local today, but versioning keeps
 /// the contract explicit for a future cross-process / serialized clipboard.
 /// v2 added the per-note MIDI channel. v3 added the per-note articulation.
-const MIDI_CLIPBOARD_VERSION: u32 = 3;
+/// v4 added the per-note pitch curve.
+const MIDI_CLIPBOARD_VERSION: u32 = 4;
 
 /// Versioned clipboard payload — a version tag plus the copied notes.
 #[derive(Clone)]
@@ -188,14 +486,6 @@ thread_local! {
             notes: Vec::new(),
         })
     };
-}
-
-/// Strength tier of a vertical timing gridline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GridLineKind {
-    Bar,
-    Beat,
-    Subdivision,
 }
 
 /// `true` when the MIDI-editor zoom diagnostics are enabled via
@@ -219,11 +509,15 @@ const NOTE_NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
 
-fn is_black(pitch: i32) -> bool {
+/// `true` for the black keys of the chromatic octave. Shared so every pitch
+/// surface tints the same rows.
+pub fn is_black(pitch: i32) -> bool {
     matches!(pitch.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
 
-fn note_name(pitch: i32) -> String {
+/// Scientific pitch name for a semitone, shared with the Pitch tab's pitch
+/// gutter so both surfaces label rows identically.
+pub fn note_name(pitch: i32) -> String {
     format!(
         "{}{}",
         NOTE_NAMES[pitch.rem_euclid(12) as usize],
@@ -745,6 +1039,9 @@ pub struct PianoRoll {
     open_cc_curve_menu: Option<(f32, f32)>,
     /// Right-click velocity transform menu (local lane px).
     open_velocity_menu: Option<(f32, f32)>,
+    /// Right-click note menu: grid-local px of the click. Articulation, mute,
+    /// velocity and delete for the current selection.
+    open_note_menu: Option<(f32, f32)>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
@@ -990,6 +1287,7 @@ impl PianoRoll {
             cc_selection_before_marquee: HashSet::new(),
             open_cc_curve_menu: None,
             open_velocity_menu: None,
+            open_note_menu: None,
             last_editing_clip: None,
             active_preview_note: None,
             key_lane_pressed_pitch: None,
@@ -1027,6 +1325,7 @@ impl PianoRoll {
             self.cc_selection_before_marquee.clear();
             self.art_edit_prev = None;
             self.selected_articulation = None;
+            self.open_note_menu = None;
             self.hover_beat = None;
             self.hover_pitch = None;
             self.hover_note_status = None;
@@ -1044,6 +1343,12 @@ impl PianoRoll {
             .unwrap_or_default();
 
         self.selection.retain(|id| valid_note_ids.contains(id));
+        if self.selection.is_empty() {
+            // The note menu acts on the selection; an emptied selection (the
+            // notes were deleted, or the clip changed under it) leaves it
+            // nothing to act on.
+            self.open_note_menu = None;
+        }
         self.selection_before_marquee
             .retain(|id| valid_note_ids.contains(id));
         self.erase_preview_ids
@@ -1605,32 +1910,7 @@ impl PianoRoll {
     }
 
     fn step_beats(&self) -> f32 {
-        match self.grid_res {
-            GridRes::Free => 0.0,
-            GridRes::Adaptive => self.adaptive_step_beats(),
-            other => other.fixed_beats(),
-        }
-    }
-
-    /// Adaptive grid step from Zoom X: coarser when zoomed out, finer when
-    /// zoomed in. Mirrors arrangement `get_grid_sub_beats` thresholds.
-    fn adaptive_step_beats(&self) -> f32 {
-        let ppb = self.ppb.max(0.0001);
-        if ppb < 8.0 {
-            4.0
-        } else if ppb < 16.0 {
-            2.0
-        } else if ppb < 32.0 {
-            1.0
-        } else if ppb < 64.0 {
-            0.5
-        } else if ppb < 128.0 {
-            0.25
-        } else if ppb < 256.0 {
-            0.125
-        } else {
-            0.0625
-        }
+        grid_step_beats(self.grid_res, self.ppb)
     }
 
     fn snap_beats(&self, beats: f32) -> f32 {
@@ -1977,6 +2257,106 @@ impl PianoRoll {
         Some(self.y_to_pitch(local_y))
     }
 
+    /// `true` when the edited clip sits on a Solfege track. The Solfege editor
+    /// wraps this piano roll and supplies its own stacked performance lanes, so
+    /// the built-in single unified lane stands down there to avoid showing the
+    /// same parameter twice and to keep the grid the majority of the viewport.
+    pub(super) fn editing_solfege_track(&self, cx: &Context<Self>) -> bool {
+        let tl = self.timeline.read(cx);
+        tl.state
+            .selection
+            .selected_clip_ids
+            .first()
+            .and_then(|clip_id| tl.state.find_clip(clip_id))
+            .is_some_and(|(track, _)| track.solfege.is_some())
+    }
+
+    /// Whether the built-in unified controller lane is on screen this frame.
+    ///
+    /// The Solfege editor replaces the velocity and controller views with its
+    /// own stacked performance lanes, so those stand down there. Articulations
+    /// are the exception: direction articulations have no Solfege lane, and
+    /// suppressing them left the whole `MidiArticulationEvent` model with no
+    /// lane on exactly the tracks that perform articulations.
+    pub(super) fn unified_lane_visible(&self, cx: &Context<Self>) -> bool {
+        self.lane_visible
+            && (self.lane_view == PianoLaneView::Articulations || !self.editing_solfege_track(cx))
+    }
+
+    /// Articulations the editing track can play. A Solfege track answers from
+    /// its instrument capability table (spec: "available articulations must
+    /// come from the loaded instrument"); every other track keeps the built-in
+    /// set.
+    pub(super) fn available_articulations(&self, cx: &Context<Self>) -> Vec<ArticulationId> {
+        let tl = self.timeline.read(cx);
+        tl.state
+            .selection
+            .selected_clip_ids
+            .first()
+            .and_then(|clip_id| tl.state.find_clip(clip_id))
+            .and_then(|(track, _)| track.solfege.as_ref())
+            .map(|solfege| solfege.capabilities().articulations)
+            .unwrap_or_else(|| ArticulationId::ALL.to_vec())
+    }
+
+    /// Read-only snapshot of the shared MIDI timeline viewport.
+    ///
+    /// The piano roll is the single horizontal-scroll owner for the whole
+    /// Solfege editor: the performance lane stack and the Pitch tab render
+    /// through this transform instead of keeping their own scroll, which is
+    /// what keeps every surface sample-aligned with the notes.
+    pub fn viewport(&self) -> PianoRollViewport {
+        let (grid_width, grid_height) = self.grid_view_size();
+        PianoRollViewport {
+            ppb: self.ppb.max(0.0001),
+            scroll_x: self.scroll_x.max(0.0),
+            row_h: self.note_row_h(),
+            scroll_y: self.scroll_y.max(0.0),
+            key_lane_width: key_lane_width(),
+            snap_step_beats: viewport_snap_step(self.snap_on, self.grid_res, self.ppb),
+            sub_step_beats: self.step_beats().max(MIN_NOTE_BEATS),
+            grid_width,
+            grid_height,
+        }
+    }
+
+    /// Scroll the shared viewport horizontally by `dx` pixels, clamped exactly
+    /// as the piano roll's own drag-scroll does.
+    pub fn scroll_viewport_by(&mut self, dx: f32, cx: &Context<Self>) {
+        let max_scroll_x = self.max_scroll_x(cx);
+        self.scroll_x = (self.scroll_x - dx).clamp(0.0, max_scroll_x);
+    }
+
+    /// Scroll the shared viewport vertically by `dy` pixels.
+    ///
+    /// `view_h` is the height of the surface doing the scrolling, because the
+    /// scroll limit depends on it. The Pitch tab must pass its own canvas
+    /// height: the piano roll is not even mounted while that tab is on screen,
+    /// so its captured grid bounds are stale, and clamping against them would
+    /// leave the lowest pitches unreachable (or over-scroll past the last row)
+    /// depending on what the MIDI tab last painted.
+    pub fn scroll_viewport_vertically_by(&mut self, dy: f32, view_h: f32) {
+        self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.max_scroll_y_for(view_h));
+    }
+
+    /// Change Zoom Y, keeping the pitch under `anchor_y` fixed.
+    ///
+    /// `view_h` and `anchor_y` belong to the surface being zoomed, for the same
+    /// reason as [`Self::scroll_viewport_vertically_by`]. Anchoring on the
+    /// cursor rather than the view centre is also what keeps Ctrl+wheel from
+    /// drifting the view sideways in pitch.
+    pub fn zoom_viewport_vertically(&mut self, factor: f32, view_h: f32, anchor_y: f32) {
+        let anchor_y = anchor_y.clamp(0.0, view_h.max(1.0));
+        let anchor_pitch = local_y_to_pitch_f32(anchor_y, self.scroll_y, self.note_row_h());
+        let new_row_h =
+            (self.note_row_h() * factor).clamp(PIANO_ROLL_MIN_ROW_H, PIANO_ROLL_MAX_ROW_H);
+        self.row_h = new_row_h;
+        // Re-solve scroll_y so the same pitch stays under the cursor.
+        let target_top = (PITCH_CNT - 1) as f32 * new_row_h - anchor_pitch * new_row_h;
+        self.scroll_y =
+            (target_top + new_row_h * 0.5 - anchor_y).clamp(0.0, self.max_scroll_y_for(view_h));
+    }
+
     fn grid_view_size(&self) -> (f32, f32) {
         match self.grid_bounds.get() {
             Some(b) => (
@@ -1989,7 +2369,12 @@ impl PianoRoll {
 
     fn max_scroll_y(&self) -> f32 {
         let (_, h) = self.grid_view_size();
-        (self.total_pitch_h() - h).max(0.0)
+        self.max_scroll_y_for(h)
+    }
+
+    /// Scroll limit for a surface `view_h` pixels tall.
+    fn max_scroll_y_for(&self, view_h: f32) -> f32 {
+        (self.total_pitch_h() - view_h.max(1.0)).max(0.0)
     }
 
     fn max_scroll_x(&self, cx: &Context<Self>) -> f32 {
@@ -2224,8 +2609,10 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
-        // Any grid interaction dismisses the lane selector dropdown.
+        // Any grid interaction dismisses the lane selector dropdown and the
+        // note context menu.
         self.open_select_menu = None;
+        self.open_note_menu = None;
         window.focus(&self.focus, cx);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             // Bounds not captured yet (first frame) — ignore to avoid creating
@@ -2253,11 +2640,13 @@ impl PianoRoll {
                 let pitch = self.pitch_ctx.constrain_pitch(self.y_to_pitch(ly));
                 let unsnap = event.modifiers.shift;
                 let start = self.snap_beats_live(self.x_to_beat(lx), unsnap);
-                if let Some((track_id, channel)) = self.preview_target(cx) {
-                    eprintln!(
-                        "[MidiEditor] draw_start pitch={} velocity=100 track_id={} channel={}",
-                        pitch, track_id, channel
-                    );
+                if midi_debug_enabled() {
+                    if let Some((track_id, channel)) = self.preview_target(cx) {
+                        eprintln!(
+                            "[MidiEditor] draw_start pitch={} velocity=100 track_id={} channel={}",
+                            pitch, track_id, channel
+                        );
+                    }
                 }
                 self.begin_preview_note(pitch, 100, "draw_start", cx);
                 let channel = self.active_note_channel(cx);
@@ -2303,6 +2692,7 @@ impl PianoRoll {
     ) {
         cx.stop_propagation();
         window.focus(&self.focus, cx);
+        self.open_note_menu = None;
         let Some((lx, ly)) = self.grid_local(event.position) else {
             return;
         };
@@ -2324,19 +2714,32 @@ impl PianoRoll {
         cx.notify();
     }
 
-    fn note_right_down(&mut self, id: u64, lx: f32, ly: f32, cx: &mut Context<Self>) {
-        let Some(_clip_id) = self.editing_clip_id(cx) else {
+    /// Right-click on a note opens its context menu (articulation, mute,
+    /// velocity, delete) rather than erasing it. Erasing was a destructive
+    /// surprise with no confirmation; the erase sweep still lives on
+    /// right-drag over empty grid, on the Erase tool, and on Delete.
+    fn note_right_down(
+        &mut self,
+        id: u64,
+        lx: f32,
+        ly: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_clip_id(cx).is_none() {
             return;
-        };
-        let erased = HashSet::from([id]);
-        self.erase_preview_ids = erased.clone();
-        self.drag = PianoDrag::EraseNotes {
-            start_x: lx,
-            start_y: ly,
-            current_x: lx,
-            current_y: ly,
-            erased,
-        };
+        }
+        // The menu is dismissed with Escape, which the grid's own key handler
+        // owns — so the press has to take focus like every other grid gesture.
+        window.focus(&self.focus, cx);
+        // Right-clicking outside the current selection retargets it, so the
+        // menu always acts on what the user pointed at.
+        if !self.selection.contains(&id) {
+            self.selection = HashSet::from([id]);
+        }
+        self.open_velocity_menu = None;
+        self.open_select_menu = None;
+        self.open_note_menu = Some((lx, ly));
         cx.notify();
     }
     fn note_mouse_down(
@@ -3563,6 +3966,10 @@ impl PianoRoll {
                             note.muted = source.muted;
                             note.channel = source.channel;
                             note.articulation = source.articulation;
+                            note.pitch_curve = source
+                                .pitch_curve
+                                .as_ref()
+                                .map(PitchCurve::cloned_with_new_ids);
                             Some(note)
                         })
                         .collect();
@@ -3754,7 +4161,8 @@ impl PianoRoll {
             }
             "escape" => {
                 cx.stop_propagation();
-                if self.open_velocity_menu.take().is_some() {
+                if self.open_note_menu.take().is_some() || self.open_velocity_menu.take().is_some()
+                {
                     cx.notify();
                 } else if !matches!(self.drag, PianoDrag::None) {
                     self.cancel_active_gesture(cx);
@@ -4060,15 +4468,25 @@ impl PianoRoll {
         if left_len < MIN_NOTE_BEATS || right_len < MIN_NOTE_BEATS {
             return;
         }
+        // Per-note expression follows the parts: the pitch curve is cut at the
+        // same beat and each half is re-based to its own note start, so a split
+        // never silently discards a performance.
+        let (left_curve, right_curve) = original
+            .pitch_curve
+            .as_ref()
+            .map(|curve| curve.split_at(left_len))
+            .unwrap_or_default();
         let mut left =
             MidiNoteState::new(original.pitch, original.start, left_len, original.velocity);
         left.muted = original.muted;
         left.channel = original.channel;
         left.articulation = original.articulation;
+        left.pitch_curve = (!left_curve.is_empty()).then_some(left_curve);
         let mut right = MidiNoteState::new(original.pitch, cut, right_len, original.velocity);
         right.muted = original.muted;
         right.channel = original.channel;
         right.articulation = original.articulation;
+        right.pitch_curve = (!right_curve.is_empty()).then_some(right_curve);
         let new_ids = [left.id, right.id];
         self.run_edit_command(
             EditCommand::SplitMidiNote {
@@ -4128,6 +4546,7 @@ impl PianoRoll {
                 muted: n.muted,
                 channel: n.channel,
                 articulation: n.articulation,
+                pitch_curve: n.pitch_curve.clone(),
             })
             .collect();
         MIDI_NOTE_CLIPBOARD.with(|cb| {
@@ -4164,6 +4583,7 @@ impl PianoRoll {
                     note.muted = c.muted;
                     note.channel = c.channel;
                     note.articulation = c.articulation;
+                    note.pitch_curve = c.pitch_curve.as_ref().map(PitchCurve::cloned_with_new_ids);
                     note
                 })
                 .collect()
@@ -4263,6 +4683,7 @@ impl PianoRoll {
                 note.muted = n.muted;
                 note.channel = n.channel;
                 note.articulation = n.articulation;
+                note.pitch_curve = n.pitch_curve.as_ref().map(PitchCurve::cloned_with_new_ids);
                 note
             })
             .collect();
@@ -4289,6 +4710,16 @@ impl PianoRoll {
         articulation: Option<ArticulationId>,
         cx: &mut Context<Self>,
     ) {
+        // Every entry point funnels through here, so the capability table is
+        // enforced once. Without it the arrangement clip menu could assign an
+        // articulation the loaded instrument cannot play, leaving a badge the
+        // inspector then offered no button to clear. Clearing (`None`) is
+        // always allowed — it is how such a value gets removed.
+        if let Some(requested) = articulation {
+            if !self.available_articulations(cx).contains(&requested) {
+                return;
+            }
+        }
         let ids = self.selected_note_ids();
         if ids.is_empty() {
             return;
@@ -4347,8 +4778,47 @@ impl PianoRoll {
         NoteInspectorSnapshot { selected }
     }
 
-    fn selected_note_ids(&self) -> Vec<u64> {
+    /// Ids of the notes currently selected in the roll.
+    ///
+    /// Public so the Solfege editor's Analyze Accent can scope what it *writes*
+    /// to the selection. It never scopes what the analysis *reads*: accent is a
+    /// contextual judgement and a three-note selection analysed alone would be
+    /// given a three-note phrase.
+    pub fn selected_note_ids(&self) -> Vec<u64> {
         self.selection.iter().copied().collect()
+    }
+
+    /// The articulation every selected note carries, or `None` when the
+    /// selection is empty or mixed. The inner `Option` is the value itself, so
+    /// `Some(None)` means "all selected notes have no articulation".
+    ///
+    /// Lets the articulation controls show which value is current instead of a
+    /// rail of identical buttons.
+    pub(super) fn uniform_selection_articulation(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<Option<ArticulationId>> {
+        let clip_id = self.editing_clip_id(cx)?;
+        let snapshot = self.note_inspector_snapshot(cx, &clip_id);
+        if snapshot.selected.is_empty() {
+            return None;
+        }
+        let first = snapshot.selected[0].articulation;
+        snapshot
+            .selected
+            .iter()
+            .all(|note| note.articulation == first)
+            .then_some(first)
+    }
+
+    /// `true` when every selected note is muted, so a toggle can name what it
+    /// will actually do.
+    pub(super) fn selection_all_muted(&self, cx: &Context<Self>) -> bool {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return false;
+        };
+        let snapshot = self.note_inspector_snapshot(cx, &clip_id);
+        !snapshot.selected.is_empty() && snapshot.selected.iter().all(|note| note.muted)
     }
 
     fn nudge_selected_pitch(&mut self, semitones: i32, cx: &mut Context<Self>) {
@@ -4564,6 +5034,20 @@ impl PianoRoll {
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
         let (view_w, _) = self.grid_view_size();
         self.zoom_ppb_around(factor, view_w * 0.5, cx);
+    }
+
+    /// Handle a wheel event that landed on a surface sharing this viewport
+    /// (the Solfege performance lanes). The lane stack is a *sibling* of the
+    /// piano roll, not a descendant, so the roll's own root handler never sees
+    /// those events; forwarding here keeps one modifier map for the editor
+    /// instead of a second copy that drifts.
+    pub fn forward_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_wheel(event, window, cx);
     }
 
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4813,18 +5297,22 @@ fn tool_btn(
         } else {
             Colors::text_secondary()
         })
+        // Active is accent-based (matching the Solfege tab chips and the Pitch
+        // tab's tools); hover is a weaker graphite wash. Painting both with
+        // `surface_hover` made a hovered tool indistinguishable from the
+        // selected one.
         .bg(if active {
-            Colors::surface_hover()
+            Colors::accent_muted()
         } else {
             Colors::with_alpha(Colors::text_primary(), 0.0)
         })
         .border(px(1.0))
         .border_color(if active {
-            Colors::border_subtle()
+            Colors::accent_primary()
         } else {
             Colors::with_alpha(Colors::text_primary(), 0.0)
         })
-        .hover(|s| s.bg(Colors::surface_hover()))
+        .when(!active, |s| s.hover(|s| s.bg(Colors::surface_hover())))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |ev, w, cx| on_click(ev, w, cx))
         .child(label.to_string())
@@ -4892,6 +5380,47 @@ fn note_action_button(
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_raised())
         .hover(|s| s.bg(Colors::surface_hover()))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_click(move |ev, w, cx| on_click(ev, w, cx))
+        .child(label.to_string())
+}
+
+/// A [`note_action_button`] that also shows whether its value is the one the
+/// selection currently carries. Used by the articulation palette, where a rail
+/// of identical buttons otherwise gave no indication of the current value.
+fn note_toggle_button(
+    id: &'static str,
+    label: &str,
+    active: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(22.0))
+        .min_w(px(54.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .text_size(px(10.0))
+        .text_color(if active {
+            Colors::text_primary()
+        } else {
+            Colors::text_secondary()
+        })
+        .border(px(1.0))
+        .border_color(if active {
+            Colors::accent_primary()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if active {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_raised()
+        })
+        .when(!active, |s| s.hover(|s| s.bg(Colors::surface_hover())))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |ev, w, cx| on_click(ev, w, cx))
         .child(label.to_string())
@@ -5179,5 +5708,76 @@ mod velocity_and_timing_tests {
         restore_velocity_values(&mut notes, &snapshot);
         assert_eq!(notes[0].velocity, 20);
         assert_eq!(notes[1].velocity, 80);
+    }
+}
+
+#[cfg(test)]
+mod shared_grid_step_tests {
+    use super::*;
+
+    /// The Solfege lanes and the Pitch tab snap through the viewport's
+    /// published step; the notes snap through `step_beats`. Both resolve to
+    /// `grid_step_beats`, so they cannot diverge — this is the regression test
+    /// for Adaptive reporting 1/32 to the lanes while notes snapped to a beat.
+    #[test]
+    fn viewport_publishes_the_step_the_notes_snap_to() {
+        for ppb in [4.0f32, 12.0, 24.0, 48.0, 96.0, 200.0, 400.0] {
+            for grid in GridRes::ALL {
+                let note_step = grid_step_beats(grid, ppb);
+                let lane_step = viewport_snap_step(true, grid, ppb);
+                if grid.is_free() {
+                    assert_eq!(lane_step, 0.0, "{grid:?} @ {ppb}");
+                } else {
+                    assert_eq!(lane_step, note_step.max(MIN_NOTE_BEATS), "{grid:?} @ {ppb}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_lane_step_follows_zoom_not_the_fixed_table() {
+        // `GridRes::Adaptive.fixed_beats()` is 0.0; using it published 1/32.
+        assert_eq!(viewport_snap_step(true, GridRes::Adaptive, 20.0), 1.0);
+        assert_eq!(viewport_snap_step(true, GridRes::Adaptive, 4.0), 4.0);
+        assert_eq!(viewport_snap_step(true, GridRes::Adaptive, 300.0), 0.0625);
+    }
+
+    #[test]
+    fn snapping_off_publishes_no_step() {
+        for grid in GridRes::ALL {
+            assert_eq!(viewport_snap_step(false, grid, 96.0), 0.0, "{grid:?}");
+        }
+        // Free never snaps even with the toggle on, matching `snap_beats`.
+        assert_eq!(viewport_snap_step(true, GridRes::Free, 96.0), 0.0);
+    }
+
+    /// A published step of `0.0` must leave the beat untouched, so "snap off"
+    /// on a lane means the same thing it means on the grid.
+    #[test]
+    fn a_zero_step_is_a_pass_through() {
+        assert_eq!(snap_beat_to_step(1.234, 0.0), 1.234);
+    }
+}
+
+#[cfg(test)]
+mod note_hit_geometry_tests {
+    use super::*;
+
+    /// The rubber band and the drawn block must agree: a note narrower than
+    /// `NOTE_MIN_W` at the current zoom is still painted (and clicked) at
+    /// `NOTE_MIN_W`, so the marquee has to intersect the same width.
+    #[test]
+    fn minimum_note_width_is_shared_by_drawing_and_hit_testing() {
+        let ppb = 20.0f32;
+        let duration = 0.01f32;
+        assert!(duration * ppb < NOTE_MIN_W);
+        assert_eq!((duration * ppb).max(NOTE_MIN_W), NOTE_MIN_W);
+    }
+
+    /// A note showing a resize handle always keeps at least as much move zone
+    /// beside it, so grabbing the body never becomes impossible.
+    #[test]
+    fn resize_handle_never_covers_the_whole_note() {
+        assert!(NOTE_RESIZE_MIN_W - RESIZE_ZONE >= RESIZE_ZONE);
     }
 }

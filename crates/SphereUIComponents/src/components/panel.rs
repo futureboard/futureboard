@@ -36,6 +36,7 @@ use crate::components::inspector::{
 };
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::slider::slider_with_drag_callbacks;
+use crate::components::solfege_editor::SolfegePitchSummary;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
@@ -47,6 +48,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::i18n::I18n;
 use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
+use crate::solfege::{ModelLoadState, SolfegeModelInfo};
 use crate::theme::{typography, Colors};
 
 type RoutingComboToggleCb =
@@ -1596,7 +1598,9 @@ fn plugin_slot_row(
 
 fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpui::AnyElement {
     let slot = track.instrument_insert();
-    let slot_name = if slot.is_none() && track.builtin_soundfont_player {
+    let slot_name = if track.solfege.is_some() {
+        "Solfege Engine".to_string()
+    } else if slot.is_none() && track.builtin_soundfont_player {
         "Built-in Soundfont Player".to_string()
     } else {
         plugin_slot_name(slot, "No Instrument")
@@ -1636,6 +1640,8 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
             .child(insert_action_row(
                 &track.id, slot, 0, callbacks, false, false, true,
             ));
+    } else if track.solfege.is_some() {
+        section = section.child(kv_row("Details", "Open the Solfege tab"));
     } else if track.builtin_soundfont_player {
         let track_id = track.id.clone();
         let open = callbacks.on_open_soundfont_player.clone();
@@ -1657,6 +1663,402 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
     }
 
     section.into_any_element()
+}
+
+/// Dedicated right-dock panel for the native Solfege instrument. Keeping this
+/// outside the regular Inspector prevents the model/voice details from making
+/// every track inspector excessively tall, while still following the same
+/// track selection and cached FBMX metadata path.
+pub fn solfege_panel(
+    tracks: &[TrackState],
+    selected_track_id: Option<&str>,
+    active: bool,
+    pitch: Option<SolfegePitchSummary>,
+) -> impl IntoElement {
+    let selected = selected_track_id
+        .and_then(|id| tracks.iter().find(|track| track.id == id))
+        .and_then(|track| track.solfege.as_ref().map(|solfege| (track, solfege)));
+
+    let body = if let Some((track, solfege)) = selected {
+        scroll_body()
+            .child(inspector_header(track.color, track.name.clone(), "SOLFEGE"))
+            .child(solfege_instrument_section(track, solfege))
+            .children(pitch.map(solfege_note_pitch_section))
+    } else {
+        scroll_body()
+            .child(fb_section_header("SOLFEGE ENGINE"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(7.0))
+                    .px(px(16.0))
+                    .py(px(24.0))
+                    .text_center()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_secondary())
+                            .child("Select a Solfege Engine track"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(Colors::text_faint())
+                            .child(
+                                "FBMX model, voice, preset, and performance details appear here.",
+                            ),
+                    ),
+            )
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .h_full()
+        .bg(Colors::surface_panel())
+        .border_l(px(1.0))
+        .border_color(if active {
+            Colors::panel_border_focused()
+        } else {
+            Colors::border_subtle()
+        })
+        .child(body)
+}
+
+/// Concise pitch facts for the note the Pitch tab is editing.
+///
+/// Shown only while the Pitch tab is open with a note selected, so it does not
+/// duplicate the piano roll's own note inspector rail during MIDI editing. Uses
+/// the Inspector's `kv_row` scale, not the piano roll's smaller one, so the
+/// dock keeps a single type scale.
+fn solfege_note_pitch_section(pitch: SolfegePitchSummary) -> impl IntoElement {
+    let (low, high) = pitch.range_cents;
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .child(fb_section_header("NOTE"))
+        .child(kv_row("Pitch", pitch.name.clone()))
+        .child(kv_row("Start", format!("{:.3}", pitch.start_beats)))
+        .child(kv_row("Length", format!("{:.3}", pitch.length_beats)));
+    if let Some(articulation) = pitch.articulation {
+        section = section.child(kv_row("Artic.", articulation));
+    }
+    section = section
+        .child(fb_section_header("PITCH"))
+        .child(kv_row(
+            "Deviation",
+            format!("{:+.0} ct", pitch.deviation_cents),
+        ))
+        .child(kv_row("Range", format!("{low:+.0} / {high:+.0} ct")));
+    if pitch.point_count == 0 {
+        // An empty curve is not "no pitch" — the note still sounds at its
+        // notated pitch, and the Pitch tab draws that line.
+        section = section.child(kv_row("Curve", "Baseline"));
+    } else {
+        section = section.child(kv_row("Curve", format!("{} points", pitch.point_count)));
+    }
+    section
+}
+
+fn solfege_instrument_section(
+    track: &TrackState,
+    solfege: &crate::solfege::SolfegeTrackState,
+) -> impl IntoElement {
+    let model_path = solfege.model_path.as_deref();
+    let model_file = model_path
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("No Solfege model");
+    // Opening a packaged model is a 146 MB read and ~293 MB of SHA-256. This
+    // only asks where that work has got to; the work itself runs on a worker
+    // thread started by the first call.
+    let model_state = model_path
+        .map(std::path::Path::new)
+        .map(crate::solfege::model_load_state);
+
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(fb_section_header("SOLFEGE ENGINE"))
+        .child(kv_row("Instrument", solfege.instrument.clone()))
+        .child(kv_row("Voice", solfege.voice.clone()))
+        .child(kv_row("Preset", solfege.preset.clone()))
+        .child(kv_row("Format", "SFM / FBMX / native"))
+        .child(kv_row("Model", model_file.to_string()))
+        .child(kv_row(
+            "Model Path",
+            model_path.unwrap_or("Documents/Futureboard Studio/Utilities/Model/Solfage"),
+        ))
+        .child(kv_row("MIDI Input", track.routing.midi_input.label()))
+        .child(kv_row(
+            "MIDI Ch",
+            track
+                .routing
+                .midi_channel
+                .map(|ch| ch.to_string())
+                .unwrap_or_else(|| "All".to_string()),
+        ))
+        .child(kv_row("Output", track.routing.output.label()));
+
+    match model_state {
+        Some(ModelLoadState::Ready(info)) => {
+            // Built before the chain so the row can read the whole `info` while
+            // the rows after it still move fields out of it.
+            let architecture = solfege_runtime_architecture(model_path, &info);
+            section = section
+                .child(kv_row("State", "Loaded & verified"))
+                .child(kv_row("Model Type", info.model_type))
+                .child(kv_row("Architecture", architecture))
+                .child(kv_row(
+                    "Voicebank",
+                    if info.voicebank_entries > 0 {
+                        format!(
+                            "{} profiles, {} clips, {:.1} MB PCM from {} source files",
+                            info.voicebank_profiles,
+                            info.voicebank_entries,
+                            info.voicebank_audio_bytes as f32 / 1_000_000.0,
+                            info.voicebank_source_files,
+                        )
+                    } else {
+                        "None (physical-only)".to_string()
+                    },
+                ))
+                .child(kv_row(
+                    "Performer",
+                    // Said plainly, because "yes" is not the useful part: a
+                    // Performer changes what the track does before it makes any
+                    // sound, and a user reading the inspector needs to know the
+                    // notes may not be played exactly as written.
+                    match info.performer.as_ref() {
+                        Some(performer) => format!(
+                            "{} — {} in, {} out, {:.1} kB{}",
+                            performer.mode(),
+                            performer.input_size,
+                            performer.output_size,
+                            performer.weight_bytes as f32 / 1000.0,
+                            // Whether the Accent lane can reach it at all. A
+                            // Performer built before accent existed still loads
+                            // and still plays; it just plays the same way
+                            // whatever the accents say, and a control that does
+                            // nothing must say so rather than look available.
+                            if performer.reads_accent() {
+                                ", reads accent"
+                            } else {
+                                ", ignores accent (pre-v2 model)"
+                            },
+                        ),
+                        None => "None (plays the score as written)".to_string(),
+                    },
+                ))
+                .child(kv_row(
+                    "Accent Analyzer",
+                    // "None" here is the designed state, not a missing piece:
+                    // Analyze Accent runs on a fitted rule built into the app,
+                    // and a package only carries a model where one has been
+                    // shown to beat it. Saying "None" alone would read as a
+                    // broken instrument.
+                    match info.accent.as_ref() {
+                        Some(accent) => accent.summary(),
+                        None => "Built-in rule (no model in this package)".to_string(),
+                    },
+                ))
+                .child(kv_row("Sample Rate", format!("{} Hz", info.sample_rate)))
+                .child(kv_row("Source", info.source_type))
+                .child(kv_row(
+                    "Validation",
+                    if info.validated {
+                        "Reference checked"
+                    } else {
+                        "Unvalidated"
+                    },
+                ))
+                .child(kv_row(
+                    "Parameters",
+                    format!(
+                        "{} ({:.1} MB)",
+                        info.parameter_count,
+                        info.file_size_bytes as f32 / 1_000_000.0
+                    ),
+                ));
+        }
+        Some(ModelLoadState::Loading(progress)) => {
+            section = section.child(solfege_model_loading_rows(model_path, progress));
+        }
+        Some(ModelLoadState::Failed(error)) => {
+            section = section.child(solfege_model_failure_rows(model_path, &error));
+        }
+        Some(ModelLoadState::Cancelled) => {
+            section = section
+                .child(kv_row("State", "Load cancelled"))
+                .children(model_path.map(|path| solfege_model_retry_row(path, "Load model")));
+        }
+        None => {
+            section = section.child(kv_row("State", "No model selected"));
+        }
+    }
+
+    section
+        .child(fb_section_header("PERFORMANCE PARAMETERS"))
+        .child(kv_row(
+            "Bow Pressure",
+            format!("{:.0}%", solfege.bow_pressure * 100.0),
+        ))
+        .child(kv_row(
+            "Vibrato",
+            format!("{:.0}%", solfege.vibrato * 100.0),
+        ))
+        .child(kv_row(
+            "Dynamics",
+            format!("{:.0}%", solfege.dynamics * 100.0),
+        ))
+        .child(kv_row(
+            "Expression",
+            format!("{:.0}%", solfege.expression * 100.0),
+        ))
+}
+
+/// What Studio will actually instantiate for this model, rather than which
+/// sections the file happens to contain.
+///
+/// `SolfegeModelInfo::architecture` describes the *file*: `solfege::loading`
+/// builds it from the sections present in the `.sfm`, so a packaged violin
+/// reads "Neural voicebank + BowedString + embedded FBMX residual" even though
+/// two of those three never run. The DAW loads every `.sfm` through
+/// `sphere_direct_audio_engine::runtime::prepare_sfm_runtime` with
+/// `SfmMode::VoicebankOnly`, and `solfege_engine::SamplerEngine::
+/// prepare_sfm_staged` leaves both `instrument` and the embedded residual
+/// `None` in that mode. The BowedString profile and the `FBMX` section are read
+/// and verified by the loader, then not instantiated.
+///
+/// The other two shapes are equally real:
+///
+/// - an `.sfm` with no `INDX`/`AUDO` voicebank fails `prepare_sfm_runtime`
+///   outright, and `RuntimeSolfegeEngine::new` keeps the default BowedString
+///   engine it built as a fallback;
+/// - a standalone `.fbmx` runs on that same fallback, with the model applied
+///   over it by `RuntimeSolfegeEngine::render_segment_stereo`.
+///
+/// `has_voicebank` is recovered from the "Neural voicebank" prefix that
+/// `solfege::loading::load_sfm` writes when `INDX` and `AUDO` are both present
+/// — the same condition `prepare_sfm_runtime` requires. Coupling through prose
+/// is the weak part of this: the durable fix is a typed flag on
+/// [`SolfegeModelInfo`], which lives outside the files this change owns. The
+/// prefix test fails safe — an unrecognised string falls into the
+/// missing-voicebank branch, which describes the fallback engine.
+fn solfege_runtime_architecture(model_path: Option<&str>, info: &SolfegeModelInfo) -> String {
+    let is_sfm = model_path
+        .and_then(|path| std::path::Path::new(path).extension())
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("sfm"));
+    if !is_sfm {
+        // Standalone `.fbmx`: `architecture` here is the model's own
+        // architecture name, and it does run — over the fallback instrument.
+        return format!("BowedString physical + {} residual", info.architecture);
+    }
+    if !info.architecture.starts_with("Neural voicebank") {
+        return "BowedString physical fallback — packaged voicebank missing".to_string();
+    }
+    // `parameter_count` is set only from the embedded residual section, so it
+    // says whether one is packaged — not whether it is used.
+    if info.parameter_count > 0 {
+        "Neural voicebank playback (BowedString + FBMX residual present, not instantiated)"
+            .to_string()
+    } else {
+        "Neural voicebank playback (BowedString present, not instantiated)".to_string()
+    }
+}
+
+/// The load in progress: which stage, how far through the whole load, and a
+/// way out of it.
+///
+/// The percentage is bytes read and hashed, not a stage counter — on the
+/// shipped violin the `AUDO` digest is the load, so a stage counter would sit
+/// still for the part that actually takes the time.
+fn solfege_model_loading_rows(
+    model_path: Option<&str>,
+    progress: crate::solfege::ModelLoadProgress,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .child(kv_row(
+            "State",
+            format!(
+                "{} — {:.0}%",
+                progress.stage.label(),
+                progress.percent().floor()
+            ),
+        ))
+        .child(
+            div()
+                .my(px(3.0))
+                .h(px(3.0))
+                .rounded_full()
+                .overflow_hidden()
+                .bg(Colors::border_subtle())
+                .child(
+                    div()
+                        .h_full()
+                        .w(gpui::relative(progress.fraction))
+                        .rounded_full()
+                        .bg(Colors::accent_primary()),
+                ),
+        )
+        .children(model_path.map(|path| {
+            let path = std::path::PathBuf::from(path);
+            div().pt(px(2.0)).child(compact_action_button(
+                "solfege-model-cancel",
+                "Cancel Load",
+                true,
+                move |_, _, _| crate::solfege::loading::cancel_model_load(&path),
+            ))
+        }))
+        // Progress is published from a worker thread and changes no entity, so
+        // the panel schedules its own repaint for as long as a load is running.
+        .child(
+            gpui::canvas(
+                |_, _, cx: &mut App| crate::solfege::loading::ensure_progress_repaint(cx),
+                |_, _, _, _| {},
+            )
+            .h(px(0.0)),
+        )
+}
+
+/// A failure names the stage and the cause, because "failed to load" does not
+/// tell a truncated copy apart from a corrupt section.
+fn solfege_model_failure_rows(
+    model_path: Option<&str>,
+    error: &crate::solfege::ModelLoadError,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .child(kv_row(
+            "State",
+            format!("Failed while {}", error.stage.label().to_lowercase()),
+        ))
+        .child(
+            div()
+                .py(px(3.0))
+                .text_size(px(10.5))
+                .text_color(Colors::status_error())
+                .child(error.to_string()),
+        )
+        .children(model_path.map(|path| solfege_model_retry_row(path, "Retry Load")))
+}
+
+fn solfege_model_retry_row(path: &str, label: &'static str) -> impl IntoElement {
+    let path = std::path::PathBuf::from(path);
+    div().pt(px(2.0)).child(compact_action_button(
+        "solfege-model-retry",
+        label,
+        true,
+        move |_, _, _| crate::solfege::loading::retry_model_load(&path),
+    ))
 }
 
 fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
@@ -3497,6 +3899,158 @@ mod input_routing_tests {
             audio_input_combo_label(&track, &AudioConnectionRegistry::new()),
             "No Input"
         );
+    }
+}
+
+/// The Architecture row must describe the engine Studio builds, not the
+/// sections the loader read on the way there. These run without a GPUI window
+/// because `solfege_runtime_architecture` is a pure string function.
+#[cfg(test)]
+mod solfege_inspector_tests {
+    use super::*;
+
+    fn info(architecture: &str, parameter_count: u64) -> SolfegeModelInfo {
+        SolfegeModelInfo {
+            name: "Solo Violin".to_string(),
+            model_type: "SFM v1 / neural voicebank".to_string(),
+            architecture: architecture.to_string(),
+            sample_rate: 48_000,
+            source_type: "recorded".to_string(),
+            validated: true,
+            parameter_count,
+            file_size_bytes: 146_000_000,
+            voicebank_profiles: 4,
+            voicebank_entries: 512,
+            voicebank_audio_bytes: 145_000_000,
+            voicebank_source_files: 512,
+            performer: None,
+            accent: None,
+        }
+    }
+
+    /// A model that carries a Performer says so, and one that does not says
+    /// what it does instead — "None" alone would read as a missing feature
+    /// rather than as "this track plays the notes you wrote".
+    #[test]
+    fn the_inspector_distinguishes_a_performer_from_its_absence() {
+        let without = info("Neural voicebank + BowedString", 0);
+        assert!(without.performer.is_none());
+
+        let mut with = info("Neural voicebank + BowedString", 0);
+        with.performer = Some(crate::solfege::SolfegePerformerInfo {
+            input_size: 20,
+            output_size: 9,
+            bidirectional: true,
+            weight_bytes: 11_604,
+            feature_schema_version: 2,
+        });
+        let performer = with.performer.as_ref().expect("a performer");
+        assert_eq!(performer.mode(), "Studio (reads the whole phrase)");
+        assert!(performer.reads_accent());
+
+        let live = crate::solfege::SolfegePerformerInfo {
+            input_size: 16,
+            output_size: 9,
+            bidirectional: false,
+            weight_bytes: 10_660,
+            feature_schema_version: 1,
+        };
+        assert_eq!(live.mode(), "Live (causal)");
+    }
+
+    /// A package built before accent existed must still load, still play, and
+    /// say plainly that the Accent lane cannot reach it — a sixteen-input
+    /// Performer has nowhere to put the four accent columns, and quietly
+    /// pretending otherwise is how a control becomes decorative.
+    #[test]
+    fn a_pre_accent_performer_is_reported_as_not_reading_accent() {
+        let old = crate::solfege::SolfegePerformerInfo {
+            input_size: 16,
+            output_size: 9,
+            bidirectional: true,
+            weight_bytes: 10_660,
+            feature_schema_version: 1,
+        };
+        assert!(!old.reads_accent());
+    }
+
+    /// No embedded Accent Analyzer is the designed state, not a defect: the
+    /// analysis runs on the built-in fitted rule.
+    #[test]
+    fn an_embedded_accent_analyzer_is_optional_and_reports_its_usability() {
+        let mut model = info("Neural voicebank + BowedString", 0);
+        assert!(model.accent.is_none());
+
+        model.accent = Some(crate::solfege::SolfegeAccentInfo {
+            input_size: 33,
+            output_size: 5,
+            weight_bytes: 5_061,
+            usable: true,
+        });
+        assert!(model.accent.as_ref().unwrap().summary().contains("33 in"));
+
+        model.accent = Some(crate::solfege::SolfegeAccentInfo {
+            input_size: 0,
+            output_size: 0,
+            weight_bytes: 4_096,
+            usable: false,
+        });
+        assert!(model
+            .accent
+            .as_ref()
+            .unwrap()
+            .summary()
+            .contains("uses the rule"));
+    }
+
+    #[test]
+    fn packaged_sfm_reports_voicebank_playback_not_the_file_contents() {
+        let architecture = solfege_runtime_architecture(
+            Some("C:\\Models\\violin.sfm"),
+            &info(
+                "Neural voicebank + BowedString + embedded FBMX residual",
+                4_200_000,
+            ),
+        );
+        assert!(
+            architecture.starts_with("Neural voicebank playback"),
+            "{architecture}"
+        );
+        // The two sections the DAW's VoicebankOnly load never instantiates must
+        // not read as active architecture.
+        assert!(architecture.contains("not instantiated"), "{architecture}");
+    }
+
+    #[test]
+    fn sfm_without_a_packaged_residual_does_not_claim_one() {
+        let architecture = solfege_runtime_architecture(
+            Some("C:\\Models\\violin.sfm"),
+            &info("Neural voicebank + BowedString", 0),
+        );
+        assert!(!architecture.contains("FBMX"), "{architecture}");
+        assert!(architecture.contains("not instantiated"), "{architecture}");
+    }
+
+    #[test]
+    fn sfm_without_a_voicebank_reports_the_fallback_engine() {
+        // `prepare_sfm_runtime` refuses this file, so the track runs on the
+        // default BowedString engine `RuntimeSolfegeEngine::new` already built.
+        let architecture = solfege_runtime_architecture(
+            Some("C:\\Models\\violin.sfm"),
+            &info("BowedString physical", 0),
+        );
+        assert!(architecture.contains("fallback"), "{architecture}");
+        assert!(
+            !architecture.contains("voicebank playback"),
+            "{architecture}"
+        );
+    }
+
+    #[test]
+    fn standalone_fbmx_keeps_the_model_architecture_over_the_fallback() {
+        let architecture =
+            solfege_runtime_architecture(Some("C:\\Models\\violin.fbmx"), &info("LSTM", 4_200_000));
+        assert_eq!(architecture, "BowedString physical + LSTM residual");
     }
 }
 

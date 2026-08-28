@@ -29,6 +29,7 @@ pub enum WorkspaceActivePanel {
     ChordDisplay,
     LyricDisplay,
     LyricEditor,
+    Solfege,
 }
 
 impl WorkspaceActivePanel {
@@ -45,6 +46,7 @@ impl WorkspaceActivePanel {
             WorkspaceActivePanel::ChordDisplay => "Chord Display",
             WorkspaceActivePanel::LyricDisplay => "Lyric Display",
             WorkspaceActivePanel::LyricEditor => "Lyric Editor",
+            WorkspaceActivePanel::Solfege => "Solfege",
         }
     }
 }
@@ -55,6 +57,7 @@ pub enum RightDockTab {
     ChordDisplay,
     LyricDisplay,
     LyricEditor,
+    Solfege,
 }
 
 impl RightDockTab {
@@ -64,6 +67,7 @@ impl RightDockTab {
             Self::ChordDisplay => "Chords",
             Self::LyricDisplay => "Lyrics",
             Self::LyricEditor => "Lyric Editor",
+            Self::Solfege => "Solfege",
         }
     }
 
@@ -73,6 +77,7 @@ impl RightDockTab {
             Self::ChordDisplay => WorkspaceActivePanel::ChordDisplay,
             Self::LyricDisplay => WorkspaceActivePanel::LyricDisplay,
             Self::LyricEditor => WorkspaceActivePanel::LyricEditor,
+            Self::Solfege => WorkspaceActivePanel::Solfege,
         }
     }
 }

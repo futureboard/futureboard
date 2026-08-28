@@ -1,0 +1,27 @@
+[package]
+name = "singer"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Native Singer instrument playground for the Solfege engine."
+
+[[bin]]
+name = "Singer"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_windows.workspace = true
+cpal.workspace = true
+crossbeam-channel.workspace = true
+pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+solfege-audio.workspace = true
+solfege-core.workspace = true
+solfege-engine.workspace = true
+solfege-event.workspace = true
+sphere_ui_components = { workspace = true, default-features = false, features = ["gpu-renderer"] }
+
+[lints]
+workspace = true

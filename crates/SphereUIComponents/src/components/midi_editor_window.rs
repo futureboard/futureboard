@@ -364,12 +364,16 @@ pub fn open_midi_editor_window(
         cx,
     );
 
-    let mut options = crate::platform_chrome::external_dialog_window_options_partial();
+    // The MIDI editor is a top-level tool window, not an owned dialog. Using
+    // dialog options here leaves `dialog_parenting` enabled before changing
+    // the kind to Floating, which can make GPUI/Win32 tear down the window
+    // during creation instead of returning a normal window handle.
+    let mut options = crate::platform_chrome::external_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.kind = WindowKind::Floating;
     options.is_resizable = true;
     options.is_minimizable = true;
-    options.window_background = WindowBackgroundAppearance::Transparent;
+    options.window_background = WindowBackgroundAppearance::Opaque;
     options.window_min_size = Some(size(
         px(MIDI_EDITOR_WINDOW_MIN_WIDTH),
         px(MIDI_EDITOR_WINDOW_MIN_HEIGHT),

@@ -1,12 +1,13 @@
 use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
-    InputMonitorMode, MidiArticulation, MidiControllerKind, MidiControllerLane,
-    MidiControllerPoint, MidiNote, MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob,
-    ProjectAsset, ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip, ProjectInsert,
-    ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer, ProjectPluginInstance,
-    ProjectSend, ProjectSongSectionType, ProjectSongTextEvent, ProjectSongTextEventKind,
-    ProjectSoundfontPlayer, ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion,
-    ProjectTrack, ProjectTrackAudioFormat, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
+    InputMonitorMode, MidiAccent, MidiArticulation, MidiControllerKind, MidiControllerLane,
+    MidiControllerPoint, MidiNote, MidiPitchPoint, MidiSysExEvent, MidiSysExKind, PluginFormat,
+    PluginStateBlob, ProjectAsset, ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip,
+    ProjectInsert, ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer,
+    ProjectPluginInstance, ProjectSend, ProjectSolfegeEngine, ProjectSolfegeLane,
+    ProjectSongSectionType, ProjectSongTextEvent, ProjectSongTextEventKind, ProjectSoundfontPlayer,
+    ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack,
+    ProjectTrackAudioFormat, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
     ProjectTrackType, SoundfontEnvelope, SoundfontRenderQuality, TrackRouting,
     V33TrackInputRouting,
 };
@@ -73,6 +74,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// ids plus the one-time bootstrap latch) after the registry section.
 /// v36 persists each insert's registry-resolved instrument/effect role, so an
 /// effect in slot zero is never mistaken for an instrument after project load.
+/// v37 appends the native Solfege instrument state to each track.
 ///
 /// This is a *version bump rather than an extension of v34* on purpose. The body
 /// is positional and a v34 file simply ends after the registry, so appending
@@ -80,7 +82,13 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// trailing bytes are absent or truncated. A v34 file must decode as v34, with
 /// no output routing and the bootstrap latch clear — which is exactly what makes
 /// the compatibility bootstrap run once for it.
-pub const PROJECT_VERSION: u32 = 36;
+/// v39 appends per-note musical accent: five normalised components and a
+/// provenance tag, written as an optional block after the pitch curve. A v38
+/// file loads with no accent on any note, which is exactly the state it was
+/// saved in — and "no accent" is a distinct state from "neutral accent", so
+/// re-analysis treats a pre-v39 project as never analysed rather than as
+/// analysed-and-found-flat.
+pub const PROJECT_VERSION: u32 = 39;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -543,6 +551,30 @@ fn encode_midi_note(w: &mut FbWriter, n: &MidiNote) {
     w.write_u8(n.articulation); // v25 (0 = none)
     w.write_u64(n.id); // v26 (0 = mint on load for legacy writers)
     w.write_u8(n.release_velocity); // v26 (0 = unset)
+                                    // v38: continuous pitch performance. Cent deviations keyed by beats from
+                                    // the note start, so the shape survives transposition and moves.
+    w.write_u32(n.pitch_curve.len() as u32);
+    for point in &n.pitch_curve {
+        w.write_u64(point.id);
+        w.write_f32(point.beat);
+        w.write_f32(point.cents);
+        w.write_u8(point.shape);
+    }
+    // v39: musical accent. A presence byte rather than a sentinel value,
+    // because every component of an accent is a legitimate number and there is
+    // no value left over to mean "absent".
+    match n.accent.as_ref() {
+        Some(accent) => {
+            w.write_bool(true);
+            w.write_f32(accent.prominence);
+            w.write_f32(accent.attack);
+            w.write_f32(accent.agogic);
+            w.write_f32(accent.timbre);
+            w.write_f32(accent.confidence);
+            w.write_u8(accent.source);
+        }
+        None => w.write_bool(false),
+    }
 }
 
 /// v5: controller kind tag. CC carries its number; the rest are tag-only.
@@ -841,6 +873,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_opt_f32(&t.row_height_px);
     encode_soundfont_player(w, t.soundfont.as_ref()); // v28
     w.write_bool(t.volume_automation_read); // v32
+    encode_solfege_engine(w, t.solfege.as_ref()); // v37
 }
 
 /// v28: built-in Soundfont Player instrument state. A leading flag keeps the
@@ -913,6 +946,71 @@ fn decode_soundfont_player(
         polyphony,
         envelope,
         quality,
+    }))
+}
+
+fn encode_solfege_engine(w: &mut FbWriter, solfege: Option<&ProjectSolfegeEngine>) {
+    let Some(solfege) = solfege else {
+        w.write_bool(false);
+        return;
+    };
+    w.write_bool(true);
+    w.write_opt_path(&solfege.model_path);
+    w.write_str(&solfege.instrument);
+    w.write_str(&solfege.voice);
+    w.write_str(&solfege.preset);
+    w.write_f32(solfege.bow_pressure.clamp(0.0, 1.0));
+    w.write_f32(solfege.vibrato.clamp(0.0, 1.0));
+    w.write_f32(solfege.dynamics.clamp(0.0, 1.0));
+    w.write_f32(solfege.expression.clamp(0.0, 1.0));
+    // v38: Solfege editor lane layout (which performance lanes are on screen).
+    w.write_u32(solfege.visible_lanes.len() as u32);
+    for lane in &solfege.visible_lanes {
+        w.write_str(&lane.lane_id);
+        w.write_f32(lane.height);
+    }
+}
+
+fn decode_solfege_engine(
+    r: &mut FbReader,
+    version: u32,
+) -> Result<Option<ProjectSolfegeEngine>, ProjectError> {
+    if !r.read_bool()? {
+        return Ok(None);
+    }
+    let model_path = r.read_opt_path()?;
+    let instrument = r.read_str()?;
+    let voice = r.read_str()?;
+    let preset = r.read_str()?;
+    let bow_pressure = r.read_f32()?.clamp(0.0, 1.0);
+    let vibrato = r.read_f32()?.clamp(0.0, 1.0);
+    let dynamics = r.read_f32()?.clamp(0.0, 1.0);
+    let expression = r.read_f32()?.clamp(0.0, 1.0);
+    // v38 adds the editor lane layout. A v37 file falls back to the
+    // instrument's default lanes when the timeline restores it.
+    let visible_lanes = if version >= 38 {
+        let count = r.read_u32()? as usize;
+        let mut lanes = Vec::with_capacity(count.min(64));
+        for _ in 0..count {
+            lanes.push(ProjectSolfegeLane {
+                lane_id: r.read_str()?,
+                height: r.read_f32()?,
+            });
+        }
+        lanes
+    } else {
+        ProjectSolfegeEngine::default().visible_lanes
+    };
+    Ok(Some(ProjectSolfegeEngine {
+        model_path,
+        instrument,
+        voice,
+        preset,
+        bow_pressure,
+        vibrato,
+        dynamics,
+        expression,
+        visible_lanes,
     }))
 }
 
@@ -1494,6 +1592,35 @@ fn decode_midi_note(r: &mut FbReader, version: u32) -> Result<MidiNote, ProjectE
         // v26 adds stable id + optional release velocity.
         id: if version >= 26 { r.read_u64()? } else { 0 },
         release_velocity: if version >= 26 { r.read_u8()? } else { 0 },
+        // v38 adds the per-note pitch curve; older files have none.
+        pitch_curve: if version >= 38 {
+            let count = r.read_u32()? as usize;
+            let mut points = Vec::with_capacity(count.min(4096));
+            for _ in 0..count {
+                points.push(MidiPitchPoint {
+                    id: r.read_u64()?,
+                    beat: r.read_f32()?,
+                    cents: r.read_f32()?,
+                    shape: r.read_u8()?,
+                });
+            }
+            points
+        } else {
+            Vec::new()
+        },
+        // v39 adds the per-note accent; older files have none.
+        accent: if version >= 39 && r.read_bool()? {
+            Some(MidiAccent {
+                prominence: r.read_f32()?,
+                attack: r.read_f32()?,
+                agogic: r.read_f32()?,
+                timbre: r.read_f32()?,
+                confidence: r.read_f32()?,
+                source: r.read_u8()?,
+            })
+        } else {
+            None
+        },
     })
 }
 
@@ -1938,6 +2065,11 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         None
     };
     let volume_automation_read = if version >= 32 { r.read_bool()? } else { true };
+    let solfege = if version >= 37 {
+        decode_solfege_engine(r, version)?
+    } else {
+        None
+    };
 
     Ok(ProjectTrack {
         id,
@@ -1959,6 +2091,7 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         row_height_px,
         soundfont,
         volume_automation_read,
+        solfege,
     })
 }
 
@@ -2369,7 +2502,165 @@ mod tests {
             muted,
             channel: 1,
             articulation: 0,
+            pitch_curve: Vec::new(),
+            accent: None,
         }
+    }
+
+    fn note_with_pitch_curve(pitch: u8) -> MidiNote {
+        MidiNote {
+            pitch_curve: vec![
+                MidiPitchPoint {
+                    id: 7,
+                    beat: 0.0,
+                    cents: -25.0,
+                    shape: 1,
+                },
+                MidiPitchPoint {
+                    id: 8,
+                    beat: 0.25,
+                    cents: 12.5,
+                    shape: 0,
+                },
+            ],
+            ..note(pitch, false)
+        }
+    }
+
+    fn note_with_accent(pitch: u8) -> MidiNote {
+        MidiNote {
+            accent: Some(MidiAccent {
+                prominence: 0.82,
+                attack: 0.71,
+                agogic: 0.34,
+                timbre: 0.55,
+                confidence: 0.63,
+                source: 1,
+            }),
+            ..note(pitch, false)
+        }
+    }
+
+    #[test]
+    fn v39_note_accent_round_trips() {
+        let mut w = FbWriter::new();
+        encode_midi_note(&mut w, &note_with_accent(60));
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        let accent = decoded.accent.expect("accent restored");
+        assert_eq!(accent.prominence, 0.82);
+        assert_eq!(accent.attack, 0.71);
+        assert_eq!(accent.agogic, 0.34);
+        assert_eq!(accent.timbre, 0.55);
+        assert_eq!(accent.confidence, 0.63);
+        assert_eq!(accent.source, 1, "a hand-edited accent stays hand-edited");
+    }
+
+    /// "No accent" and "neutral accent" are different states and the file has
+    /// to keep them apart: re-analysis leaves a hand-set neutral alone and
+    /// fills an absent one in.
+    #[test]
+    fn a_note_without_an_accent_round_trips_as_absent_not_as_neutral() {
+        let mut w = FbWriter::new();
+        encode_midi_note(&mut w, &note(60, false));
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        assert!(decode_midi_note(&mut r, PROJECT_VERSION)
+            .unwrap()
+            .accent
+            .is_none());
+    }
+
+    /// A v38 file has no accent bytes at all. Reading it as v39 would consume
+    /// the next note's pitch byte as a presence flag, so the version gate is
+    /// what keeps an old project loading.
+    #[test]
+    fn a_v38_note_loads_with_no_accent_and_consumes_no_accent_bytes() {
+        let mut w = FbWriter::new();
+        let source = note_with_pitch_curve(64);
+        // Encode the v38 body by hand: everything up to and including the
+        // curve, and nothing after it.
+        w.write_u8(source.pitch);
+        w.write_f32(source.start_beats);
+        w.write_f32(source.duration_beats);
+        w.write_u8(source.velocity);
+        w.write_bool(source.muted);
+        w.write_u8(source.channel);
+        w.write_u8(source.articulation);
+        w.write_u64(source.id);
+        w.write_u8(source.release_velocity);
+        w.write_u32(source.pitch_curve.len() as u32);
+        for point in &source.pitch_curve {
+            w.write_u64(point.id);
+            w.write_f32(point.beat);
+            w.write_f32(point.cents);
+            w.write_u8(point.shape);
+        }
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_midi_note(&mut r, 38).unwrap();
+        assert!(decoded.accent.is_none());
+        assert_eq!(decoded.pitch_curve.len(), 2, "the v38 body still decodes");
+    }
+
+    #[test]
+    fn v38_note_pitch_curve_round_trips() {
+        let mut w = FbWriter::new();
+        encode_midi_note(&mut w, &note_with_pitch_curve(64));
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(decoded.pitch_curve.len(), 2);
+        assert_eq!(decoded.pitch_curve[0].id, 7);
+        assert_eq!(decoded.pitch_curve[0].cents, -25.0);
+        assert_eq!(decoded.pitch_curve[0].shape, 1);
+        assert_eq!(decoded.pitch_curve[1].beat, 0.25);
+    }
+
+    #[test]
+    fn v37_notes_decode_without_a_pitch_curve() {
+        let mut w = FbWriter::new();
+        // A v37 writer stops after the release velocity.
+        let n = note(60, false);
+        w.write_u8(n.pitch);
+        w.write_f32(n.start_beats);
+        w.write_f32(n.duration_beats);
+        w.write_u8(n.velocity);
+        w.write_bool(n.muted);
+        w.write_u8(n.channel);
+        w.write_u8(n.articulation);
+        w.write_u64(n.id);
+        w.write_u8(n.release_velocity);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_midi_note(&mut r, 37).unwrap();
+        assert!(decoded.pitch_curve.is_empty());
+    }
+
+    #[test]
+    fn v38_solfege_lane_layout_round_trips() {
+        let engine = ProjectSolfegeEngine {
+            visible_lanes: vec![
+                ProjectSolfegeLane {
+                    lane_id: "velocity".to_string(),
+                    height: 64.0,
+                },
+                ProjectSolfegeLane {
+                    lane_id: "bow-pressure".to_string(),
+                    height: 96.0,
+                },
+            ],
+            ..ProjectSolfegeEngine::default()
+        };
+        let mut w = FbWriter::new();
+        encode_solfege_engine(&mut w, Some(&engine));
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_solfege_engine(&mut r, PROJECT_VERSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.visible_lanes, engine.visible_lanes);
     }
 
     fn project_bytes_with_version(body: Vec<u8>, version: u32) -> Vec<u8> {
@@ -3214,6 +3505,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         }
     }
 

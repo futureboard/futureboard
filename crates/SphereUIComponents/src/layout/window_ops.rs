@@ -1148,6 +1148,31 @@ impl StudioLayout {
                                 // instead of an insert. Inspector shows an Open button
                                 // that opens the Soundfont Player MDI window for it.
                                 timeline.state.set_track_builtin_soundfont_player(&id, true);
+                            } else if dialog.selected_kind == AddTrackKind::Instrument
+                                && dialog.instrument_mode == InstrumentMode::SolfegeEngine
+                            {
+                                let model_path = dialog
+                                    .solfege_model_path
+                                    .clone()
+                                    .filter(|path| !path.trim().is_empty());
+                                if let Some(path) = model_path.as_deref() {
+                                    match crate::solfege::load_model_info(
+                                        std::path::Path::new(path),
+                                    ) {
+                                        Ok(info) => eprintln!(
+                                            "[solfege] loaded model='{}' type={} sample_rate={} validated={}",
+                                            info.name, info.model_type, info.sample_rate, info.validated
+                                        ),
+                                        Err(error) => eprintln!(
+                                            "[solfege] model load deferred for '{}': {error}",
+                                            path
+                                        ),
+                                    }
+                                }
+                                timeline.state.set_track_solfege_engine(
+                                    &id,
+                                    Some(crate::solfege::SolfegeTrackState::violin(model_path)),
+                                );
                             }
                             created_ids.push(id.clone());
                             selected_track_id = Some(id);

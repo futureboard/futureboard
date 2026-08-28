@@ -866,6 +866,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         });
 
         let entries = collect_waveform_restore_entries(&project, Path::new("/tmp/unused"));
@@ -902,6 +903,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         });
 
         let root = PathBuf::from("/proj");
@@ -938,6 +940,7 @@ mod tests {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         });
 
         let entries = collect_waveform_restore_entries(&project, Path::new("/tmp"));

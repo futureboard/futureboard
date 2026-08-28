@@ -436,9 +436,15 @@ fn render_offline_impl(
             None,
             capture_tracks.then_some(track_taps.as_mut_slice()),
         );
-        // Match the realtime path: per-block MIDI events are consumed once.
+        // Match the realtime path: per-block MIDI events are consumed once,
+        // and so are the Solfege pitch and articulation lists. An export that
+        // let those accumulate re-applied every earlier pitch change on every
+        // block, so a bounced take drifted away from what the same project
+        // played live.
         for track in &mut runtime.tracks {
             track.midi_block_events.clear();
+            track.solfege_pitch_events.clear();
+            track.solfege_articulation_events.clear();
         }
 
         let frames = frames as usize;
@@ -644,6 +650,7 @@ pub(crate) fn make_track_snapshot(id: &str) -> crate::types::EngineTrackSnapshot
         soundfont_polyphony: 64,
         soundfont_envelope: Default::default(),
         soundfont_quality: Default::default(),
+        solfege_engine: None,
     }
 }
 

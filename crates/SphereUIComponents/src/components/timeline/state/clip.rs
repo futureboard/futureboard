@@ -529,6 +529,16 @@ impl TimelineState {
                         cloned.muted = note.muted;
                         cloned.channel = note.channel;
                         cloned.articulation = note.articulation;
+                        // Per-note pitch performance is part of the note, not
+                        // decoration on it: duplicating, alt-dragging or pasting
+                        // a clip must carry the drawn curve with the notes or
+                        // the copy silently plays a different phrase. Fresh
+                        // point ids, so editing the copy cannot disturb the
+                        // original's selection or undo entries.
+                        cloned.pitch_curve = note
+                            .pitch_curve
+                            .as_ref()
+                            .map(super::PitchCurve::cloned_with_new_ids);
                         cloned
                     })
                     .collect(),

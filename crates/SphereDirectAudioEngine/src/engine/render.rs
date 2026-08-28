@@ -576,7 +576,10 @@ fn render_inaudible_instrument_block(
     transport: RuntimeTransportContext,
 ) {
     let track = &mut runtime.tracks[track_index];
-    if track.midi_instrument_insert_ix.is_none() && track.soundfont_player.is_none() {
+    if track.midi_instrument_insert_ix.is_none()
+        && track.soundfont_player.is_none()
+        && track.solfege_engine.is_none()
+    {
         return;
     }
     apply_track_chain_block(track, frames, transport);
@@ -1603,6 +1606,91 @@ fn render_soundfont_segment(track: &mut RuntimeTrack, start: usize, end: usize) 
     }
 }
 
+fn render_solfege_instrument_block(track: &mut RuntimeTrack, frames: usize) {
+    if frames == 0 || track.solfege_engine.is_none() {
+        return;
+    }
+    // Two ordered streams — note/controller events and continuous-pitch
+    // targets — merged into one forward walk so the block is split at every
+    // event, in time order, whichever list it came from. Both lists are already
+    // sorted by sample offset (the scheduler emits them from one sorted event
+    // list), so this is a merge, not a sort: no allocation, no comparison
+    // sort, nothing that would be unsafe in the audio callback.
+    let midi_count = track.midi_block_events.len();
+    let pitch_count = track.solfege_pitch_events.len();
+    let articulation_count = track.solfege_articulation_events.len();
+    let mut midi_ix = 0usize;
+    let mut pitch_ix = 0usize;
+    let mut articulation_ix = 0usize;
+    let mut cursor = 0usize;
+    while midi_ix < midi_count || pitch_ix < pitch_count || articulation_ix < articulation_count {
+        let midi_at = (midi_ix < midi_count)
+            .then(|| (track.midi_block_events[midi_ix].sample_offset as usize).min(frames));
+        let pitch_at = (pitch_ix < pitch_count)
+            .then(|| (track.solfege_pitch_events[pitch_ix].0 as usize).min(frames));
+        let articulation_at = (articulation_ix < articulation_count)
+            .then(|| (track.solfege_articulation_events[articulation_ix].0 as usize).min(frames));
+
+        // Tie-breaking at one offset decides whether a note is heard correctly:
+        // an articulation chooses the recording, so it must arrive *before* the
+        // note-on that resolves it; a pitch target addresses a voice, so it must
+        // arrive *after*. Hence articulation, then MIDI, then pitch.
+        let earliest = [articulation_at, midi_at, pitch_at]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(frames);
+        if earliest > cursor {
+            render_solfege_segment(track, cursor, earliest);
+            cursor = earliest;
+        }
+
+        if articulation_at == Some(earliest) {
+            let (_, note_id, articulation) = track.solfege_articulation_events[articulation_ix];
+            articulation_ix += 1;
+            if let Some(solfege) = track.solfege_engine.as_mut() {
+                solfege.handle_articulation_event(note_id, articulation);
+            }
+        } else if midi_at == Some(earliest) {
+            let event = track.midi_block_events[midi_ix];
+            midi_ix += 1;
+            if let Some(solfege) = track.solfege_engine.as_mut() {
+                solfege.handle_midi_event(event);
+            }
+        } else {
+            let (_, note_id, hz) = track.solfege_pitch_events[pitch_ix];
+            pitch_ix += 1;
+            if let Some(solfege) = track.solfege_engine.as_mut() {
+                solfege.handle_pitch_event(note_id, hz);
+            }
+        }
+    }
+    if cursor < frames {
+        render_solfege_segment(track, cursor, frames);
+    }
+}
+
+fn render_solfege_segment(track: &mut RuntimeTrack, start: usize, end: usize) {
+    if end <= start {
+        return;
+    }
+    let len = end - start;
+    // Both scratch planes are preallocated to the callback capacity. Keeping
+    // the bank stereo avoids folding phase-opposed source material to mono,
+    // which can sound thin or dirty on sustained notes.
+    let output_l = &mut track.soundfont_l[..len];
+    let output_r = &mut track.soundfont_r[..len];
+    output_l.fill(0.0);
+    output_r.fill(0.0);
+    if let Some(solfege) = track.solfege_engine.as_mut() {
+        solfege.render_segment_stereo(output_l, output_r);
+    }
+    for i in 0..len {
+        track.block_l[start + i] += output_l[i];
+        track.block_r[start + i] += output_r[i];
+    }
+}
+
 /// Apply every insert on a channel strip, including external-bridge inserts on
 /// the master bus. Each bridge insert uses its build/command-time cached
 /// `bridge_sink` (no per-block `HashMap<String, _>` lookup).
@@ -1633,6 +1721,7 @@ pub fn apply_track_chain_block(
     }
 
     render_soundfont_instrument_block(track, frames);
+    render_solfege_instrument_block(track, frames);
 
     let instrument_ix = track.midi_instrument_insert_ix;
     let midi_events = &track.midi_block_events;
@@ -2548,6 +2637,7 @@ mod live_input_monitor_tests {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege_engine: None,
         }
     }
 
@@ -2753,6 +2843,7 @@ mod soundfont_instrument_tests {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege_engine: None,
         }
     }
 
@@ -2781,6 +2872,7 @@ mod soundfont_instrument_tests {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege_engine: None,
         }
     }
 
@@ -3188,6 +3280,8 @@ mod soundfont_instrument_tests {
                         length_beats: 0.5,
                         velocity: 100,
                         channel: 0,
+                        pitch_points: Vec::new(),
+                        articulation: None,
                     },
                     EngineMidiNoteSnapshot {
                         id: 2,
@@ -3196,6 +3290,8 @@ mod soundfont_instrument_tests {
                         length_beats: 0.5,
                         velocity: 100,
                         channel: 0,
+                        pitch_points: Vec::new(),
+                        articulation: None,
                     },
                 ],
                 controllers: Vec::new(),
@@ -3363,3 +3459,7 @@ mod bridge_bypass_tests {
 #[cfg(test)]
 #[path = "control_room_tests.rs"]
 mod control_room_tests;
+
+#[cfg(test)]
+#[path = "solfege_pitch_tests.rs"]
+mod solfege_pitch_tests;

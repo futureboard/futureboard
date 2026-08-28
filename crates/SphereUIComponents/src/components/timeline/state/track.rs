@@ -212,6 +212,9 @@ pub struct TrackState {
     pub soundfont_envelope: SoundfontEnvelope,
     /// Internal synthesis oversampling for the built-in player.
     pub soundfont_quality: SoundfontRenderQuality,
+    /// Native Solfege instrument state. Mutually exclusive with the built-in
+    /// Soundfont Player and VSTi instrument insert for Instrument tracks.
+    pub solfege: Option<crate::solfege::SolfegeTrackState>,
     /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
     pub sends: Vec<SendSlotState>,
     /// Persisted routing choices. Device discovery is not wired yet, so device
@@ -466,6 +469,7 @@ impl TimelineState {
             soundfont_polyphony: 64,
             soundfont_envelope: SoundfontEnvelope::default(),
             soundfont_quality: SoundfontRenderQuality::default(),
+            solfege: None,
         });
         id
     }
@@ -584,6 +588,34 @@ impl TimelineState {
             track.soundfont_quality = settings.quality;
         }
         changed
+    }
+
+    /// Assign or clear the native Solfege instrument on an Instrument track.
+    /// Selecting Solfege also clears the other built-in instrument marker so
+    /// the engine snapshot has one unambiguous instrument source.
+    pub fn set_track_solfege_engine(
+        &mut self,
+        track_id: &str,
+        state: Option<crate::solfege::SolfegeTrackState>,
+    ) -> bool {
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id && t.track_type == TrackType::Instrument)
+        else {
+            return false;
+        };
+        let state = state.map(crate::solfege::SolfegeTrackState::sanitized);
+        if track.solfege == state {
+            return false;
+        }
+        track.solfege = state;
+        if track.solfege.is_some() {
+            track.builtin_soundfont_player = false;
+            track.soundfont_path = None;
+            track.soundfont_preset = None;
+        }
+        true
     }
 
     pub fn selected_audio_track_id(&self) -> Option<String> {

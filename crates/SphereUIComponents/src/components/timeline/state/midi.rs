@@ -45,6 +45,18 @@ pub struct MidiNoteState {
     /// snapshot build time). Travels with the note through move / copy /
     /// split / delete because it lives on the note itself.
     pub articulation: Option<ArticulationId>,
+    /// Continuous pitch performance for this note: cent deviations relative to
+    /// [`Self::pitch`], keyed by beats from [`Self::start`]. `None` means the
+    /// note sounds at its notated pitch. Both anchors travel with the note, so
+    /// transposing or moving it preserves the expressive shape exactly. See
+    /// [`PitchCurve`].
+    pub pitch_curve: Option<PitchCurve>,
+    /// Musical accent for this note: how prominent it should feel and by what
+    /// means. `None` means the note has never been analysed or drawn and is to
+    /// be played as written — the same "absence means unmodified" convention
+    /// [`Self::pitch_curve`] uses, so Reset restores a genuinely unaccented
+    /// note rather than a row of neutral values. See [`AccentState`].
+    pub accent: Option<AccentState>,
 }
 
 impl MidiNoteState {
@@ -62,6 +74,8 @@ impl MidiNoteState {
             muted: false,
             channel: MidiChannel::default(),
             articulation: None,
+            pitch_curve: None,
+            accent: None,
         }
     }
 
@@ -91,6 +105,8 @@ impl MidiNoteState {
             muted: false,
             channel: MidiChannel::default(),
             articulation: None,
+            pitch_curve: None,
+            accent: None,
         }
     }
 }
@@ -497,6 +513,59 @@ impl TimelineState {
         changed
     }
 
+    /// Set the accent prominence of a set of notes, marking them hand-edited.
+    ///
+    /// A note that has never been analysed gains a neutral accent first, so a
+    /// drag on an un-analysed clip is a way of authoring accents by hand rather
+    /// than a no-op that waits for a model. The three sub-components follow
+    /// prominence — see [`AccentState::with_prominence`] — so a dragged note
+    /// keeps whatever character the analyser gave it while changing degree.
+    pub fn set_midi_notes_accent_bulk(
+        &mut self,
+        clip_id: &str,
+        ids: &[u64],
+        prominence: f32,
+    ) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let prominence = prominence.clamp(0.0, 1.0);
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if !ids.contains(&note.id) {
+                continue;
+            }
+            let next = note
+                .accent
+                .unwrap_or_else(AccentState::neutral)
+                .with_prominence(prominence);
+            if note.accent != Some(next) {
+                note.accent = Some(next);
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// Remove the accent from a set of notes, returning them to "as written".
+    ///
+    /// Distinct from setting the accent to neutral: an absent accent is a note
+    /// that has never been analysed, and a re-analysis that preserves manual
+    /// edits will fill it in. A note deliberately set to neutral by hand will
+    /// not be.
+    pub fn clear_midi_notes_accent(&mut self, clip_id: &str, ids: &[u64]) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if ids.contains(&note.id) && note.accent.take().is_some() {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Overwrite the mutable fields of existing notes from full snapshots,
     /// matched by id. Used by the `EditMidiNotes` undo command — the note set is
     /// not changed, only field values. Auto-expands the clip afterwards.
@@ -511,6 +580,15 @@ impl TimelineState {
                     note.muted = s.muted;
                     note.channel = s.channel;
                     note.articulation = s.articulation;
+                    // Pitch expression is part of the note, so an
+                    // `EditMidiNotes` entry undoes/redoes it with everything
+                    // else the same gesture touched.
+                    note.pitch_curve = s.pitch_curve.clone();
+                    // So is accent, and for the same reason. Without this line
+                    // Analyze Accent would apply and never come back: the
+                    // command records a before/after note snapshot and undo
+                    // restores every field this function names.
+                    note.accent = s.accent;
                 }
             }
         }

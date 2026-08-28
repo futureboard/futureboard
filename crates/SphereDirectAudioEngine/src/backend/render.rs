@@ -1372,8 +1372,19 @@ fn fill_output_f32_inner(
 
     // Consumed for this block — clear AFTER render so drain_commands preview
     // events queued earlier in the same callback survive until apply_insert.
+    //
+    // The Solfege pitch and articulation lists are per-block for the same
+    // reason and must be cleared here too. Leaving them was a real fault on
+    // this backend: `solfege_events` splits the render block at every queued
+    // offset, so a list that only ever grows re-applies every pitch and
+    // articulation change from earlier blocks on each callback — heard as the
+    // pitch warbling back through stale values — and once it reaches the
+    // capacity the producer checks (`runtime.rs`), new edits stop arriving at
+    // all.
     for track in &mut runtime.tracks {
         track.midi_block_events.clear();
+        track.solfege_pitch_events.clear();
+        track.solfege_articulation_events.clear();
     }
 
     frames

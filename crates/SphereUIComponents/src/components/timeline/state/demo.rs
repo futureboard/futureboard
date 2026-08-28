@@ -86,6 +86,7 @@ impl TimelineState {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege: None,
         };
 
         let track2 = TrackState {
@@ -140,6 +141,7 @@ impl TimelineState {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege: None,
         };
 
         let track3 = TrackState {
@@ -204,6 +206,7 @@ impl TimelineState {
             soundfont_polyphony: 64,
             soundfont_envelope: Default::default(),
             soundfont_quality: Default::default(),
+            solfege: None,
         };
 
         Self {

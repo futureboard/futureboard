@@ -4312,6 +4312,8 @@ where
                 if ch > 0 {
                     for track in &mut runtime.tracks {
                         track.midi_block_events.clear();
+                        track.solfege_pitch_events.clear();
+                        track.solfege_articulation_events.clear();
                     }
                 }
 
@@ -5204,6 +5206,7 @@ mod live_input_tests {
                 soundfont_polyphony: 64,
                 soundfont_envelope: Default::default(),
                 soundfont_quality: Default::default(),
+                solfege_engine: None,
             }],
             clips: Vec::new(),
             midi_clips: Vec::new(),
@@ -5573,8 +5576,11 @@ mod bridge_insert_tests {
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
             midi_block_events: Vec::new(),
+            solfege_pitch_events: Vec::new(),
+            solfege_articulation_events: Vec::new(),
             midi_instrument_insert_ix: None,
             soundfont_player: None,
+            solfege_engine: None,
             plugin_latency_samples: 0,
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
@@ -6040,8 +6046,11 @@ mod bridge_insert_tests {
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
             midi_block_events: Vec::new(),
+            solfege_pitch_events: Vec::new(),
+            solfege_articulation_events: Vec::new(),
             midi_instrument_insert_ix: None,
             soundfont_player: None,
+            solfege_engine: None,
             plugin_latency_samples: 0,
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
@@ -6175,8 +6184,11 @@ mod bridge_insert_tests {
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
             midi_block_events: Vec::new(),
+            solfege_pitch_events: Vec::new(),
+            solfege_articulation_events: Vec::new(),
             midi_instrument_insert_ix: None,
             soundfont_player: None,
+            solfege_engine: None,
             plugin_latency_samples: 0,
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
@@ -6259,8 +6271,11 @@ mod routing_tests {
             soundfont_l: vec![0.0; cap],
             soundfont_r: vec![0.0; cap],
             midi_block_events: Vec::new(),
+            solfege_pitch_events: Vec::new(),
+            solfege_articulation_events: Vec::new(),
             midi_instrument_insert_ix: None,
             soundfont_player: None,
+            solfege_engine: None,
             plugin_latency_samples: 0,
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),

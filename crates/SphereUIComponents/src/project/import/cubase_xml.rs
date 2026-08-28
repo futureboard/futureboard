@@ -173,6 +173,7 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
             row_height_px: None,
             soundfont: None,
             volume_automation_read: true,
+            solfege: None,
         });
     }
 

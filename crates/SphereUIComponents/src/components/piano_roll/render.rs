@@ -51,7 +51,7 @@ impl PianoRoll {
 
     pub(super) fn note_to_rect(&self, note: &DisplayNote) -> (f32, f32, f32, f32) {
         let x = self.beat_to_x(note.start);
-        let w = (note.duration * self.ppb).max(3.0);
+        let w = (note.duration * self.ppb).max(NOTE_MIN_W);
         let y = self.pitch_to_y(note.pitch) + 1.0;
         let h = self.note_row_h() - 2.0;
         (x, y, x + w, y + h)
@@ -199,6 +199,164 @@ impl PianoRoll {
                     })),
             );
         }
+        Some(
+            deferred(panel.into_any_element())
+                .with_priority(PIANO_ROLL_MENU_PRIORITY)
+                .into_any_element(),
+        )
+    }
+
+    /// Right-click menu for the selected notes, anchored at the click.
+    ///
+    /// This is the in-context articulation affordance: articulation is a note
+    /// property, so it is reachable from the note itself on every track —
+    /// including Solfege tracks, where the built-in velocity/controller lanes
+    /// stand down. The palette is capability-filtered exactly like the
+    /// inspector's row, and the current value is marked.
+    fn build_note_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (lx, ly) = self.open_note_menu?;
+        let (view_w, view_h) = self.grid_view_size();
+        let menu_w = 168.0_f32;
+        let menu_h = 300.0_f32;
+        let available = self.available_articulations(cx);
+        let current = self.uniform_selection_articulation(cx);
+        let selected_count = self.selection.len();
+        let all_muted = self.selection_all_muted(cx);
+
+        // One row shape for the whole menu: a check column that shows which
+        // value the selection already carries, then the label. The press sits
+        // on the row so the whole width is the target.
+        let row = |id: (&'static str, usize),
+                   label: String,
+                   marked: bool,
+                   destructive: bool,
+                   on_click: Box<
+            dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+        >| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(20.0))
+                .px(px(7.0))
+                .rounded(px(4.0))
+                .text_size(px(10.0))
+                .text_color(if destructive {
+                    Colors::status_error()
+                } else if marked {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_secondary()
+                })
+                .hover(|s| s.bg(Colors::surface_hover()))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .on_click(move |ev, window, cx| on_click(ev, window, cx))
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .flex_none()
+                        .text_size(px(9.0))
+                        .child(if marked { "\u{2713}" } else { "" }),
+                )
+                .child(label)
+        };
+        let heading = |text: &'static str| {
+            div()
+                .px(px(7.0))
+                .pt(px(4.0))
+                .pb(px(2.0))
+                .text_size(px(8.5))
+                .text_color(Colors::text_faint())
+                .child(text)
+        };
+
+        let mut panel = div()
+            .id("pr-note-menu")
+            .absolute()
+            // Clamp to the grid so a right-click near an edge keeps the whole
+            // menu on screen.
+            .left(px(lx.clamp(2.0, (view_w - menu_w).max(2.0))))
+            .top(px(ly.clamp(2.0, (view_h - menu_h).max(2.0))))
+            .w(px(menu_w))
+            .max_h(px(menu_h))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(3.0))
+            .gap(px(1.0))
+            .rounded(px(6.0))
+            .bg(Colors::surface_card())
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .shadow_lg()
+            // `occlude` keeps the press off what is painted beneath; the grid's
+            // draw listener is an *ancestor*, so it also has to be stopped.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+            .child(heading("Articulation"));
+
+        for (index, articulation) in available.into_iter().enumerate() {
+            panel = panel.child(row(
+                ("pr-note-menu-art", index),
+                articulation.name().to_string(),
+                current == Some(Some(articulation)),
+                false,
+                Box::new(cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.set_selection_articulation(Some(articulation), cx);
+                    this.open_note_menu = None;
+                })),
+            ));
+        }
+        panel = panel.child(row(
+            ("pr-note-menu-art", usize::MAX),
+            "None".to_string(),
+            current == Some(None),
+            false,
+            Box::new(cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                this.set_selection_articulation(None, cx);
+                this.open_note_menu = None;
+            })),
+        ));
+
+        panel = panel.child(heading("Note")).child(row(
+            ("pr-note-menu-cmd", 0),
+            if all_muted { "Unmute" } else { "Mute" }.to_string(),
+            all_muted,
+            false,
+            Box::new(cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                this.toggle_mute_selection(cx);
+                this.open_note_menu = None;
+            })),
+        ));
+        for (index, (label, delta)) in [("Velocity +5", 5_i16), ("Velocity -5", -5)]
+            .into_iter()
+            .enumerate()
+        {
+            // Stays open: velocity nudges are repeated, and reopening the menu
+            // between each press is the wrong rhythm for that.
+            panel = panel.child(row(
+                ("pr-note-menu-cmd", index + 1),
+                label.to_string(),
+                false,
+                false,
+                Box::new(cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.nudge_selected_velocity(delta, cx);
+                })),
+            ));
+        }
+        panel = panel.child(row(
+            ("pr-note-menu-cmd", 3),
+            format!("Delete {selected_count} note{}", plural(selected_count)),
+            false,
+            true,
+            Box::new(cx.listener(|this, _ev: &gpui::ClickEvent, _w, cx| {
+                this.open_note_menu = None;
+                this.delete_selection(cx);
+            })),
+        ));
+
         Some(
             deferred(panel.into_any_element())
                 .with_priority(PIANO_ROLL_MENU_PRIORITY)
@@ -556,7 +714,7 @@ impl PianoRoll {
         let current = self.current_lane();
         let label = format!("Lane: {}", self.lane_name());
         let open = self.open_select_menu == Some(PianoSelectMenu::Lane);
-        let visible = self.lane_visible;
+        let visible = self.unified_lane_visible(cx);
         let custom = self.custom_cc;
 
         // Controller kinds that actually carry points in the clip being
@@ -1394,7 +1552,9 @@ impl PianoRoll {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
-                            eprintln!("[PianoKeyPreview] down note={p}");
+                            if midi_debug_enabled() {
+                                eprintln!("[PianoKeyPreview] down note={p}");
+                            }
                             this.piano_key_drag_active = true;
                             this.key_lane_pressed_pitch = Some(p as u8);
                             this.begin_preview_note(p as u8, 100, "piano_key_down", cx);
@@ -1436,13 +1596,31 @@ impl PianoRoll {
         let marquee_overlay = self.build_marquee_overlay();
         let draw_preview = self.build_draw_note_preview();
         let erase_overlay = self.build_erase_overlay();
+        let note_menu = self.build_note_context_menu(cx);
+        // Empty clip: the musical canvas (ruler, keys, grid) stays, with one
+        // quiet hint naming the gesture that actually creates a note. Nothing
+        // here is a status readout — the note/selection counts live in the
+        // toolbar.
+        let grid_empty_hint = (note_count_for_clip(cx, &self.timeline, clip_id) == 0).then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .text_color(Colors::text_muted())
+                .child("Draw notes with the Draw tool, or record onto this clip")
+                .into_any_element()
+        });
         let note_inspector = self.render_note_inspector(cx, clip_id);
 
         // ── Single unified controller lane ───────────────────────────────────
         // Exactly one lane is built per frame: velocity OR the active controller.
         // Switching the selector only changes which is built — the hidden lane's
         // data (note velocities / other controller points) is left untouched.
-        let lane_header: Option<gpui::AnyElement> = self.lane_visible.then(|| {
+        let unified_lane_visible = self.unified_lane_visible(cx);
+        let lane_header: Option<gpui::AnyElement> = unified_lane_visible.then(|| {
             div()
                 .h(px(LANE_H))
                 .w_full()
@@ -1465,7 +1643,7 @@ impl PianoRoll {
                 )
                 .into_any_element()
         });
-        let lane_body: Option<gpui::AnyElement> = if !self.lane_visible {
+        let lane_body: Option<gpui::AnyElement> = if !unified_lane_visible {
             None
         } else if self.lane_view == PianoLaneView::Articulations {
             Some(
@@ -1677,11 +1855,13 @@ impl PianoRoll {
                             .children(clip_bounds)
                             .children(loop_overlay)
                             .when_some(playhead_line, |el, line| el.child(line))
+                            .children(grid_empty_hint)
                             .children(notes_geo)
                             .children(quantize_preview)
                             .when_some(marquee_overlay, |el, overlay| el.child(overlay))
                             .when_some(draw_preview, |el, overlay| el.child(overlay))
                             .when_some(erase_overlay, |el, overlay| el.child(overlay))
+                            .children(note_menu)
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_grid_down))
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -1704,7 +1884,12 @@ impl PianoRoll {
 
         if max_y > 0.5 {
             let track_h = view_h.max(1.0);
-            let thumb_h = (track_h * (view_h / (view_h + max_y))).clamp(24.0, track_h);
+            // A just-created/floating editor can have a viewport shorter than
+            // the preferred scrollbar thumb. `clamp` panics when its minimum
+            // exceeds its maximum, so cap the preferred minimum to the track
+            // size before clamping.
+            let min_thumb_h = 24.0_f32.min(track_h);
+            let thumb_h = (track_h * (view_h / (view_h + max_y))).clamp(min_thumb_h, track_h);
             let thumb_y = ((self.scroll_y / max_y) * (track_h - thumb_h)).clamp(0.0, track_h);
             bars.push(
                 div()
@@ -1721,13 +1906,18 @@ impl PianoRoll {
 
         if max_x > 0.5 {
             let track_w = view_w.max(1.0);
-            let thumb_w = (track_w * (view_w / (view_w + max_x))).clamp(32.0, track_w);
+            let min_thumb_w = 32.0_f32.min(track_w);
+            let thumb_w = (track_w * (view_w / (view_w + max_x))).clamp(min_thumb_w, track_w);
             let thumb_x = ((self.scroll_x / max_x) * (track_w - thumb_w)).clamp(0.0, track_w);
             bars.push(
                 div()
                     .absolute()
                     .left(px(key_lane_width() + thumb_x))
-                    .bottom(px(if self.lane_visible { LANE_H + 3.0 } else { 3.0 }))
+                    .bottom(px(if self.unified_lane_visible(cx) {
+                        LANE_H + 3.0
+                    } else {
+                        3.0
+                    }))
                     .w(px(thumb_w))
                     .h(px(5.0))
                     .rounded(px(3.0))
@@ -1753,15 +1943,24 @@ impl PianoRoll {
                 Some(ArticulationId::Tenuto) => "pr-art-assign-tenuto",
                 Some(ArticulationId::Accent) => "pr-art-assign-accent",
                 Some(ArticulationId::Marcato) => "pr-art-assign-marcato",
+                Some(ArticulationId::Pizzicato) => "pr-art-assign-pizzicato",
+                Some(ArticulationId::Tremolo) => "pr-art-assign-tremolo",
             }
         }
-        let mut buttons: Vec<gpui::AnyElement> = ArticulationId::ALL
+        // Solfege tracks narrow the palette to what the loaded instrument can
+        // actually play; everything else keeps the full built-in vocabulary.
+        let available = self.available_articulations(cx);
+        // `None` while the selection is mixed, so no button claims to be the
+        // current value.
+        let current = self.uniform_selection_articulation(cx);
+        let mut buttons: Vec<gpui::AnyElement> = available
             .iter()
             .map(|articulation| {
                 let articulation = *articulation;
-                note_action_button(
+                note_toggle_button(
                     button_id(Some(articulation)),
                     articulation.short_name(),
+                    current == Some(Some(articulation)),
                     cx.listener(move |this, _, _w, cx| {
                         this.set_selection_articulation(Some(articulation), cx)
                     }),
@@ -1770,9 +1969,10 @@ impl PianoRoll {
             })
             .collect();
         buttons.push(
-            note_action_button(
+            note_toggle_button(
                 button_id(None),
                 "None",
+                current == Some(None),
                 cx.listener(|this, _, _w, cx| this.set_selection_articulation(None, cx)),
             )
             .into_any_element(),
@@ -2043,62 +2243,17 @@ impl PianoRoll {
     /// - `ppb >= 10`: beat lines
     /// - subdivision (snap step) lines only when they're at least ~7 px apart
     ///   and the view is zoomed in enough — keeps far-zoom views uncluttered.
+    /// Vertical grid lines for the visible range.
+    ///
+    /// Geometry lives on [`PianoRollViewport`] so the Solfege Pitch tab draws
+    /// the identical grid from the identical transform.
     pub(super) fn visible_grid_lines(
         &self,
         start_beat: f32,
         end_beat: f32,
         bpb: f32,
     ) -> Vec<(f32, GridLineKind)> {
-        let ppb = self.ppb.max(0.0001);
-        let bpb = bpb.max(1.0);
-        let show_beats = ppb >= 10.0;
-        let sub_step = self.grid_res.beats().max(1.0 / 32.0);
-        let show_subs = show_beats && sub_step * ppb >= 7.0 && ppb >= 24.0;
-        let bar_step = if ppb * bpb >= 18.0 {
-            bpb
-        } else {
-            let mut bars = 2.0_f32;
-            while bars * bpb * ppb < 18.0 && bars < 256.0 {
-                bars *= 2.0;
-            }
-            bpb * bars
-        };
-
-        let iter_step = if show_subs {
-            sub_step
-        } else if show_beats {
-            1.0
-        } else {
-            bar_step
-        };
-
-        let mut out = Vec::new();
-        let mut beat = (start_beat / iter_step).floor() * iter_step;
-        let mut guard = 0;
-        while beat <= end_beat + iter_step && guard < 8000 {
-            guard += 1;
-            let b = beat;
-            beat += iter_step;
-            if b < -1.0e-3 {
-                continue;
-            }
-            let kind = if is_multiple(b, bpb) {
-                GridLineKind::Bar
-            } else if is_multiple(b, 1.0) {
-                GridLineKind::Beat
-            } else {
-                GridLineKind::Subdivision
-            };
-            let keep = match kind {
-                GridLineKind::Bar => is_multiple(b, bar_step),
-                GridLineKind::Beat => show_beats,
-                GridLineKind::Subdivision => show_subs,
-            };
-            if keep {
-                out.push((self.beat_to_x(b), kind));
-            }
-        }
-        out
+        self.viewport().grid_lines(start_beat, end_beat, bpb)
     }
 
     pub(super) fn build_clip_bounds_overlay(
@@ -2340,72 +2495,43 @@ impl PianoRoll {
     }
 
     /// Bar/beat ruler header labels, aligned to the note grid via `beat_to_x`.
+    /// The ruler's labels and ticks.
+    ///
+    /// Mark positions come from [`PianoRollViewport::ruler_marks`], the single
+    /// source of ruler geometry in the editor; only the styling is local.
     pub(super) fn build_ruler(
         &self,
         start_beat: f32,
         end_beat: f32,
         bpb: f32,
     ) -> Vec<gpui::AnyElement> {
-        let ppb = self.ppb.max(0.0001);
-        let bpb = bpb.max(1.0);
-        // Label each beat when zoomed in; otherwise label sparse bar starts.
-        let label_beats = ppb >= 36.0;
-        let step = if label_beats {
-            1.0
-        } else if ppb * bpb >= 56.0 {
-            bpb
-        } else {
-            let mut bars = 2.0_f32;
-            while bars * bpb * ppb < 56.0 && bars < 256.0 {
-                bars *= 2.0;
-            }
-            bpb * bars
-        };
-
         let mut out: Vec<gpui::AnyElement> = Vec::new();
-        let mut beat = (start_beat / step).floor() * step;
-        let mut guard = 0;
-        while beat <= end_beat + step && guard < 2000 {
-            guard += 1;
-            let b = beat;
-            beat += step;
-            if b < -1.0e-3 {
-                continue;
-            }
-            let x = self.beat_to_x(b);
-            let bar = (b / bpb).floor() as i32 + 1;
-            let on_bar = is_multiple(b, bpb);
-            let text = if label_beats {
-                let beat_in_bar = (b - (bar - 1) as f32 * bpb).floor() as i32 + 1;
-                format!("{}.{}", bar, beat_in_bar)
-            } else {
-                format!("{}", bar)
-            };
+        for mark in self.viewport().ruler_marks(start_beat, end_beat, bpb) {
             out.push(
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(x + 2.0))
+                    .left(px(mark.x + 2.0))
                     .text_size(px(8.5))
-                    .text_color(if on_bar {
+                    .text_color(if mark.on_bar {
                         Colors::text_secondary()
                     } else {
                         Colors::text_muted()
                     })
-                    .child(text)
+                    .child(mark.label)
                     .into_any_element(),
             );
             // Tick mark at the bottom of the ruler.
             out.push(
                 div()
                     .absolute()
-                    .left(px(x))
+                    .left(px(mark.x))
                     .bottom_0()
                     .w(px(1.0))
-                    .h(px(if on_bar { 6.0 } else { 4.0 }))
+                    .h(px(if mark.on_bar { 6.0 } else { 4.0 }))
                     .bg(Colors::with_alpha(
                         Colors::text_primary(),
-                        if on_bar { 0.26 } else { 0.13 },
+                        if mark.on_bar { 0.26 } else { 0.13 },
                     ))
                     .into_any_element(),
             );
@@ -2529,7 +2655,7 @@ impl PianoRoll {
                 .filter_map(|n| {
                     let d = self.display_note(n);
                     let x = self.beat_to_x(d.start);
-                    let w = (d.duration * self.ppb).max(5.0);
+                    let w = (d.duration * self.ppb).max(NOTE_MIN_W);
                     let y = self.pitch_to_y(d.pitch);
                     // Cull off-screen notes.
                     if x + w < 0.0 || x > view_w || y + row_h < 0.0 || y > view_h {
@@ -2635,10 +2761,10 @@ impl PianoRoll {
                         )
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, ev: &MouseDownEvent, _window, cx| {
+                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 let (lx, ly) = this.grid_local(ev.position).unwrap_or((0.0, 0.0));
-                                this.note_right_down(id, lx, ly, cx);
+                                this.note_right_down(id, lx, ly, window, cx);
                             }),
                         );
                     // Note-name label, shown only when the block is large enough to
@@ -2691,7 +2817,7 @@ impl PianoRoll {
                     }
                     // Right-edge resize handle (only when the note is wide enough to
                     // leave room for a separate move/resize zone).
-                    if w >= 12.0 {
+                    if w >= NOTE_RESIZE_MIN_W {
                         note = note.child(
                             div()
                                 .id(("pr-note-edge", id as usize))

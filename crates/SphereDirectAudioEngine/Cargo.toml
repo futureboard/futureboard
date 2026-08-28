@@ -73,6 +73,13 @@ sphere-audio-processor.workspace = true
 sphere-audio-plugins.workspace = true
 sphere-encoder.workspace = true
 sphere-soundfont-player.workspace = true
+solfege-audio.workspace = true
+solfege-core.workspace = true
+solfege-engine.workspace = true
+solfege-event.workspace = true
+fbmx-runtime.workspace = true
+solfege-model.workspace = true
+solfege-acoustic.workspace = true
 
 # Memory-map large audio files so huge WAVs do not explode RAM usage.
 memmap2.workspace = true

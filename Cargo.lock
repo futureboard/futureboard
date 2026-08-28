@@ -2701,6 +2701,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caf1079563223d5d59d83c85886a56e586cfd5c1a26292e971a0fa266531ac5a"
 
 [[package]]
+name = "fbmx-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7442,6 +7450,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "singer"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "crossbeam-channel",
+ "gpui",
+ "gpui_windows",
+ "pollster 0.4.0",
+ "serde",
+ "serde_json",
+ "solfege-audio",
+ "solfege-core",
+ "solfege-engine",
+ "solfege-event",
+ "sphere_ui_components",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7531,6 +7557,103 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "solfege-acoustic"
+version = "0.1.0"
+dependencies = [
+ "solfege-model",
+]
+
+[[package]]
+name = "solfege-audio"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solfege-core"
+version = "0.1.0"
+dependencies = [
+ "solfege-storage",
+ "solfege-zone",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solfege-dsp"
+version = "0.1.0"
+dependencies = [
+ "solfege-core",
+]
+
+[[package]]
+name = "solfege-engine"
+version = "0.1.0"
+dependencies = [
+ "fbmx-runtime",
+ "serde_json",
+ "solfege-acoustic",
+ "solfege-audio",
+ "solfege-core",
+ "solfege-event",
+ "solfege-model",
+ "solfege-voice",
+ "solfege-zone",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solfege-event"
+version = "0.1.0"
+dependencies = [
+ "solfege-core",
+]
+
+[[package]]
+name = "solfege-model"
+version = "0.1.0"
+dependencies = [
+ "fbmx-runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solfege-modulation"
+version = "0.1.0"
+dependencies = [
+ "solfege-core",
+]
+
+[[package]]
+name = "solfege-resampler"
+version = "0.1.0"
+
+[[package]]
+name = "solfege-storage"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solfege-voice"
+version = "0.1.0"
+dependencies = [
+ "solfege-core",
+ "solfege-dsp",
+ "solfege-modulation",
+ "solfege-resampler",
+ "solfege-zone",
+]
+
+[[package]]
+name = "solfege-zone"
+version = "0.1.0"
 
 [[package]]
 name = "sphere-audio-editor"
@@ -7635,6 +7758,7 @@ dependencies = [
  "cc",
  "cpal",
  "crossbeam-channel",
+ "fbmx-runtime",
  "libc",
  "memmap2",
  "napi",
@@ -7644,6 +7768,12 @@ dependencies = [
  "pkg-config",
  "serde",
  "serde_json",
+ "solfege-acoustic",
+ "solfege-audio",
+ "solfege-core",
+ "solfege-engine",
+ "solfege-event",
+ "solfege-model",
  "sphere-audio-plugins",
  "sphere-audio-processor",
  "sphere-encoder",
@@ -7670,6 +7800,7 @@ dependencies = [
  "equz8",
  "fa2a",
  "fa76",
+ "fbmx-runtime",
  "gpui",
  "image",
  "midir",
@@ -7682,6 +7813,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 1.15.1",
+ "solfege-model",
  "sphere-audio-editor",
  "sphere-audio-processor",
  "sphere-encoder",

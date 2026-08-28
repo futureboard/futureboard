@@ -10,10 +10,202 @@ use DirectAudio::types::{
     EngineAutomationLaneSnapshot, EngineAutomationPointSnapshot, EngineAutomationTargetSnapshot,
     EngineClipAudioProcess, EngineClipSnapshot, EngineFadeSnapshot, EngineInsertSnapshot,
     EngineMidiClipSnapshot, EngineMidiControllerLane, EngineMidiControllerPoint,
-    EngineMidiNoteSnapshot, EngineProjectSnapshot, EngineRoutingSnapshot, EngineSendSnapshot,
-    EngineTempoPointSnapshot, EngineTrackInputSourceSnapshot, EngineTrackSnapshot,
-    EngineWarpMarkerSnapshot,
+    EngineMidiNoteSnapshot, EnginePitchPoint, EngineProjectSnapshot, EngineRoutingSnapshot,
+    EngineSendSnapshot, EngineSolfegeSnapshot, EngineTempoPointSnapshot,
+    EngineTrackInputSourceSnapshot, EngineTrackSnapshot, EngineWarpMarkerSnapshot,
 };
+
+/// Sampled-instrument articulation ids, matching
+/// `solfege_model::voicebank`'s `ARTICULATION_*` constants.
+///
+/// Duplicated here rather than imported because `SphereUIComponents` does not
+/// depend on `solfege-model`, and adding that dependency to carry four integers
+/// would couple the whole UI crate to the container format. The
+/// `articulation_ids_match_the_voicebank` test pins them.
+mod voicebank_articulation {
+    pub const SUSTAIN_VIBRATO: u16 = 0;
+    pub const PIZZICATO: u16 = 1;
+    pub const SPICCATO: u16 = 2;
+    #[allow(dead_code)]
+    pub const TREMOLO: u16 = 3;
+}
+
+/// Translate a score marking into the recorded articulation that plays it.
+///
+/// These are different alphabets. The editor's vocabulary is notation —
+/// Sustain, Legato, Staccato, Tenuto, Accent, Marcato — and describes *how a
+/// note is written*. A sampled bank's vocabulary is technique — sustain with
+/// vibrato, spiccato, pizzicato, tremolo — and describes *how it was played*.
+/// The mapping below is therefore a judgement, and a deliberately conservative
+/// one: markings that mean "held" choose the sustained recording, markings that
+/// mean "short and separated" choose the short bowed one.
+///
+/// Pizzicato and Tremolo are the exception, and they are not a judgement at
+/// all: they name a playing technique directly, so they select the recording
+/// of that technique. They were unreachable while the editor's vocabulary was
+/// score markings only, which left 44% of a bank like Solo Violin — every
+/// pizzicato and tremolo recording in it — impossible to select from the
+/// arrangement no matter what the player wrote.
+///
+/// Returning `None` leaves the instrument on its own default, which is what
+/// happened for every note before articulation reached the engine at all.
+fn voicebank_articulation_for(articulation: timeline_state::ArticulationId) -> Option<u16> {
+    use timeline_state::ArticulationId as A;
+    match articulation {
+        A::Sustain | A::Legato | A::Tenuto => Some(voicebank_articulation::SUSTAIN_VIBRATO),
+        A::Staccato | A::Staccatissimo | A::Accent | A::Marcato => {
+            Some(voicebank_articulation::SPICCATO)
+        }
+        A::Pizzicato => Some(voicebank_articulation::PIZZICATO),
+        A::Tremolo => Some(voicebank_articulation::TREMOLO),
+    }
+}
+
+/// Sampling step for a note's sounding-pitch trajectory, in seconds. The
+/// engine smooths between the breakpoints it receives, so this only has to be
+/// fine enough that a fast gesture is not aliased — 5 ms resolves a 100 Hz
+/// wobble, well past anything a hand can draw or an instrument can articulate.
+const PITCH_SAMPLE_SECONDS: f32 = 0.005;
+
+/// Largest deviation, in cents, that the decimator is allowed to introduce by
+/// dropping an intermediate breakpoint. One cent is roughly a fifth of the
+/// smallest pitch difference a trained listener can hear on a sustained tone,
+/// so a curve reconstructed within this tolerance is the curve that was drawn.
+const PITCH_DECIMATE_CENTS: f32 = 1.0;
+
+/// Emit the sounding-pitch trajectory of one note as engine breakpoints.
+///
+/// This is the hop that used to be missing: the editor stored a
+/// [`PitchCurve`](timeline_state::PitchCurve) on the note and the trajectory
+/// evaluator composed it with note transitions, but nothing ever carried the
+/// result into the engine snapshot, so a drawn curve could never be heard.
+///
+/// Returns an empty vector when the note simply sounds at its notated pitch,
+/// which keeps untouched projects byte-identical to before and lets the engine
+/// skip the whole continuous-pitch path.
+fn build_note_pitch_points(
+    trajectory: &timeline_state::PitchTrajectory,
+    notes: &[timeline_state::MidiNoteState],
+    voice_of_note: &[usize],
+    note_index: usize,
+    playback_length_beats: f32,
+    seconds_per_beat: f32,
+) -> Vec<EnginePitchPoint> {
+    let note = &notes[note_index];
+    let voice = voice_of_note[note_index];
+
+    let length = playback_length_beats.max(0.0);
+    if length <= 0.0 {
+        return Vec::new();
+    }
+    // Ask before sampling. A note with no drawn points that no transition
+    // reaches sounds at the pitch it is written at, and the loop below would
+    // spend a 5 ms-resolution pass over its whole length only to discover that
+    // every sample equalled `note.pitch` and return nothing. Most notes in a
+    // real arrangement are that note, and this runs on every project sync —
+    // including every pointer event of a pitch drag.
+    if !trajectory.note_departs_from_notated_pitch(notes, voice, note_index) {
+        return Vec::new();
+    }
+    let step_beats = (PITCH_SAMPLE_SECONDS / seconds_per_beat.max(1e-6)).max(1e-4);
+    let columns = ((length / step_beats).ceil() as usize).clamp(1, 1 << 16) + 1;
+
+    let mut raw: Vec<Option<f32>> = Vec::with_capacity(columns);
+    trajectory.sample_columns(notes, voice, note.start, step_beats, columns, &mut raw);
+
+    // Fractional-semitone pitch per column, clamped to the note's own span so
+    // the last point lands exactly on the note end rather than one step past.
+    let notated = note.pitch as f32;
+    let samples: Vec<(f32, f32)> = raw
+        .iter()
+        .enumerate()
+        .map(|(column, value)| {
+            (
+                (step_beats * column as f32).min(length),
+                value.unwrap_or(notated),
+            )
+        })
+        .collect();
+
+    // A note whose whole span sits within the tolerance of its notated pitch
+    // has nothing to say; let the engine use the note number it already has.
+    let tolerance = PITCH_DECIMATE_CENTS / 100.0;
+    if samples
+        .iter()
+        .all(|(_, pitch)| (pitch - notated).abs() <= tolerance)
+    {
+        return Vec::new();
+    }
+
+    // Douglas–Peucker-style run decimation against the *reconstruction* the
+    // engine will actually produce (a straight line between kept breakpoints),
+    // so the emitted set reproduces the drawn curve to within `tolerance` at
+    // every dropped column — not merely at the one adjacent to it. Checking a
+    // single neighbour is the tempting shortcut and it silently flattens peaks
+    // that fall in the middle of a long run.
+    //
+    // `MAX_RUN` bounds the inner rescan so this stays linear in practice; it
+    // also guarantees a breakpoint at least every 320 ms, which keeps a voice
+    // that joined late from waiting a whole note for its first pitch target.
+    const MAX_RUN: usize = 64;
+    let mut kept: Vec<(f32, f32)> = Vec::new();
+    let mut anchor = 0usize;
+    kept.push(samples[0]);
+    for index in 1..samples.len() {
+        let (anchor_beat, anchor_pitch) = samples[anchor];
+        let (beat, pitch) = samples[index];
+        let span = beat - anchor_beat;
+        let fits = index - anchor <= MAX_RUN
+            && samples[anchor + 1..index].iter().all(|(b, p)| {
+                let t = if span > 1e-9 {
+                    ((b - anchor_beat) / span).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (anchor_pitch + (pitch - anchor_pitch) * t - p).abs() <= tolerance
+            });
+        if !fits {
+            anchor = index - 1;
+            kept.push(samples[anchor]);
+        }
+    }
+    if kept.last().map(|(beat, _)| *beat) != Some(samples[samples.len() - 1].0) {
+        kept.push(samples[samples.len() - 1]);
+    }
+
+    // A single point conveys no motion, and a run that decimated back to the
+    // notated pitch is better expressed as "no points at all".
+    if kept.len() < 2
+        || kept
+            .iter()
+            .all(|(_, pitch)| (pitch - notated).abs() <= tolerance)
+    {
+        return Vec::new();
+    }
+    kept.into_iter()
+        .map(|(beat, pitch)| EnginePitchPoint {
+            beat: (note.start + beat).max(0.0) as f64,
+            hz: timeline_state::midi_pitch_to_hz(pitch),
+        })
+        .collect()
+}
+
+/// Map every note index to the trajectory voice that owns it, so a note can
+/// ask the trajectory for *its* line without re-deriving the voice partition.
+fn voice_index_per_note(
+    trajectory: &timeline_state::PitchTrajectory,
+    note_count: usize,
+) -> Vec<usize> {
+    let mut owner = vec![0usize; note_count];
+    for (voice, line) in trajectory.voices().iter().enumerate() {
+        for &note in &line.notes {
+            if note < note_count {
+                owner[note] = voice;
+            }
+        }
+    }
+    owner
+}
 
 /// Per-channel `(start, pitch)` of every unmuted note in a clip, sorted by
 /// start beat. Built once per clip at snapshot time so legato can find "the
@@ -712,6 +904,16 @@ fn build_engine_project_snapshot_inner(
             soundfont_polyphony: track.soundfont_polyphony,
             soundfont_envelope: track.soundfont_envelope,
             soundfont_quality: track.soundfont_quality,
+            solfege_engine: track.solfege.as_ref().map(|state| EngineSolfegeSnapshot {
+                model_path: state.model_path.clone(),
+                instrument: state.instrument.clone(),
+                voice: state.voice.clone(),
+                preset: state.preset.clone(),
+                bow_pressure: state.bow_pressure,
+                vibrato: state.vibrato,
+                dynamics: state.dynamics,
+                expression: state.expression,
+            }),
         })
         .collect();
 
@@ -750,6 +952,7 @@ fn build_engine_project_snapshot_inner(
         soundfont_polyphony: 64,
         soundfont_envelope: Default::default(),
         soundfont_quality: Default::default(),
+        solfege_engine: None,
     });
 
     let mut clips: Vec<EngineClipSnapshot> = state
@@ -887,6 +1090,14 @@ fn build_engine_project_snapshot_inner(
                 // chasing is a pure beat lookup over the clip's event list, so
                 // it is independent of where the transport starts/seeks/loops.
                 let legato_index = ArticulationLegatoIndex::build(notes, output_mode);
+                // The evaluated pitch trajectory is built from the *same*
+                // notes and articulation events the piano roll and the Pitch
+                // editor render, so what is drawn, what is displayed and what
+                // is played are one evaluation, not three.
+                let trajectory =
+                    timeline_state::PitchTrajectory::build(notes, articulations.as_slice());
+                let voice_of_note = voice_index_per_note(&trajectory, notes.len());
+                let seconds_per_beat = 60.0 / state.bpm.max(1.0);
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),
@@ -894,9 +1105,10 @@ fn build_engine_project_snapshot_inner(
                     length_beats: clip.duration_beats.max(0.0) as f64,
                     notes: notes
                         .iter()
+                        .enumerate()
                         // Muted notes stay in the clip but emit no runtime event.
-                        .filter(|n| !n.muted)
-                        .map(|n| {
+                        .filter(|(_, n)| !n.muted)
+                        .map(|(index, n)| {
                             let channel = output_mode.resolve(n.channel).raw();
                             let (length_beats, velocity) =
                                 articulated_note_playback(n, articulations, channel, &legato_index);
@@ -907,6 +1119,22 @@ fn build_engine_project_snapshot_inner(
                                 length_beats: length_beats.max(0.0) as f64,
                                 velocity,
                                 channel,
+                                // Resolved the same way playback resolves it,
+                                // so a note with no marking of its own still
+                                // follows the clip's direction lane.
+                                articulation: timeline_state::resolve_note_articulation(
+                                    n,
+                                    articulations,
+                                )
+                                .and_then(voicebank_articulation_for),
+                                pitch_points: build_note_pitch_points(
+                                    &trajectory,
+                                    notes,
+                                    &voice_of_note,
+                                    index,
+                                    length_beats,
+                                    seconds_per_beat,
+                                ),
                             }
                         })
                         .collect(),
