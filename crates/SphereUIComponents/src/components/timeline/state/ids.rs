@@ -157,3 +157,42 @@ pub fn next_song_text_event_id() -> String {
         .as_nanos();
     format!("song-text-{ts:x}-{seq:x}")
 }
+
+fn counter_midi_edit_revision() -> &'static std::sync::atomic::AtomicU64 {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    &COUNTER
+}
+
+/// The current MIDI edit revision.
+///
+/// A monotonic counter bumped whenever anything takes a mutable borrow of a
+/// clip's notes or articulation events. It exists so that a view which caches
+/// something derived from those — the Pitch editor's evaluated trajectory, for
+/// one — can ask "is what I have still current" in a single integer compare.
+///
+/// The alternative it replaces was comparing the cached `Vec<MidiNoteState>`
+/// against the live one field by field. That walks every note *and every pitch
+/// point of every note*, once per frame, and it was measured at **five times
+/// the cost of simply rebuilding the thing it was trying to avoid rebuilding**
+/// — a cache whose validity check is more expensive than a miss.
+///
+/// Deliberately global rather than per clip. A mutation anywhere invalidates
+/// every derived cache, which over-invalidates when two clips are open at once
+/// and is the safe direction: a cache that refreshes too often is slow, and one
+/// that refreshes too rarely draws the wrong thing.
+pub fn midi_edit_revision() -> u64 {
+    use std::sync::atomic::Ordering;
+    counter_midi_edit_revision().load(Ordering::Relaxed)
+}
+
+/// Record that MIDI clip content may have changed.
+///
+/// Called from the mutable accessors themselves, so no caller has to remember
+/// to. Taking the borrow is treated as having mutated: a caller that borrows
+/// and changes nothing costs one wasted rebuild, which is the direction that
+/// cannot draw a stale curve.
+pub(crate) fn bump_midi_edit_revision() {
+    use std::sync::atomic::Ordering;
+    counter_midi_edit_revision().fetch_add(1, Ordering::Relaxed);
+}

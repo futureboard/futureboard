@@ -233,6 +233,10 @@ impl TimelineState {
     }
 
     pub(crate) fn midi_clip_notes_mut(&mut self, clip_id: &str) -> Option<&mut Vec<MidiNoteState>> {
+        // Every mutation of a clip's notes passes through here, which makes it
+        // the one place a derived-view cache can be told to refresh. See
+        // `midi_edit_revision`.
+        bump_midi_edit_revision();
         for track in &mut self.tracks {
             for clip in &mut track.clips {
                 if clip.id == clip_id {

@@ -47,8 +47,8 @@ use gpui::{
 use crate::components::edit::edit_commands::EditCommand;
 use crate::components::piano_roll::{is_black, note_name, PianoRollViewport};
 use crate::components::timeline::timeline_state::{
-    ArticulationId, MidiArticulationEvent, MidiNoteState, PitchCurve, PitchPoint,
-    PitchSegmentShape, PitchTrajectory, ABUT_EPS_BEATS, LEGATO_BRIDGE_BEATS, PITCH_CURVE_MAX_CENTS,
+    midi_edit_revision, ArticulationId, MidiNoteState, PitchCurve, PitchPoint, PitchSegmentShape,
+    PitchTrajectory, ABUT_EPS_BEATS, LEGATO_BRIDGE_BEATS, PITCH_CURVE_MAX_CENTS,
 };
 use crate::components::timeline::waveform_cache;
 use crate::solfege::{LaneSource, SolfegeLaneVisibility};
@@ -213,12 +213,20 @@ enum PitchDrag {
 /// The canvas closure outlives the render pass, so it needs owned data; and
 /// [`PitchTrajectory::build`] does the whole voice assignment and span
 /// construction. Without this, both ran on every frame — including every
-/// mouse-move of a drag. Comparing the live notes against the cached copy is a
-/// linear field compare, far cheaper than the clone and rebuild it skips.
+/// mouse-move of a drag.
+///
+/// Validity is one integer compare against [`midi_edit_revision`]. It was a
+/// field-by-field comparison of the cached `Vec<MidiNoteState>` against the
+/// live one, which sounds cheap and is not: it walks every note *and every
+/// pitch point of every note*, and on a clip carrying a few hundred drawn
+/// points it measured at **five times the cost of the rebuild it was avoiding**
+/// — paid on every frame, including the ones where nothing had changed. A
+/// cache whose miss is cheaper than its hit test is not a cache.
 struct PitchCanvasCache {
     clip_id: String,
+    /// The MIDI edit revision this was built from.
+    revision: u64,
     notes: Rc<Vec<MidiNoteState>>,
-    directions: Rc<Vec<MidiArticulationEvent>>,
     trajectory: Rc<PitchTrajectory>,
 }
 
@@ -879,22 +887,10 @@ impl SolfegeEditorPanel {
         clip_id: &str,
         cx: &mut Context<Self>,
     ) -> (Rc<Vec<MidiNoteState>>, Rc<PitchTrajectory>) {
-        {
-            let state = &self.timeline.read(cx).state;
-            let notes = state.midi_clip_notes(clip_id);
-            let directions = state.midi_clip_articulations(clip_id);
-            if let Some(cache) = &self.pitch.canvas {
-                let notes_match = match notes {
-                    Some(live) => cache.notes.as_ref() == live,
-                    None => cache.notes.is_empty(),
-                };
-                let directions_match = match directions {
-                    Some(live) => cache.directions.as_ref() == live,
-                    None => cache.directions.is_empty(),
-                };
-                if cache.clip_id == clip_id && notes_match && directions_match {
-                    return (cache.notes.clone(), cache.trajectory.clone());
-                }
+        let revision = midi_edit_revision();
+        if let Some(cache) = &self.pitch.canvas {
+            if cache.clip_id == clip_id && cache.revision == revision {
+                return (cache.notes.clone(), cache.trajectory.clone());
             }
         }
         let (notes, directions) = {
@@ -911,8 +907,8 @@ impl SolfegeEditorPanel {
         let notes = Rc::new(notes);
         self.pitch.canvas = Some(PitchCanvasCache {
             clip_id: clip_id.to_string(),
+            revision,
             notes: notes.clone(),
-            directions: Rc::new(directions),
             trajectory: trajectory.clone(),
         });
         (notes, trajectory)
@@ -1442,34 +1438,41 @@ impl SolfegeEditorPanel {
             } => {
                 let beat_in_note = beat_in_note(&prev, beat);
                 let cents = cents_for(&prev, pitch);
-                let mut curve = self
-                    .timeline
-                    .read(cx)
-                    .state
-                    .note_pitch_curve(&clip_id, note_id);
-                if self.pitch.tool == PitchTool::Erase {
-                    let half = PITCH_MERGE_BEATS.max(viewport.snap_step_beats * 0.5);
-                    if curve.erase_range(beat_in_note - half, beat_in_note + half) == 0 {
-                        return;
+                let erasing = self.pitch.tool == PitchTool::Erase;
+                let half = PITCH_MERGE_BEATS.max(viewport.snap_step_beats * 0.5);
+
+                // Edited in place. Reading the curve out, changing it and
+                // writing it back copies every point already drawn, once per
+                // mouse-move sample — which makes one stroke quadratic in its
+                // own length for the second time in this file's history. The
+                // note is found once and the point goes straight in.
+                let changed = self.edit_note_pitch_curve(&clip_id, note_id, cx, |curve| {
+                    if erasing {
+                        curve.erase_range(beat_in_note - half, beat_in_note + half) > 0
+                    } else {
+                        // The live curve tracks the pointer exactly — a stroke
+                        // that lagged its own cursor would be unusable. The
+                        // per-sample density this leaves behind is collapsed
+                        // once, on release, by `simplify_stroke`.
+                        curve.set_point(
+                            beat_in_note,
+                            cents,
+                            PitchSegmentShape::Smooth,
+                            PITCH_MERGE_BEATS,
+                        );
+                        true
                     }
-                } else {
-                    // The live curve tracks the pointer exactly — a stroke that
-                    // lagged its own cursor would be unusable. The per-sample
-                    // density this leaves behind is collapsed once, on release,
-                    // by `simplify_stroke`.
-                    curve.set_point(
-                        beat_in_note,
-                        cents,
-                        PitchSegmentShape::Smooth,
-                        PITCH_MERGE_BEATS,
-                    );
+                });
+                if !changed {
+                    return;
+                }
+                if !erasing {
                     self.pitch.stroke_range = Some(match self.pitch.stroke_range {
                         Some((lo, hi)) => (lo.min(beat_in_note), hi.max(beat_in_note)),
                         None => (beat_in_note, beat_in_note),
                     });
                     self.pitch.readout = Some(format_cents(cents));
                 }
-                self.write_pitch_curve(&clip_id, note_id, curve, cx);
             }
             PitchDrag::Line {
                 clip_id,
@@ -1566,6 +1569,49 @@ impl SolfegeEditorPanel {
 
     /// Write a curve into live timeline state without touching history. The
     /// undo entry is recorded once, on gesture end.
+    /// Mutate one note's pitch curve in place.
+    ///
+    /// `edit` returns whether it changed anything; when it did not, nothing is
+    /// marked dirty and no redraw is requested, so a sample that lands on top
+    /// of the previous one costs a lookup and stops.
+    ///
+    /// This exists because the obvious shape — read the curve, change it, write
+    /// it back — copies the whole curve twice per call, and the drawing tools
+    /// call it once per mouse-move sample. A curve is a `Vec` of every point
+    /// drawn so far, so that is a stroke whose cost grows with its own length.
+    fn edit_note_pitch_curve(
+        &mut self,
+        clip_id: &str,
+        note_id: u64,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(&mut PitchCurve) -> bool,
+    ) -> bool {
+        let clip_id = clip_id.to_string();
+        let changed = self.timeline.update(cx, |tl, tcx| {
+            let Some(notes) = tl.state.midi_clip_notes_mut(&clip_id) else {
+                return false;
+            };
+            let Some(note) = notes.iter_mut().find(|note| note.id == note_id) else {
+                return false;
+            };
+            let mut curve = note.pitch_curve.take().unwrap_or_default();
+            let changed = edit(&mut curve);
+            note.pitch_curve = (!curve.is_empty()).then_some(curve);
+            if changed {
+                // The same unforced dirty mark `write_pitch_curve` explains:
+                // the engine's poll coalesces a stroke's worth of these into a
+                // handful of snapshots rather than one per sample.
+                tl.mark_project_changed(tcx);
+                tcx.notify();
+            }
+            changed
+        });
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+
     fn write_pitch_curve(
         &mut self,
         clip_id: &str,

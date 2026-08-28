@@ -133,5 +133,8 @@ fn deciding_whether_the_canvas_is_stale_is_cheaper_than_rebuilding_it() {
     let build_ms = started.elapsed().as_secs_f64() * 1000.0 / 20.0;
 
     println!("  deep compare {compare_ms:7.3} ms   rebuild {build_ms:7.3} ms");
-    println!("  compare is {:.0}% of a rebuild", compare_ms / build_ms * 100.0);
+    println!(
+        "  compare is {:.0}% of a rebuild",
+        compare_ms / build_ms * 100.0
+    );
 }

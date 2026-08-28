@@ -36,6 +36,19 @@ const SMOOTH_SPLIT_STEPS: usize = 6;
 /// plenty of room for scoops, falls, and wide portamento.
 pub const PITCH_CURVE_MAX_CENTS: f32 = 2400.0;
 
+/// Ceiling on the spline's slope, in cents per beat.
+///
+/// Two points a thousandth of a beat apart and a hundred cents apart imply a
+/// slope of 100 000 cents per beat, and a Hermite segment built on that
+/// excursion swings far outside both of them before it comes back. A stroke
+/// drawn quickly at a high zoom produces exactly that pair. The monotone limit
+/// already bounds the curve *between* two points; this bounds what one
+/// pathologically steep pair can do to the segments either side of it.
+///
+/// Four octaves per beat is far steeper than any sung or bowed portamento and
+/// still finite.
+const MAX_TANGENT_CENTS_PER_BEAT: f32 = 4800.0;
+
 /// How the curve travels from one point to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -43,7 +56,14 @@ pub enum PitchSegmentShape {
     /// Straight ramp. The default for drawn and generated points.
     #[default]
     Linear = 0,
-    /// Cosine ease — the natural shape for a sung/bowed note transition.
+    /// Flowing spline — the natural shape for a sung or bowed line, and what
+    /// the Draw tool writes.
+    ///
+    /// A run of these is interpolated as one monotone cubic through all of
+    /// them, so the slope carries *through* each point rather than restarting
+    /// at it. See `PitchCurve::tangent_at`. The persisted tag is unchanged;
+    /// what changed is how the shape is evaluated, so an existing project reads
+    /// as the same points drawn with a smoother line.
     Smooth = 1,
     /// Step: hold this point's value until the next point.
     Hold = 2,
@@ -182,12 +202,78 @@ impl PitchCurve {
                     PitchSegmentShape::Hold => a.cents,
                     PitchSegmentShape::Linear => a.cents + (b.cents - a.cents) * t,
                     PitchSegmentShape::Smooth => {
-                        let eased = 0.5 - 0.5 * (t * std::f32::consts::PI).cos();
-                        a.cents + (b.cents - a.cents) * eased
+                        // Monotone cubic Hermite through the neighbouring
+                        // points, not a per-segment ease. See `tangent_at`.
+                        let (start, end) = (self.tangent_at(idx), self.tangent_at(idx + 1));
+                        let (t2, t3) = (t * t, t * t * t);
+                        let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+                        let h10 = t3 - 2.0 * t2 + t;
+                        let h01 = -2.0 * t3 + 3.0 * t2;
+                        let h11 = t3 - t2;
+                        h00 * a.cents + h10 * span * start + h01 * b.cents + h11 * span * end
                     }
                 }
             }
         }
+    }
+
+    /// Slope at point `index`, in cents per beat, for the smooth spline.
+    ///
+    /// This is what makes a drawn line *flow* instead of bending. A per-segment
+    /// cosine ease — what `Smooth` used to mean — starts and ends every segment
+    /// at zero slope, so the line flattens at every single control point and
+    /// each span reads as its own little S. Densely drawn, that is a visible
+    /// ripple; sparsely drawn, it is a row of plateaus joined by steep ramps.
+    /// Neither is what a pitch line looks like when a voice does it.
+    ///
+    /// Carrying a slope *through* each point instead makes the curve C¹
+    /// continuous, which is the whole difference. The slope is limited by the
+    /// **Fritsch–Carlson** rule, so the spline is monotone between points: it
+    /// passes exactly through everything drawn and never overshoots past it. An
+    /// unlimited Catmull-Rom would bulge above a peak the user drew, inventing
+    /// pitch nobody asked for — on a control that decides what a note sounds
+    /// like, that is not a cosmetic difference.
+    ///
+    /// A neighbour is only consulted when the segment joining it is itself
+    /// `Smooth`. A `Hold` or `Linear` segment is a deliberate corner, and a
+    /// spline that reached across one would round off the shape the user chose.
+    fn tangent_at(&self, index: usize) -> f32 {
+        let points = &self.points;
+        if index >= points.len() {
+            return 0.0;
+        }
+
+        let secant = |from: usize, to: usize| -> Option<f32> {
+            let (a, b) = (points.get(from)?, points.get(to)?);
+            // The segment's shape lives on its *left* endpoint.
+            if points.get(from)?.shape != PitchSegmentShape::Smooth {
+                return None;
+            }
+            let span = b.beat - a.beat;
+            (span > f32::EPSILON).then(|| (b.cents - a.cents) / span)
+        };
+
+        let incoming = index.checked_sub(1).and_then(|prev| secant(prev, index));
+        let outgoing = secant(index, index + 1);
+
+        match (incoming, outgoing) {
+            (Some(before), Some(after)) => {
+                // A local maximum or minimum: the slope there is zero, which is
+                // what stops the curve overshooting the peak.
+                if before * after <= 0.0 {
+                    return 0.0;
+                }
+                let average = (before + after) * 0.5;
+                // Fritsch-Carlson: no steeper than three times the shallower
+                // of the two secants, which is the condition for monotonicity.
+                let limit = 3.0 * before.abs().min(after.abs());
+                average.clamp(-limit, limit)
+            }
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => 0.0,
+        }
+        .max(-MAX_TANGENT_CENTS_PER_BEAT)
+        .min(MAX_TANGENT_CENTS_PER_BEAT)
     }
 
     /// Insert or replace a point at `beat`. Points closer than `merge_beats`
@@ -203,23 +289,54 @@ impl PitchCurve {
         let beat = beat.max(0.0);
         let cents = cents.clamp(-PITCH_CURVE_MAX_CENTS, PITCH_CURVE_MAX_CENTS);
         let merge = merge_beats.max(0.0);
-        if let Some(existing) = self
-            .points
-            .iter_mut()
-            .find(|p| (p.beat - beat).abs() <= merge)
-        {
+
+        // `points` is sorted by beat and every mutation keeps it that way, so
+        // the insertion point is a binary search rather than a scan, and the
+        // nearest existing point can only be one of the two straddling it.
+        //
+        // This used to scan every point and then re-sort the whole vector. Both
+        // are linear in the points already drawn, and a Draw stroke calls this
+        // once per mouse-move sample — so one stroke was quadratic in its own
+        // length and got visibly slower the longer it was drawn. Measured, four
+        // times the samples cost ten times the time; it is now close to four.
+        let insert = self.points.partition_point(|p| p.beat < beat);
+        let nearest = [insert.checked_sub(1), Some(insert)]
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.points.get(index).map(|p| (index, p)))
+            .filter(|(_, p)| (p.beat - beat).abs() <= merge)
+            .min_by(|(_, a), (_, b)| (a.beat - beat).abs().total_cmp(&(b.beat - beat).abs()))
+            .map(|(index, _)| index);
+
+        if let Some(index) = nearest {
+            let existing = &mut self.points[index];
             existing.beat = beat;
             existing.cents = cents;
             existing.shape = shape;
             let id = existing.id;
-            self.sort();
+            // Overwriting in place cannot break the ordering: the point being
+            // replaced was within `merge` of `beat` and is therefore still
+            // between the same two neighbours — unless `merge` is wide enough
+            // to reach past one of them, which only the erase paths do.
+            debug_assert!(self.is_sorted(), "set_point left the curve unsorted");
             return id;
         }
+
         let point = PitchPoint::new(beat, cents, shape);
         let id = point.id;
-        self.points.push(point);
-        self.sort();
+        self.points.insert(insert, point);
         id
+    }
+
+    /// Whether the points are in ascending beat order.
+    ///
+    /// Every method here maintains that, and the binary searches in
+    /// [`Self::set_point`] and [`Self::cents_at`] depend on it. Cheap enough to
+    /// assert in debug builds at the points where it could plausibly break.
+    pub fn is_sorted(&self) -> bool {
+        self.points
+            .windows(2)
+            .all(|pair| pair[0].beat <= pair[1].beat)
     }
 
     /// Remove every point inside `[from, to]`. Returns how many were removed.
@@ -600,5 +717,152 @@ mod tests {
         )]));
         let pitch = TimelineState::note_sounding_pitch(&note, 0.0);
         assert!((pitch - 59.63).abs() < 0.001);
+    }
+
+    fn smooth(points: &[(f32, f32)]) -> PitchCurve {
+        PitchCurve::from_points(
+            points
+                .iter()
+                .map(|&(beat, cents)| PitchPoint::new(beat, cents, PitchSegmentShape::Smooth))
+                .collect(),
+        )
+    }
+
+    /// The property that makes a drawn line read as a line and not as a chain
+    /// of separate bends: the slope carries through each control point.
+    ///
+    /// The cosine ease this replaced returned to zero slope at *every* point,
+    /// so a straight run of evenly rising points came out as a staircase of
+    /// flat spots. Sampled either side of an interior point, a flowing curve
+    /// has nearly the same slope; an easing one has nearly none.
+    #[test]
+    fn the_curve_does_not_flatten_at_every_control_point() {
+        let curve = smooth(&[(0.0, 0.0), (1.0, 100.0), (2.0, 200.0), (3.0, 300.0)]);
+        let step = 0.01;
+        let before = (curve.cents_at(1.0) - curve.cents_at(1.0 - step)) / step;
+        let after = (curve.cents_at(1.0 + step) - curve.cents_at(1.0)) / step;
+
+        // A constant-slope run must stay a constant-slope run.
+        assert!(
+            (before - 100.0).abs() < 5.0,
+            "slope into the point is {before} cents/beat, expected ~100"
+        );
+        assert!(
+            (after - 100.0).abs() < 5.0,
+            "slope out of the point is {after} cents/beat, expected ~100"
+        );
+    }
+
+    /// A straight ramp drawn as a run of smooth points must stay straight.
+    #[test]
+    fn evenly_rising_points_interpolate_as_a_straight_line() {
+        let curve = smooth(&[(0.0, 0.0), (1.0, 100.0), (2.0, 200.0)]);
+        for step in 0..=20 {
+            let beat = step as f32 * 0.1;
+            let expected = beat * 100.0;
+            assert!(
+                (curve.cents_at(beat) - expected).abs() < 1.0,
+                "at {beat} the curve reads {} but the ramp is {expected}",
+                curve.cents_at(beat)
+            );
+        }
+    }
+
+    /// Monotonicity: the curve must never leave the range of the two points it
+    /// is travelling between. An unlimited spline bulges past a peak, which on
+    /// a control that decides what a note sounds like is inventing pitch.
+    #[test]
+    fn the_curve_never_overshoots_the_points_it_passes_through() {
+        // A sharp peak and a sharp trough, the shapes that provoke overshoot.
+        let curve = smooth(&[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 400.0),
+            (3.0, 0.0),
+            (4.0, -400.0),
+            (5.0, 0.0),
+        ]);
+        for step in 0..=500 {
+            let beat = step as f32 * 0.01;
+            let value = curve.cents_at(beat);
+            assert!(
+                (-400.5..=400.5).contains(&value),
+                "at {beat} the curve reached {value}, outside the drawn range"
+            );
+        }
+        // ...and it still passes exactly through what was drawn.
+        assert!((curve.cents_at(2.0) - 400.0).abs() < 0.001);
+        assert!((curve.cents_at(4.0) + 400.0).abs() < 0.001);
+    }
+
+    /// A `Hold` or `Linear` segment is a deliberate corner. The spline must not
+    /// reach across one and round it off.
+    #[test]
+    fn a_hold_segment_stays_a_step() {
+        let curve = PitchCurve::from_points(vec![
+            PitchPoint::new(0.0, 0.0, PitchSegmentShape::Hold),
+            PitchPoint::new(1.0, 200.0, PitchSegmentShape::Smooth),
+            PitchPoint::new(2.0, 200.0, PitchSegmentShape::Smooth),
+        ]);
+        assert_eq!(curve.cents_at(0.5), 0.0);
+        assert_eq!(curve.cents_at(0.999), 0.0);
+        assert!((curve.cents_at(1.0) - 200.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_linear_segment_stays_straight() {
+        let curve = PitchCurve::from_points(vec![
+            PitchPoint::new(0.0, 0.0, PitchSegmentShape::Linear),
+            PitchPoint::new(1.0, 100.0, PitchSegmentShape::Smooth),
+            PitchPoint::new(2.0, 0.0, PitchSegmentShape::Smooth),
+        ]);
+        assert!((curve.cents_at(0.5) - 50.0).abs() < 0.001);
+        assert!((curve.cents_at(0.25) - 25.0).abs() < 0.001);
+    }
+
+    /// Two points almost on top of each other imply an enormous slope, and a
+    /// fast stroke at a high zoom produces exactly that pair. The neighbouring
+    /// segments must not swing off the screen because of it.
+    #[test]
+    fn a_near_vertical_pair_does_not_blow_up_its_neighbours() {
+        let curve = smooth(&[(0.0, 0.0), (1.0, 0.0), (1.001, 300.0), (2.0, 300.0)]);
+        for step in 0..=200 {
+            let beat = step as f32 * 0.01;
+            let value = curve.cents_at(beat);
+            assert!(
+                value.is_finite() && (-700.0..=1000.0).contains(&value),
+                "at {beat} the curve reached {value}"
+            );
+        }
+    }
+
+    /// `set_point` keeps the points sorted without a full re-sort, and the
+    /// binary search it uses depends on that. Inserted out of order, they must
+    /// still come out in order.
+    #[test]
+    fn set_point_keeps_the_curve_sorted_whatever_order_it_is_given() {
+        let mut curve = PitchCurve::default();
+        for beat in [2.0_f32, 0.5, 3.5, 1.0, 0.0, 2.75] {
+            curve.set_point(beat, beat * 10.0, PitchSegmentShape::Smooth, 0.0);
+        }
+        assert!(curve.is_sorted(), "{:?}", curve.points);
+        let beats: Vec<f32> = curve.points.iter().map(|p| p.beat).collect();
+        assert_eq!(beats, vec![0.0, 0.5, 1.0, 2.0, 2.75, 3.5]);
+    }
+
+    /// A sample within the merge distance replaces the nearest point rather
+    /// than adding one, and does not disturb the ordering.
+    #[test]
+    fn set_point_merges_into_the_nearest_point_within_range() {
+        let mut curve = PitchCurve::default();
+        let first = curve.set_point(1.0, 0.0, PitchSegmentShape::Smooth, 0.0);
+        curve.set_point(2.0, 0.0, PitchSegmentShape::Smooth, 0.0);
+
+        // Closer to the point at 1.0 than to the one at 2.0.
+        let merged = curve.set_point(1.05, 50.0, PitchSegmentShape::Smooth, 0.2);
+        assert_eq!(merged, first, "merged into the wrong point");
+        assert_eq!(curve.len(), 2);
+        assert!(curve.is_sorted());
+        assert!((curve.cents_at(1.05) - 50.0).abs() < 0.001);
     }
 }
