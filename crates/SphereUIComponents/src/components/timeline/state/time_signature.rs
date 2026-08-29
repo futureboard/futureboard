@@ -213,6 +213,13 @@ impl TimeSignatureMap {
         self.revision
     }
 
+    /// Overwrite the marker list from an undo/redo snapshot, bumping the
+    /// revision forward so downstream caches still invalidate.
+    pub fn restore_points(&mut self, points: Vec<TimeSignaturePoint>) {
+        self.points = points;
+        self.bump_revision();
+    }
+
     pub fn has_markers(&self) -> bool {
         !self.points.is_empty()
     }
@@ -534,10 +541,19 @@ impl TimelineState {
         if !self.show_time_signature_track {
             return 0.0;
         }
-        if self.time_signature_track_collapsed {
-            Self::TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED
-        } else {
-            Self::TIME_SIGNATURE_TRACK_HEIGHT
+        self.global_lane_height(GlobalLaneKind::TimeSignature)
+    }
+
+    /// Replace the whole meter map from an undo/redo snapshot. Keeps the legacy
+    /// `time_signature_num`/`_den` mirror in step and drops a selection that no
+    /// longer names a live marker.
+    pub fn restore_time_signature_state(&mut self, points: Vec<TimeSignaturePoint>) {
+        self.time_signature_map.restore_points(points);
+        self.sync_legacy_time_signature_fields();
+        if let Some(id) = self.selected_time_signature_point_id.clone() {
+            if !self.time_signature_map.points.iter().any(|p| p.id == id) {
+                self.selected_time_signature_point_id = None;
+            }
         }
     }
 

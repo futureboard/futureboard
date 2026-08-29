@@ -22,7 +22,8 @@ use crate::components::form::{
 };
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks, text_field_with_callbacks_and_ime,
-    TextInputAction, TextInputCallbacks, TextInputMouseEvent, TextInputMousePhase, TextInputState,
+    text_input_context_entries, TextInputAction, TextInputCallbacks, TextInputMouseEvent,
+    TextInputMousePhase, TextInputState,
 };
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::title_bar::external_window_titlebar_with_icon;
@@ -1810,6 +1811,22 @@ pub const ADD_TRACK_WINDOW_HEIGHT: f32 = 520.0;
 pub const ADD_TRACK_WINDOW_MIN_WIDTH: f32 = 480.0;
 pub const ADD_TRACK_WINDOW_MIN_HEIGHT: f32 = 500.0;
 
+/// Text field inside the dialog that an open context menu belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddTrackTextField {
+    Name,
+    Count,
+    InstrumentSearch,
+}
+
+/// Open text-input context menu: which field, and where it was summoned.
+#[derive(Debug, Clone, Copy)]
+struct AddTrackTextMenu {
+    field: AddTrackTextField,
+    x: f32,
+    y: f32,
+}
+
 pub struct AddTrackWindow {
     pub state: AddTrackDialogState,
     language: String,
@@ -1820,6 +1837,13 @@ pub struct AddTrackWindow {
     count_drag: Option<CountDragState>,
     color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
+    /// Cut/Copy/Paste menu for this window's text fields.
+    ///
+    /// The studio shell renders one of these from its own overlay state, but
+    /// this dialog is a separate window, so it has to own and draw its own —
+    /// which is why every field here shipped with `on_context_menu: None` and
+    /// no right-click menu at all.
+    text_context_menu: Option<AddTrackTextMenu>,
     instrument_plugin_query: String,
     instrument_search_input: TextInputState,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -1832,6 +1856,41 @@ pub struct AddTrackWindow {
 }
 
 impl AddTrackWindow {
+    fn text_input_for(&self, field: AddTrackTextField) -> &TextInputState {
+        match field {
+            AddTrackTextField::Name => &self.track_name_input,
+            AddTrackTextField::Count => &self.count_input,
+            AddTrackTextField::InstrumentSearch => &self.instrument_search_input,
+        }
+    }
+
+    fn text_input_for_mut(&mut self, field: AddTrackTextField) -> &mut TextInputState {
+        match field {
+            AddTrackTextField::Name => &mut self.track_name_input,
+            AddTrackTextField::Count => &mut self.count_input,
+            AddTrackTextField::InstrumentSearch => &mut self.instrument_search_input,
+        }
+    }
+
+    /// Push an edited field's text back into the state the dialog acts on.
+    /// Cut/Paste change the buffer without going through the key handler, so
+    /// without this the menu would edit the visible text and nothing else.
+    fn sync_text_field(&mut self, field: AddTrackTextField) {
+        match field {
+            AddTrackTextField::Name => {
+                self.state.track_name = self.track_name_input.value.clone();
+            }
+            AddTrackTextField::InstrumentSearch => {
+                self.instrument_plugin_query = self.instrument_search_input.value.clone();
+            }
+            // Count deliberately does not commit here. Typing into it does not
+            // commit either — the value lands on Enter or on blur — so
+            // committing on paste would make the menu behave unlike the
+            // keyboard and could close the editor mid-edit.
+            AddTrackTextField::Count => {}
+        }
+    }
+
     pub fn new(
         initial_state: AddTrackDialogState,
         language: impl Into<String>,
@@ -1868,6 +1927,7 @@ impl AddTrackWindow {
             count_drag: None,
             color_picker,
             open_select: None,
+            text_context_menu: None,
             instrument_plugin_query: String::new(),
             instrument_search_input,
             instrument_plugins,
@@ -2701,7 +2761,21 @@ impl Render for AddTrackWindow {
             callbacks: picker_callbacks,
         };
         let name_callbacks = TextInputCallbacks {
-            on_context_menu: None,
+            on_context_command: None,
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |pos: &(f32, f32), _w, cx| {
+                    let (x, y) = *pos;
+                    let _ = target.update(cx, |this, cx| {
+                        this.text_context_menu = Some(AddTrackTextMenu {
+                            field: AddTrackTextField::Name,
+                            x,
+                            y,
+                        });
+                        cx.notify();
+                    });
+                }
+            })),
             on_mouse: Some(Arc::new({
                 let target = target.clone();
                 move |event: &TextInputMouseEvent, _w, cx| {
@@ -2725,7 +2799,21 @@ impl Render for AddTrackWindow {
             })),
         };
         let count_callbacks = TextInputCallbacks {
-            on_context_menu: None,
+            on_context_command: None,
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |pos: &(f32, f32), _w, cx| {
+                    let (x, y) = *pos;
+                    let _ = target.update(cx, |this, cx| {
+                        this.text_context_menu = Some(AddTrackTextMenu {
+                            field: AddTrackTextField::Count,
+                            x,
+                            y,
+                        });
+                        cx.notify();
+                    });
+                }
+            })),
             on_mouse: Some(Arc::new({
                 let target = target.clone();
                 move |event: &TextInputMouseEvent, _w, cx| {
@@ -2750,7 +2838,21 @@ impl Render for AddTrackWindow {
         };
 
         let instrument_search_callbacks = TextInputCallbacks {
-            on_context_menu: None,
+            on_context_command: None,
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |pos: &(f32, f32), _w, cx| {
+                    let (x, y) = *pos;
+                    let _ = target.update(cx, |this, cx| {
+                        this.text_context_menu = Some(AddTrackTextMenu {
+                            field: AddTrackTextField::InstrumentSearch,
+                            x,
+                            y,
+                        });
+                        cx.notify();
+                    });
+                }
+            })),
             on_mouse: Some(Arc::new({
                 let target = target.clone();
                 move |event: &TextInputMouseEvent, _w, cx| {
@@ -2775,6 +2877,48 @@ impl Render for AddTrackWindow {
                 }
             })),
         };
+
+        // Cut/Copy/Paste for this window's text fields. Entries and enablement
+        // come from the same `text_input_context_entries` the studio shell uses,
+        // so the two menus cannot drift apart.
+        let text_context_overlay = self.text_context_menu.map(|menu| {
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let entries =
+                text_input_context_entries(self.text_input_for(menu.field), clipboard_has_text);
+            let command_target = cx.entity().clone();
+            let close_target = cx.entity().clone();
+            crate::components::context_menu::context_menu_overlay(
+                entries,
+                menu.x,
+                menu.y,
+                ADD_TRACK_WINDOW_WIDTH,
+                ADD_TRACK_WINDOW_HEIGHT,
+                Arc::new(move |command: &String, _window, cx| {
+                    let command = command.clone();
+                    let _ = command_target.update(cx, |this, cx| {
+                        if let Some(menu) = this.text_context_menu {
+                            let applied = this
+                                .text_input_for_mut(menu.field)
+                                .apply_context_command(&command, cx);
+                            if applied {
+                                this.sync_text_field(menu.field);
+                            }
+                        }
+                        this.text_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+                Arc::new(move |_: &(), _window, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.text_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
 
         div()
             .flex()
@@ -2819,6 +2963,7 @@ impl Render for AddTrackWindow {
             ))
             .children(dismiss_backdrop)
             .children(color_backdrop)
+            .children(text_context_overlay)
     }
 }
 

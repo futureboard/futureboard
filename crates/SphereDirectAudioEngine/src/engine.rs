@@ -4089,7 +4089,13 @@ fn audition_decode_worker(requests: Arc<AuditionRequests>, engine: std::sync::We
         if !is_current() {
             continue; // superseded while it sat in the mailbox — never decode it
         }
-        match crate::audio_file::load_audio_file(&path) {
+        // Preview only ever plays AUDITION_PREVIEW_SECONDS, so decode that head
+        // rather than the whole file. This is what makes a long stem audible at
+        // all: the full-file WAV path rejects anything >= 64 MB.
+        match crate::audio_file::load_audio_file_head(
+            &path,
+            crate::audio_file::AUDITION_PREVIEW_SECONDS,
+        ) {
             Ok(source) => {
                 if !is_current() {
                     continue; // a newer selection landed while this decoded

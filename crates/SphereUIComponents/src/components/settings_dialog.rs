@@ -2296,6 +2296,9 @@ pub struct SettingsWindow {
     settings: Entity<SettingsModel>,
     active_tab: SettingsTab,
     search_input: TextInputState,
+    /// Cut/Copy/Paste menu position for [`Self::search_input`], or `None`.
+    /// This window draws its own overlay; the studio shell's does not reach it.
+    search_context_menu: Option<(f32, f32)>,
     available_backends: Vec<String>,
     /// Backend-scoped device lists shown by the dropdowns. This is a *cache*:
     /// `render` only ever reads it. It is repopulated off the UI thread by

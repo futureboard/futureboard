@@ -15,6 +15,10 @@ use super::{
     TransportCommand,
 };
 
+/// Undo label shared by every tap in one tap-tempo session — the key the
+/// history uses to recognise the entry it should extend.
+const TAP_TEMPO_EDIT_LABEL: &str = "Tap Tempo";
+
 fn tap_tempo_now_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -67,12 +71,41 @@ impl TempoEditState {
     }
 }
 
+/// Right-click handler that opens the shared text context menu for one of the
+/// transport readout's inline editors.
+fn transport_text_context(
+    target: gpui::Entity<StudioLayout>,
+    menu_target: crate::layout::studio_state::TextMenuTarget,
+) -> crate::components::text_input::TextInputContextCb {
+    Arc::new(move |pos: &(f32, f32), _window, cx| {
+        let (x, y) = *pos;
+        let _ = target.update(cx, |layout, cx| {
+            layout.menu_bar.open_menu_id = None;
+            layout.menu_bar.submenu_path.clear();
+            layout.overlay.text_context_menu = Some(crate::layout::studio_state::TextContextMenu {
+                target: menu_target,
+                x,
+                y,
+            });
+            cx.notify();
+        });
+    })
+}
+
 fn bind_time_signature_mouse_selection(
     target: gpui::Entity<StudioLayout>,
     numerator: bool,
 ) -> TextInputCallbacks {
     TextInputCallbacks {
-        on_context_menu: None,
+        on_context_command: None,
+        on_context_menu: Some(transport_text_context(
+            target.clone(),
+            if numerator {
+                crate::layout::studio_state::TextMenuTarget::TransportTimeSigNum
+            } else {
+                crate::layout::studio_state::TextMenuTarget::TransportTimeSigDen
+            },
+        )),
         on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _window, cx| {
             let _ = target.update(cx, |layout, cx| {
                 if matches!(event.phase, TextInputMousePhase::Down) {
@@ -440,6 +473,15 @@ impl StudioLayout {
             )
         };
 
+        let on_bpm_drag_end: components::ChromeActionCb = {
+            let this = cx.entity().clone();
+            Arc::new(move |_: &(), _window: &mut Window, cx: &mut gpui::App| {
+                let _ = this.update(cx, |this, cx| {
+                    this.commit_bpm_drag(cx);
+                });
+            })
+        };
+
         let on_bpm_menu: components::BpmMenuCb = {
             let this = cx.entity().clone();
             Arc::new(
@@ -503,10 +545,18 @@ impl StudioLayout {
             })
         };
 
-        let bpm_input_callbacks =
+        let bpm_mouse_callbacks =
             bind_mouse_selection(cx.entity().clone(), |layout: &mut StudioLayout| {
                 &mut layout.tempo_edit.bpm_input
             });
+        let bpm_input_callbacks = TextInputCallbacks {
+            on_context_command: None,
+            on_context_menu: Some(transport_text_context(
+                cx.entity().clone(),
+                crate::layout::studio_state::TextMenuTarget::TransportBpm,
+            )),
+            on_mouse: bpm_mouse_callbacks.on_mouse,
+        };
         let ts_num_input_callbacks = bind_time_signature_mouse_selection(cx.entity().clone(), true);
         let ts_den_input_callbacks =
             bind_time_signature_mouse_selection(cx.entity().clone(), false);
@@ -552,6 +602,7 @@ impl StudioLayout {
             on_follow_mode_toggle,
             on_set_bpm,
             on_bpm_drag,
+            on_bpm_drag_end,
             on_bpm_menu,
             on_bpm_edit_start,
             on_tap_tempo,
@@ -585,7 +636,27 @@ impl StudioLayout {
                 None
             }
         };
+        // One undo entry per tap session, not per tap. The first tap produces no
+        // BPM, so the second is where a session first writes tempo: that tap
+        // pushes the entry, and every later tap in the session extends it. A
+        // timeout resets the tap count, so the next session starts a new entry.
+        let first_commit_of_session = self.tap_tempo.tap_count() <= 2;
+        let prev = first_commit_of_session.then(|| self.capture_tempo_state(cx));
         self.apply_bpm_value(bpm, target_point_id.as_deref(), true, cx);
+        match prev {
+            Some(prev) => {
+                self.record_tempo_edit(TAP_TEMPO_EDIT_LABEL, prev, cx);
+            }
+            None => {
+                if !self.amend_tempo_edit(TAP_TEMPO_EDIT_LABEL, cx) {
+                    // The newest entry is no longer this session's (an edit
+                    // landed in between): start a fresh one rather than
+                    // rewriting somebody else's step.
+                    let prev = self.capture_tempo_state(cx);
+                    self.record_tempo_edit(TAP_TEMPO_EDIT_LABEL, prev, cx);
+                }
+            }
+        }
     }
 
     pub(super) fn add_tempo_marker_from_current_tempo_at_playhead(

@@ -48,6 +48,7 @@ impl SettingsWindow {
             settings,
             active_tab: SettingsTab::General,
             search_input,
+            search_context_menu: None,
             available_backends,
             device_lists,
             device_lists_backend,
@@ -414,9 +415,56 @@ impl Render for SettingsWindow {
         let search_mouse_callbacks =
             bind_mouse_selection(target.clone(), |this| &mut this.search_input);
         let search_callbacks = TextInputCallbacks {
-            on_context_menu: None,
+            on_context_command: None,
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |pos: &(f32, f32), _w, cx| {
+                    let pos = *pos;
+                    let _ = target.update(cx, |this, cx| {
+                        this.search_context_menu = Some(pos);
+                        cx.notify();
+                    });
+                }
+            })),
             on_mouse: search_mouse_callbacks.on_mouse,
         };
+
+        // Same entries and enablement as the studio shell's text menu; this
+        // window just has to draw its own, since the shell's overlay does not
+        // reach a separate window.
+        let search_context_overlay = self.search_context_menu.map(|(x, y)| {
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let entries = crate::components::text_input::text_input_context_entries(
+                &self.search_input,
+                clipboard_has_text,
+            );
+            let command_target = target.clone();
+            let close_target = target.clone();
+            crate::components::context_menu::context_menu_overlay(
+                entries,
+                x,
+                y,
+                SETTINGS_WIDTH,
+                SETTINGS_HEIGHT,
+                Arc::new(move |command: &String, _window, cx| {
+                    let command = command.clone();
+                    let _ = command_target.update(cx, |this, cx| {
+                        let _ = this.search_input.apply_context_command(&command, cx);
+                        this.search_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+                Arc::new(move |_: &(), _window, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.search_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
 
         // Read cached snapshots only — no provider calls, no enumeration here.
         let latency = self.latency.clone();
@@ -595,7 +643,8 @@ impl Render for SettingsWindow {
                             }),
                     ),
             )
-            .children(combo_overlay);
+            .children(combo_overlay)
+            .children(search_context_overlay);
 
         if perf_debug {
             let blocked_ms = render_started.elapsed().as_secs_f64() * 1000.0;

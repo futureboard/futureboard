@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
+use crate::components::edit::TempoStateSnapshot;
 use crate::components::mixer_panel::{write_vsti_output_meter_key, VstiOutputMeterState};
 use crate::components::timeline::timeline_state::{ClipType, TrackOutputRouting, TrackType};
+use crate::components::timeline::Timeline;
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
@@ -55,6 +57,10 @@ pub(crate) struct BpmDragState {
     pub target_point_id: Option<String>,
     /// BPM value captured at drag start — the accumulation base.
     pub start_value: f32,
+    /// Whole tempo state captured at drag start. The scrub writes tempo live so
+    /// playback follows the pointer; this is what turns the finished gesture
+    /// into ONE undo entry instead of one per mouse-move.
+    pub gesture_origin: Option<TempoStateSnapshot>,
 }
 
 impl Default for BpmDragState {
@@ -67,6 +73,7 @@ impl Default for BpmDragState {
             scale: 1.0,
             target_point_id: None,
             start_value: 120.0,
+            gesture_origin: None,
         }
     }
 }
@@ -2152,6 +2159,7 @@ impl StudioLayout {
             };
             self.bpm_drag.target_point_id = target_point_id;
             self.bpm_drag.start_value = start_value;
+            self.bpm_drag.gesture_origin = Some(self.capture_tempo_state(cx));
             if components::bpm_debug_enabled() {
                 eprintln!(
                     "[transport-bpm] drag_start id={} start_value={:.2} target_point_id={:?} scale={:.2} anchor={:?}",
@@ -2227,7 +2235,7 @@ impl StudioLayout {
     }
 
     /// Cancel the active BPM drag, restoring the value captured at drag start.
-    /// Wired to Escape.
+    /// Wired to Escape. Records nothing: the tempo is back where it began.
     pub(super) fn cancel_bpm_drag(&mut self, cx: &mut Context<Self>) -> bool {
         if self.bpm_drag.active_id.is_none() {
             return false;
@@ -2239,12 +2247,55 @@ impl StudioLayout {
         true
     }
 
+    /// Pointer release after a BPM scrub: close the gesture as one undo entry.
+    ///
+    /// Idempotent — a release with no scrub in flight does nothing, which is
+    /// what the off-element mouse-up handler relies on.
+    pub(super) fn commit_bpm_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(prev) = self.bpm_drag.gesture_origin.take() else {
+            return;
+        };
+        self.end_bpm_drag();
+        self.record_tempo_edit("Set Tempo", prev, cx);
+    }
+
     /// Clears transient BPM-drag bookkeeping. The next `on_drag` gets a fresh
-    /// `drag_id`, so this is only needed for explicit cancel.
+    /// `drag_id`, so this is only needed for explicit cancel/commit.
     pub(super) fn end_bpm_drag(&mut self) {
         self.bpm_drag.active_id = None;
         self.bpm_drag.anchor = None;
         self.bpm_drag.accum = 0.0;
+        self.bpm_drag.gesture_origin = None;
+    }
+
+    /// Tempo snapshot of the current project state. Pair with
+    /// [`Self::record_tempo_edit`] around any tempo mutation.
+    pub(super) fn capture_tempo_state(&self, cx: &App) -> TempoStateSnapshot {
+        TempoStateSnapshot::capture(&self.timeline.read(cx).state)
+    }
+
+    /// Fold a repeated tempo gesture's later steps into the entry it already
+    /// pushed. Returns `false` when there is nothing to extend.
+    pub(super) fn amend_tempo_edit(&mut self, label: &'static str, cx: &mut Context<Self>) -> bool {
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.amend_or_record_tempo_edit(label, cx)
+        })
+    }
+
+    /// Record an already-applied tempo change as one undo entry.
+    pub(super) fn record_tempo_edit(
+        &mut self,
+        label: &'static str,
+        prev: TempoStateSnapshot,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            timeline.record_tempo_edit(label, prev, cx)
+        });
+        if changed {
+            cx.notify();
+        }
+        changed
     }
 
     /// Apply a BPM value to the correct target: a tempo marker (mapped mode) or
@@ -2347,54 +2398,168 @@ impl StudioLayout {
     /// Add a tempo marker at the current playhead using the effective BPM there.
     /// This is the primary way to introduce tempo automation from the transport.
     pub(super) fn add_tempo_marker_at_playhead(&mut self, cx: &mut Context<Self>) {
+        self.edit_tempo_state(
+            "Add Tempo Marker",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats as f64;
+                let bpm = timeline.state.effective_bpm_at_beat(beat);
+                timeline.state.tempo_map.add_or_update_point(
+                    beat,
+                    bpm,
+                    crate::components::timeline::timeline_state::TempoCurve::Hold,
+                );
+            },
+            cx,
+        );
+    }
+
+    /// Run one Tempo-lane mutation and record it as a single undo entry.
+    ///
+    /// The closure mutates `timeline.state` directly; the snapshot taken around
+    /// it turns the whole command into one reversible step. Returns `false` when
+    /// the command changed nothing, so a no-op never pushes a dead history entry
+    /// or re-syncs the engine.
+    ///
+    /// Recording routes through `EditImpact::TempoMap`, which is what marks the
+    /// project dirty and pushes the new map to the engine — that is why there is
+    /// no explicit `mark_dirty` / `sync_tempo_map_to_engine` here, and why undo
+    /// now reaches the engine the same way the original edit did.
+    pub(super) fn edit_tempo_state(
+        &mut self,
+        label: &'static str,
+        edit: impl FnOnce(&mut Timeline),
+        cx: &mut Context<Self>,
+    ) -> bool {
         let changed = self.timeline.update(cx, |timeline, cx| {
-            let beat = timeline.state.transport.playhead_beats as f64;
-            let bpm = timeline.state.effective_bpm_at_beat(beat);
-            timeline.state.tempo_map.add_or_update_point(
-                beat,
-                bpm,
-                crate::components::timeline::timeline_state::TempoCurve::Hold,
-            );
+            let prev = timeline.capture_tempo_state();
+            edit(timeline);
+            let changed = timeline.record_tempo_edit(label, prev, cx);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
             cx.notify();
-            true
+        }
+        changed
+    }
+
+    /// Run one arrangement-marker mutation and record it as a single undo entry.
+    fn edit_markers(
+        &mut self,
+        label: &'static str,
+        edit: impl FnOnce(&mut Timeline),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let prev = timeline.state.markers.clone();
+            edit(timeline);
+            let changed = timeline.record_marker_edit(label, prev, cx);
+            if changed {
+                cx.notify();
+            }
+            changed
         });
         if changed {
             self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
             cx.notify();
         }
+        changed
+    }
+
+    /// Run one arrangement-region mutation and record it as a single undo entry.
+    fn edit_regions(
+        &mut self,
+        label: &'static str,
+        edit: impl FnOnce(&mut Timeline),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let prev = timeline.state.regions.clone();
+            edit(timeline);
+            let changed = timeline.record_region_edit(label, prev, cx);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            self.mark_dirty();
+            cx.notify();
+        }
+        changed
+    }
+
+    pub(super) fn add_marker_at_beat_command(&mut self, beat: f64, cx: &mut Context<Self>) {
+        self.edit_markers(
+            "Add Marker",
+            |timeline| {
+                timeline.state.add_marker_at_beat(beat);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn add_region_at_beat_command(&mut self, beat: f64, cx: &mut Context<Self>) {
+        self.edit_regions(
+            "Add Region",
+            |timeline| {
+                timeline.state.add_region_at_beat(beat);
+            },
+            cx,
+        );
+    }
+
+    /// Time Signature counterpart of [`Self::edit_tempo_state`].
+    pub(super) fn edit_time_signature_state(
+        &mut self,
+        label: &'static str,
+        edit: impl FnOnce(&mut Timeline),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let prev = timeline.capture_time_signature_state();
+            edit(timeline);
+            let changed = timeline.record_time_signature_edit(label, prev, cx);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        if changed {
+            cx.notify();
+        }
+        changed
     }
 
     /// Remove all tempo automation, keeping the playhead BPM as a single fixed
     /// marker at beat 0.
     pub(super) fn clear_tempo_automation(&mut self, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let bpm = timeline.state.effective_bpm_at_playhead();
-            if timeline.state.tempo_map.points.len() == 1
-                && timeline
-                    .state
-                    .tempo_map
-                    .points
-                    .first()
-                    .is_some_and(|p| p.beat <= 1e-6 && (p.bpm - bpm).abs() < 1e-6)
-            {
-                return false;
-            }
-            timeline.state.bpm = bpm as f32;
-            timeline.state.tempo_map.reset_to_single_point(
-                0.0,
-                bpm,
-                crate::components::timeline::timeline_state::TempoCurve::Hold,
-            );
-            timeline.state.selected_tempo_point_id = None;
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Clear Tempo Automation",
+            |timeline| {
+                let bpm = timeline.state.effective_bpm_at_playhead();
+                if timeline.state.tempo_map.points.len() == 1
+                    && timeline
+                        .state
+                        .tempo_map
+                        .points
+                        .first()
+                        .is_some_and(|p| p.beat <= 1e-6 && (p.bpm - bpm).abs() < 1e-6)
+                {
+                    return;
+                }
+                timeline.state.bpm = bpm as f32;
+                timeline.state.tempo_map.reset_to_single_point(
+                    0.0,
+                    bpm,
+                    crate::components::timeline::timeline_state::TempoCurve::Hold,
+                );
+                timeline.state.selected_tempo_point_id = None;
+            },
+            cx,
+        );
     }
 
     pub(super) fn show_tempo_track(&mut self, cx: &mut Context<Self>) {
@@ -2438,20 +2603,15 @@ impl StudioLayout {
     }
 
     pub(super) fn add_tempo_point_at_lane(&mut self, beat: f64, bpm: f64, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.add_tempo_point(beat, bpm) {
-                timeline.state.select_tempo_point(&id);
-                cx.notify();
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Add Tempo Marker",
+            |timeline| {
+                if let Some(id) = timeline.state.add_tempo_point(beat, bpm) {
+                    timeline.state.select_tempo_point(&id);
+                }
+            },
+            cx,
+        );
     }
 
     pub(super) fn set_fixed_tempo_from_lane(
@@ -2460,33 +2620,24 @@ impl StudioLayout {
         bpm: f64,
         cx: &mut Context<Self>,
     ) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            timeline.state.set_fixed_tempo_from_beat(beat, bpm);
-            timeline.state.bpm = bpm as f32;
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Set Fixed Tempo",
+            |timeline| {
+                timeline.state.set_fixed_tempo_from_beat(beat, bpm);
+                timeline.state.bpm = bpm as f32;
+            },
+            cx,
+        );
     }
 
     pub(super) fn delete_tempo_point(&mut self, id: &str, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            if timeline.state.delete_tempo_point(id) {
-                cx.notify();
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Delete Tempo Marker",
+            |timeline| {
+                timeline.state.delete_tempo_point(id);
+            },
+            cx,
+        );
     }
 
     pub(super) fn set_tempo_point_curve(
@@ -2495,42 +2646,33 @@ impl StudioLayout {
         curve: crate::components::timeline::timeline_state::TempoCurve,
         cx: &mut Context<Self>,
     ) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            if timeline.state.set_tempo_point_curve(id, curve) {
-                cx.notify();
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Set Tempo Curve",
+            |timeline| {
+                timeline.state.set_tempo_point_curve(id, curve);
+            },
+            cx,
+        );
     }
 
     /// Convert fixed-tempo mode into a tempo map by seeding an initial marker at
     /// beat 0 using the current project BPM. No-op if automation already exists.
     pub(super) fn create_tempo_automation(&mut self, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            if timeline.state.tempo_map.has_automation() {
-                return false;
-            }
-            let bpm = timeline.state.bpm as f64;
-            timeline.state.tempo_map.add_or_update_point(
-                0.0,
-                bpm,
-                crate::components::timeline::timeline_state::TempoCurve::Hold,
-            );
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_tempo_state(
+            "Create Tempo Automation",
+            |timeline| {
+                if timeline.state.tempo_map.has_automation() {
+                    return;
+                }
+                let bpm = timeline.state.bpm as f64;
+                timeline.state.tempo_map.add_or_update_point(
+                    0.0,
+                    bpm,
+                    crate::components::timeline::timeline_state::TempoCurve::Hold,
+                );
+            },
+            cx,
+        );
     }
 
     /// Insert a tempo marker at an explicit beat using the effective BPM there
@@ -2543,32 +2685,31 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         let beat = beat.max(0.0);
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            use crate::components::timeline::timeline_state::TempoCurve;
-            if !timeline.state.tempo_map.has_automation() && create_first {
-                // Seed an anchor at beat 0 so the new marker reads as a change
-                // from the project's fixed tempo.
-                let base = timeline.state.bpm as f64;
-                if beat > 1e-6 {
-                    timeline
-                        .state
-                        .tempo_map
-                        .add_or_update_point(0.0, base, TempoCurve::Hold);
+        // One entry covers the seeded beat-0 anchor and the new marker together,
+        // so a single undo returns the project to fixed tempo.
+        self.edit_tempo_state(
+            "Add Tempo Marker",
+            |timeline| {
+                use crate::components::timeline::timeline_state::TempoCurve;
+                if !timeline.state.tempo_map.has_automation() && create_first {
+                    // Seed an anchor at beat 0 so the new marker reads as a change
+                    // from the project's fixed tempo.
+                    let base = timeline.state.bpm as f64;
+                    if beat > 1e-6 {
+                        timeline
+                            .state
+                            .tempo_map
+                            .add_or_update_point(0.0, base, TempoCurve::Hold);
+                    }
                 }
-            }
-            let bpm = timeline.state.effective_bpm_at_beat(beat);
-            timeline
-                .state
-                .tempo_map
-                .add_or_update_point(beat, bpm, TempoCurve::Hold);
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_tempo_map_to_engine(cx);
-            cx.notify();
-        }
+                let bpm = timeline.state.effective_bpm_at_beat(beat);
+                timeline
+                    .state
+                    .tempo_map
+                    .add_or_update_point(beat, bpm, TempoCurve::Hold);
+            },
+            cx,
+        );
     }
 
     /// Open the inline numeric BPM editor, seeded with the current effective
@@ -2641,7 +2782,9 @@ impl StudioLayout {
                     None
                 }
             };
+            let prev = self.capture_tempo_state(cx);
             self.apply_bpm_value(bpm, target_point_id.as_deref(), true, cx);
+            self.record_tempo_edit("Set Tempo", prev, cx);
         }
         cx.notify();
     }
@@ -2744,73 +2887,58 @@ impl StudioLayout {
     }
 
     pub(super) fn add_time_signature_marker_at_playhead(&mut self, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let beat = timeline.state.transport.playhead_beats as f64;
-            let pt = timeline
-                .state
-                .time_signature_map
-                .time_signature_at_beat(beat);
-            timeline
-                .state
-                .add_time_signature_point(beat, pt.numerator, pt.denominator);
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Add Time Signature",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats as f64;
+                let pt = timeline
+                    .state
+                    .time_signature_map
+                    .time_signature_at_beat(beat);
+                timeline
+                    .state
+                    .add_time_signature_point(beat, pt.numerator, pt.denominator);
+            },
+            cx,
+        );
     }
 
     pub(super) fn add_time_signature_point_at_beat(&mut self, beat: f64, cx: &mut Context<Self>) {
         let beat = beat.max(0.0);
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let pt = timeline
-                .state
-                .time_signature_map
-                .time_signature_at_beat(beat);
-            timeline
-                .state
-                .add_time_signature_point(beat, pt.numerator, pt.denominator);
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Add Time Signature",
+            |timeline| {
+                let pt = timeline
+                    .state
+                    .time_signature_map
+                    .time_signature_at_beat(beat);
+                timeline
+                    .state
+                    .add_time_signature_point(beat, pt.numerator, pt.denominator);
+            },
+            cx,
+        );
     }
 
     pub(super) fn clear_time_signature_markers(&mut self, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let beat = timeline.state.transport.playhead_beats as f64;
-            timeline.state.clear_time_signature_markers(beat);
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Clear Time Signatures",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats as f64;
+                timeline.state.clear_time_signature_markers(beat);
+            },
+            cx,
+        );
     }
 
     pub(super) fn delete_time_signature_point(&mut self, id: &str, cx: &mut Context<Self>) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            if timeline.state.delete_time_signature_point(id) {
-                cx.notify();
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Delete Time Signature",
+            |timeline| {
+                timeline.state.delete_time_signature_point(id);
+            },
+            cx,
+        );
     }
 
     pub(super) fn move_time_signature_point_to_playhead(
@@ -2818,20 +2946,14 @@ impl StudioLayout {
         id: &str,
         cx: &mut Context<Self>,
     ) {
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let beat = timeline.state.transport.playhead_beats as f64;
-            if timeline.state.move_time_signature_point(id, beat) {
-                cx.notify();
-                true
-            } else {
-                false
-            }
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Move Time Signature",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats as f64;
+                timeline.state.move_time_signature_point(id, beat);
+            },
+            cx,
+        );
     }
 
     pub(super) fn ts_track_context_position(&self) -> Option<f64> {
@@ -2931,24 +3053,19 @@ impl StudioLayout {
         };
 
         let point_id = self.tempo_edit.ts_edit_point_id.clone();
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let changed = if let Some(id) = point_id {
-                timeline.state.update_time_signature_point(&id, num, den)
-            } else {
-                let beat = timeline.state.transport.playhead_beats as f64;
-                timeline.state.add_time_signature_point(beat, num, den);
-                true
-            };
-            if changed {
-                cx.notify();
-            }
-            changed
-        });
+        self.edit_time_signature_state(
+            "Edit Time Signature",
+            |timeline| {
+                if let Some(id) = point_id {
+                    timeline.state.update_time_signature_point(&id, num, den);
+                } else {
+                    let beat = timeline.state.transport.playhead_beats as f64;
+                    timeline.state.add_time_signature_point(beat, num, den);
+                }
+            },
+            cx,
+        );
         self.tempo_edit.ts_edit_point_id = None;
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-        }
         cx.notify();
     }
 

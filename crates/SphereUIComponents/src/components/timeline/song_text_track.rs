@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::components::timeline::global_lane_header::{
-    global_lane_header, GlobalLaneHeaderActions,
+    global_lane_header, global_lane_resize_handle, GlobalLaneHeaderActions, GlobalLaneResizeArmCb,
+    GlobalLaneResizeResetCb,
 };
 use crate::components::timeline::timeline_grid::timeline_grid;
-use crate::components::timeline::timeline_state::{SongTextEventType, TimelineState};
+use crate::components::timeline::timeline_state::{
+    GlobalLaneKind, SongTextEventType, TimelineState,
+};
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -13,14 +16,18 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window,
 };
 
-/// Song Text lane height (px).
+/// Default Song Text lane height (px).
 ///
 /// Trimmed from 58 to sit in the same secondary band as the other global lanes.
-/// `ROW_HEIGHT` is 18, so this holds 2 rows of colliding text markers where 58
-/// held 3 — a third simultaneous overlap now stacks past the lane instead of
-/// getting its own row.
+/// The lane is resizable, so this is the starting height, not a fixed one: the
+/// three marker rows always divide the lane's live height.
 pub const SONG_TEXT_LANE_HEIGHT: f32 = 44.0;
-const ROW_HEIGHT: f32 = 18.0;
+
+/// Section / chord / lyric — the lane always shows exactly these three rows.
+const SONG_TEXT_ROWS: usize = 3;
+
+/// Floor for a divided row so the chips stay legible in a squeezed lane.
+const MIN_ROW_HEIGHT: f32 = 10.0;
 
 #[derive(Clone, Debug)]
 pub struct SongTextDragSession {
@@ -90,8 +97,14 @@ pub fn song_text_track_lane(
     on_marker_context: Option<SongTextMarkerContextCallback>,
     on_empty_seek: SongTextLaneSeekCallback,
     on_hide: Option<GlobalLaneVoidCallback>,
+    on_resize_arm: Option<GlobalLaneResizeArmCb>,
+    on_resize_reset: Option<GlobalLaneResizeResetCb>,
 ) -> impl IntoElement {
     let lane_width = state.viewport.viewport_width.max(1.0);
+    // The lane is resizable, so its three marker rows divide whatever height it
+    // currently has instead of the design-time constant.
+    let lane_height = state.song_text_track_height();
+    let row_height = (lane_height / SONG_TEXT_ROWS as f32).max(MIN_ROW_HEIGHT);
     let overscan_beats = 160.0 / state.viewport.pixels_per_beat.max(1.0) as f64;
     let start_beat = (state.x_to_beat(0.0) - overscan_beats).max(0.0);
     let end_beat = state.x_to_beat(lane_width) + overscan_beats;
@@ -144,10 +157,14 @@ pub fn song_text_track_lane(
             collision_level[row] = 0;
         }
         let compact = collision_level[row] == 1;
-        let marker_height = if compact { 8.0 } else { 15.0 };
-        let top = row as f32 * ROW_HEIGHT
+        let marker_height = if compact {
+            (row_height * 0.45).clamp(7.0, 16.0)
+        } else {
+            (row_height - 3.0).clamp(11.0, 30.0)
+        };
+        let top = row as f32 * row_height
             + if compact {
-                ROW_HEIGHT - marker_height - 1.0
+                row_height - marker_height - 1.0
             } else {
                 1.0
             };
@@ -320,10 +337,15 @@ pub fn song_text_track_lane(
         },
     );
 
+    let resize_handle = on_resize_arm
+        .zip(on_resize_reset)
+        .map(|(arm, reset)| global_lane_resize_handle(GlobalLaneKind::SongText, arm, reset));
+
     div()
         .flex()
         .flex_row()
-        .h(px(SONG_TEXT_LANE_HEIGHT))
+        .relative()
+        .h(px(lane_height))
         .w_full()
         .bg(Colors::surface_panel_alt())
         .border_b(px(1.0))
@@ -336,11 +358,12 @@ pub fn song_text_track_lane(
                 .relative()
                 .overflow_hidden()
                 .bg(Colors::timeline_content_background())
-                .child(timeline_grid(state, lane_width, SONG_TEXT_LANE_HEIGHT))
+                .child(timeline_grid(state, lane_width, lane_height))
                 .child(empty_seek)
                 .children(markers)
                 .children(crate::perf::debug_clip_outline()),
         )
+        .children(resize_handle)
 }
 
 #[cfg(test)]

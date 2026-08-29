@@ -1,10 +1,11 @@
 use crate::components::timeline::global_lane_header::{
-    global_lane_header, GlobalLaneHeaderActions,
+    global_lane_header, global_lane_resize_handle, GlobalLaneHeaderActions, GlobalLaneResizeArmCb,
+    GlobalLaneResizeResetCb,
 };
 use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
 use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{
-    bpm_to_y, TempoMap, TimelineState, TEMPO_LANE_PAD,
+    bpm_to_y, GlobalLaneKind, TempoMap, TimelineState, TEMPO_LANE_PAD,
 };
 use crate::theme::Colors;
 use gpui::{
@@ -39,6 +40,8 @@ pub fn tempo_track_lane(
     on_header_menu: Option<GlobalLaneMenuCallback>,
     on_hide: Option<GlobalLaneVoidCallback>,
     on_toggle_collapsed: Option<GlobalLaneVoidCallback>,
+    on_resize_arm: Option<GlobalLaneResizeArmCb>,
+    on_resize_reset: Option<GlobalLaneResizeResetCb>,
 ) -> impl IntoElement {
     let (min_bpm, max_bpm) = state.tempo_lane_bpm_range();
     let lane_w = state.viewport.viewport_width.max(1.0);
@@ -253,9 +256,14 @@ pub fn tempo_track_lane(
         },
     );
 
+    let resize_handle = on_resize_arm
+        .zip(on_resize_reset)
+        .map(|(arm, reset)| global_lane_resize_handle(GlobalLaneKind::Tempo, arm, reset));
+
     div()
         .flex()
         .flex_row()
+        .relative()
         .h(px(lane_height))
         .w_full()
         .bg(Colors::surface_panel_alt())
@@ -281,4 +289,5 @@ pub fn tempo_track_lane(
                 // Debug: outline tempo_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline()),
         )
+        .children(resize_handle)
 }

@@ -3,10 +3,77 @@
 use std::collections::VecDeque;
 
 use crate::components::timeline::timeline_state::{
-    AudioClipStretchState, AutomationLaneState, ClipState, MidiArticulationEvent,
-    MidiControllerKind, MidiControllerPoint, MidiNoteState, SongTextEvent, TimelineState,
+    AudioClipStretchState, AutomationLaneState, ClipState, GlobalLaneHeights,
+    MidiArticulationEvent, MidiControllerKind, MidiControllerPoint, MidiNoteState, SongTextEvent,
+    TempoPoint, TimeSignaturePoint, TimelineMarkerState, TimelineRegionState, TimelineState,
     TrackState,
 };
+
+/// How a command's effect has to be propagated after execute / undo / redo.
+///
+/// Every command answers this once, so the four entry points (run, record,
+/// undo, redo) route a change the same way. Undo used to only distinguish
+/// "metadata or not", which is why undoing a conductor edit left the engine
+/// holding the old tempo/meter map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditImpact {
+    /// Structural project / audio-graph change.
+    Project,
+    /// MIDI content change — publish to the scheduler immediately.
+    Midi,
+    /// Persisted UI metadata; never invalidates the audio graph.
+    Metadata,
+    /// Pure view state (global lane heights). Not persisted and not part of the
+    /// audio graph, so it must not mark the project dirty — it is undoable only
+    /// so the gesture behaves like every other resize in the arrangement.
+    View,
+    /// Tempo map or fixed BPM — the engine needs a fresh `set_tempo_map`.
+    TempoMap,
+    /// Time-signature map — the engine needs a fresh meter map.
+    TimeSignatureMap,
+}
+
+/// Snapshot of the project's tempo state for undo/redo.
+///
+/// The Tempo lane edits the marker list and the fixed project BPM together
+/// (clearing automation folds the effective BPM back into `bpm`), so one
+/// history entry has to carry both halves or undo restores a mismatched pair.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempoStateSnapshot {
+    pub points: Vec<TempoPoint>,
+    pub bpm: f32,
+}
+
+impl TempoStateSnapshot {
+    pub fn capture(state: &TimelineState) -> Self {
+        Self {
+            points: state.tempo_map.points.clone(),
+            bpm: state.bpm,
+        }
+    }
+
+    pub fn apply(&self, state: &mut TimelineState) {
+        state.restore_tempo_state(self.points.clone(), self.bpm);
+    }
+}
+
+/// Snapshot of the project's time-signature markers for undo/redo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeSignatureStateSnapshot {
+    pub points: Vec<TimeSignaturePoint>,
+}
+
+impl TimeSignatureStateSnapshot {
+    pub fn capture(state: &TimelineState) -> Self {
+        Self {
+            points: state.time_signature_map.points.clone(),
+        }
+    }
+
+    pub fn apply(&self, state: &mut TimelineState) {
+        state.restore_time_signature_state(self.points.clone());
+    }
+}
 
 /// Snapshot of a clip plus its owning track for undo/redo.
 #[derive(Debug, Clone)]
@@ -202,28 +269,75 @@ pub enum EditCommand {
         previous: Vec<SongTextEvent>,
         next: Vec<SongTextEvent>,
     },
+    /// One Tempo-lane gesture or command (add / move / delete / curve / clear /
+    /// fixed-BPM edit). Snapshots the whole tempo state rather than a single
+    /// marker: adding the first marker *seeds* an anchor at beat 0, clearing
+    /// folds the effective BPM back into the fixed `bpm`, and a drag can reorder
+    /// the list — none of which a per-point command could reverse exactly.
+    SetTempoState {
+        label: &'static str,
+        prev: TempoStateSnapshot,
+        next: TempoStateSnapshot,
+    },
+    /// One Time Signature-lane gesture or command. Whole-map snapshot for the
+    /// same reason as [`EditCommand::SetTempoState`].
+    SetTimeSignatureState {
+        label: &'static str,
+        prev: TimeSignatureStateSnapshot,
+        next: TimeSignatureStateSnapshot,
+    },
+    /// Arrangement marker list (add / import / delete). Markers are a small
+    /// sorted list with no per-item identity beyond the id, so the whole vec is
+    /// the cheapest exact snapshot.
+    SetMarkers {
+        label: &'static str,
+        prev: Vec<TimelineMarkerState>,
+        next: Vec<TimelineMarkerState>,
+    },
+    /// Arrangement region list (add / delete / one completed drag).
+    SetRegions {
+        label: &'static str,
+        prev: Vec<TimelineRegionState>,
+        next: Vec<TimelineRegionState>,
+    },
+    /// One global-lane height gesture (drag or reset-to-default). View state, so
+    /// it never invalidates the audio graph.
+    SetGlobalLaneHeights {
+        prev: GlobalLaneHeights,
+        next: GlobalLaneHeights,
+    },
 }
 
 impl EditCommand {
-    /// MIDI content changes are cheap to identify at the command boundary.
-    /// The owner uses this to publish a note edit immediately instead of
-    /// waiting for the general 75 ms gesture-sync throttle.
-    pub fn is_midi_edit(&self) -> bool {
-        matches!(
-            self,
+    /// How this command's effect must reach the rest of the app. Answered once
+    /// here so execute, record, undo, and redo all propagate it identically.
+    pub fn impact(&self) -> EditImpact {
+        match self {
+            // MIDI content changes are cheap to identify at the command
+            // boundary. The owner uses this to publish a note edit immediately
+            // instead of waiting for the general 75 ms gesture-sync throttle.
             EditCommand::CreateMidiNote { .. }
-                | EditCommand::CreateMidiNotes { .. }
-                | EditCommand::DeleteMidiNotes { .. }
-                | EditCommand::SetMidiNotesMuted { .. }
-                | EditCommand::EditMidiNotes { .. }
-                | EditCommand::SetControllerPoints { .. }
-                | EditCommand::SetMidiArticulations { .. }
-                | EditCommand::SplitMidiNote { .. }
-        )
+            | EditCommand::CreateMidiNotes { .. }
+            | EditCommand::DeleteMidiNotes { .. }
+            | EditCommand::SetMidiNotesMuted { .. }
+            | EditCommand::EditMidiNotes { .. }
+            | EditCommand::SetControllerPoints { .. }
+            | EditCommand::SetMidiArticulations { .. }
+            | EditCommand::SplitMidiNote { .. } => EditImpact::Midi,
+            EditCommand::SetSongTextEvents { .. } => EditImpact::Metadata,
+            EditCommand::SetGlobalLaneHeights { .. } => EditImpact::View,
+            EditCommand::SetTempoState { .. } => EditImpact::TempoMap,
+            EditCommand::SetTimeSignatureState { .. } => EditImpact::TimeSignatureMap,
+            _ => EditImpact::Project,
+        }
+    }
+
+    pub fn is_midi_edit(&self) -> bool {
+        self.impact() == EditImpact::Midi
     }
 
     pub fn is_metadata_only(&self) -> bool {
-        matches!(self, EditCommand::SetSongTextEvents { .. })
+        self.impact() == EditImpact::Metadata
     }
 
     pub fn label(&self) -> &'static str {
@@ -258,6 +372,11 @@ impl EditCommand {
             EditCommand::SetTrackPan { .. } => "Set Pan",
             EditCommand::SetTrackVolumeAutomationRead { .. } => "Set Volume Automation Read",
             EditCommand::SetSongTextEvents { label, .. } => label,
+            EditCommand::SetTempoState { label, .. } => label,
+            EditCommand::SetTimeSignatureState { label, .. } => label,
+            EditCommand::SetMarkers { label, .. } => label,
+            EditCommand::SetRegions { label, .. } => label,
+            EditCommand::SetGlobalLaneHeights { .. } => "Resize Lane",
         }
     }
 
@@ -417,6 +536,17 @@ impl EditCommand {
             EditCommand::SetSongTextEvents { previous, next, .. } => {
                 apply_song_text_snapshot(state, previous, next);
             }
+            EditCommand::SetTempoState { next, .. } => next.apply(state),
+            EditCommand::SetTimeSignatureState { next, .. } => next.apply(state),
+            EditCommand::SetMarkers { next, .. } => {
+                state.markers = next.clone();
+            }
+            EditCommand::SetRegions { next, .. } => {
+                state.regions = next.clone();
+            }
+            EditCommand::SetGlobalLaneHeights { next, .. } => {
+                state.global_lane_heights = next.clone();
+            }
         }
     }
 
@@ -548,6 +678,17 @@ impl EditCommand {
             }
             EditCommand::SetSongTextEvents { previous, next, .. } => {
                 apply_song_text_snapshot(state, next, previous);
+            }
+            EditCommand::SetTempoState { prev, .. } => prev.apply(state),
+            EditCommand::SetTimeSignatureState { prev, .. } => prev.apply(state),
+            EditCommand::SetMarkers { prev, .. } => {
+                state.markers = prev.clone();
+            }
+            EditCommand::SetRegions { prev, .. } => {
+                state.regions = prev.clone();
+            }
+            EditCommand::SetGlobalLaneHeights { prev, .. } => {
+                state.global_lane_heights = prev.clone();
             }
         }
     }
@@ -949,6 +1090,272 @@ mod articulation_command_tests {
     }
 }
 
+/// The conductor lanes (tempo, meter, markers, regions) used to mutate the
+/// project outside the command system entirely, so none of them could be undone
+/// or redone. These guard the round trip *and* the impact routing, because an
+/// undone tempo edit that does not report `TempoMap` leaves the engine holding
+/// the old map even though the UI shows the old value.
+#[cfg(test)]
+mod conductor_command_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        GlobalLaneHeights, GlobalLaneKind, TempoCurve, TimelineMarkerState, TimelineRegionState,
+    };
+
+    fn tempo_command(state: &mut TimelineState, label: &'static str) -> EditCommand {
+        let prev = TempoStateSnapshot::capture(state);
+        state
+            .tempo_map
+            .add_or_update_point(8.0, 150.0, TempoCurve::Hold);
+        let next = TempoStateSnapshot::capture(state);
+        EditCommand::SetTempoState { label, prev, next }
+    }
+
+    #[test]
+    fn tempo_marker_add_undoes_and_redoes() {
+        let mut state = TimelineState::default();
+        let mut history = EditHistory::new(8);
+        let cmd = tempo_command(&mut state, "Add Tempo Marker");
+        history.push(cmd);
+        assert_eq!(state.tempo_map.points.len(), 1);
+
+        assert_eq!(
+            history.undo_with_impact(&mut state),
+            Some(EditImpact::TempoMap)
+        );
+        assert!(
+            state.tempo_map.points.is_empty(),
+            "undo must remove the marker"
+        );
+
+        assert_eq!(
+            history.redo_with_impact(&mut state),
+            Some(EditImpact::TempoMap)
+        );
+        assert_eq!(state.tempo_map.points.len(), 1, "redo must put it back");
+        assert!((state.tempo_map.points[0].bpm - 150.0).abs() < 1e-9);
+    }
+
+    /// Clearing automation folds the effective BPM into the fixed `bpm`, so an
+    /// entry that only snapshotted the marker list would restore the markers but
+    /// leave the project tempo at the folded value.
+    #[test]
+    fn clearing_tempo_automation_restores_the_fixed_bpm_too() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 90.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(16.0, 140.0, TempoCurve::Hold);
+
+        let prev = TempoStateSnapshot::capture(&state);
+        state.bpm = 90.0;
+        state
+            .tempo_map
+            .reset_to_single_point(0.0, 90.0, TempoCurve::Hold);
+        let next = TempoStateSnapshot::capture(&state);
+        let cmd = EditCommand::SetTempoState {
+            label: "Clear Tempo Automation",
+            prev,
+            next,
+        };
+
+        cmd.undo(&mut state);
+        assert_eq!(state.tempo_map.points.len(), 2);
+        assert!(
+            (state.bpm - 120.0).abs() < 1e-6,
+            "fixed BPM must come back too"
+        );
+
+        cmd.execute(&mut state);
+        assert_eq!(state.tempo_map.points.len(), 1);
+        assert!((state.bpm - 90.0).abs() < 1e-6);
+    }
+
+    /// Restoring an older marker list must not rewind the revision counter that
+    /// the renderer and engine caches diff against.
+    #[test]
+    fn tempo_undo_moves_the_map_revision_forward() {
+        let mut state = TimelineState::default();
+        let cmd = tempo_command(&mut state, "Add Tempo Marker");
+        let after_edit = state.tempo_map.revision();
+        cmd.undo(&mut state);
+        assert!(
+            state.tempo_map.revision() > after_edit,
+            "revision must keep increasing so caches still invalidate"
+        );
+    }
+
+    #[test]
+    fn time_signature_marker_undoes_and_redoes() {
+        let mut state = TimelineState::default();
+        state.time_signature_map.ensure_default_point();
+        let mut history = EditHistory::new(8);
+
+        let prev = TimeSignatureStateSnapshot::capture(&state);
+        state.add_time_signature_point(8.0, 7, 8);
+        let next = TimeSignatureStateSnapshot::capture(&state);
+        history.push(EditCommand::SetTimeSignatureState {
+            label: "Add Time Signature",
+            prev,
+            next,
+        });
+        assert_eq!(state.time_signature_map.points.len(), 2);
+
+        assert_eq!(
+            history.undo_with_impact(&mut state),
+            Some(EditImpact::TimeSignatureMap)
+        );
+        assert_eq!(state.time_signature_map.points.len(), 1);
+
+        assert_eq!(
+            history.redo_with_impact(&mut state),
+            Some(EditImpact::TimeSignatureMap)
+        );
+        assert_eq!(state.time_signature_map.points.len(), 2);
+        assert_eq!(state.time_signature_map.points[1].numerator, 7);
+    }
+
+    #[test]
+    fn marker_and_region_edits_round_trip() {
+        let mut state = TimelineState::default();
+        let mut history = EditHistory::new(8);
+
+        let prev_markers = state.markers.clone();
+        state.add_marker_at_beat(12.0);
+        history.push(EditCommand::SetMarkers {
+            label: "Add Marker",
+            prev: prev_markers,
+            next: state.markers.clone(),
+        });
+
+        let prev_regions = state.regions.clone();
+        let region_id = state.add_region_at_beat(4.0);
+        history.push(EditCommand::SetRegions {
+            label: "Add Region",
+            prev: prev_regions,
+            next: state.regions.clone(),
+        });
+
+        assert!(history.undo(&mut state));
+        assert!(state.regions.is_empty(), "region undo comes first");
+        assert_eq!(state.markers.len(), 1, "the marker entry is still below it");
+
+        assert!(history.undo(&mut state));
+        assert!(state.markers.is_empty());
+
+        assert!(history.redo(&mut state));
+        assert_eq!(state.markers.len(), 1);
+        assert!(history.redo(&mut state));
+        assert_eq!(state.regions.len(), 1);
+        assert_eq!(state.regions[0].id, region_id);
+    }
+
+    #[test]
+    fn region_drag_round_trips_through_one_entry() {
+        let mut state = TimelineState::default();
+        let id = state.add_region_at_beat(4.0);
+        let prev = state.regions.clone();
+        // Several drag frames, as the ruler produces them.
+        for end in [9.0, 10.0, 11.5] {
+            state.update_region_range(&id, 4.0, end);
+        }
+        let cmd = EditCommand::SetRegions {
+            label: "Move Region",
+            prev,
+            next: state.regions.clone(),
+        };
+        assert!((state.regions[0].end_beat - 11.5).abs() < 1e-9);
+
+        cmd.undo(&mut state);
+        assert!(
+            (state.regions[0].end_beat - 8.0).abs() < 1e-9,
+            "one undo must return to the pre-drag range, not the previous frame"
+        );
+    }
+
+    /// Lane heights are session view state: undoable like any other resize, but
+    /// they must never report themselves as a project or engine change.
+    #[test]
+    fn global_lane_height_is_undoable_view_state() {
+        let mut state = TimelineState::default();
+        let mut history = EditHistory::new(4);
+        let prev = state.global_lane_heights.clone();
+        let mut next = GlobalLaneHeights::default();
+        next.set(GlobalLaneKind::Tempo, Some(120.0));
+
+        history.push(EditCommand::SetGlobalLaneHeights {
+            prev,
+            next: next.clone(),
+        });
+        state.global_lane_heights = next;
+        assert!((state.tempo_track_height() - 120.0).abs() < 0.01);
+
+        assert_eq!(history.undo_with_impact(&mut state), Some(EditImpact::View));
+        assert!(
+            (state.tempo_track_height()
+                - TimelineState::global_lane_default_height(GlobalLaneKind::Tempo))
+            .abs()
+                < 0.01
+        );
+    }
+
+    /// Repeated taps in one tap-tempo session extend a single entry; an
+    /// unrelated newest entry is never rewritten.
+    #[test]
+    fn tap_tempo_amends_its_own_entry_only() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        let mut history = EditHistory::new(8);
+
+        let prev = TempoStateSnapshot::capture(&state);
+        state.bpm = 128.0;
+        history.push(EditCommand::SetTempoState {
+            label: "Tap Tempo",
+            prev,
+            next: TempoStateSnapshot::capture(&state),
+        });
+
+        state.bpm = 131.0;
+        assert!(history.amend_tempo_state("Tap Tempo", TempoStateSnapshot::capture(&state)));
+        assert!(
+            history.undo(&mut state),
+            "the whole session is still one step"
+        );
+        assert!((state.bpm - 120.0).abs() < 1e-6);
+        assert!(history.redo(&mut state));
+        assert!(
+            (state.bpm - 131.0).abs() < 1e-6,
+            "redo must land on the last tap, not the first"
+        );
+
+        // A marker edit on top must be untouchable by a later tap.
+        history.push(EditCommand::SetMarkers {
+            label: "Add Marker",
+            prev: Vec::new(),
+            next: vec![TimelineMarkerState::new(0.0, "A", "#ffffff")],
+        });
+        assert!(!history.amend_tempo_state("Tap Tempo", TempoStateSnapshot::capture(&state)));
+    }
+
+    #[test]
+    fn region_snapshot_type_is_the_state_type() {
+        // Guards the command against silently drifting from the state model.
+        let region = TimelineRegionState::new(0.0, 4.0, "A", "#42C7A3");
+        let cmd = EditCommand::SetRegions {
+            label: "Add Region",
+            prev: Vec::new(),
+            next: vec![region.clone()],
+        };
+        let mut state = TimelineState::default();
+        cmd.execute(&mut state);
+        assert_eq!(state.regions, vec![region]);
+        assert_eq!(cmd.impact(), EditImpact::Project);
+    }
+}
+
 fn restore_track_snapshot(state: &mut TimelineState, snapshot: &TrackSnapshot) {
     if state
         .tracks
@@ -988,28 +1395,52 @@ impl EditHistory {
         self.redo_stack.clear();
     }
 
-    pub fn undo_with_impact(&mut self, state: &mut TimelineState) -> Option<bool> {
+    pub fn undo_with_impact(&mut self, state: &mut TimelineState) -> Option<EditImpact> {
         let cmd = self.undo_stack.pop_back()?;
-        let metadata_only = cmd.is_metadata_only();
+        let impact = cmd.impact();
         cmd.undo(state);
         self.redo_stack.push_back(cmd);
-        Some(metadata_only)
+        Some(impact)
     }
 
     pub fn undo(&mut self, state: &mut TimelineState) -> bool {
         self.undo_with_impact(state).is_some()
     }
 
-    pub fn redo_with_impact(&mut self, state: &mut TimelineState) -> Option<bool> {
+    pub fn redo_with_impact(&mut self, state: &mut TimelineState) -> Option<EditImpact> {
         let cmd = self.redo_stack.pop_back()?;
-        let metadata_only = cmd.is_metadata_only();
+        let impact = cmd.impact();
         cmd.execute(state);
         self.undo_stack.push_back(cmd);
-        Some(metadata_only)
+        Some(impact)
     }
 
     pub fn redo(&mut self, state: &mut TimelineState) -> bool {
         self.redo_with_impact(state).is_some()
+    }
+
+    /// Extend the newest entry when it is a tempo entry with `label`, instead
+    /// of pushing another step. Lets a repeated gesture that fires many small
+    /// commits — tap tempo taps in one session — stay a single undo step while
+    /// still ending on the final value.
+    ///
+    /// Returns `false` when the newest entry is something else, so the caller
+    /// falls back to a normal push and never rewrites an unrelated edit.
+    pub fn amend_tempo_state(&mut self, label: &'static str, next: TempoStateSnapshot) -> bool {
+        let Some(EditCommand::SetTempoState {
+            label: top_label,
+            next: top_next,
+            ..
+        }) = self.undo_stack.back_mut()
+        else {
+            return false;
+        };
+        if *top_label != label {
+            return false;
+        }
+        *top_next = next;
+        self.redo_stack.clear();
+        true
     }
 
     pub fn can_undo(&self) -> bool {

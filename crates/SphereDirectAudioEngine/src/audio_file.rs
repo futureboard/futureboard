@@ -692,6 +692,89 @@ pub fn probe_audio_file(path: impl AsRef<Path>) -> Result<AudioFileInfo, SphereA
 /// `mov` (audio track only — the Video track's sound).
 ///
 /// Returns an error string on failure; the caller logs it and skips the clip.
+/// Decode only the first `max_seconds` of `path`, for the Browser preview.
+///
+/// The preview voice never plays more than [`AUDITION_PREVIEW_SECONDS`], so
+/// decoding the whole file to throw almost all of it away is pure latency: a
+/// 100 MB stem cost a 100 MB read plus a ~200 MB `Vec` before a single sample
+/// was audible. Worse, `load_wav` *refuses* files at or above
+/// [`STREAMING_WAV_THRESHOLD_BYTES`] (64 MB), so previewing an ordinary long
+/// stem failed outright and the Browser simply never played anything.
+///
+/// Reading a bounded head sidesteps both: the size guard is about how much is
+/// held in memory, and this holds seconds rather than files.
+pub fn load_audio_file_head(path: &str, max_seconds: f64) -> Result<AudioFileBuffer, String> {
+    let p = Path::new(path);
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match ext.as_str() {
+        "wav" | "wave" => load_wav_head(p, max_seconds),
+        // Symphonia and RAUF still decode in full. They are bounded by
+        // `MAX_IN_MEMORY_DECODE_BYTES` (256 MB) rather than the 64 MB WAV
+        // threshold, so they do not hit the failure above; trimming them is a
+        // latency win, not a correctness fix, and is left for a separate change.
+        _ => load_audio_file(path),
+    }
+}
+
+/// Read at most `max_seconds` of PCM from the head of a WAV's data chunk.
+///
+/// Deliberately does not go through [`load_wav`]: that reads the entire file
+/// into memory first, which is the cost this exists to avoid.
+fn load_wav_head(path: &Path, max_seconds: f64) -> Result<AudioFileBuffer, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = File::open(path).map_err(|e| format!("open failed: {e}"))?;
+    let (fmt, data_start, data_len) = read_wav_header(&mut file)?;
+    if fmt.channels == 0 || fmt.sample_rate == 0 {
+        return Err("invalid channel count or sample rate".to_string());
+    }
+
+    let bytes_per_sample = match fmt.bits_per_sample {
+        8 => 1usize,
+        16 => 2,
+        24 => 3,
+        32 => 4,
+        bits => return Err(format!("unsupported WAV bit depth: {bits}")),
+    };
+    let bytes_per_frame = fmt.channels * bytes_per_sample;
+    if bytes_per_frame == 0 || (data_len as usize) < bytes_per_frame {
+        return Err("empty WAV data".to_string());
+    }
+
+    let available_frames = data_len as usize / bytes_per_frame;
+    let wanted_frames = (max_seconds.max(0.0) * fmt.sample_rate as f64).ceil() as usize;
+    let frames = available_frames.min(wanted_frames.max(1));
+    let read_len = frames * bytes_per_frame;
+
+    file.seek(SeekFrom::Start(data_start))
+        .map_err(|e| format!("seek failed: {e}"))?;
+    let mut bytes = vec![0u8; read_len];
+    file.read_exact(&mut bytes)
+        .map_err(|e| format!("read failed: {e}"))?;
+
+    // `decode_wav_sample` indexes the buffer it is given, so offsets here are
+    // relative to the head we just read, not to the start of the file.
+    let sample_count = frames * fmt.channels;
+    let mut samples = Vec::with_capacity(sample_count);
+    let mut offset = 0usize;
+    for _ in 0..sample_count {
+        samples.push(decode_wav_sample(&bytes, offset, &fmt)?);
+        offset += bytes_per_sample;
+    }
+
+    Ok(AudioFileBuffer {
+        sample_rate: fmt.sample_rate,
+        channels: fmt.channels,
+        frames,
+        samples,
+    })
+}
+
 pub fn load_audio_file(path: &str) -> Result<AudioFileBuffer, String> {
     let p = Path::new(path);
     let ext = p
@@ -1750,5 +1833,102 @@ mod peak_tests {
             "finest LOD must stay bounded to real frames, got {}",
             finest.peaks.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod audition_head_tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// 16-bit stereo WAV of `frames` frames at 48 kHz.
+    fn write_wav(path: &Path, frames: usize) {
+        let sample_rate = 48_000u32;
+        let channels = 2u16;
+        let bits = 16u16;
+        let bytes_per_frame = (channels * bits / 8) as usize;
+        let data_len = frames * bytes_per_frame;
+        let mut out: Vec<u8> = Vec::with_capacity(44 + data_len);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        out.extend_from_slice(&channels.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * bytes_per_frame as u32).to_le_bytes());
+        out.extend_from_slice(&(bytes_per_frame as u16).to_le_bytes());
+        out.extend_from_slice(&bits.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for i in 0..frames {
+            let v = ((i % 1000) as i16).wrapping_mul(30);
+            out.extend_from_slice(&v.to_le_bytes());
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut f = File::create(path).unwrap();
+        f.write_all(&out).unwrap();
+    }
+
+    fn temp_wav(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fb_audition_head_{label}_{}_{}.wav",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    /// The head decode stops at the requested duration instead of reading the
+    /// whole file.
+    #[test]
+    fn head_decode_truncates_to_requested_seconds() {
+        let path = temp_wav("truncate");
+        write_wav(&path, 48_000 * 10); // 10 seconds
+        let buf = load_audio_file_head(path.to_str().unwrap(), AUDITION_PREVIEW_SECONDS).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(buf.sample_rate, 48_000);
+        assert_eq!(buf.channels, 2);
+        assert_eq!(buf.frames, (AUDITION_PREVIEW_SECONDS * 48_000.0) as usize);
+        assert_eq!(buf.samples.len(), buf.frames * 2);
+    }
+
+    /// A file shorter than the preview window is returned whole — the limit
+    /// only ever truncates.
+    #[test]
+    fn head_decode_keeps_short_files_intact() {
+        let path = temp_wav("short");
+        write_wav(&path, 4_800); // 0.1 s
+        let buf = load_audio_file_head(path.to_str().unwrap(), AUDITION_PREVIEW_SECONDS).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(buf.frames, 4_800);
+    }
+
+    /// The regression this exists for: `load_wav` refuses any WAV at or above
+    /// `STREAMING_WAV_THRESHOLD_BYTES`, so Browser preview of an ordinary long
+    /// stem failed outright and nothing ever played. The head decode never
+    /// reads the whole file, so it must succeed where the full decode errors.
+    #[test]
+    fn head_decode_previews_a_file_the_full_decoder_rejects() {
+        // Just past the 64 MB in-memory WAV threshold.
+        let frames = (STREAMING_WAV_THRESHOLD_BYTES as usize / 4) + 48_000;
+        let path = temp_wav("oversize");
+        write_wav(&path, frames);
+
+        let full = load_audio_file(path.to_str().unwrap());
+        let head = load_audio_file_head(path.to_str().unwrap(), AUDITION_PREVIEW_SECONDS);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            full.is_err(),
+            "full decode should still refuse an oversize WAV"
+        );
+        let head = head.expect("preview head must decode a file the full decoder rejects");
+        assert_eq!(head.frames, (AUDITION_PREVIEW_SECONDS * 48_000.0) as usize);
     }
 }

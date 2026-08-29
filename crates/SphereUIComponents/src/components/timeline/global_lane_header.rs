@@ -6,7 +6,9 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::timeline::timeline_state::HEADER_WIDTH;
+use crate::components::timeline::timeline_state::{
+    GlobalLaneKind, GlobalLaneResizeDrag, GLOBAL_LANE_RESIZE_HANDLE_HITBOX, HEADER_WIDTH,
+};
 use crate::theme::Colors;
 
 const LANE_BTN: f32 = 20.0;
@@ -14,6 +16,65 @@ const LANE_ICON: f32 = 11.0;
 
 pub type GlobalLaneVoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 pub type GlobalLaneMenuCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
+/// Pointer-down on a lane's resize handle: `(lane, window y)`.
+pub type GlobalLaneResizeArmCb =
+    Arc<dyn Fn(&(GlobalLaneKind, f32), &mut Window, &mut App) + 'static>;
+/// Double-click on a lane's resize handle: back to the default height.
+pub type GlobalLaneResizeResetCb = Arc<dyn Fn(&GlobalLaneKind, &mut Window, &mut App) + 'static>;
+
+/// Stable element-id discriminator per lane, so the three handles never share
+/// a GPUI id.
+fn lane_id_index(kind: GlobalLaneKind) -> usize {
+    match kind {
+        GlobalLaneKind::Tempo => 0,
+        GlobalLaneKind::TimeSignature => 1,
+        GlobalLaneKind::SongText => 2,
+        GlobalLaneKind::Marker => 3,
+        GlobalLaneKind::Arranger => 4,
+    }
+}
+
+/// Drag strip on a global lane's bottom edge. Mirrors the arrangement track row
+/// handle: pointer-down arms, the first drag-move promotes it to a live resize,
+/// and a double-click resets the lane to its default height.
+///
+/// Spans the full lane width (header included) so the grab target is the same
+/// edge the user sees, and sits above the lane content so the lane's own
+/// mouse-down hit layer never swallows the gesture.
+pub fn global_lane_resize_handle(
+    kind: GlobalLaneKind,
+    on_arm: GlobalLaneResizeArmCb,
+    on_reset: GlobalLaneResizeResetCb,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(0.0))
+        .h(px(GLOBAL_LANE_RESIZE_HANDLE_HITBOX))
+        .id(("global-lane-resize", lane_id_index(kind)))
+        .cursor(CursorStyle::ResizeUpDown)
+        .on_mouse_down(gpui::MouseButton::Left, {
+            let on_arm = on_arm.clone();
+            let on_reset = on_reset.clone();
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                if event.click_count >= 2 {
+                    on_reset(&kind, window, cx);
+                    return;
+                }
+                let y: f32 = event.position.y.into();
+                on_arm(&(kind, y), window, cx);
+            }
+        })
+        .on_drag(
+            GlobalLaneResizeDrag { kind },
+            move |_drag, _offset, _window, cx| {
+                cx.stop_propagation();
+                cx.new(|_| GlobalLaneResizeDrag { kind })
+            },
+        )
+}
 
 #[derive(Clone, Default)]
 pub struct GlobalLaneHeaderActions {

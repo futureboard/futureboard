@@ -2197,3 +2197,142 @@ mod solfege_pitch_expression_tests {
         assert_eq!(TimelineState::note_sounding_pitch(&note, 0.4), 67.0);
     }
 }
+
+/// The conductor lanes had a fixed height and a collapse toggle, with no way to
+/// give the Tempo curve (or the Song Text rows) more room. These cover the drag
+/// state machine and the geometry that depends on it.
+#[cfg(test)]
+mod global_lane_resize_tests {
+    use super::*;
+
+    fn drag(state: &mut TimelineState, kind: GlobalLaneKind, from_y: f32, to_y: f32) {
+        state.arm_global_lane_resize(kind, from_y);
+        assert!(
+            state.ensure_global_lane_resize_from_arm(to_y),
+            "the first drag-move must promote the armed handle to a live resize"
+        );
+    }
+
+    #[test]
+    fn dragging_down_makes_the_tempo_lane_taller() {
+        let mut state = TimelineState::default();
+        let start = state.tempo_track_height();
+        drag(&mut state, GlobalLaneKind::Tempo, 100.0, 160.0);
+        assert!(
+            (state.tempo_track_height() - (start + 60.0)).abs() < 0.01,
+            "height must follow the absolute pointer delta"
+        );
+        assert!(state.finish_global_lane_resize().is_some());
+    }
+
+    /// Every window-y -> arrangement-y conversion is built on the conductor
+    /// block's total height, so a resized lane has to move the content top with
+    /// it or all arrangement hit-testing shifts.
+    #[test]
+    fn a_resized_lane_moves_the_arrangement_content_top() {
+        let mut state = TimelineState::default();
+        let before = state.arrangement_content_top();
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 50.0);
+        state.finish_global_lane_resize();
+        assert!(
+            (state.arrangement_content_top() - (before + 50.0)).abs() < 0.01,
+            "the arrangement must start below the taller lane"
+        );
+    }
+
+    #[test]
+    fn the_drag_is_clamped_at_both_ends() {
+        let mut state = TimelineState::default();
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 5000.0);
+        assert!((state.tempo_track_height() - GLOBAL_LANE_MAX_HEIGHT).abs() < 0.01);
+        state.finish_global_lane_resize();
+
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, -5000.0);
+        assert!((state.tempo_track_height() - GLOBAL_LANE_MIN_HEIGHT).abs() < 0.01);
+    }
+
+    /// Dragging a collapsed lane has to un-collapse it, or the collapse flag
+    /// would keep winning and the lane would snap back on release.
+    #[test]
+    fn dragging_a_collapsed_lane_expands_it() {
+        let mut state = TimelineState::default();
+        state.tempo_track_collapsed = true;
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 40.0);
+        assert!(!state.tempo_track_collapsed);
+        assert!(state.tempo_track_height() > TEMPO_TRACK_HEIGHT_COLLAPSED);
+    }
+
+    #[test]
+    fn escape_puts_the_lane_back_where_it_started() {
+        let mut state = TimelineState::default();
+        let start = state.tempo_track_height();
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 70.0);
+        assert!(state.cancel_global_lane_resize());
+        assert!((state.tempo_track_height() - start).abs() < 0.01);
+        assert!(
+            state
+                .global_lane_heights
+                .get(GlobalLaneKind::Tempo)
+                .is_none(),
+            "a cancelled drag on a default-height lane must leave it on the default"
+        );
+    }
+
+    /// A drag that ends where it began is not an edit; it must not push a dead
+    /// undo step.
+    #[test]
+    fn a_zero_delta_drag_records_nothing() {
+        let mut state = TimelineState::default();
+        state.arm_global_lane_resize(GlobalLaneKind::Tempo, 120.0);
+        state.ensure_global_lane_resize_from_arm(120.0);
+        assert!(state.finish_global_lane_resize().is_none());
+    }
+
+    #[test]
+    fn the_undo_pair_restores_the_default_rather_than_pinning_it() {
+        let mut state = TimelineState::default();
+        drag(&mut state, GlobalLaneKind::TimeSignature, 0.0, 30.0);
+        let (prev, next) = state
+            .finish_global_lane_resize()
+            .expect("a moved drag is an edit");
+        assert!(prev.get(GlobalLaneKind::TimeSignature).is_none());
+        assert!(next.get(GlobalLaneKind::TimeSignature).is_some());
+    }
+
+    #[test]
+    fn double_click_reset_returns_to_the_default_height() {
+        let mut state = TimelineState::default();
+        drag(&mut state, GlobalLaneKind::SongText, 0.0, 60.0);
+        state.finish_global_lane_resize();
+        assert!(state
+            .reset_global_lane_height(GlobalLaneKind::SongText)
+            .is_some());
+        assert!(
+            state
+                .reset_global_lane_height(GlobalLaneKind::SongText)
+                .is_none(),
+            "resetting an already-default lane is not an edit"
+        );
+    }
+
+    /// Resizing one lane must not disturb its neighbours' geometry.
+    #[test]
+    fn resizing_one_lane_leaves_the_others_alone() {
+        let mut state = TimelineState::default();
+        let ts_before = state.time_signature_track_height();
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 40.0);
+        state.finish_global_lane_resize();
+        assert!((state.time_signature_track_height() - ts_before).abs() < 0.01);
+    }
+
+    /// A hidden lane still contributes 0 to the conductor block, custom height
+    /// or not.
+    #[test]
+    fn a_hidden_lane_contributes_no_height() {
+        let mut state = TimelineState::default();
+        drag(&mut state, GlobalLaneKind::Tempo, 0.0, 60.0);
+        state.finish_global_lane_resize();
+        state.hide_tempo_track_lane();
+        assert_eq!(state.tempo_track_height(), 0.0);
+    }
+}

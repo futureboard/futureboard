@@ -126,12 +126,33 @@ const TEXT_INPUT_PAD_X: f32 = 9.0;
 const TEXT_INPUT_CHAR_W: f32 = 7.0;
 
 pub type TextInputContextCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
+/// Applies a `TEXT_INPUT_*` command, or closes the menu when passed `None`.
+pub type TextInputContextCommandCb = Arc<dyn Fn(Option<&str>, &mut Window, &mut App) + 'static>;
+
+/// Everything the built-in Cut/Copy/Paste menu needs, captured at the moment it
+/// is summoned.
+///
+/// The viewport and clipboard state are snapshotted here rather than read while
+/// rendering because the render path has neither a `Window` nor an `App` — and
+/// right-click time is also exactly when both are accurate.
+#[derive(Debug, Clone, Copy)]
+pub struct TextContextMenuAnchor {
+    pub x: f32,
+    pub y: f32,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub clipboard_has_text: bool,
+}
 pub type TextInputMouseCb = Arc<dyn Fn(&TextInputMouseEvent, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone, Default)]
 pub struct TextInputCallbacks {
     pub on_context_menu: Option<TextInputContextCb>,
     pub on_mouse: Option<TextInputMouseCb>,
+    /// Set by [`bind_mouse_selection`] so the field can draw and drive its own
+    /// context menu. Owners that render their own menu (the studio shell, the
+    /// Add Track / Preferences / plugin-picker windows) leave this `None`.
+    pub on_context_command: Option<TextInputContextCommandCb>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +277,10 @@ pub struct TextEditBuffer {
     selection_anchor: Option<usize>,
     pub disabled: bool,
     pub read_only: bool,
+    /// Open Cut/Copy/Paste menu, when the field draws its own (see
+    /// [`bind_mouse_selection`]). `None` when closed, or when the owning window
+    /// renders the menu itself.
+    pub context_menu: Option<TextContextMenuAnchor>,
     pub is_password: bool,
     marked_range: Option<Range<usize>>,
 }
@@ -1217,8 +1242,45 @@ pub fn bind_mouse_selection<T: gpui::Render>(
     target: gpui::Entity<T>,
     get: impl Fn(&mut T) -> &mut TextInputState + Send + Sync + 'static,
 ) -> TextInputCallbacks {
+    // Wire the context menu here rather than at each call site. Every field
+    // built through this helper already hands over the entity and a mutable
+    // accessor, which is everything the menu needs — leaving it to callers is
+    // why most text fields in the app shipped without Cut/Copy/Paste at all.
+    let get = Arc::new(get);
+    let open_target = target.clone();
+    let open_get = get.clone();
+    let command_target = target.clone();
+    let command_get = get.clone();
+
     TextInputCallbacks {
-        on_context_menu: None,
+        on_context_menu: Some(Arc::new(move |pos: &(f32, f32), window, cx| {
+            let (x, y) = *pos;
+            let viewport = window.viewport_size();
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let _ = open_target.update(cx, |this, cx| {
+                open_get(this).context_menu = Some(TextContextMenuAnchor {
+                    x,
+                    y,
+                    viewport_width: viewport.width.into(),
+                    viewport_height: viewport.height.into(),
+                    clipboard_has_text,
+                });
+                cx.notify();
+            });
+        })),
+        on_context_command: Some(Arc::new(move |command: Option<&str>, _window, cx| {
+            let command = command.map(|c| c.to_string());
+            let _ = command_target.update(cx, |this, cx| {
+                if let Some(command) = command {
+                    let _ = command_get(this).apply_context_command(&command, cx);
+                }
+                command_get(this).context_menu = None;
+                cx.notify();
+            });
+        })),
         on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _w, cx| {
             let phase = event.phase;
             let index = event.index;
@@ -1342,6 +1404,29 @@ fn text_field_inner(
     let selection = state.selection_range();
     let cursor = state.cursor.min(value.chars().count());
     let on_context_menu = callbacks.on_context_menu.clone();
+    // Menu drawn by the field itself, for owners that use `bind_mouse_selection`
+    // and do not render one. `deferred` lifts it above the field's siblings, and
+    // the anchor carries the viewport it was measured against so the panel is
+    // still clamped into the window it belongs to.
+    let context_overlay = state
+        .context_menu
+        .zip(callbacks.on_context_command.clone())
+        .map(|(anchor, on_command)| {
+            let on_close = on_command.clone();
+            gpui::deferred(crate::components::context_menu::context_menu_overlay(
+                text_input_context_entries(state, anchor.clipboard_has_text),
+                anchor.x,
+                anchor.y,
+                anchor.viewport_width,
+                anchor.viewport_height,
+                Arc::new(move |command: &String, window, cx| {
+                    on_command(Some(command.as_str()), window, cx);
+                }),
+                Arc::new(move |_: &(), window, cx| {
+                    on_close(None, window, cx);
+                }),
+            ))
+        });
     let on_mouse_down = callbacks.on_mouse.clone();
     let on_mouse_move = callbacks.on_mouse.clone();
     let on_mouse_up = callbacks.on_mouse.clone();
@@ -1583,6 +1668,7 @@ fn text_field_inner(
                 })),
         )
         .children(ime_layer)
+        .children(context_overlay)
 }
 
 fn text_segment(text: String, selected: bool) -> impl IntoElement {

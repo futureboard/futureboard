@@ -33,6 +33,12 @@ pub(crate) struct InsertPickerWindow {
     scroll: PluginPickerScrollHandles,
     /// Focus the search field once the dialog's own window is live.
     needs_search_focus: bool,
+    /// Cut/Copy/Paste menu position for the search field, or `None`.
+    ///
+    /// The field itself lives on `StudioLayout`, but this is a separate window,
+    /// so the shell's overlay cannot draw over it — this window owns the menu's
+    /// position and renders it.
+    search_context_menu: Option<(f32, f32)>,
 }
 
 #[derive(Clone)]
@@ -59,6 +65,7 @@ impl InsertPickerWindow {
             focus_handle: cx.focus_handle(),
             scroll: PluginPickerScrollHandles::default(),
             needs_search_focus: true,
+            search_context_menu: None,
         }
     }
 
@@ -300,7 +307,17 @@ impl Render for InsertPickerWindow {
         let owner = self.owner.clone();
         let target_for_search = target.clone();
         let search_callbacks = TextInputCallbacks {
-            on_context_menu: None,
+            on_context_command: None,
+            on_context_menu: Some(Arc::new({
+                let target = target.clone();
+                move |pos: &(f32, f32), _w, cx| {
+                    let pos = *pos;
+                    let _ = target.update(cx, |this, cx| {
+                        this.search_context_menu = Some(pos);
+                        cx.notify();
+                    });
+                }
+            })),
             on_mouse: search_mouse_callbacks.on_mouse.map(|on_mouse| {
                 Arc::new(
                     move |event: &TextInputMouseEvent, window: &mut Window, cx: &mut App| {
@@ -329,6 +346,55 @@ impl Render for InsertPickerWindow {
             &self.scroll,
         ));
 
+        // The search field is owned by `StudioLayout`, so the command applies
+        // there and then re-snapshots — otherwise the text would change and the
+        // filtered plugin list behind it would not.
+        let search_context_overlay = self.search_context_menu.map(|(x, y)| {
+            let clipboard_has_text = cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some_and(|text| !text.is_empty());
+            let entries = crate::components::text_input::text_input_context_entries(
+                &snapshot.search_input,
+                clipboard_has_text,
+            );
+            let owner = self.owner.clone();
+            let command_target = target.clone();
+            let close_target = target.clone();
+            crate::components::context_menu::context_menu_overlay(
+                entries,
+                x,
+                y,
+                INSERT_PICKER_WINDOW_WIDTH,
+                INSERT_PICKER_WINDOW_HEIGHT,
+                Arc::new(move |command: &String, _window, cx| {
+                    let command = command.clone();
+                    let refreshed = owner.update(cx, |layout, _cx| {
+                        let applied = layout
+                            .plugin_picker_search_input
+                            .apply_context_command(&command, _cx);
+                        if applied {
+                            layout.sync_text_input_target(
+                                crate::layout::studio_state::TextMenuTarget::PluginPickerSearch,
+                            );
+                        }
+                        layout.insert_picker_snapshot()
+                    });
+                    let _ = command_target.update(cx, |this, cx| {
+                        this.set_snapshot(refreshed);
+                        this.search_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+                Arc::new(move |_: &(), _window, cx| {
+                    let _ = close_target.update(cx, |this, cx| {
+                        this.search_context_menu = None;
+                        cx.notify();
+                    });
+                }),
+            )
+        });
+
         let root = div()
             .flex()
             .flex_col()
@@ -349,7 +415,8 @@ impl Render for InsertPickerWindow {
                     }
                 },
             ))
-            .child(panel);
+            .child(panel)
+            .children(search_context_overlay);
 
         if let Some(started) = build_started {
             eprintln!(

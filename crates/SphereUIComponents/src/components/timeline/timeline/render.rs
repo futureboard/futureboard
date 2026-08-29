@@ -924,6 +924,12 @@ impl Render for Timeline {
             std::sync::Arc::new(on_song_text_empty_seek);
 
         let on_region_drag = cx.listener(|this, update: &TimelineRegionDragUpdate, _window, cx| {
+            // Snapshot before the first mutation of the gesture; the drop turns
+            // it into one history entry for the whole drag rather than one per
+            // mouse-move.
+            if this.region_gesture_origin.is_none() {
+                this.region_gesture_origin = Some(this.state.regions.clone());
+            }
             if this
                 .state
                 .update_region_range(&update.region_id, update.start_beat, update.end_beat)
@@ -931,6 +937,12 @@ impl Render for Timeline {
                 this.mark_project_changed(cx);
                 cx.notify();
             }
+        });
+        let on_region_drag_drop = cx.listener(|this, _drag: &TimelineRegionDrag, _window, cx| {
+            if let Some(prev) = this.region_gesture_origin.take() {
+                this.record_region_edit("Move Region", prev, cx);
+            }
+            cx.notify();
         });
         let on_region_drag: std::sync::Arc<
             dyn Fn(&TimelineRegionDragUpdate, &mut gpui::Window, &mut gpui::App) + 'static,
@@ -1630,6 +1642,52 @@ impl Render for Timeline {
                 }
             });
 
+        let on_global_lane_resize_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<GlobalLaneResizeDrag>, _window, cx| {
+                let y: f32 = event.event.position.y.into();
+                if this.state.ensure_global_lane_resize_from_arm(y) {
+                    this.state.update_global_lane_resize(y);
+                    cx.notify();
+                }
+            },
+        );
+        let on_global_lane_resize_drop =
+            cx.listener(|this, _drag: &GlobalLaneResizeDrag, _window, cx| {
+                this.state.clear_global_lane_resize_arm();
+                if let Some((prev, next)) = this.state.finish_global_lane_resize() {
+                    this.record_executed_command(
+                        EditCommand::SetGlobalLaneHeights { prev, next },
+                        cx,
+                    );
+                }
+                cx.notify();
+            });
+        let on_global_lane_resize_arm: GlobalLaneResizeArmCb = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |(kind, y): &(GlobalLaneKind, f32), _window, cx| {
+                let (kind, y) = (*kind, *y);
+                let _ = this.update(cx, |this, cx| {
+                    this.state.arm_global_lane_resize(kind, y);
+                    cx.notify();
+                });
+            })
+        };
+        let on_global_lane_resize_reset: GlobalLaneResizeResetCb = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |kind: &GlobalLaneKind, _window, cx| {
+                let kind = *kind;
+                let _ = this.update(cx, |this, cx| {
+                    if let Some((prev, next)) = this.state.reset_global_lane_height(kind) {
+                        this.record_executed_command(
+                            EditCommand::SetGlobalLaneHeights { prev, next },
+                            cx,
+                        );
+                    }
+                    cx.notify();
+                });
+            })
+        };
+
         let on_track_height_resize_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<TrackHeightResizeDrag>, _window, cx| {
                 let y: f32 = event.event.position.y.into();
@@ -1919,6 +1977,12 @@ impl Render for Timeline {
             .on_drop::<SongTextDragSession>(on_song_text_drag_drop)
             .on_drag_move::<TrackHeightResizeDrag>(on_track_height_resize_move)
             .on_drop::<TrackHeightResizeDrag>(on_track_height_resize_drop)
+            .on_drag_move::<GlobalLaneResizeDrag>(on_global_lane_resize_move)
+            .on_drop::<GlobalLaneResizeDrag>(on_global_lane_resize_drop)
+            // Regions are dragged on the ruler, but the drop lands wherever the
+            // pointer is released — take it at the surface, like the resize
+            // gestures, so the undo entry is always recorded.
+            .on_drop::<TimelineRegionDrag>(on_region_drag_drop)
             .on_drag_move::<TrackDragItem>(on_track_drag_move)
             .on_drop::<TrackDragItem>(on_track_dropped)
             .on_mouse_down(gpui::MouseButton::Middle, on_middle_pan_start)
@@ -1979,6 +2043,8 @@ impl Render for Timeline {
                     on_tempo_header_menu.clone(),
                     Some(on_tempo_hide.clone()),
                     Some(on_tempo_toggle_collapsed.clone()),
+                    Some(on_global_lane_resize_arm.clone()),
+                    Some(on_global_lane_resize_reset.clone()),
                 ))
             })
             .when(state.show_time_signature_track, |this| {
@@ -1991,6 +2057,8 @@ impl Render for Timeline {
                     on_ts_header_menu.clone(),
                     Some(on_ts_hide.clone()),
                     Some(on_ts_toggle_collapsed.clone()),
+                    Some(on_global_lane_resize_arm.clone()),
+                    Some(on_global_lane_resize_reset.clone()),
                 ))
             })
             .when(state.show_song_text_track, |this| {
@@ -2001,6 +2069,8 @@ impl Render for Timeline {
                     on_song_text_marker_context,
                     on_song_text_empty_seek,
                     Some(on_song_text_hide.clone()),
+                    Some(on_global_lane_resize_arm.clone()),
+                    Some(on_global_lane_resize_reset.clone()),
                 ))
             })
             // 2. Track List Scroll Area

@@ -643,6 +643,9 @@ impl StudioLayout {
             TextMenuTarget::InspectorColorHex => {
                 &mut self.inspector_name_edit.color_picker.hex_input
             }
+            TextMenuTarget::TransportBpm => &mut self.tempo_edit.bpm_input,
+            TextMenuTarget::TransportTimeSigNum => &mut self.tempo_edit.ts_num_input,
+            TextMenuTarget::TransportTimeSigDen => &mut self.tempo_edit.ts_den_input,
         }
     }
 
@@ -656,6 +659,9 @@ impl StudioLayout {
             TextMenuTarget::InspectorName => &self.inspector_name_edit.name_input,
             TextMenuTarget::InspectorClipName => &self.inspector_name_edit.clip_name_input,
             TextMenuTarget::InspectorColorHex => &self.inspector_name_edit.color_picker.hex_input,
+            TextMenuTarget::TransportBpm => &self.tempo_edit.bpm_input,
+            TextMenuTarget::TransportTimeSigNum => &self.tempo_edit.ts_num_input,
+            TextMenuTarget::TransportTimeSigDen => &self.tempo_edit.ts_den_input,
         }
     }
 
@@ -702,6 +708,14 @@ impl StudioLayout {
             TextMenuTarget::AutomationPickerSearch => {
                 self.automation_picker_query = self.automation_picker_search_input.value.clone();
             }
+            // The transport's inline editors commit on Enter or on blur, not on
+            // every keystroke — so a clipboard edit deliberately leaves the
+            // draft text alone here. Committing on paste would make the context
+            // menu behave differently from typing and could apply a
+            // half-finished tempo to the engine.
+            TextMenuTarget::TransportBpm
+            | TextMenuTarget::TransportTimeSigNum
+            | TextMenuTarget::TransportTimeSigDen => {}
         }
     }
 

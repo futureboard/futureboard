@@ -145,10 +145,14 @@ impl Timeline {
         self.automation_curve_drag = None;
         self.automation_marquee = None;
         self.tempo_drag = None;
+        self.tempo_gesture_origin = None;
         self.ts_drag = None;
+        self.ts_gesture_origin = None;
+        self.region_gesture_origin = None;
         self.pan_last_position = None;
         self.state.clear_track_drag();
         self.state.cancel_track_height_resize();
+        self.state.cancel_global_lane_resize();
         self.log_input_state("reset-after");
     }
 
@@ -199,7 +203,10 @@ impl Timeline {
             automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
+            tempo_gesture_origin: None,
             ts_drag: None,
+            ts_gesture_origin: None,
+            region_gesture_origin: None,
             pan_last_position: None,
             floating_toolbar_position: None,
             floating_toolbar_drag_anchor: None,
@@ -253,7 +260,10 @@ impl Timeline {
             automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
+            tempo_gesture_origin: None,
             ts_drag: None,
+            ts_gesture_origin: None,
+            region_gesture_origin: None,
             pan_last_position: None,
             floating_toolbar_position: None,
             floating_toolbar_drag_anchor: None,
@@ -269,15 +279,27 @@ impl Timeline {
     }
 
     pub fn run_edit_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
-        let midi_edit = cmd.is_midi_edit();
+        let impact = cmd.impact();
         cmd.execute(&mut self.state);
         self.edit_history.push(cmd);
-        if midi_edit {
-            self.mark_midi_changed(cx);
-        } else {
-            self.mark_project_changed(cx);
-        }
+        self.notify_edit_impact(impact, cx);
         cx.notify();
+    }
+
+    /// Propagate one command's effect. Execute, record, undo, and redo all go
+    /// through here so an undone tempo/meter edit reaches the engine exactly
+    /// like the original edit did.
+    fn notify_edit_impact(&self, impact: EditImpact, cx: &mut gpui::App) {
+        match impact {
+            EditImpact::Project => self.mark_project_changed(cx),
+            EditImpact::Midi => self.mark_midi_changed(cx),
+            EditImpact::Metadata => self.mark_control_state_changed(cx),
+            // Nothing to propagate: the caller's `cx.notify()` repaints, and
+            // there is no project or engine state behind it.
+            EditImpact::View => {}
+            EditImpact::TempoMap => self.mark_tempo_map_changed(cx),
+            EditImpact::TimeSignatureMap => self.mark_time_signature_map_changed(cx),
+        }
     }
 
     /// Execute a persisted UI-metadata edit without invalidating the audio graph.
@@ -319,14 +341,99 @@ impl Timeline {
     /// (e.g. a gesture that mutated `state` live). Pushes it onto the undo
     /// stack without re-executing, then marks the project changed.
     pub fn record_executed_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
-        let midi_edit = cmd.is_midi_edit();
+        let impact = cmd.impact();
         self.edit_history.push(cmd);
-        if midi_edit {
-            self.mark_midi_changed(cx);
-        } else {
-            self.mark_project_changed(cx);
-        }
+        self.notify_edit_impact(impact, cx);
         cx.notify();
+    }
+
+    /// Capture the tempo state before a Tempo-lane mutation. Pair with
+    /// [`Self::record_tempo_edit`].
+    pub(crate) fn capture_tempo_state(&self) -> TempoStateSnapshot {
+        TempoStateSnapshot::capture(&self.state)
+    }
+
+    /// Record an already-applied Tempo-lane edit as one undo entry. No-ops (and
+    /// returns `false`) when the gesture left the tempo state unchanged, so a
+    /// click that moved nothing never buries a real edit under a dead step.
+    pub(crate) fn record_tempo_edit(
+        &mut self,
+        label: &'static str,
+        prev: TempoStateSnapshot,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let next = TempoStateSnapshot::capture(&self.state);
+        if next == prev {
+            return false;
+        }
+        self.record_executed_command(EditCommand::SetTempoState { label, prev, next }, cx);
+        true
+    }
+
+    /// Fold another step of a repeated tempo gesture into the entry it already
+    /// pushed. Falls back to a normal recorded edit when there is nothing to
+    /// extend, so the gesture is always undoable either way.
+    pub(crate) fn amend_or_record_tempo_edit(
+        &mut self,
+        label: &'static str,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let next = TempoStateSnapshot::capture(&self.state);
+        if !self.edit_history.amend_tempo_state(label, next) {
+            return false;
+        }
+        self.mark_tempo_map_changed(cx);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn capture_time_signature_state(&self) -> TimeSignatureStateSnapshot {
+        TimeSignatureStateSnapshot::capture(&self.state)
+    }
+
+    /// Record an already-applied Time Signature-lane edit as one undo entry.
+    pub(crate) fn record_time_signature_edit(
+        &mut self,
+        label: &'static str,
+        prev: TimeSignatureStateSnapshot,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let next = TimeSignatureStateSnapshot::capture(&self.state);
+        if next == prev {
+            return false;
+        }
+        self.record_executed_command(EditCommand::SetTimeSignatureState { label, prev, next }, cx);
+        true
+    }
+
+    /// Record an already-applied arrangement-marker edit as one undo entry.
+    pub(crate) fn record_marker_edit(
+        &mut self,
+        label: &'static str,
+        prev: Vec<crate::components::timeline::timeline_state::TimelineMarkerState>,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.state.markers == prev {
+            return false;
+        }
+        let next = self.state.markers.clone();
+        self.record_executed_command(EditCommand::SetMarkers { label, prev, next }, cx);
+        true
+    }
+
+    /// Record an already-applied arrangement-region edit as one undo entry.
+    pub(crate) fn record_region_edit(
+        &mut self,
+        label: &'static str,
+        prev: Vec<TimelineRegionState>,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        if self.state.regions == prev {
+            return false;
+        }
+        let next = self.state.regions.clone();
+        self.record_executed_command(EditCommand::SetRegions { label, prev, next }, cx);
+        true
     }
 
     pub fn begin_inspector_clip_gesture(&mut self, clip_id: &str) {
@@ -355,12 +462,8 @@ impl Timeline {
     }
 
     pub fn undo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        if let Some(metadata_only) = self.edit_history.undo_with_impact(&mut self.state) {
-            if metadata_only {
-                self.mark_control_state_changed(cx);
-            } else {
-                self.mark_project_changed(cx);
-            }
+        if let Some(impact) = self.edit_history.undo_with_impact(&mut self.state) {
+            self.notify_edit_impact(impact, cx);
             cx.notify();
             true
         } else {
@@ -369,12 +472,8 @@ impl Timeline {
     }
 
     pub fn redo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        if let Some(metadata_only) = self.edit_history.redo_with_impact(&mut self.state) {
-            if metadata_only {
-                self.mark_control_state_changed(cx);
-            } else {
-                self.mark_project_changed(cx);
-            }
+        if let Some(impact) = self.edit_history.redo_with_impact(&mut self.state) {
+            self.notify_edit_impact(impact, cx);
             cx.notify();
             true
         } else {
@@ -775,13 +874,17 @@ impl Timeline {
     ) {
         if click_count >= 2 {
             if point_id.is_none() {
+                let origin = self.capture_tempo_state();
                 if let Some(id) = self.state.add_tempo_point(beat, bpm) {
                     self.state.select_tempo_point(&id);
+                    // The double-click both creates the marker and starts a
+                    // drag: keep the pre-create snapshot as the gesture origin
+                    // so the release records ONE entry covering both.
+                    self.tempo_gesture_origin = Some(("Add Tempo Marker", origin));
                     self.tempo_drag = Some(TempoPointDrag {
                         point_id: id,
                         moved: true,
                     });
-                    self.mark_tempo_map_changed(cx);
                 }
             }
             cx.notify();
@@ -790,6 +893,7 @@ impl Timeline {
 
         if let Some(id) = point_id {
             self.state.select_tempo_point(&id);
+            self.tempo_gesture_origin = Some(("Move Tempo Marker", self.capture_tempo_state()));
             self.tempo_drag = Some(TempoPointDrag {
                 point_id: id,
                 moved: false,
@@ -826,8 +930,14 @@ impl Timeline {
 
     pub(super) fn finish_tempo_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some(drag) = self.tempo_drag.take() {
+            let origin = self.tempo_gesture_origin.take();
             if drag.moved {
-                self.mark_tempo_map_changed(cx);
+                match origin {
+                    Some((label, prev)) => {
+                        self.record_tempo_edit(label, prev, cx);
+                    }
+                    None => self.mark_tempo_map_changed(cx),
+                }
             }
             cx.notify();
             true
@@ -848,16 +958,17 @@ impl Timeline {
                 self.state.select_time_signature_point(&id);
             } else {
                 let pt = self.state.time_signature_map.time_signature_at_beat(beat);
+                let origin = self.capture_time_signature_state();
                 if let Some(id) =
                     self.state
                         .add_time_signature_point(beat, pt.numerator, pt.denominator)
                 {
                     self.state.select_time_signature_point(&id);
+                    self.ts_gesture_origin = Some(("Add Time Signature", origin));
                     self.ts_drag = Some(TimeSignaturePointDrag {
                         point_id: id,
                         moved: true,
                     });
-                    self.mark_time_signature_map_changed(cx);
                 }
             }
             cx.notify();
@@ -866,6 +977,8 @@ impl Timeline {
 
         if let Some(id) = point_id {
             self.state.select_time_signature_point(&id);
+            self.ts_gesture_origin =
+                Some(("Move Time Signature", self.capture_time_signature_state()));
             self.ts_drag = Some(TimeSignaturePointDrag {
                 point_id: id,
                 moved: false,
@@ -902,9 +1015,10 @@ impl Timeline {
     pub(super) fn add_tempo_point_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
         let beat = self.state.transport.playhead_beats as f64;
         let bpm = self.state.effective_bpm_at_beat(beat);
+        let prev = self.capture_tempo_state();
         if let Some(id) = self.state.add_tempo_point(beat, bpm) {
             self.state.select_tempo_point(&id);
-            self.mark_tempo_map_changed(cx);
+            self.record_tempo_edit("Add Tempo Marker", prev, cx);
             cx.notify();
         }
     }
@@ -915,12 +1029,13 @@ impl Timeline {
     ) {
         let beat = self.state.transport.playhead_beats as f64;
         let pt = self.state.time_signature_map.time_signature_at_beat(beat);
+        let prev = self.capture_time_signature_state();
         if let Some(id) = self
             .state
             .add_time_signature_point(beat, pt.numerator, pt.denominator)
         {
             self.state.select_time_signature_point(&id);
-            self.mark_time_signature_map_changed(cx);
+            self.record_time_signature_edit("Add Time Signature", prev, cx);
             cx.notify();
         }
     }
@@ -930,8 +1045,14 @@ impl Timeline {
         cx: &mut Context<Self>,
     ) -> bool {
         if let Some(drag) = self.ts_drag.take() {
+            let origin = self.ts_gesture_origin.take();
             if drag.moved {
-                self.mark_time_signature_map_changed(cx);
+                match origin {
+                    Some((label, prev)) => {
+                        self.record_time_signature_edit(label, prev, cx);
+                    }
+                    None => self.mark_time_signature_map_changed(cx),
+                }
             }
             cx.notify();
             true

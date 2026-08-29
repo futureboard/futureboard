@@ -1,9 +1,10 @@
 use crate::components::timeline::global_lane_header::{
-    global_lane_header, GlobalLaneHeaderActions,
+    global_lane_header, global_lane_resize_handle, GlobalLaneHeaderActions, GlobalLaneResizeArmCb,
+    GlobalLaneResizeResetCb,
 };
 use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
 use crate::components::timeline::timeline_grid::timeline_grid;
-use crate::components::timeline::timeline_state::TimelineState;
+use crate::components::timeline::timeline_state::{GlobalLaneKind, TimelineState};
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
@@ -31,6 +32,8 @@ pub fn time_signature_track_lane(
     on_header_menu: Option<GlobalLaneMenuCallback>,
     on_hide: Option<GlobalLaneVoidCallback>,
     on_toggle_collapsed: Option<GlobalLaneVoidCallback>,
+    on_resize_arm: Option<GlobalLaneResizeArmCb>,
+    on_resize_reset: Option<GlobalLaneResizeResetCb>,
 ) -> impl IntoElement {
     let lane_w = state.viewport.viewport_width.max(1.0);
     let points = state.time_signature_map.points.clone();
@@ -128,9 +131,14 @@ pub fn time_signature_track_lane(
         },
     );
 
+    let resize_handle = on_resize_arm
+        .zip(on_resize_reset)
+        .map(|(arm, reset)| global_lane_resize_handle(GlobalLaneKind::TimeSignature, arm, reset));
+
     div()
         .flex()
         .flex_row()
+        .relative()
         .h(px(lane_height))
         .w_full()
         .bg(Colors::surface_panel_alt())
@@ -151,4 +159,5 @@ pub fn time_signature_track_lane(
                 // Debug: outline time_signature_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline()),
         )
+        .children(resize_handle)
 }

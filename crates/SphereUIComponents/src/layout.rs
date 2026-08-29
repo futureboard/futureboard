@@ -1715,24 +1715,12 @@ impl StudioLayout {
             }
             "ruler:add-marker" => {
                 if let Some(beat) = self.ruler_context_beat() {
-                    let _ = self.timeline.update(cx, |timeline, cx| {
-                        timeline.state.add_marker_at_beat(beat);
-                        timeline.mark_project_changed(cx);
-                        cx.notify();
-                    });
-                    self.mark_dirty();
-                    cx.notify();
+                    self.add_marker_at_beat_command(beat, cx);
                 }
             }
             "ruler:add-region" => {
                 if let Some(beat) = self.ruler_context_beat() {
-                    let _ = self.timeline.update(cx, |timeline, cx| {
-                        timeline.state.add_region_at_beat(beat);
-                        timeline.mark_project_changed(cx);
-                        cx.notify();
-                    });
-                    self.mark_dirty();
-                    cx.notify();
+                    self.add_region_at_beat_command(beat, cx);
                 }
             }
             "ruler:set-loop-selection" => {

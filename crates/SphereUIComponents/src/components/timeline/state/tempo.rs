@@ -374,6 +374,13 @@ impl TempoMap {
         });
     }
 
+    /// Overwrite the marker list from an undo/redo snapshot, bumping the
+    /// revision forward so downstream caches still invalidate.
+    pub fn restore_points(&mut self, points: Vec<TempoPoint>) {
+        self.points = points;
+        self.bump_revision();
+    }
+
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -465,10 +472,23 @@ impl TimelineState {
         if !self.show_tempo_track {
             return 0.0;
         }
-        if self.tempo_track_collapsed {
-            TEMPO_TRACK_HEIGHT_COLLAPSED
-        } else {
-            TEMPO_TRACK_HEIGHT
+        self.global_lane_height(GlobalLaneKind::Tempo)
+    }
+
+    /// Replace the whole tempo state from an undo/redo snapshot.
+    ///
+    /// Restores the marker list *and* the fixed project BPM together: clearing
+    /// automation folds the effective BPM back into `bpm`, so undoing it has to
+    /// put both halves back. The map revision keeps moving forward (it is a
+    /// cache-invalidation counter, not part of the value) and a selection that
+    /// no longer names a live marker is dropped.
+    pub fn restore_tempo_state(&mut self, points: Vec<TempoPoint>, bpm: f32) {
+        self.tempo_map.restore_points(points);
+        self.bpm = bpm;
+        if let Some(id) = self.selected_tempo_point_id.clone() {
+            if !self.tempo_map.points.iter().any(|p| p.id == id) {
+                self.selected_tempo_point_id = None;
+            }
         }
     }
 

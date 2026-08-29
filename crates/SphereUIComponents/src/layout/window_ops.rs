@@ -1579,6 +1579,15 @@ impl StudioLayout {
                     });
                 })
             },
+            on_bpm_drag_end: {
+                let owner = owner.clone();
+                Arc::new(move |cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.commit_bpm_drag(cx);
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
             on_set_time_signature: {
                 let owner = owner.clone();
                 Arc::new(move |numerator, denominator, cx| {
@@ -1630,25 +1639,22 @@ impl StudioLayout {
     ) {
         let numerator = numerator.clamp(1, 64) as u16;
         let denominator = denominator.clamp(1, 64) as u16;
-        let changed = self.timeline.update(cx, |timeline, cx| {
-            let before = timeline
-                .state
-                .time_signature_map
-                .time_signature_at_beat(0.0);
-            if before.numerator == numerator && before.denominator == denominator {
-                return false;
-            }
-            timeline
-                .state
-                .add_time_signature_point(0.0, numerator, denominator);
-            cx.notify();
-            true
-        });
-        if changed {
-            self.mark_dirty();
-            self.sync_time_signature_map_to_engine(cx);
-            cx.notify();
-        }
+        self.edit_time_signature_state(
+            "Set Time Signature",
+            |timeline| {
+                let before = timeline
+                    .state
+                    .time_signature_map
+                    .time_signature_at_beat(0.0);
+                if before.numerator == numerator && before.denominator == denominator {
+                    return;
+                }
+                timeline
+                    .state
+                    .add_time_signature_point(0.0, numerator, denominator);
+            },
+            cx,
+        );
     }
 
     /// Builds the routing-matrix view-model from the current timeline tracks.

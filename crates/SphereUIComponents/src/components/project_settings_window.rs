@@ -97,6 +97,8 @@ impl Default for ProjectSettingsSnapshot {
 #[derive(Clone)]
 pub struct ProjectSettingsCallbacks {
     pub on_bpm_drag: Arc<dyn Fn(BpmDragSample, &mut App) + Send + Sync>,
+    /// Pointer release after a BPM scrub — closes the gesture as one undo entry.
+    pub on_bpm_drag_end: Arc<dyn Fn(&mut App) + Send + Sync>,
     pub on_set_time_signature: Arc<dyn Fn(u32, u32, &mut App) + Send + Sync>,
     pub on_set_sample_rate: Arc<dyn Fn(u32, &mut App) + Send + Sync>,
     pub on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
@@ -283,6 +285,8 @@ impl ProjectSettingsWindow {
 
     fn bpm_scrub_field(&self, bpm: f32) -> gpui::AnyElement {
         let on_bpm_drag = self.callbacks.on_bpm_drag.clone();
+        let on_bpm_drag_end_up = self.callbacks.on_bpm_drag_end.clone();
+        let on_bpm_drag_end_out = self.callbacks.on_bpm_drag_end.clone();
 
         div()
             .id("project-settings-bpm")
@@ -350,6 +354,21 @@ impl ProjectSettingsWindow {
                     cx,
                 );
             })
+            // Release closes the scrub as one undo entry. Wired on and off the
+            // element for the same reason as the transport BPM box; a release
+            // with no scrub in flight is a no-op.
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                move |_: &gpui::MouseUpEvent, _window, cx| {
+                    on_bpm_drag_end_up(cx);
+                },
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                move |_: &gpui::MouseUpEvent, _window, cx| {
+                    on_bpm_drag_end_out(cx);
+                },
+            )
             .into_any_element()
     }
 

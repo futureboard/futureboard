@@ -2931,10 +2931,7 @@ impl RuntimeProject {
                                 // Full list. Staying inside the capacity keeps
                                 // this allocation-free, but the event is gone,
                                 // so say so instead of losing it silently.
-                                solfege
-                                    .engine
-                                    .metrics()
-                                    .record_dropped_articulation_event();
+                                solfege.engine.metrics().record_dropped_articulation_event();
                             }
                         }
                         continue;

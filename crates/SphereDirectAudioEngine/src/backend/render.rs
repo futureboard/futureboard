@@ -907,6 +907,39 @@ pub fn fill_output_f32(
     frames
 }
 
+/// Reasons the output callback must keep producing audio while the transport is
+/// stopped (engine `Paused`).
+///
+/// Extracted and tested because the failure mode is silent: a case missing from
+/// this list does not break a build or trip an assert, it just makes a feature
+/// inaudible. The Browser audition was exactly that — the callback body has a
+/// dedicated audition-only path, but this predicate did not list the voice, so
+/// the early silence return fired first and a clicked sample never made a
+/// sound.
+///
+/// Note this is deliberately a *superset* of `graph_wake_active` further down:
+/// an audition wakes the **output**, but must not wake the **graph**, since it
+/// is a decoded buffer summed into the master rather than anything that needs
+/// every track's plugin chain pulled through a block of silence.
+fn paused_preview_wake(
+    runtime: &RuntimeProject,
+    local: &LocalAudioState,
+    software_monitoring: bool,
+) -> bool {
+    runtime.has_active_midi_preview()
+        || runtime.bridge_panic_flush_samples > 0
+        || runtime.bridge_preview_tail_samples > 0
+        || runtime.has_bridge_editor_active()
+        || local.preview_tail_samples > 0
+        || local.stop_tail_samples > 0
+        || software_monitoring
+        || !local.audition.is_idle()
+        || runtime
+            .tracks
+            .iter()
+            .any(|t| !t.midi_block_events.is_empty())
+}
+
 fn fill_output_f32_inner(
     data: &mut [f32],
     channels: usize,
@@ -931,17 +964,7 @@ fn fill_output_f32_inner(
         // transport is stopped. Every other non-Running state (loading /
         // closing / device switch / suspended) is hard silence.
         let preview_wake = matches!(engine_state, crate::engine::AudioEngineState::Paused)
-            && (runtime.has_active_midi_preview()
-                || runtime.bridge_panic_flush_samples > 0
-                || runtime.bridge_preview_tail_samples > 0
-                || runtime.has_bridge_editor_active()
-                || local.preview_tail_samples > 0
-                || local.stop_tail_samples > 0
-                || software_monitoring
-                || runtime
-                    .tracks
-                    .iter()
-                    .any(|t| !t.midi_block_events.is_empty()));
+            && paused_preview_wake(runtime, local, software_monitoring);
         // When preview_wake holds, fall through to the normal body with the
         // transport treated as stopped — only preview/flush processing runs.
         if !preview_wake {
@@ -1964,5 +1987,69 @@ mod tests {
             local.metronome_click_remaining > 0,
             "Play must re-arm clicks even when scrub-end was missed"
         );
+    }
+}
+
+#[cfg(test)]
+mod paused_preview_wake_tests {
+    use super::*;
+    use crate::audio_file::AudioFileBuffer;
+
+    fn silent_source(frames: usize) -> Box<AudioFileBuffer> {
+        Box::new(AudioFileBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            frames,
+            samples: vec![0.0; frames * 2],
+        })
+    }
+
+    /// Nothing to preview: the callback is free to return hard silence.
+    #[test]
+    fn idle_engine_does_not_wake() {
+        let runtime = RuntimeProject::default();
+        let local = LocalAudioState::new(48_000.0);
+        assert!(!paused_preview_wake(&runtime, &local, false));
+    }
+
+    /// The regression: a Browser audition is only ever started with the
+    /// transport stopped, so if it does not wake the paused callback the sample
+    /// is decoded, started, and then never mixed.
+    #[test]
+    fn active_audition_wakes_the_paused_callback() {
+        let runtime = RuntimeProject::default();
+        let mut local = LocalAudioState::new(48_000.0);
+        local.audition.start(silent_source(48_000), 48_000);
+
+        assert!(
+            !local.audition.is_idle(),
+            "audition voice should be live after start"
+        );
+        assert!(
+            paused_preview_wake(&runtime, &local, false),
+            "a live Browser audition must keep the stopped callback producing audio"
+        );
+    }
+
+    /// Stopping the preview releases the voice through a fade, so the wake has
+    /// to hold until that fade has finished rather than cutting immediately.
+    #[test]
+    fn releasing_audition_still_wakes_until_the_fade_completes() {
+        let runtime = RuntimeProject::default();
+        let mut local = LocalAudioState::new(48_000.0);
+        local.audition.start(silent_source(48_000), 48_000);
+        local.audition.stop(48_000);
+        assert!(
+            paused_preview_wake(&runtime, &local, false),
+            "the release tail must stay audible or the preview ends in a click"
+        );
+    }
+
+    /// Software monitoring is an independent reason to stay awake.
+    #[test]
+    fn software_monitoring_wakes_without_an_audition() {
+        let runtime = RuntimeProject::default();
+        let local = LocalAudioState::new(48_000.0);
+        assert!(paused_preview_wake(&runtime, &local, true));
     }
 }

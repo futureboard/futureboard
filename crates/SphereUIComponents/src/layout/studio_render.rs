@@ -332,6 +332,7 @@ impl Render for StudioLayout {
             })
         };
         let inspector_color_hex_callbacks = TextInputCallbacks {
+            on_context_command: None,
             on_context_menu: Some(inspector_color_hex_context),
             on_mouse: inspector_color_hex_callbacks.on_mouse,
         };
@@ -367,6 +368,7 @@ impl Render for StudioLayout {
             |layout: &mut StudioLayout| &mut layout.browser_search_input,
         );
         let browser_search_callbacks = TextInputCallbacks {
+            on_context_command: None,
             on_context_menu: Some(on_browser_search_context),
             on_mouse: browser_search_mouse_callbacks.on_mouse,
         };
@@ -948,6 +950,7 @@ impl Render for StudioLayout {
                 |layout: &mut StudioLayout| &mut layout.project_switcher_search_input,
             );
             let search_context_callbacks = TextInputCallbacks {
+                on_context_command: None,
                 on_context_menu: Some(Arc::new({
                     let this = cx.entity().clone();
                     move |(x, y): &(f32, f32), _w, cx| {
@@ -1118,6 +1121,7 @@ impl Render for StudioLayout {
                 |layout: &mut StudioLayout| &mut layout.plugin_picker_search_input,
             );
             let search_context_callbacks = TextInputCallbacks {
+                on_context_command: None,
                 on_context_menu: Some(Arc::new({
                     let this = cx.entity().clone();
                     move |(x, y): &(f32, f32), _w, cx| {

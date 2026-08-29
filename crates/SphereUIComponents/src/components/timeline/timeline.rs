@@ -4,10 +4,14 @@ pub(crate) use render::*;
 
 use crate::assets;
 use crate::components::edit::{
-    normalize_range, ClipSnapshot, EditCommand, EditHistory, TrackSnapshot,
+    normalize_range, ClipSnapshot, EditCommand, EditHistory, EditImpact, TempoStateSnapshot,
+    TimeSignatureStateSnapshot, TrackSnapshot,
 };
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
+use crate::components::timeline::global_lane_header::{
+    GlobalLaneResizeArmCb, GlobalLaneResizeResetCb,
+};
 use crate::components::timeline::song_text_track::{
     song_text_drag_positions, song_text_track_lane, SongTextDragPreview, SongTextDragSession,
     SongTextMarkerDown,
@@ -15,13 +19,14 @@ use crate::components::timeline::song_text_track::{
 use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::time_signature_track::time_signature_track_lane;
 use crate::components::timeline::timeline_ruler::{
-    timeline_ruler, TimelineLoopDragUpdate, TimelineRegionDragUpdate,
+    timeline_ruler, TimelineLoopDragUpdate, TimelineRegionDrag, TimelineRegionDragUpdate,
 };
 use crate::components::timeline::timeline_state::{
     hit_test_arrangement, ArrangementCoordinateContext, ArrangementHitTarget, ClipDragItem,
-    ClipResizeDrag, ClipState, ClipType, SnapDivision, TempoPointDrag, TimeSignaturePointDrag,
-    TimelineRangeSelection, TimelineState, TimelineTool, TrackDragItem, TrackHeightResizeDrag,
-    TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD,
+    ClipResizeDrag, ClipState, ClipType, GlobalLaneKind, GlobalLaneResizeDrag, SnapDivision,
+    TempoPointDrag, TimeSignaturePointDrag, TimelineRangeSelection, TimelineRegionState,
+    TimelineState, TimelineTool, TrackDragItem, TrackHeightResizeDrag, TrackType,
+    DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -207,8 +212,20 @@ pub struct Timeline {
         Option<crate::components::timeline::automation_control_lane::AutomationControlCallback>,
     /// In-flight tempo-point drag on the global Tempo Track lane.
     tempo_drag: Option<TempoPointDrag>,
+    /// Pre-gesture tempo snapshot for the in-flight Tempo lane drag, plus the
+    /// history label the release should use (a double-click *creates* a marker
+    /// and then drags it — one gesture, but not an "edit"). Kept here rather
+    /// than inside [`TempoPointDrag`] so the drag payload stays identity-only.
+    tempo_gesture_origin: Option<(&'static str, TempoStateSnapshot)>,
     /// In-flight time-signature marker drag on the global Time Signature lane.
     ts_drag: Option<TimeSignaturePointDrag>,
+    /// Pre-gesture meter snapshot for the in-flight Time Signature lane drag,
+    /// with its history label. Mirrors `tempo_gesture_origin`.
+    ts_gesture_origin: Option<(&'static str, TimeSignatureStateSnapshot)>,
+    /// Pre-gesture region snapshot, captured on the first ruler region drag-move
+    /// (before any mutation) so the drop records one undo step for the whole
+    /// drag instead of one per mouse-move.
+    region_gesture_origin: Option<Vec<TimelineRegionState>>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     /// View-only floating-toolbar placement. It deliberately never enters the
     /// project snapshot: moving tools must not make a session dirty.
@@ -354,6 +371,12 @@ impl Render for ClipResizeDrag {
 }
 
 impl Render for TrackHeightResizeDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+impl Render for GlobalLaneResizeDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         Empty
     }

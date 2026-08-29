@@ -108,6 +108,12 @@ pub(super) enum TextMenuTarget {
     InspectorClipName,
     /// The Inspector's hex colour edit field.
     InspectorColorHex,
+    /// The transport readout's inline BPM editor.
+    TransportBpm,
+    /// The transport readout's inline time-signature numerator.
+    TransportTimeSigNum,
+    /// The transport readout's inline time-signature denominator.
+    TransportTimeSigDen,
 }
 
 #[derive(Debug, Clone, Copy)]

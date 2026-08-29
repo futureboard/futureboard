@@ -183,6 +183,10 @@ pub struct TransportChromeState {
     pub on_follow_mode_toggle: ChromeActionCb,
     pub on_set_bpm: BpmChangeCb,
     pub on_bpm_drag: BpmDragCb,
+    /// Pointer release after a BPM scrub. The scrub itself writes tempo live
+    /// (so playback follows the drag); this is where the whole gesture becomes
+    /// one undo entry.
+    pub on_bpm_drag_end: ChromeActionCb,
     pub on_bpm_menu: BpmMenuCb,
     /// Opens the inline numeric BPM editor (double-click / "Edit BPM…").
     pub on_bpm_edit_start: ChromeActionCb,
@@ -274,6 +278,7 @@ fn bpm_display(
     state_bpm: f32,
     label: String,
     on_bpm_drag: BpmDragCb,
+    on_bpm_drag_end: ChromeActionCb,
     on_bpm_menu: BpmMenuCb,
     on_bpm_edit_start: ChromeActionCb,
     editing: bool,
@@ -296,6 +301,8 @@ fn bpm_display(
     }
 
     let on_bpm_drag_move = on_bpm_drag.clone();
+    let on_bpm_drag_end_up = on_bpm_drag_end.clone();
+    let on_bpm_drag_end_out = on_bpm_drag_end;
     let on_bpm_menu_down = on_bpm_menu.clone();
     let on_bpm_edit_accessible = on_bpm_edit_start.clone();
     let accessible_label = format!("Tempo {label} BPM. Activate to edit");
@@ -367,6 +374,22 @@ fn bpm_display(
             };
             on_bpm_drag_move(&sample, window, cx);
         })
+        // The scrub warps the cursor back to its anchor, so the release usually
+        // lands on this element — but not on platforms without cursor warp, and
+        // not for a drag the user ends off-target. Both are wired, and the
+        // handler is a no-op when no scrub is in flight.
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            move |_: &gpui::MouseUpEvent, window, cx| {
+                on_bpm_drag_end_up(&(), window, cx);
+            },
+        )
+        .on_mouse_up_out(
+            gpui::MouseButton::Left,
+            move |_: &gpui::MouseUpEvent, window, cx| {
+                on_bpm_drag_end_out(&(), window, cx);
+            },
+        )
         .into_any_element()
 }
 
@@ -597,6 +620,7 @@ fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
     let on_follow = state.on_follow_toggle.clone();
     let on_follow_mode = state.on_follow_mode_toggle.clone();
     let on_bpm_drag = state.on_bpm_drag.clone();
+    let on_bpm_drag_end = state.on_bpm_drag_end.clone();
     let on_bpm_menu = state.on_bpm_menu.clone();
     let on_bpm_edit_start = state.on_bpm_edit_start.clone();
     let bpm_value = state.bpm;
@@ -818,6 +842,7 @@ fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
             bpm_value,
             bpm_label,
             on_bpm_drag,
+            on_bpm_drag_end,
             on_bpm_menu,
             on_bpm_edit_start,
             bpm_editing,

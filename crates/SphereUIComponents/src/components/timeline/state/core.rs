@@ -210,6 +210,14 @@ pub struct TimelineState {
     /// the project had any lyrics in it. Tempo and meter apply to every project;
     /// song text does not, so it is now opt-in like the other conductor lanes.
     pub show_song_text_track: bool,
+    /// User-set heights for the global lanes (view state, same class as the
+    /// visibility and collapse flags above).
+    pub global_lane_heights: GlobalLaneHeights,
+    /// Active global-lane height resize gesture, if any.
+    pub global_lane_resize: Option<GlobalLaneResizeSession>,
+    /// Armed at pointer-down on a global lane's resize handle; promoted to
+    /// [`Self::global_lane_resize`] on the first drag-move delta.
+    pub global_lane_resize_arm: Option<(GlobalLaneKind, f32)>,
     /// Per-track arrangement row heights (layout/view state, persisted in project).
     pub track_view_layout: TrackViewLayout,
     /// Active track-height resize gesture, if any.
@@ -337,6 +345,9 @@ impl Default for TimelineState {
             time_signature_track_collapsed: false,
             selected_time_signature_point_id: None,
             show_song_text_track: false,
+            global_lane_heights: GlobalLaneHeights::default(),
+            global_lane_resize: None,
+            global_lane_resize_arm: None,
             track_view_layout: TrackViewLayout::default(),
             track_height_resize: None,
             track_height_resize_arm: None,

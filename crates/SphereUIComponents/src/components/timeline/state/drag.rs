@@ -41,3 +41,11 @@ pub struct TrackDragItem {
 pub struct TrackHeightResizeDrag {
     pub anchor_track_id: String,
 }
+
+/// In-flight global (conductor) lane height resize. Identity only, for the
+/// same reason as [`TrackHeightResizeDrag`]: the height is resolved live from
+/// [`TimelineState::update_global_lane_resize`].
+#[derive(Debug, Clone)]
+pub struct GlobalLaneResizeDrag {
+    pub kind: GlobalLaneKind,
+}
