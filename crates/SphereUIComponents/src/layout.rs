@@ -1723,6 +1723,80 @@ impl StudioLayout {
                     self.add_region_at_beat_command(beat, cx);
                 }
             }
+
+            "marker:add-here" => {
+                if let Some(beat) = self.marker_context_beat() {
+                    self.add_marker_at_beat_command(beat, cx);
+                }
+            }
+            "marker:add-at-playhead" => self.add_marker_at_playhead_command(cx),
+            "marker:delete" => {
+                if let Some(id) = self.marker_context_id(cx) {
+                    self.delete_marker_command(&id, cx);
+                }
+            }
+            "marker:move-to-playhead" => {
+                if let Some(id) = self.marker_context_id(cx) {
+                    self.move_marker_to_playhead_command(&id, cx);
+                }
+            }
+            "marker:goto" => {
+                if let Some(id) = self.marker_context_id(cx) {
+                    self.seek_to_marker_command(&id, cx);
+                }
+            }
+            "marker:clear-all" => self.clear_markers_command(cx),
+            "marker:open-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.show_marker_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            "marker:hide-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.hide_marker_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
+
+            "region:add-here" => {
+                if let Some(beat) = self.region_context_beat() {
+                    self.add_region_at_beat_command(beat, cx);
+                }
+            }
+            "region:add-at-playhead" => self.add_region_at_playhead_command(cx),
+            "region:delete" => {
+                if let Some(id) = self.region_context_id(cx) {
+                    self.delete_region_command(&id, cx);
+                }
+            }
+            "region:move-to-playhead" => {
+                if let Some(id) = self.region_context_id(cx) {
+                    self.move_region_to_playhead_command(&id, cx);
+                }
+            }
+            "region:set-loop" => {
+                if let Some(id) = self.region_context_id(cx) {
+                    self.set_loop_to_region_command(&id, cx);
+                }
+            }
+            "region:clear-all" => self.clear_regions_command(cx),
+            "region:open-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.show_region_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            "region:hide-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.hide_region_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
             "ruler:set-loop-selection" => {
                 let applied = self.timeline.update(cx, |timeline, cx| {
                     let Some(range) = timeline.state.arrangement_range.as_ref() else {

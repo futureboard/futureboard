@@ -1,11 +1,9 @@
-use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::audio_clip::{
     audio_clip, audio_clip_timeline_geometry, AudioClipProcessCommitCb, AudioClipProcessPreviewCb,
 };
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
-    ClipState, ClipType, TimelineGestureContext, TimelineState, TimelineTool, TrackState,
-    TrackType, HEADER_WIDTH,
+    ClipState, ClipType, TimelineGestureContext, TimelineState, TimelineTool, TrackState, TrackType,
 };
 use crate::components::timeline::video_clip::video_clip;
 use crate::theme::Colors;
@@ -187,7 +185,7 @@ pub fn track_lane(
             gpui::MouseButton::Left,
             move |event: &gpui::MouseDownEvent, window, cx| {
                 let x: f32 = event.position.x.into();
-                let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                let click_x = state_ref.lane_x_from_window_x(x);
                 let click_beat = state_ref.x_to_beats(click_x);
                 let bypass_snap = event.modifiers.shift;
                 let snapped_beat = state_ref.snap_beats_with_bypass(click_beat, bypass_snap);

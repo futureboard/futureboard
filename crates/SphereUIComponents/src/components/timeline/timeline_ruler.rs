@@ -1,14 +1,44 @@
 use crate::assets;
-use crate::components::sidebar::SIDEBAR_WIDTH;
 use crate::components::timeline::timeline_state::{
     GridLineLevel, TempoMap, TimeSignatureMap, TimelineGestureContext, TimelineState, HEADER_WIDTH,
     RULER_HEIGHT,
 };
 use crate::theme::Colors;
 use gpui::{
-    div, px, svg, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    canvas, div, px, svg, AppContext, Bounds, Empty, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Render, StatefulInteractiveElement, Styled, Window,
 };
+
+/// Sink for the measured lane-column origin. Written by the ruler's probe
+/// during prepaint, read by `Timeline::render` on the next frame.
+pub type LaneOriginProbe = std::rc::Rc<std::cell::Cell<Option<f32>>>;
+
+/// Zero-cost overlay that records its parent's window-space left edge every
+/// frame.
+///
+/// The ruler markings area *is* the lane content column, so its origin is the
+/// one number every pointer gesture in the arrangement needs. Measuring it
+/// beats deriving it: the shell has a collapsible browser panel and a left
+/// rail, and the constants that used to stand in for them were wrong whenever
+/// either changed.
+fn lane_origin_probe(sink: LaneOriginProbe) -> impl IntoElement {
+    canvas(
+        move |bounds: Bounds<Pixels>, window, _cx| {
+            let measured: f32 = bounds.origin.x.into();
+            if sink.get().is_none_or(|prev| (prev - measured).abs() >= 0.5) {
+                sink.set(Some(measured));
+                // The value is consumed at the top of the *next* render, so ask
+                // for one. Without this the first frame after startup or a panel
+                // toggle would still hit-test against the stale estimate, and a
+                // click landing in that window would miss by the difference.
+                window.refresh();
+            }
+        },
+        |_, _: (), _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
 
 #[derive(Clone, Debug)]
 struct RulerSeekDrag;
@@ -91,6 +121,7 @@ pub fn timeline_ruler(
     on_playhead_scrub_end: Option<
         std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>,
     >,
+    origin_probe: LaneOriginProbe,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TimelineRuler");
     let on_toggle_snap_clone = on_toggle_snap.clone();
@@ -107,6 +138,9 @@ pub fn timeline_ruler(
     let scrub_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let scrub_active_drag = scrub_active.clone();
     let scrub_active_up = scrub_active.clone();
+    // Resolved once per frame from last frame's measurement, so every handler
+    // built below shares one origin.
+    let lane_origin = state.lane_origin_x();
     let on_region_drag_move = on_region_drag.clone();
     // Both drag closures only map pointer x -> snapped beats, so they capture
     // this frame's geometry instead of a deep clone of the whole project.
@@ -250,6 +284,7 @@ pub fn timeline_ruler(
                 .overflow_hidden()
                 .cursor(gpui::CursorStyle::Crosshair)
                 .id("ruler-markings-area")
+                .child(lane_origin_probe(origin_probe))
                 // Debug: outline the ruler content clip rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline())
                 // Seek timeline position on click
@@ -257,7 +292,7 @@ pub fn timeline_ruler(
                     gpui::MouseButton::Left,
                     move |event: &gpui::MouseDownEvent, window, cx| {
                         let x: f32 = event.position.x.into();
-                        let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                        let click_x = x - lane_origin;
                         on_seek_clone(
                             &click_x,
                             crate::layout::SeekReason::TimelineClick,
@@ -272,7 +307,7 @@ pub fn timeline_ruler(
                     move |event: &gpui::MouseDownEvent, window, cx| {
                         let x: f32 = event.position.x.into();
                         let y: f32 = event.position.y.into();
-                        let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
+                        let click_x = x - lane_origin;
                         on_ruler_context(&(click_x, x, y), window, cx);
                     },
                 )
@@ -420,6 +455,15 @@ pub fn timeline_ruler(
                     None
                 })
                 .children(state.regions.iter().filter_map(|region| {
+                    // The Region lane owns regions outright when it is visible:
+                    // their blocks, their trim handles, their menu. A second
+                    // copy here would put two grab targets on one object, and
+                    // the ruler's sits on top of the playhead scrub. The ruler
+                    // keeps these compact bars only while that lane is hidden,
+                    // so nothing disappears when the lane is turned off.
+                    if state.show_region_track {
+                        return None;
+                    }
                     let (start, end) = region.normalized_range();
                     let x = state.beats_to_x(start as f32);
                     let rx = state.beats_to_x(end as f32);
@@ -523,6 +567,11 @@ pub fn timeline_ruler(
                     )
                 }))
                 .children(state.markers.iter().filter_map(|marker| {
+                    // Same rule as regions above: the Marker lane owns markers
+                    // while it is showing.
+                    if state.show_marker_track {
+                        return None;
+                    }
                     let x = state.beats_to_x(marker.beat as f32);
                     if x < -24.0 || x > ruler_grid_width + 24.0 {
                         return None;

@@ -203,6 +203,21 @@ pub enum ContextTarget {
     TimelineRuler {
         beat: f64,
     },
+    /// Right-click on the global Marker lane. `marker_id` is `None` on empty
+    /// lane, which is what splits "act on this marker" from "create one here".
+    MarkerTrack {
+        beat: f64,
+        marker_id: Option<String>,
+    },
+    /// Marker lane header menu — lane-level actions only.
+    MarkerLane,
+    /// Right-click on the global Region (arranger) lane.
+    RegionTrack {
+        beat: f64,
+        region_id: Option<String>,
+    },
+    /// Region lane header menu — lane-level actions only.
+    RegionLane,
     /// Right-click on the global Tempo Track lane.
     TempoTrack {
         beat: f64,

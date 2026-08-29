@@ -8,6 +8,19 @@ pub fn x_to_beat(x: f32, viewport: &TimelineViewport) -> f64 {
     ((x + viewport.scroll_x) / viewport.pixels_per_beat.max(0.0001)).max(0.0) as f64
 }
 
+/// Window-space x of the lane content column's left edge.
+///
+/// Prefers the value measured from the rendered ruler over the chrome-derived
+/// estimate. The estimate is `browser_width + HEADER_WIDTH`, which is only
+/// right when the browser panel happens to be exactly its design width and the
+/// window has no left rail — neither holds in the shipped shell, which is why
+/// clicks used to land a rail's width away from where they were drawn.
+pub fn lane_origin_x(viewport: &TimelineViewport) -> f32 {
+    viewport
+        .lane_origin_x_measured
+        .unwrap_or(viewport.panel_origin_x + HEADER_WIDTH)
+}
+
 pub fn snap_beat(beat: f64, snap: SnapSettings) -> f64 {
     // Arrangement clips historically clamp to ≥ 0; pre-roll-capable callers
     // should use [`super::musical_snap::snap_beat`] directly.
@@ -101,7 +114,7 @@ impl TimelineGestureContext {
     }
 
     pub fn lane_origin_x(&self) -> f32 {
-        self.viewport.panel_origin_x + HEADER_WIDTH
+        lane_origin_x(&self.viewport)
     }
 
     pub fn lane_x_from_window_x(&self, window_x: f32) -> f32 {
@@ -186,13 +199,12 @@ impl TimelineState {
     /// Window-space x of the arrangement lane origin — the left edge of the
     /// scrollable clip area, i.e. past the browser panel and the track headers.
     ///
-    /// The browser panel is collapsible, so its width comes from the measured
-    /// shell metrics rather than a constant. Every gesture that resolves a
-    /// window-space pointer x (clip move, clip edge-resize, ruler scrub, lane
-    /// tools, automation, tempo, song text) must map through this so pointer
+    /// Every gesture that resolves a window-space pointer x (clip move, clip
+    /// edge-resize, ruler click and scrub, lane tools, automation, tempo,
+    /// markers, regions, song text) must map through this so pointer
     /// coordinates and drawing share one transform.
     pub fn lane_origin_x(&self) -> f32 {
-        self.viewport.panel_origin_x + HEADER_WIDTH
+        lane_origin_x(&self.viewport)
     }
 
     /// Convert a window-space x into arrangement-lane content x.

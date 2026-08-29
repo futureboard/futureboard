@@ -1,6 +1,6 @@
 use gpui::{
-    Bounds, Context, EntityInputHandler, FocusHandle, KeyDownEvent, Pixels, Point, UTF16Selection,
-    Window,
+    App, Bounds, Context, EntityInputHandler, FocusHandle, KeyDownEvent, Pixels, Point,
+    UTF16Selection, Window,
 };
 use std::ops::Range;
 use std::path::PathBuf;
@@ -1253,10 +1253,19 @@ impl StudioLayout {
                 ];
                 entries
             }
-            ContextTarget::TimelineMarker { beat, .. } => {
-                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+            ContextTarget::TimelineMarker { marker_id, beat } => {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_bar_beat(*beat as f32);
+                let name = state
+                    .marker(marker_id)
+                    .map(|marker| marker.name.clone())
+                    .unwrap_or_else(|| "Marker".to_string());
                 vec![
-                    ContextMenuEntry::disabled_item(format!("Marker at {label}"), "noop"),
+                    ContextMenuEntry::disabled_item(format!("{name} — {label}"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Move to Playhead", "marker:move-to-playhead"),
+                    ContextMenuEntry::item("Set Playhead to Marker", "marker:goto"),
+                    ContextMenuEntry::danger_item("Delete Marker", "marker:delete"),
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item(i18n.tr("menu.project-add_marker"), "ruler:add-marker"),
                     ContextMenuEntry::item("Add Tempo Marker", "ruler:add-tempo-marker"),
@@ -1830,6 +1839,108 @@ impl StudioLayout {
                     ]
                 }
             }
+            ContextTarget::MarkerTrack { beat, marker_id } => {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_bar_beat(*beat as f32);
+                match marker_id.as_deref().and_then(|id| state.marker(id)) {
+                    Some(marker) => {
+                        let at = state.format_bar_beat(marker.beat as f32);
+                        vec![
+                            ContextMenuEntry::disabled_item(
+                                format!("{} — {at}", marker.name),
+                                "noop",
+                            ),
+                            ContextMenuEntry::Separator,
+                            ContextMenuEntry::item("Move to Playhead", "marker:move-to-playhead"),
+                            ContextMenuEntry::item("Set Playhead to Marker", "marker:goto"),
+                            ContextMenuEntry::Separator,
+                            ContextMenuEntry::danger_item("Delete Marker", "marker:delete"),
+                        ]
+                    }
+                    None => vec![
+                        ContextMenuEntry::disabled_item(format!("Marker lane at {label}"), "noop"),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Add Marker Here", "marker:add-here"),
+                        ContextMenuEntry::item("Add Marker at Playhead", "marker:add-at-playhead"),
+                        ContextMenuEntry::Separator,
+                        danger_menu_item_enabled(
+                            "Delete All Markers",
+                            "marker:clear-all",
+                            !state.markers.is_empty(),
+                        ),
+                        ContextMenuEntry::item("Hide Marker Track", "marker:hide-track"),
+                    ],
+                }
+            }
+            ContextTarget::MarkerLane => {
+                let state = &self.timeline.read(cx).state;
+                vec![
+                    ContextMenuEntry::Header("Marker Track".to_string()),
+                    ContextMenuEntry::item("Add Marker at Playhead", "marker:add-at-playhead"),
+                    ContextMenuEntry::Separator,
+                    danger_menu_item_enabled(
+                        "Delete All Markers",
+                        "marker:clear-all",
+                        !state.markers.is_empty(),
+                    ),
+                    ContextMenuEntry::item("Hide Marker Track", "marker:hide-track"),
+                ]
+            }
+            ContextTarget::RegionTrack { beat, region_id } => {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_bar_beat(*beat as f32);
+                match region_id.as_deref().and_then(|id| state.region(id)) {
+                    Some(region) => {
+                        let (start, end) = region.normalized_range();
+                        let span = format!(
+                            "{} – {}",
+                            state.format_bar_beat(start as f32),
+                            state.format_bar_beat(end as f32)
+                        );
+                        vec![
+                            ContextMenuEntry::disabled_item(
+                                format!("{} — {span}", region.name),
+                                "noop",
+                            ),
+                            ContextMenuEntry::Separator,
+                            ContextMenuEntry::item("Set Loop to Region", "region:set-loop"),
+                            ContextMenuEntry::item("Move to Playhead", "region:move-to-playhead"),
+                            ContextMenuEntry::Separator,
+                            ContextMenuEntry::danger_item("Delete Region", "region:delete"),
+                        ]
+                    }
+                    None => vec![
+                        ContextMenuEntry::disabled_item(format!("Region lane at {label}"), "noop"),
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::item("Create Region Here", "region:add-here"),
+                        ContextMenuEntry::item(
+                            "Create Region at Playhead",
+                            "region:add-at-playhead",
+                        ),
+                        ContextMenuEntry::Separator,
+                        danger_menu_item_enabled(
+                            "Delete All Regions",
+                            "region:clear-all",
+                            !state.regions.is_empty(),
+                        ),
+                        ContextMenuEntry::item("Hide Region Track", "region:hide-track"),
+                    ],
+                }
+            }
+            ContextTarget::RegionLane => {
+                let state = &self.timeline.read(cx).state;
+                vec![
+                    ContextMenuEntry::Header("Region Track".to_string()),
+                    ContextMenuEntry::item("Create Region at Playhead", "region:add-at-playhead"),
+                    ContextMenuEntry::Separator,
+                    danger_menu_item_enabled(
+                        "Delete All Regions",
+                        "region:clear-all",
+                        !state.regions.is_empty(),
+                    ),
+                    ContextMenuEntry::item("Hide Region Track", "region:hide-track"),
+                ]
+            }
             ContextTarget::TimelineRuler { beat } => {
                 let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
                 let has_automation = self.timeline.read(cx).state.tempo_has_automation();
@@ -1874,6 +1985,16 @@ impl StudioLayout {
                 } else {
                     ContextMenuEntry::item("Show Time Signature Track", "ts:open-track")
                 });
+                entries.push(if st.state.show_marker_track {
+                    ContextMenuEntry::item("Hide Marker Track", "marker:hide-track")
+                } else {
+                    ContextMenuEntry::item("Show Marker Track", "marker:open-track")
+                });
+                entries.push(if st.state.show_region_track {
+                    ContextMenuEntry::item("Hide Region Track", "region:hide-track")
+                } else {
+                    ContextMenuEntry::item("Show Region Track", "region:open-track")
+                });
                 entries.push(if st.state.show_song_text_track {
                     ContextMenuEntry::item("Hide Song Text Track", "songtext:hide-track")
                 } else {
@@ -1882,6 +2003,60 @@ impl StudioLayout {
                 entries
             }
         }
+    }
+
+    /// Beat under the cursor for the active Marker lane context menu, if any.
+    pub(super) fn marker_context_beat(&self) -> Option<f64> {
+        match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::MarkerTrack { beat, .. }) => Some(*beat),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Marker the active context menu is acting on: the one under the cursor in
+    /// the lane, the one right-clicked in the ruler, else the lane selection.
+    pub(super) fn marker_context_id(&self, cx: &App) -> Option<String> {
+        let from_menu = match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::MarkerTrack { marker_id, .. }) => {
+                    marker_id.clone()
+                }
+                ContextMenuTarget::Extended(ContextTarget::TimelineMarker {
+                    marker_id, ..
+                }) => Some(marker_id.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        from_menu.or_else(|| self.timeline.read(cx).state.selected_marker_id.clone())
+    }
+
+    /// Beat under the cursor for the active Region lane context menu, if any.
+    pub(super) fn region_context_beat(&self) -> Option<f64> {
+        match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::RegionTrack { beat, .. }) => Some(*beat),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Region the active context menu is acting on, else the lane selection.
+    pub(super) fn region_context_id(&self, cx: &App) -> Option<String> {
+        let from_menu = match &self.overlay.open_popover {
+            Some(OpenPopover::Context { request }) => match &request.target {
+                ContextMenuTarget::Extended(ContextTarget::RegionTrack { region_id, .. }) => {
+                    region_id.clone()
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        from_menu.or_else(|| self.timeline.read(cx).state.selected_region_id.clone())
     }
 
     /// Beat under the cursor for the active timeline-ruler context menu, if any.

@@ -59,6 +59,15 @@ pub struct TimelineViewport {
     /// [`TimelineState::lane_origin_x`] so gestures and drawing stay on one
     /// coordinate space.
     pub panel_origin_x: f32,
+    /// Measured window x of the lane content column's left edge, published by
+    /// the ruler's origin probe each frame.
+    ///
+    /// [`Self::panel_origin_x`] is derived from chrome constants and is only an
+    /// estimate: it assumes the browser panel is either exactly its design
+    /// width or absent, and it does not know about the window's left rail at
+    /// all. Pointer math reads this instead whenever it is available, so the
+    /// transform that resolves a click is the one that drew the pixel.
+    pub lane_origin_x_measured: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

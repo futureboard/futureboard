@@ -49,3 +49,11 @@ pub struct TrackHeightResizeDrag {
 pub struct GlobalLaneResizeDrag {
     pub kind: GlobalLaneKind,
 }
+
+/// In-flight arrangement-marker move on the global Marker lane. Carries the
+/// grab offset so the flag does not jump to the cursor on the first move.
+#[derive(Debug, Clone)]
+pub struct TimelineMarkerDrag {
+    pub marker_id: String,
+    pub pointer_offset_x: f32,
+}

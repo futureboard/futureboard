@@ -33,12 +33,14 @@ impl Timeline {
     }
 
     pub(super) fn arrangement_coordinate_context(&self) -> ArrangementCoordinateContext {
-        let panel_origin_px = gpui::point(
-            px(self.state.viewport.panel_origin_x),
-            px(APP_CHROME_HEIGHT),
-        );
+        // Both origins come off the one measured lane edge. Deriving the panel
+        // origin from the chrome estimate while the viewport used the measured
+        // value would let `panel_x` and `viewport_x` disagree about where the
+        // track headers end.
+        let lane_origin_x = self.state.lane_origin_x();
+        let panel_origin_px = gpui::point(px(lane_origin_x - HEADER_WIDTH), px(APP_CHROME_HEIGHT));
         let viewport_origin_px = gpui::point(
-            px(self.state.lane_origin_x()),
+            px(lane_origin_x),
             px(APP_CHROME_HEIGHT + self.state.arrangement_content_top()),
         );
         ArrangementCoordinateContext {
@@ -149,6 +151,7 @@ impl Timeline {
         self.ts_drag = None;
         self.ts_gesture_origin = None;
         self.region_gesture_origin = None;
+        self.marker_gesture_origin = None;
         self.pan_last_position = None;
         self.state.clear_track_drag();
         self.state.cancel_track_height_resize();
@@ -207,6 +210,7 @@ impl Timeline {
             ts_drag: None,
             ts_gesture_origin: None,
             region_gesture_origin: None,
+            marker_gesture_origin: None,
             pan_last_position: None,
             floating_toolbar_position: None,
             floating_toolbar_drag_anchor: None,
@@ -216,6 +220,7 @@ impl Timeline {
             on_open_editor: None,
             on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            lane_origin_probe: std::rc::Rc::new(std::cell::Cell::new(None)),
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -264,6 +269,7 @@ impl Timeline {
             ts_drag: None,
             ts_gesture_origin: None,
             region_gesture_origin: None,
+            marker_gesture_origin: None,
             pan_last_position: None,
             floating_toolbar_position: None,
             floating_toolbar_drag_anchor: None,
@@ -273,6 +279,7 @@ impl Timeline {
             on_open_editor: None,
             on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
+            lane_origin_probe: std::rc::Rc::new(std::cell::Cell::new(None)),
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -859,9 +866,130 @@ impl Timeline {
     pub(super) fn tempo_bpm_from_window_y(&self, window_y: f32) -> f64 {
         use crate::components::timeline::timeline_state::y_to_bpm;
         let lane_h = self.state.tempo_track_height();
-        let local_y = (window_y - APP_CHROME_HEIGHT - RULER_HEIGHT - TEMPO_LANE_PAD).max(0.0);
+        let local_y = (window_y - self.state.tempo_lane_origin_y() - TEMPO_LANE_PAD).max(0.0);
         let (min_bpm, max_bpm) = self.state.tempo_lane_bpm_range();
         y_to_bpm(local_y, lane_h, min_bpm, max_bpm)
+    }
+
+    // ── Marker lane ─────────────────────────────────────────────────────────
+
+    /// Mouse-down in the Marker lane. Hitting a flag selects it and seeks there;
+    /// hitting empty lane clears the selection and seeks; a double-click on
+    /// empty lane creates a marker.
+    pub(super) fn begin_marker_track_interaction(
+        &mut self,
+        beat: f64,
+        marker_id: Option<String>,
+        click_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        match marker_id {
+            Some(id) => {
+                self.state.select_marker(&id);
+                if let Some(marker) = self.state.marker(&id) {
+                    let target = marker.beat as f32;
+                    self.seek_to_exact_beat(target, crate::layout::SeekReason::TimelineClick, cx);
+                }
+            }
+            None => {
+                self.state.clear_marker_selection();
+                if click_count >= 2 {
+                    let prev = self.state.markers.clone();
+                    let id = self.state.add_marker_at_beat(beat);
+                    self.state.select_marker(&id);
+                    self.record_marker_edit("Add Marker", prev, cx);
+                } else {
+                    self.seek_to_exact_beat(
+                        beat as f32,
+                        crate::layout::SeekReason::TimelineClick,
+                        cx,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add a marker at the playhead from the lane header's + button.
+    pub(super) fn add_marker_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
+        let prev = self.state.markers.clone();
+        let beat = self.state.transport.playhead_beats.max(0.0) as f64;
+        let id = self.state.add_marker_at_beat(beat);
+        self.state.select_marker(&id);
+        self.record_marker_edit("Add Marker", prev, cx);
+        cx.notify();
+    }
+
+    /// One frame of a Marker lane flag drag. Mutates live; the drop records the
+    /// single history entry for the whole gesture.
+    pub(super) fn update_marker_drag(
+        &mut self,
+        marker_id: &str,
+        beat: f64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.marker_gesture_origin.is_none() {
+            self.marker_gesture_origin = Some(self.state.markers.clone());
+        }
+        if self.state.move_marker(marker_id, beat) {
+            self.state.select_marker(marker_id);
+            self.mark_project_changed(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn finish_marker_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(prev) = self.marker_gesture_origin.take() {
+            self.record_marker_edit("Move Marker", prev, cx);
+        }
+        cx.notify();
+    }
+
+    // ── Region lane ─────────────────────────────────────────────────────────
+
+    /// Mouse-down in the Region lane. Mirrors the Marker lane: a hit selects and
+    /// seeks to the section start, empty lane clears, double-click creates.
+    pub(super) fn begin_region_track_interaction(
+        &mut self,
+        beat: f64,
+        region_id: Option<String>,
+        click_count: u32,
+        cx: &mut Context<Self>,
+    ) {
+        match region_id {
+            Some(id) => {
+                self.state.select_region(&id);
+                if let Some(region) = self.state.region(&id) {
+                    let target = region.normalized_range().0 as f32;
+                    self.seek_to_exact_beat(target, crate::layout::SeekReason::TimelineClick, cx);
+                }
+            }
+            None => {
+                self.state.clear_region_selection();
+                if click_count >= 2 {
+                    let prev = self.state.regions.clone();
+                    let id = self.state.add_region_at_beat(beat);
+                    self.state.select_region(&id);
+                    self.record_region_edit("Add Region", prev, cx);
+                } else {
+                    self.seek_to_exact_beat(
+                        beat as f32,
+                        crate::layout::SeekReason::TimelineClick,
+                        cx,
+                    );
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn add_region_at_playhead_from_header(&mut self, cx: &mut Context<Self>) {
+        let prev = self.state.regions.clone();
+        let beat = self.state.transport.playhead_beats.max(0.0) as f64;
+        let id = self.state.add_region_at_beat(beat);
+        self.state.select_region(&id);
+        self.record_region_edit("Add Region", prev, cx);
+        cx.notify();
     }
 
     pub(super) fn begin_tempo_track_interaction(

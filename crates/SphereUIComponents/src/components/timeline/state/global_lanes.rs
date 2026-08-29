@@ -32,6 +32,8 @@ pub struct GlobalLaneHeights {
     pub tempo: Option<f32>,
     pub time_signature: Option<f32>,
     pub song_text: Option<f32>,
+    pub marker: Option<f32>,
+    pub region: Option<f32>,
 }
 
 impl GlobalLaneHeights {
@@ -40,7 +42,8 @@ impl GlobalLaneHeights {
             GlobalLaneKind::Tempo => self.tempo,
             GlobalLaneKind::TimeSignature => self.time_signature,
             GlobalLaneKind::SongText => self.song_text,
-            GlobalLaneKind::Marker | GlobalLaneKind::Arranger => None,
+            GlobalLaneKind::Marker => self.marker,
+            GlobalLaneKind::Arranger => self.region,
         }
     }
 
@@ -50,7 +53,8 @@ impl GlobalLaneHeights {
             GlobalLaneKind::Tempo => self.tempo = height,
             GlobalLaneKind::TimeSignature => self.time_signature = height,
             GlobalLaneKind::SongText => self.song_text = height,
-            GlobalLaneKind::Marker | GlobalLaneKind::Arranger => {}
+            GlobalLaneKind::Marker => self.marker = height,
+            GlobalLaneKind::Arranger => self.region = height,
         }
     }
 }
@@ -100,9 +104,26 @@ impl TimelineState {
     /// window-y -> arrangement-y conversion, so a lane counted here but not
     /// drawn (or vice versa) offsets all arrangement hit-testing.
     pub fn global_lanes_height(&self) -> f32 {
-        self.tempo_track_height()
-            + self.time_signature_track_height()
-            + self.song_text_track_height()
+        self.visible_global_lanes()
+            .into_iter()
+            .map(|kind| self.global_lane_height(kind))
+            .sum()
+    }
+
+    /// Offset of one lane's top edge from the top of the conductor block.
+    ///
+    /// Any lane that maps a pointer y to a value (the Tempo curve) has to build
+    /// its origin from this rather than assuming it sits directly under the
+    /// ruler — the block's order is not fixed.
+    pub fn global_lane_top(&self, kind: GlobalLaneKind) -> f32 {
+        let mut top = 0.0;
+        for visible in self.visible_global_lanes() {
+            if visible == kind {
+                break;
+            }
+            top += self.global_lane_height(visible);
+        }
+        top
     }
 
     /// Height of the global Song Text lane when visible, else 0.
@@ -121,7 +142,8 @@ impl TimelineState {
             GlobalLaneKind::SongText => {
                 crate::components::timeline::song_text_track::SONG_TEXT_LANE_HEIGHT
             }
-            GlobalLaneKind::Marker | GlobalLaneKind::Arranger => DEFAULT_TRACK_HEIGHT,
+            GlobalLaneKind::Marker => MARKER_TRACK_HEIGHT,
+            GlobalLaneKind::Arranger => REGION_TRACK_HEIGHT,
         }
     }
 
@@ -133,11 +155,27 @@ impl TimelineState {
             GlobalLaneKind::TimeSignature if self.time_signature_track_collapsed => {
                 Self::TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED
             }
+            GlobalLaneKind::Marker if self.marker_track_collapsed => MARKER_TRACK_HEIGHT_COLLAPSED,
+            GlobalLaneKind::Arranger if self.region_track_collapsed => {
+                REGION_TRACK_HEIGHT_COLLAPSED
+            }
             _ => self
                 .global_lane_heights
                 .get(kind)
                 .unwrap_or_else(|| Self::global_lane_default_height(kind)),
         }
+    }
+
+    /// Window-space y of the Tempo lane's content top.
+    ///
+    /// The lane maps a pointer y onto a BPM axis, so this is the one number its
+    /// hit test and its drag both have to agree on. It used to be spelled
+    /// `APP_CHROME_HEIGHT + RULER_HEIGHT` inline in two files, which silently
+    /// became wrong the moment another conductor lane was allowed above it.
+    pub fn tempo_lane_origin_y(&self) -> f32 {
+        crate::shell_metrics::APP_CHROME_HEIGHT
+            + RULER_HEIGHT
+            + self.global_lane_top(GlobalLaneKind::Tempo)
     }
 
     /// Arm a lane resize at pointer-down. Promoted to a live session on the
@@ -232,9 +270,21 @@ impl TimelineState {
         self.show_song_text_track = false;
     }
 
-    /// Visible global/system lanes (Tempo then Time Signature when shown).
+    /// Visible global/system lanes, top to bottom.
+    ///
+    /// Structure first (regions, then markers), then the conductor data the
+    /// structure is measured in (tempo, meter), then annotation. Section names
+    /// are what the eye tracks against the ruler while arranging, so they sit
+    /// closest to it; the tempo curve needs the most room and is happiest
+    /// against the arrangement it drives.
     pub fn visible_global_lanes(&self) -> Vec<GlobalLaneKind> {
         let mut lanes = Vec::new();
+        if self.show_region_track {
+            lanes.push(GlobalLaneKind::Arranger);
+        }
+        if self.show_marker_track {
+            lanes.push(GlobalLaneKind::Marker);
+        }
         if self.show_tempo_track {
             lanes.push(GlobalLaneKind::Tempo);
         }

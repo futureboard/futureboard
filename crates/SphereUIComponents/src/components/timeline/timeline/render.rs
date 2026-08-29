@@ -18,6 +18,13 @@ impl Render for Timeline {
         // list, and the arrangement snapshot all share this instance instead of
         // rebuilding it three times. Row heights cannot change during a repaint;
         // only `scroll_y` moves below, and it is refreshed after clamping.
+        // Fold in the lane origin measured during the previous frame's prepaint
+        // before anything reads the viewport. Every gesture context and lane
+        // closure built below then resolves through the same x the ruler was
+        // actually drawn at.
+        if let Some(measured) = self.lane_origin_probe.get() {
+            self.state.viewport.lane_origin_x_measured = Some(measured);
+        }
         let mut row_layout = self.state.track_row_layout();
         let (viewport_w, viewport_h, (scroll_max_x, scroll_max_y)) =
             self.scroll_geometry_with_content_height(window, row_layout.total_height);
@@ -1185,6 +1192,146 @@ impl Render for Timeline {
         let on_tempo_toggle_collapsed: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
             std::sync::Arc::new(on_tempo_toggle_collapsed);
 
+        // ── Marker lane ─────────────────────────────────────────────────
+        let on_marker_down =
+            cx.listener(|this, payload: &(f64, Option<String>, u32), _window, cx| {
+                let (beat, marker_id, click_count) = (payload.0, payload.1.clone(), payload.2);
+                this.begin_marker_track_interaction(beat, marker_id, click_count, cx);
+            });
+        let on_marker_down: crate::components::timeline::marker_track::MarkerTrackDownCallback =
+            std::sync::Arc::new(on_marker_down);
+
+        let on_marker_context = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(beat, marker_id, x, y): &(f64, Option<String>, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(
+                            TimelineContextTarget::MarkerTrack {
+                                beat: *beat,
+                                marker_id: marker_id.clone(),
+                            },
+                            *x,
+                            *y,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::marker_track::MarkerTrackContextCallback
+        });
+
+        let on_marker_add = cx.listener(|this, _: &(), _window, cx| {
+            this.add_marker_at_playhead_from_header(cx);
+        });
+        let on_marker_add: crate::components::timeline::marker_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_marker_add);
+
+        let on_marker_header_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |pos: &(f32, f32), window: &mut gpui::Window, cx: &mut gpui::App| {
+                    cb(
+                        &(TimelineContextTarget::MarkerLaneHeader, pos.0, pos.1),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::marker_track::GlobalLaneMenuCallback
+        });
+
+        let on_marker_hide = cx.listener(|this, _: &(), _window, cx| {
+            this.state.hide_marker_track_lane();
+            cx.notify();
+        });
+        let on_marker_hide: crate::components::timeline::marker_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_marker_hide);
+
+        let on_marker_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
+            this.state.marker_track_collapsed = !this.state.marker_track_collapsed;
+            cx.notify();
+        });
+        let on_marker_toggle_collapsed: crate::components::timeline::marker_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_marker_toggle_collapsed);
+
+        let on_marker_drag_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<TimelineMarkerDrag>, _window, cx| {
+                let drag = event.drag(cx).clone();
+                let x: f32 = event.event.position.x.into();
+                let lane_x = this.state.lane_x_from_window_x(x) - drag.pointer_offset_x;
+                let beat = this
+                    .state
+                    .snap_beats(this.state.x_to_beat(lane_x) as f32)
+                    .max(0.0);
+                this.update_marker_drag(&drag.marker_id, beat as f64, cx);
+            },
+        );
+        let on_marker_drag_drop = cx.listener(|this, _drag: &TimelineMarkerDrag, _window, cx| {
+            this.finish_marker_drag(cx);
+        });
+
+        // ── Region lane ─────────────────────────────────────────────────
+        let on_region_down =
+            cx.listener(|this, payload: &(f64, Option<String>, u32), _window, cx| {
+                let (beat, region_id, click_count) = (payload.0, payload.1.clone(), payload.2);
+                this.begin_region_track_interaction(beat, region_id, click_count, cx);
+            });
+        let on_region_down: crate::components::timeline::region_track::RegionTrackDownCallback =
+            std::sync::Arc::new(on_region_down);
+
+        let on_region_context = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |(beat, region_id, x, y): &(f64, Option<String>, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    cb(
+                        &(
+                            TimelineContextTarget::RegionTrack {
+                                beat: *beat,
+                                region_id: region_id.clone(),
+                            },
+                            *x,
+                            *y,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::region_track::RegionTrackContextCallback
+        });
+
+        let on_region_add = cx.listener(|this, _: &(), _window, cx| {
+            this.add_region_at_playhead_from_header(cx);
+        });
+        let on_region_add: crate::components::timeline::region_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_region_add);
+
+        let on_region_header_menu = self.on_context_menu.clone().map(|cb| {
+            std::sync::Arc::new(
+                move |pos: &(f32, f32), window: &mut gpui::Window, cx: &mut gpui::App| {
+                    cb(
+                        &(TimelineContextTarget::RegionLaneHeader, pos.0, pos.1),
+                        window,
+                        cx,
+                    );
+                },
+            ) as crate::components::timeline::region_track::GlobalLaneMenuCallback
+        });
+
+        let on_region_hide = cx.listener(|this, _: &(), _window, cx| {
+            this.state.hide_region_track_lane();
+            cx.notify();
+        });
+        let on_region_hide: crate::components::timeline::region_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_region_hide);
+
+        let on_region_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
+            this.state.region_track_collapsed = !this.state.region_track_collapsed;
+            cx.notify();
+        });
+        let on_region_toggle_collapsed: crate::components::timeline::region_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_region_toggle_collapsed);
+
         let on_ts_down = cx.listener(
             |this, payload: &(f64, Option<String>, bool, u32), _window, cx| {
                 let (beat, point_id, _additive, click_count) =
@@ -1300,6 +1447,8 @@ impl Render for Timeline {
         let state = &self.state;
         let tempo_h = state.tempo_track_height();
         let ts_h = state.time_signature_track_height();
+        let marker_h = state.marker_track_height();
+        let region_h = state.region_track_height();
         let content_top = state.arrangement_content_top();
         // Live pen-draw ghost clip (built before the chain to keep the borrow of
         // `self.pen_clip_draw` separate from the render closures).
@@ -1979,6 +2128,8 @@ impl Render for Timeline {
             .on_drop::<TrackHeightResizeDrag>(on_track_height_resize_drop)
             .on_drag_move::<GlobalLaneResizeDrag>(on_global_lane_resize_move)
             .on_drop::<GlobalLaneResizeDrag>(on_global_lane_resize_drop)
+            .on_drag_move::<TimelineMarkerDrag>(on_marker_drag_move)
+            .on_drop::<TimelineMarkerDrag>(on_marker_drag_drop)
             // Regions are dragged on the ruler, but the drop lands wherever the
             // pointer is released — take it at the surface, like the resize
             // gestures, so the undo entry is always recorded.
@@ -2031,8 +2182,39 @@ impl Render for Timeline {
                 on_ruler_context.clone(),
                 on_playhead_scrub_begin,
                 on_playhead_scrub_end,
+                self.lane_origin_probe.clone(),
             ))
-            // 1b. Global Tempo Track lane (below ruler, above tracks)
+            // 1b. Conductor lanes, in `visible_global_lanes()` order: structure
+            // (regions, markers) closest to the ruler, then tempo and meter.
+            .when(state.show_region_track, |this| {
+                this.child(region_track_lane(
+                    state,
+                    region_h,
+                    Some(on_region_down.clone()),
+                    on_region_context.clone(),
+                    Some(on_region_drag.clone()),
+                    Some(on_region_add.clone()),
+                    on_region_header_menu.clone(),
+                    Some(on_region_hide.clone()),
+                    Some(on_region_toggle_collapsed.clone()),
+                    Some(on_global_lane_resize_arm.clone()),
+                    Some(on_global_lane_resize_reset.clone()),
+                ))
+            })
+            .when(state.show_marker_track, |this| {
+                this.child(marker_track_lane(
+                    state,
+                    marker_h,
+                    Some(on_marker_down.clone()),
+                    on_marker_context.clone(),
+                    Some(on_marker_add.clone()),
+                    on_marker_header_menu.clone(),
+                    Some(on_marker_hide.clone()),
+                    Some(on_marker_toggle_collapsed.clone()),
+                    Some(on_global_lane_resize_arm.clone()),
+                    Some(on_global_lane_resize_reset.clone()),
+                ))
+            })
             .when(state.show_tempo_track, |this| {
                 this.child(tempo_track_lane(
                     state,

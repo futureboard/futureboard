@@ -28,8 +28,6 @@ pub type GlobalLaneVoidCallback =
 pub type GlobalLaneMenuCallback =
     std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
-use crate::shell_metrics::APP_CHROME_HEIGHT;
-
 /// Global Tempo Track lane — header + automation curve over the project TempoMap.
 pub fn tempo_track_lane(
     state: &TimelineState,
@@ -177,7 +175,9 @@ pub fn tempo_track_lane(
     let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
 
     let subtitle = state.tempo_lane_header_subtitle();
-    let content_top = APP_CHROME_HEIGHT + crate::components::timeline::timeline_state::RULER_HEIGHT;
+    // Shared with `Timeline::tempo_bpm_from_window_y` so the click and the drag
+    // resolve a BPM through one transform.
+    let content_top = state.tempo_lane_origin_y();
 
     let interaction = on_down.map(|cb| {
         let state_left = state.clone();

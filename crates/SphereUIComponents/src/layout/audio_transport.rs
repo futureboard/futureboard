@@ -2511,6 +2511,137 @@ impl StudioLayout {
         );
     }
 
+    pub(super) fn add_marker_at_playhead_command(&mut self, cx: &mut Context<Self>) {
+        self.edit_markers(
+            "Add Marker",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats.max(0.0) as f64;
+                let id = timeline.state.add_marker_at_beat(beat);
+                timeline.state.select_marker(&id);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn add_region_at_playhead_command(&mut self, cx: &mut Context<Self>) {
+        self.edit_regions(
+            "Add Region",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats.max(0.0) as f64;
+                let id = timeline.state.add_region_at_beat(beat);
+                timeline.state.select_region(&id);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn delete_marker_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.edit_markers(
+            "Delete Marker",
+            |timeline| {
+                timeline.state.delete_marker(id);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn delete_region_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.edit_regions(
+            "Delete Region",
+            |timeline| {
+                timeline.state.delete_region(id);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn move_marker_to_playhead_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.edit_markers(
+            "Move Marker",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats.max(0.0) as f64;
+                timeline.state.move_marker(id, beat);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn move_region_to_playhead_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.edit_regions(
+            "Move Region",
+            |timeline| {
+                let beat = timeline.state.transport.playhead_beats.max(0.0) as f64;
+                timeline.state.move_region(id, beat);
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn clear_markers_command(&mut self, cx: &mut Context<Self>) {
+        self.edit_markers(
+            "Delete All Markers",
+            |timeline| {
+                timeline.state.markers.clear();
+                timeline.state.clear_marker_selection();
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn clear_regions_command(&mut self, cx: &mut Context<Self>) {
+        self.edit_regions(
+            "Delete All Regions",
+            |timeline| {
+                timeline.state.regions.clear();
+                timeline.state.clear_region_selection();
+            },
+            cx,
+        );
+    }
+
+    /// Move the playhead to a marker. Seeking is transport state, not an edit,
+    /// so this deliberately records no history entry.
+    pub(super) fn seek_to_marker_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        let beat = self
+            .timeline
+            .read(cx)
+            .state
+            .marker(id)
+            .map(|marker| marker.beat as f32);
+        if let Some(beat) = beat {
+            self.timeline.update(cx, |timeline, cx| {
+                timeline.state.select_marker(id);
+                timeline.seek_to_exact_beat(beat, SeekReason::TimelineClick, cx);
+            });
+            cx.notify();
+        }
+    }
+
+    /// Set the transport loop to a region's span. Loop range is control state,
+    /// so this marks view-only dirty rather than entering edit history —
+    /// matching the ruler's loop drag.
+    pub(super) fn set_loop_to_region_command(&mut self, id: &str, cx: &mut Context<Self>) {
+        let range = self
+            .timeline
+            .read(cx)
+            .state
+            .region(id)
+            .map(|region| region.normalized_range());
+        let Some((start, end)) = range else {
+            return;
+        };
+        self.timeline.update(cx, |timeline, cx| {
+            let transport = &mut timeline.state.transport;
+            transport.loop_start_beats = start as f32;
+            transport.loop_end_beats = (end as f32).max(start as f32 + 1.0e-3);
+            transport.loop_enabled = true;
+            cx.notify();
+        });
+        self.mark_dirty_view_only();
+        self.sync_loop_controls(cx);
+        cx.notify();
+    }
+
     /// Time Signature counterpart of [`Self::edit_tempo_state`].
     pub(super) fn edit_time_signature_state(
         &mut self,

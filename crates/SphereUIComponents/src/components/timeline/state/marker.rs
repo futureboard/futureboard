@@ -1,5 +1,22 @@
 use super::*;
 
+/// Default height of the global Marker lane (px).
+///
+/// A single row of anchored flags — it needs the flag body plus breathing room,
+/// not a full track row.
+pub const MARKER_TRACK_HEIGHT: f32 = 30.0;
+pub const MARKER_TRACK_HEIGHT_COLLAPSED: f32 = 22.0;
+
+/// Default height of the global Region (arranger) lane (px). One row taller
+/// than the Marker lane because a region is a *block* with a readable name
+/// inside it, not a flag hanging off a beat.
+pub const REGION_TRACK_HEIGHT: f32 = 34.0;
+pub const REGION_TRACK_HEIGHT_COLLAPSED: f32 = 22.0;
+
+/// Smallest region length a drag may produce, in beats. Below this the block
+/// stops being clickable and the two edge handles overlap.
+pub const MIN_REGION_BEATS: f64 = 0.25;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineMarkerState {
     pub id: String,
@@ -119,8 +136,7 @@ impl TimelineState {
         );
         let id = marker.id.clone();
         self.markers.push(marker);
-        self.markers
-            .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
+        self.sort_markers();
         id
     }
 
@@ -144,8 +160,7 @@ impl TimelineState {
                 crate::color::rgba_to_hex(crate::theme::Colors::automation_curve()),
             ));
         }
-        self.markers
-            .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
+        self.sort_markers();
     }
 
     pub fn add_region_at_beat(&mut self, beat: f64) -> String {
@@ -155,23 +170,25 @@ impl TimelineState {
         let region = TimelineRegionState::new(start, start + length, label, "#42C7A3");
         let id = region.id.clone();
         self.regions.push(region);
-        self.regions.sort_by(|a, b| {
-            a.start_beat
-                .total_cmp(&b.start_beat)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        self.sort_regions();
         id
     }
 
     pub fn delete_marker(&mut self, id: &str) -> bool {
         let before = self.markers.len();
         self.markers.retain(|marker| marker.id != id);
+        if self.selected_marker_id.as_deref() == Some(id) {
+            self.selected_marker_id = None;
+        }
         before != self.markers.len()
     }
 
     pub fn delete_region(&mut self, id: &str) -> bool {
         let before = self.regions.len();
         self.regions.retain(|region| region.id != id);
+        if self.selected_region_id.as_deref() == Some(id) {
+            self.selected_region_id = None;
+        }
         before != self.regions.len()
     }
 
@@ -192,12 +209,185 @@ impl TimelineState {
             return false;
         }
         region.start_beat = updated.start_beat;
-        region.end_beat = updated.end_beat;
+        region.end_beat = updated.end_beat.max(updated.start_beat + MIN_REGION_BEATS);
+        self.sort_regions();
+        true
+    }
+}
+
+// ── Marker lane ──────────────────────────────────────────────────────────────
+
+impl TimelineState {
+    /// Height of the global Marker lane when visible, else 0.
+    pub fn marker_track_height(&self) -> f32 {
+        if !self.show_marker_track {
+            return 0.0;
+        }
+        self.global_lane_height(GlobalLaneKind::Marker)
+    }
+
+    pub fn show_marker_track_lane(&mut self) {
+        self.show_marker_track = true;
+    }
+
+    pub fn hide_marker_track_lane(&mut self) {
+        self.show_marker_track = false;
+        self.selected_marker_id = None;
+    }
+
+    pub fn select_marker(&mut self, id: &str) {
+        self.selected_marker_id = Some(id.to_string());
+    }
+
+    pub fn clear_marker_selection(&mut self) {
+        self.selected_marker_id = None;
+    }
+
+    pub fn marker(&self, id: &str) -> Option<&TimelineMarkerState> {
+        self.markers.iter().find(|marker| marker.id == id)
+    }
+
+    /// Marker whose beat is within `tolerance_beats` of `beat`, nearest first.
+    pub fn marker_at(&self, beat: f64, tolerance_beats: f64) -> Option<String> {
+        self.markers
+            .iter()
+            .filter(|marker| (marker.beat - beat).abs() <= tolerance_beats)
+            .min_by(|a, b| (a.beat - beat).abs().total_cmp(&(b.beat - beat).abs()))
+            .map(|marker| marker.id.clone())
+    }
+
+    /// Move one marker to `beat`. Returns `false` when it did not actually move,
+    /// so a click that only selected never records an edit.
+    pub fn move_marker(&mut self, id: &str, beat: f64) -> bool {
+        let beat = beat.max(0.0);
+        let Some(marker) = self.markers.iter_mut().find(|marker| marker.id == id) else {
+            return false;
+        };
+        if (marker.beat - beat).abs() < 1.0e-9 {
+            return false;
+        }
+        marker.beat = beat;
+        self.sort_markers();
+        true
+    }
+
+    pub fn rename_marker(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let Some(marker) = self.markers.iter_mut().find(|marker| marker.id == id) else {
+            return false;
+        };
+        if marker.name == name {
+            return false;
+        }
+        marker.name = name.to_string();
+        true
+    }
+
+    /// Markers are kept beat-ordered so the lane, the ruler, and MIDI export
+    /// all read the same sequence. Ties break on id so the order is stable.
+    pub(crate) fn sort_markers(&mut self) {
+        self.markers
+            .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
+    }
+
+    /// Regions are kept start-ordered, matching [`Self::sort_markers`].
+    pub(crate) fn sort_regions(&mut self) {
         self.regions.sort_by(|a, b| {
             a.start_beat
                 .total_cmp(&b.start_beat)
                 .then_with(|| a.id.cmp(&b.id))
         });
+    }
+
+    /// Secondary label for the Marker lane header.
+    pub fn marker_lane_header_subtitle(&self) -> String {
+        match self.markers.len() {
+            0 => "No markers".to_string(),
+            1 => self.markers[0].name.clone(),
+            n => format!("{n} markers"),
+        }
+    }
+}
+
+// ── Region (arranger) lane ───────────────────────────────────────────────────
+
+impl TimelineState {
+    /// Height of the global Region lane when visible, else 0.
+    pub fn region_track_height(&self) -> f32 {
+        if !self.show_region_track {
+            return 0.0;
+        }
+        self.global_lane_height(GlobalLaneKind::Arranger)
+    }
+
+    pub fn show_region_track_lane(&mut self) {
+        self.show_region_track = true;
+    }
+
+    pub fn hide_region_track_lane(&mut self) {
+        self.show_region_track = false;
+        self.selected_region_id = None;
+    }
+
+    pub fn select_region(&mut self, id: &str) {
+        self.selected_region_id = Some(id.to_string());
+    }
+
+    pub fn clear_region_selection(&mut self) {
+        self.selected_region_id = None;
+    }
+
+    pub fn region(&self, id: &str) -> Option<&TimelineRegionState> {
+        self.regions.iter().find(|region| region.id == id)
+    }
+
+    /// Region containing `beat`. Later regions win an overlap, matching the
+    /// paint order in the lane.
+    pub fn region_at(&self, beat: f64) -> Option<String> {
+        self.regions
+            .iter()
+            .rev()
+            .find(|region| {
+                let (start, end) = region.normalized_range();
+                beat >= start && beat <= end
+            })
+            .map(|region| region.id.clone())
+    }
+
+    /// Move a region to start at `start_beat`, keeping its length.
+    pub fn move_region(&mut self, id: &str, start_beat: f64) -> bool {
+        let Some(region) = self.region(id) else {
+            return false;
+        };
+        let (start, end) = region.normalized_range();
+        let length = (end - start).max(MIN_REGION_BEATS);
+        let next_start = start_beat.max(0.0);
+        self.update_region_range(id, next_start, next_start + length)
+    }
+
+    pub fn rename_region(&mut self, id: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let Some(region) = self.regions.iter_mut().find(|region| region.id == id) else {
+            return false;
+        };
+        if region.name == name {
+            return false;
+        }
+        region.name = name.to_string();
         true
+    }
+
+    pub fn region_lane_header_subtitle(&self) -> String {
+        match self.regions.len() {
+            0 => "No regions".to_string(),
+            1 => self.regions[0].name.clone(),
+            n => format!("{n} regions"),
+        }
     }
 }

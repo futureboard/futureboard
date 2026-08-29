@@ -600,6 +600,14 @@ impl Render for StudioLayout {
                             TimelineContextTarget::TimeSignatureTrack { beat, point_id } => {
                                 ContextTarget::TimeSignatureTrack { beat, point_id }
                             }
+                            TimelineContextTarget::MarkerTrack { beat, marker_id } => {
+                                ContextTarget::MarkerTrack { beat, marker_id }
+                            }
+                            TimelineContextTarget::RegionTrack { beat, region_id } => {
+                                ContextTarget::RegionTrack { beat, region_id }
+                            }
+                            TimelineContextTarget::MarkerLaneHeader => ContextTarget::MarkerLane,
+                            TimelineContextTarget::RegionLaneHeader => ContextTarget::RegionLane,
                             TimelineContextTarget::TempoLaneHeader => ContextTarget::Tempo,
                             TimelineContextTarget::TimeSignatureLaneHeader => {
                                 ContextTarget::TimeSignature

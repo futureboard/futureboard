@@ -12,6 +12,8 @@ use crate::components::timeline::floating_tools_bar::floating_tools_bar;
 use crate::components::timeline::global_lane_header::{
     GlobalLaneResizeArmCb, GlobalLaneResizeResetCb,
 };
+use crate::components::timeline::marker_track::marker_track_lane;
+use crate::components::timeline::region_track::region_track_lane;
 use crate::components::timeline::song_text_track::{
     song_text_drag_positions, song_text_track_lane, SongTextDragPreview, SongTextDragSession,
     SongTextMarkerDown,
@@ -19,14 +21,16 @@ use crate::components::timeline::song_text_track::{
 use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::time_signature_track::time_signature_track_lane;
 use crate::components::timeline::timeline_ruler::{
-    timeline_ruler, TimelineLoopDragUpdate, TimelineRegionDrag, TimelineRegionDragUpdate,
+    timeline_ruler, LaneOriginProbe, TimelineLoopDragUpdate, TimelineRegionDrag,
+    TimelineRegionDragUpdate,
 };
 use crate::components::timeline::timeline_state::{
     hit_test_arrangement, ArrangementCoordinateContext, ArrangementHitTarget, ClipDragItem,
     ClipResizeDrag, ClipState, ClipType, GlobalLaneKind, GlobalLaneResizeDrag, SnapDivision,
-    TempoPointDrag, TimeSignaturePointDrag, TimelineRangeSelection, TimelineRegionState,
-    TimelineState, TimelineTool, TrackDragItem, TrackHeightResizeDrag, TrackType,
-    DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT, TEMPO_LANE_PAD,
+    TempoPointDrag, TimeSignaturePointDrag, TimelineMarkerDrag, TimelineMarkerState,
+    TimelineRangeSelection, TimelineRegionState, TimelineState, TimelineTool, TrackDragItem,
+    TrackHeightResizeDrag, TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT,
+    TEMPO_LANE_PAD,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -222,10 +226,13 @@ pub struct Timeline {
     /// Pre-gesture meter snapshot for the in-flight Time Signature lane drag,
     /// with its history label. Mirrors `tempo_gesture_origin`.
     ts_gesture_origin: Option<(&'static str, TimeSignatureStateSnapshot)>,
-    /// Pre-gesture region snapshot, captured on the first ruler region drag-move
+    /// Pre-gesture region snapshot, captured on the first region drag-move
     /// (before any mutation) so the drop records one undo step for the whole
     /// drag instead of one per mouse-move.
     region_gesture_origin: Option<Vec<TimelineRegionState>>,
+    /// Pre-gesture marker snapshot, for the Marker lane's flag drag. Mirrors
+    /// `region_gesture_origin`.
+    marker_gesture_origin: Option<Vec<TimelineMarkerState>>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
     /// View-only floating-toolbar placement. It deliberately never enters the
     /// project snapshot: moving tools must not make a session dirty.
@@ -242,6 +249,11 @@ pub struct Timeline {
     /// Invoked when the user double-clicks a Song Text marker.
     on_open_song_text_editor: Option<TimelineOpenEditorCb>,
     chrome_metrics: TimelineChromeMetrics,
+    /// Window x of the lane content column, measured from the ruler each frame
+    /// and folded into the viewport at the top of the next render. Pointer math
+    /// then resolves through the same origin the pixels were drawn at, instead
+    /// of through chrome constants that go stale whenever a panel moves.
+    lane_origin_probe: LaneOriginProbe,
     /// Absolute root folder of the saved project, pushed by `StudioLayout` each
     /// render. `None` for an Untitled (unsaved) project. Used to eagerly copy
     /// dropped audio into the project's `Assets/Audio` folder.
@@ -298,10 +310,25 @@ pub enum TimelineContextTarget {
         beat: f64,
         point_id: Option<String>,
     },
+    /// Right-click on the global Marker lane. `marker_id` is `None` on empty
+    /// lane, which is what splits "act on this marker" from "create one here".
+    MarkerTrack {
+        beat: f64,
+        marker_id: Option<String>,
+    },
+    /// Right-click on the global Region (arranger) lane.
+    RegionTrack {
+        beat: f64,
+        region_id: Option<String>,
+    },
     /// Lane header menu button on the Tempo track.
     TempoLaneHeader,
     /// Lane header menu button on the Time Signature track.
     TimeSignatureLaneHeader,
+    /// Lane header menu button on the Marker track.
+    MarkerLaneHeader,
+    /// Lane header menu button on the Region track.
+    RegionLaneHeader,
     /// Automation target picker opened from the control lane "+ Add" button.
     AutomationTargetPicker {
         track_id: String,
@@ -377,6 +404,12 @@ impl Render for TrackHeightResizeDrag {
 }
 
 impl Render for GlobalLaneResizeDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+impl Render for TimelineMarkerDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         Empty
     }

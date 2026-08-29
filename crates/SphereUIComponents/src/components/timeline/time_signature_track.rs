@@ -81,9 +81,7 @@ pub fn time_signature_track_lane(
                 move |event: &gpui::MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     let wx: f32 = event.position.x.into();
-                    let lane_x = wx
-                        - crate::components::sidebar::SIDEBAR_WIDTH
-                        - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                    let lane_x = state_hit.lane_x_from_window_x(wx);
                     let beat = state_hit.x_to_beat(lane_x).max(0.0);
                     let snapped = state_hit.snap_beats(beat as f32) as f64;
                     let ppb = state_hit.viewport.pixels_per_beat.max(1.0) as f64;
@@ -105,9 +103,7 @@ pub fn time_signature_track_lane(
                         let wx: f32 = event.position.x.into();
                         let sx: f32 = event.position.x.into();
                         let sy: f32 = event.position.y.into();
-                        let lane_x = wx
-                            - crate::components::sidebar::SIDEBAR_WIDTH
-                            - crate::components::timeline::timeline_state::HEADER_WIDTH;
+                        let lane_x = state_ctx.lane_x_from_window_x(wx);
                         let beat = state_ctx.x_to_beat(lane_x).max(0.0);
                         let ppb = state_ctx.viewport.pixels_per_beat.max(1.0) as f64;
                         let point_id = state_ctx.time_signature_point_at(beat, 12.0 / ppb);

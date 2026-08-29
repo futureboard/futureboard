@@ -161,6 +161,13 @@ impl StudioLayout {
                 ContextTarget::TimeSignaturePoint { .. }
                 | ContextTarget::TimeSignatureTrack { .. } => true,
                 ContextTarget::TempoTrack { .. } => true,
+                ContextTarget::MarkerLane | ContextTarget::RegionLane => true,
+                ContextTarget::MarkerTrack { marker_id, .. } => marker_id
+                    .as_deref()
+                    .is_none_or(|id| state.marker(id).is_some()),
+                ContextTarget::RegionTrack { region_id, .. } => region_id
+                    .as_deref()
+                    .is_none_or(|id| state.region(id).is_some()),
             },
         }
     }

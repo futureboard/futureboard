@@ -822,16 +822,23 @@ mod tempo_track_tests {
         );
     }
 
-    /// Tempo and meter lanes are on by default; Song Text is opt-in.
+    /// Structure, tempo and meter lanes are on by default; Song Text is opt-in.
     #[test]
-    fn default_global_lanes_are_tempo_and_time_signature() {
+    fn default_global_lanes_are_structure_tempo_and_time_signature() {
         let state = TimelineState::default();
+        assert!(state.show_region_track);
+        assert!(state.show_marker_track);
         assert!(state.show_tempo_track);
         assert!(state.show_time_signature_track);
         assert!(!state.show_song_text_track);
         assert_eq!(
             state.visible_global_lanes(),
-            vec![GlobalLaneKind::Tempo, GlobalLaneKind::TimeSignature]
+            vec![
+                GlobalLaneKind::Arranger,
+                GlobalLaneKind::Marker,
+                GlobalLaneKind::Tempo,
+                GlobalLaneKind::TimeSignature
+            ]
         );
     }
 
@@ -855,6 +862,11 @@ mod tempo_track_tests {
     #[test]
     fn show_tempo_track_enables_global_lane() {
         let mut state = TimelineState::default();
+        // Isolate the tempo lane from the structure lanes so this stays a test
+        // about one toggle rather than about the default lane set.
+        state.hide_region_track_lane();
+        state.hide_marker_track_lane();
+
         state.hide_tempo_track_lane();
         assert!(!state.show_tempo_track);
         assert_eq!(
@@ -2334,5 +2346,315 @@ mod global_lane_resize_tests {
         state.finish_global_lane_resize();
         state.hide_tempo_track_lane();
         assert_eq!(state.tempo_track_height(), 0.0);
+    }
+}
+
+/// Markers and regions used to exist only as decoration inside the ruler. These
+/// cover the state the dedicated lanes are built on: hit-testing, moving,
+/// selection hygiene, and the conductor-block geometry the two extra lanes
+/// change for everyone else.
+#[cfg(test)]
+mod marker_region_lane_tests {
+    use super::*;
+
+    fn state_at_zoom(pixels_per_beat: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.viewport.pixels_per_beat = pixels_per_beat;
+        state
+    }
+
+    #[test]
+    fn both_structure_lanes_are_visible_by_default() {
+        let state = TimelineState::default();
+        let lanes = state.visible_global_lanes();
+        assert_eq!(
+            lanes,
+            vec![
+                GlobalLaneKind::Arranger,
+                GlobalLaneKind::Marker,
+                GlobalLaneKind::Tempo,
+                GlobalLaneKind::TimeSignature,
+            ],
+            "structure lanes sit above the conductor data lanes"
+        );
+    }
+
+    /// Every window-y -> arrangement-y conversion is built on the conductor
+    /// block, so two new lanes have to be inside that total or the arrangement
+    /// paints over them.
+    #[test]
+    fn the_new_lanes_are_counted_in_the_conductor_block() {
+        let mut state = TimelineState::default();
+        let with_both = state.global_lanes_height();
+        state.hide_marker_track_lane();
+        state.hide_region_track_lane();
+        let without = state.global_lanes_height();
+        assert!(
+            (with_both - without - MARKER_TRACK_HEIGHT - REGION_TRACK_HEIGHT).abs() < 0.01,
+            "hiding both lanes must give back exactly their height"
+        );
+    }
+
+    /// The Tempo lane maps a pointer y to a BPM, so it can only be correct if
+    /// its origin follows the lanes stacked above it.
+    #[test]
+    fn the_tempo_lane_knows_it_is_no_longer_first() {
+        let state = TimelineState::default();
+        let top = state.global_lane_top(GlobalLaneKind::Tempo);
+        assert!(
+            (top - (REGION_TRACK_HEIGHT + MARKER_TRACK_HEIGHT)).abs() < 0.01,
+            "tempo starts below the region and marker lanes, got {top}"
+        );
+        assert_eq!(state.global_lane_top(GlobalLaneKind::Arranger), 0.0);
+    }
+
+    #[test]
+    fn a_hidden_lane_drops_out_of_the_offsets() {
+        let mut state = TimelineState::default();
+        state.hide_region_track_lane();
+        assert!((state.global_lane_top(GlobalLaneKind::Tempo) - MARKER_TRACK_HEIGHT).abs() < 0.01);
+    }
+
+    #[test]
+    fn marker_hit_test_picks_the_nearest_inside_the_slop() {
+        let mut state = state_at_zoom(40.0);
+        let near = state.add_marker_at_beat(4.0);
+        state.add_marker_at_beat(12.0);
+        // 0.25 beats at 40 px/beat is 10 px — inside the lane's grab slop.
+        assert_eq!(state.marker_at(4.2, 0.25).as_deref(), Some(near.as_str()));
+        assert_eq!(state.marker_at(8.0, 0.25), None, "the gap is not a hit");
+    }
+
+    #[test]
+    fn marker_hit_test_breaks_a_tie_on_distance() {
+        let mut state = state_at_zoom(40.0);
+        let left = state.add_marker_at_beat(4.0);
+        let right = state.add_marker_at_beat(5.0);
+        assert_eq!(state.marker_at(4.1, 2.0).as_deref(), Some(left.as_str()));
+        assert_eq!(state.marker_at(4.9, 2.0).as_deref(), Some(right.as_str()));
+    }
+
+    #[test]
+    fn moving_a_marker_keeps_the_list_beat_ordered() {
+        let mut state = TimelineState::default();
+        let first = state.add_marker_at_beat(2.0);
+        state.add_marker_at_beat(6.0);
+        assert!(state.move_marker(&first, 10.0));
+        assert!(
+            state.markers[0].beat <= state.markers[1].beat,
+            "the lane, the ruler, and MIDI export all read this order"
+        );
+        assert!(
+            !state.move_marker(&first, 10.0),
+            "a move that changes nothing is not an edit"
+        );
+    }
+
+    #[test]
+    fn a_marker_cannot_be_dragged_before_the_song_start() {
+        let mut state = TimelineState::default();
+        let id = state.add_marker_at_beat(4.0);
+        assert!(state.move_marker(&id, -8.0));
+        assert_eq!(state.marker(&id).unwrap().beat, 0.0);
+    }
+
+    #[test]
+    fn deleting_clears_a_selection_that_named_it() {
+        let mut state = TimelineState::default();
+        let id = state.add_marker_at_beat(4.0);
+        state.select_marker(&id);
+        assert!(state.delete_marker(&id));
+        assert!(
+            state.selected_marker_id.is_none(),
+            "a selection pointing at a deleted marker would outlive it"
+        );
+    }
+
+    #[test]
+    fn hiding_the_lane_drops_its_selection() {
+        let mut state = TimelineState::default();
+        let id = state.add_region_at_beat(0.0);
+        state.select_region(&id);
+        state.hide_region_track_lane();
+        assert!(state.selected_region_id.is_none());
+    }
+
+    #[test]
+    fn region_hit_test_covers_the_whole_span() {
+        let mut state = TimelineState::default();
+        let id = state.add_region_at_beat(4.0);
+        let (start, end) = state.region(&id).unwrap().normalized_range();
+        assert_eq!(state.region_at(start).as_deref(), Some(id.as_str()));
+        assert_eq!(
+            state.region_at((start + end) * 0.5).as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(state.region_at(end + 1.0), None);
+    }
+
+    #[test]
+    fn moving_a_region_keeps_its_length() {
+        let mut state = TimelineState::default();
+        let id = state.add_region_at_beat(4.0);
+        let (start, end) = state.region(&id).unwrap().normalized_range();
+        let length = end - start;
+        assert!(state.move_region(&id, 16.0));
+        let (moved_start, moved_end) = state.region(&id).unwrap().normalized_range();
+        assert!((moved_start - 16.0).abs() < 1.0e-9);
+        assert!(
+            (moved_end - moved_start - length).abs() < 1.0e-9,
+            "a move is not a resize"
+        );
+    }
+
+    /// Trimming the right edge past the left one used to be able to produce a
+    /// zero-width block that could never be grabbed again.
+    #[test]
+    fn a_region_cannot_be_trimmed_to_nothing() {
+        let mut state = TimelineState::default();
+        let id = state.add_region_at_beat(4.0);
+        state.update_region_range(&id, 4.0, 4.0);
+        let (start, end) = state.region(&id).unwrap().normalized_range();
+        assert!(
+            end - start >= MIN_REGION_BEATS - 1.0e-9,
+            "got {}",
+            end - start
+        );
+    }
+
+    #[test]
+    fn the_lane_headers_report_what_is_in_them() {
+        let mut state = TimelineState::default();
+        assert_eq!(state.marker_lane_header_subtitle(), "No markers");
+        state.add_marker_at_beat(0.0);
+        assert_eq!(state.marker_lane_header_subtitle(), "Marker 1");
+        state.add_marker_at_beat(8.0);
+        assert_eq!(state.marker_lane_header_subtitle(), "2 markers");
+
+        assert_eq!(state.region_lane_header_subtitle(), "No regions");
+        state.add_region_at_beat(0.0);
+        assert_eq!(state.region_lane_header_subtitle(), "Region 1");
+    }
+
+    /// The lanes are resizable like the rest of the conductor block.
+    #[test]
+    fn the_structure_lanes_resize_like_the_others() {
+        let mut state = TimelineState::default();
+        state.arm_global_lane_resize(GlobalLaneKind::Marker, 0.0);
+        assert!(state.ensure_global_lane_resize_from_arm(45.0));
+        assert!((state.marker_track_height() - (MARKER_TRACK_HEIGHT + 45.0)).abs() < 0.01);
+        assert!(state.finish_global_lane_resize().is_some());
+
+        state.arm_global_lane_resize(GlobalLaneKind::Arranger, 0.0);
+        assert!(state.ensure_global_lane_resize_from_arm(20.0));
+        assert!((state.region_track_height() - (REGION_TRACK_HEIGHT + 20.0)).abs() < 0.01);
+    }
+}
+
+/// Pointer maths used to run on three different transforms at once: the
+/// constants `SIDEBAR_WIDTH + HEADER_WIDTH` (ruler click, meter lane, track
+/// lane), `panel_origin_x + HEADER_WIDTH` (tempo, song text), and the
+/// element's real `bounds.origin` (ruler scrub, region drag). Only the last
+/// was right, which is why dragging the playhead landed where you pointed and
+/// clicking it did not. These pin the single transform everything now shares.
+#[cfg(test)]
+mod lane_pointer_transform_tests {
+    use super::*;
+
+    #[test]
+    fn a_measured_origin_wins_over_the_chrome_estimate() {
+        let mut state = TimelineState::default();
+        state.viewport.panel_origin_x = 0.0;
+        assert_eq!(
+            state.lane_origin_x(),
+            HEADER_WIDTH,
+            "with nothing measured yet the estimate still has to be usable"
+        );
+
+        // What the shell actually draws: a left rail the chrome estimate knows
+        // nothing about.
+        state.viewport.lane_origin_x_measured = Some(HEADER_WIDTH + 38.0);
+        assert_eq!(state.lane_origin_x(), HEADER_WIDTH + 38.0);
+    }
+
+    /// A click and the drag that follows it must resolve to the same beat.
+    #[test]
+    fn click_and_drag_resolve_the_same_beat() {
+        let mut state = TimelineState::default();
+        state.viewport.pixels_per_beat = 75.0;
+        state.viewport.scroll_x = 0.0;
+        state.viewport.lane_origin_x_measured = Some(358.0);
+
+        // The scrub path works in element-local x (`event.bounds.origin`); the
+        // click path works in window x. Same pixel, same beat.
+        let window_x = 358.0 + 150.0;
+        let from_click = state.x_to_beats(state.lane_x_from_window_x(window_x));
+        let from_scrub = state.x_to_beats(150.0);
+        assert!((from_click - from_scrub).abs() < 1.0e-6);
+        assert!((from_click - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn the_gesture_context_carries_the_measured_origin() {
+        let mut state = TimelineState::default();
+        state.viewport.lane_origin_x_measured = Some(412.0);
+        let gesture = TimelineGestureContext::from_state(&state);
+        assert_eq!(
+            gesture.lane_origin_x(),
+            state.lane_origin_x(),
+            "closures that captured only the frame geometry must not drift from the state"
+        );
+    }
+
+    /// Drawing and hit-testing have to be inverses, or a marker is grabbable
+    /// somewhere other than where it is painted.
+    #[test]
+    fn window_x_round_trips_through_the_drawn_position() {
+        let mut state = TimelineState::default();
+        state.viewport.pixels_per_beat = 64.0;
+        state.viewport.scroll_x = 220.0;
+        state.viewport.lane_origin_x_measured = Some(358.0);
+
+        for beat in [0.0_f32, 3.5, 12.25, 41.0] {
+            let drawn_window_x = state.beats_to_x(beat) + state.lane_origin_x();
+            let hit_beat = state.x_to_beats(state.lane_x_from_window_x(drawn_window_x));
+            assert!(
+                (hit_beat - beat).abs() < 0.02,
+                "beat {beat} drew at {drawn_window_x} but hit-tested as {hit_beat}"
+            );
+        }
+    }
+
+    /// The Tempo lane maps pointer y onto a BPM axis, so its origin has to
+    /// follow whatever lanes are stacked above it.
+    #[test]
+    fn the_tempo_lane_origin_follows_the_lanes_above_it() {
+        let mut state = TimelineState::default();
+        let with_structure = state.tempo_lane_origin_y();
+
+        state.hide_region_track_lane();
+        state.hide_marker_track_lane();
+        let alone = state.tempo_lane_origin_y();
+
+        assert!(
+            (with_structure - alone - MARKER_TRACK_HEIGHT - REGION_TRACK_HEIGHT).abs() < 0.01,
+            "the tempo lane moved down by exactly the two lanes above it"
+        );
+        assert!(
+            (alone - (crate::shell_metrics::APP_CHROME_HEIGHT + RULER_HEIGHT)).abs() < 0.01,
+            "with nothing above it the tempo lane still starts under the ruler"
+        );
+    }
+
+    /// Resizing a lane above the Tempo lane moves it too — the old inline
+    /// `APP_CHROME_HEIGHT + RULER_HEIGHT` could not see this at all.
+    #[test]
+    fn resizing_a_lane_above_moves_the_tempo_origin() {
+        let mut state = TimelineState::default();
+        let before = state.tempo_lane_origin_y();
+        state.arm_global_lane_resize(GlobalLaneKind::Marker, 0.0);
+        state.ensure_global_lane_resize_from_arm(50.0);
+        state.finish_global_lane_resize();
+        assert!((state.tempo_lane_origin_y() - before - 50.0).abs() < 0.01);
     }
 }

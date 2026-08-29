@@ -210,6 +210,20 @@ pub struct TimelineState {
     /// the project had any lyrics in it. Tempo and meter apply to every project;
     /// song text does not, so it is now opt-in like the other conductor lanes.
     pub show_song_text_track: bool,
+    /// When true, the global Region (arranger) lane is shown below the ruler.
+    ///
+    /// Regions used to exist only as translucent bars inside the ruler, which
+    /// left no room to read a section name, no grab target that was not also
+    /// the playhead scrub, and no place to put per-region commands.
+    pub show_region_track: bool,
+    pub region_track_collapsed: bool,
+    /// Selected arrangement region (stable id).
+    pub selected_region_id: Option<String>,
+    /// When true, the global Marker lane is shown below the ruler.
+    pub show_marker_track: bool,
+    pub marker_track_collapsed: bool,
+    /// Selected arrangement marker (stable id).
+    pub selected_marker_id: Option<String>,
     /// User-set heights for the global lanes (view state, same class as the
     /// visibility and collapse flags above).
     pub global_lane_heights: GlobalLaneHeights,
@@ -272,6 +286,7 @@ impl Default for TimelineState {
                 viewport_height: 500.0,
                 track_area_height: 500.0,
                 panel_origin_x: 0.0,
+                lane_origin_x_measured: None,
             },
             transport: TransportState {
                 playing: false,
@@ -345,6 +360,16 @@ impl Default for TimelineState {
             time_signature_track_collapsed: false,
             selected_time_signature_point_id: None,
             show_song_text_track: false,
+            // Structure lanes are on by default for the same reason tempo and
+            // meter are: every arrangement has sections and cue points, and a
+            // lane that has to be found in a menu before it can be used is a
+            // lane most projects never get.
+            show_region_track: true,
+            region_track_collapsed: false,
+            selected_region_id: None,
+            show_marker_track: true,
+            marker_track_collapsed: false,
+            selected_marker_id: None,
             global_lane_heights: GlobalLaneHeights::default(),
             global_lane_resize: None,
             global_lane_resize_arm: None,
