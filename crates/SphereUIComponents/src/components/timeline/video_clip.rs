@@ -109,7 +109,7 @@ pub fn video_clip(
         .top(px(pad))
         .w(px(width))
         .h(px(clip_h))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .overflow_hidden()
         .bg({
             let mut c = track_color;

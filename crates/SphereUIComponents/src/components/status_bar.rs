@@ -148,7 +148,7 @@ fn perf_metrics_pill(
         .flex_row()
         .items_center()
         .px(px(7.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(if open {
             Colors::border_accent()
@@ -196,7 +196,7 @@ fn perf_metrics_panel(metrics: &StatusBarPerfMetrics) -> impl IntoElement {
         .w(px(220.0))
         .flex()
         .flex_col()
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())

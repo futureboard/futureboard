@@ -1159,6 +1159,13 @@ impl Render for Timeline {
         let on_tempo_hide: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
             std::sync::Arc::new(on_tempo_hide);
 
+        let on_song_text_hide = cx.listener(|this, _: &(), _window, cx| {
+            this.state.hide_song_text_track_lane();
+            cx.notify();
+        });
+        let on_song_text_hide: crate::components::timeline::song_text_track::GlobalLaneVoidCallback =
+            std::sync::Arc::new(on_song_text_hide);
+
         let on_tempo_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.tempo_track_collapsed = !this.state.tempo_track_collapsed;
             cx.notify();
@@ -1986,13 +1993,16 @@ impl Render for Timeline {
                     Some(on_ts_toggle_collapsed.clone()),
                 ))
             })
-            .child(song_text_track_lane(
-                state,
-                self.song_text_drag_preview.as_ref(),
-                on_song_text_marker_down,
-                on_song_text_marker_context,
-                on_song_text_empty_seek,
-            ))
+            .when(state.show_song_text_track, |this| {
+                this.child(song_text_track_lane(
+                    state,
+                    self.song_text_drag_preview.as_ref(),
+                    on_song_text_marker_down,
+                    on_song_text_marker_context,
+                    on_song_text_empty_seek,
+                    Some(on_song_text_hide.clone()),
+                ))
+            })
             // 2. Track List Scroll Area
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,
@@ -2160,7 +2170,7 @@ impl Render for Timeline {
                     .gap(px(4.0))
                     .px(px(8.0))
                     .py(px(4.0))
-                    .rounded_full()
+                    .rounded(px(crate::theme::radius::PILL))
                     .border(px(1.0))
                     .border_color(Colors::border_default())
                     .bg(Colors::surface_panel_alt())
@@ -2173,7 +2183,7 @@ impl Render for Timeline {
                             .justify_center()
                             .w(px(24.0))
                             .h(px(24.0))
-                            .rounded_md()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_color(Colors::text_secondary())
                             .id("zoom-out-btn")
@@ -2214,7 +2224,7 @@ impl Render for Timeline {
                             .justify_center()
                             .w(px(24.0))
                             .h(px(24.0))
-                            .rounded_md()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .cursor(gpui::CursorStyle::PointingHand)
                             .text_color(Colors::text_secondary())
                             .id("zoom-in-btn")
@@ -2313,7 +2323,7 @@ pub(crate) fn vertical_scrollbar(
                 .left(px(2.0))
                 .right(px(2.0))
                 .h(px(thumb_h))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
         )
         .into_any_element()
@@ -2389,7 +2399,7 @@ pub(crate) fn horizontal_scrollbar(
                 .top(px(2.0))
                 .bottom(px(2.0))
                 .w(px(thumb_w))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
         )
         .into_any_element()
@@ -2587,7 +2597,7 @@ fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<
         .top(px(label_top))
         .px(px(8.0))
         .py(px(5.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::with_alpha(accent, 0.62))
         .bg(Colors::with_alpha(Colors::surface_panel(), 0.96))
@@ -2662,7 +2672,7 @@ fn clip_clone_hint_overlay(
         .top(px(y.max(0.0)))
         .w(px(width))
         .h(px(height))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::with_alpha(color, 0.6))
         .bg(Colors::with_alpha(color, 0.12))
@@ -2734,7 +2744,7 @@ fn pen_clip_draw_overlay(
         .top(px(top))
         .w(px(width))
         .h(px(height))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(ghost_fill)
         .border(px(1.0))
         .border_color(Colors::with_alpha(track_color, 0.85))
@@ -2792,7 +2802,7 @@ fn pen_clip_draw_overlay(
         })
         .px(px(6.0))
         .py(px(2.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(Colors::with_alpha(Colors::surface_panel(), 0.96))
         .border(px(1.0))
         .border_color(Colors::with_alpha(track_color, 0.6))

@@ -1859,7 +1859,7 @@ impl Render for StudioLayout {
                             .bottom(px(28.0))
                             .px(px(8.0))
                             .py(px(4.0))
-                            .rounded_md()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .border(px(1.0))
                             .border_color(Colors::panel_border_focused())
                             .bg(Colors::surface_canvas())
@@ -1970,7 +1970,7 @@ fn right_dock_tab_button(
         .px(px(6.0))
         .flex()
         .items_center()
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(if selected {
             Colors::tab_bg_active()
         } else {

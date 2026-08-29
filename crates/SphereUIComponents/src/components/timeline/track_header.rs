@@ -67,7 +67,7 @@ impl Render for TrackDragPreview {
             .h(px(28.0))
             .min_w(px(150.0))
             .px(px(8.0))
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color({
                 let mut c = self.color;
@@ -76,7 +76,13 @@ impl Render for TrackDragPreview {
             })
             .bg(Colors::surface_raised())
             .shadow_lg()
-            .child(div().w(px(3.0)).h(px(16.0)).rounded_full().bg(self.color))
+            .child(
+                div()
+                    .w(px(3.0))
+                    .h(px(16.0))
+                    .rounded(px(crate::theme::radius::PILL))
+                    .bg(self.color),
+            )
             .child(
                 div()
                     .ml(px(7.0))
@@ -118,64 +124,82 @@ fn type_badge(kind: TrackType) -> impl IntoElement {
         TrackType::Video => "VID",
     };
     let color = track_type_color(kind);
-    // Readable, not neon: muted tinted chip with a slightly dimmed label.
+    // An identity chip, not a control: fully round, quiet fill, and no border.
+    // The type is the least urgent thing in the header, so it must not compete
+    // with the track name beside it.
     div()
-        .px(px(3.0))
-        .py(px(0.5))
-        .rounded_sm()
+        .flex_none()
+        .px(px(crate::theme::space::SNUG))
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::with_alpha(color, 0.14))
-        .text_color(Colors::with_alpha(color, 0.92))
-        .text_size(px(8.0))
-        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(Colors::with_alpha(color, 0.85))
+        .text_size(px(crate::theme::typography::DENSE_CAPTION))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(label)
 }
 
+/// Latching track-state button (mute / solo / arm / input monitor / automation).
+///
+/// `semantic` is the state's own hue, not a background: latched paints a wash of
+/// it, a border of it, and the glyph at full strength — three channels, so the
+/// state survives a 16 px control and a colour-blind reader. It used to fill
+/// solid with the hue and set the glyph to `text_inverse`, which meant a
+/// latched button's only cue was a colour swap.
 fn pill_button(
     id: gpui::ElementId,
     label: &'static str,
     icon: Option<&'static str>,
     active: bool,
-    active_bg: gpui::Rgba,
-    active_fg: gpui::Rgba,
+    semantic: gpui::Rgba,
+    _unused_fg: gpui::Rgba,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let mut btn = div()
+    let base = Colors::surface_panel_alt();
+    let (rest, border) = if active {
+        Colors::latched(base, semantic)
+    } else {
+        (Colors::button_bg(), Colors::border_subtle())
+    };
+    let hover = Colors::composite(rest, Colors::state_hover());
+    let fg = if active {
+        semantic
+    } else {
+        Colors::text_muted()
+    };
+    // 16 px visual, 24 px hit area. The growth is transparent padding, so the
+    // header reads tighter and clicks easier at the same time.
+    let pad = crate::theme::size::hit_target(16.0);
+
+    let btn = div()
         .flex()
         .items_center()
         .justify_center()
         .w(px(16.0))
         .h(px(16.0))
-        .rounded_sm()
-        .cursor(gpui::CursorStyle::PointingHand)
+        .rounded(px(crate::theme::radius::CONTROL_SM))
+        .border(px(1.0))
+        .border_color(border)
+        .bg(rest)
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
-        .id(id)
-        .on_mouse_down(gpui::MouseButton::Left, on_click);
+        .text_color(fg)
+        .hover(move |s| s.bg(hover));
 
-    if active {
-        btn = btn.bg(active_bg).text_color(active_fg);
-    } else {
-        btn = btn
-            .bg(Colors::with_alpha(Colors::text_primary(), 0.05))
-            .text_color(Colors::text_secondary())
-            .hover(|s| s.bg(Colors::surface_hover()));
-    }
-
-    if let Some(path) = icon {
-        btn.child(
-            svg()
-                .path(path)
-                .w(px(10.0))
-                .h(px(10.0))
-                .text_color(if active {
-                    active_fg
-                } else {
-                    Colors::text_secondary()
-                }),
-        )
+    let btn = if let Some(path) = icon {
+        btn.child(svg().path(path).w(px(10.0)).h(px(10.0)).text_color(fg))
     } else {
         btn.child(label)
-    }
+    };
+
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(pad))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_mouse_down(gpui::MouseButton::Left, on_click)
+        .child(btn)
 }
 
 pub fn track_header(
@@ -441,10 +465,10 @@ pub fn track_header(
                     .border_r(px(1.0))
                     .border_color(Colors::border_strong())
                     .when(is_first_group_child, |frame| {
-                        frame.border_t(px(1.0)).rounded_t_md()
+                        frame.border_t(px(1.0)).rounded_t(px(crate::theme::radius::CONTROL))
                     })
                     .when(is_last_group_child, |frame| {
-                        frame.border_b(px(1.0)).rounded_b_md()
+                        frame.border_b(px(1.0)).rounded_b(px(crate::theme::radius::CONTROL))
                     }),
             )
         })
@@ -521,7 +545,7 @@ pub fn track_header(
                                         .justify_center()
                                         .w(px(22.0))
                                         .h(px(30.0))
-                                        .rounded_sm()
+                                        .rounded(px(crate::theme::radius::CONTROL))
                                         .id(("track-drag-handle", id_num))
                                         .cursor(gpui::CursorStyle::PointingHand)
                                         .hover(|s| s.bg(Colors::surface_hover()))
@@ -557,7 +581,7 @@ pub fn track_header(
                                                             .justify_center()
                                                             .w(px(16.0))
                                                             .h(px(16.0))
-                                                            .rounded_sm()
+                                                            .rounded(px(crate::theme::radius::CONTROL))
                                                             .hover(|style| {
                                                                 style.bg(Colors::surface_hover())
                                                             })
@@ -627,24 +651,23 @@ pub fn track_header(
                                 ),
                         )
                         .child(
+                            // No wrapper box. Each state button already carries
+                            // its own fill and border, so framing the row added a
+                            // second nested rectangle around six rectangles and
+                            // was the main reason the header read as a form
+                            // rather than a channel strip.
                             div()
                                 .flex()
                                 .flex_row()
                                 .flex_shrink_0()
                                 .items_center()
-                                .gap(px(2.0))
-                                .px(px(3.0))
-                                .py(px(2.0))
-                                .rounded_md()
-                                .bg(Colors::surface_panel_alt())
-                                .border(px(1.0))
-                                .border_color(Colors::divider())
+                                .gap(px(crate::theme::space::HAIR))
                                 .child(pill_button(
                                     ("mute-btn", id_num).into(),
                                     "M",
                                     None,
                                     track.muted,
-                                    Colors::accent_warning(),
+                                    Colors::state_mute(),
                                     Colors::text_inverse(),
                                     on_mute,
                                 ))
@@ -653,7 +676,7 @@ pub fn track_header(
                                     "S",
                                     None,
                                     track.solo,
-                                    Colors::accent_success(),
+                                    Colors::state_solo(),
                                     Colors::text_inverse(),
                                     on_solo,
                                 ))
@@ -662,7 +685,7 @@ pub fn track_header(
                                     "R",
                                     None,
                                     track.armed,
-                                    Colors::accent_danger(),
+                                    Colors::state_arm(),
                                     Colors::text_inverse(),
                                     on_arm,
                                 ))
@@ -671,7 +694,7 @@ pub fn track_header(
                                     "I",
                                     None,
                                     track.input_monitor.is_active(track.armed),
-                                    Colors::accent_primary(),
+                                    Colors::state_monitor(),
                                     Colors::text_inverse(),
                                     on_input,
                                 ))
@@ -682,7 +705,7 @@ pub fn track_header(
                                     "A",
                                     None,
                                     is_automation,
-                                    Colors::accent_primary(),
+                                    Colors::state_automation(),
                                     Colors::text_inverse(),
                                     on_automation,
                                 ))
@@ -713,7 +736,7 @@ pub fn track_header(
                             // each side keeps the two-row header at its exact
                             // 72px intrinsic height.
                             .py(px(2.0))
-                            .rounded_md()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .bg(Colors::with_alpha(Colors::surface_canvas(), 0.16))
                             .border(px(1.0))
                             .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
@@ -758,7 +781,7 @@ pub fn track_header(
                                     .min_w(px(28.0))
                                     .px(px(5.0))
                                     .h(px(14.0))
-                                    .rounded_sm()
+                                    .rounded(px(crate::theme::radius::CONTROL))
                                     .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
                                     .border(px(1.0))
                                     .border_color(border)

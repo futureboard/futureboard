@@ -136,7 +136,7 @@ pub fn select_with_placement_and_header(
                 .h(px(28.0))
                 .w_full()
                 .min_w(px(0.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(if open {
                     Colors::border_focus()
@@ -205,7 +205,7 @@ pub fn select_with_placement_and_header(
                 .left_0()
                 .right_0()
                 .max_h(px(SELECT_MENU_MAX_HEIGHT))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::border_default())
                 .bg(Colors::surface_panel_raised())
@@ -249,7 +249,7 @@ pub fn select_with_placement_and_header(
                             24.0
                         }))
                         .w_full()
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .px(px(8.0))
                         .py(px(4.0))
                         .flex()

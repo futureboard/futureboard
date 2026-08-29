@@ -66,6 +66,7 @@ pub mod pre_studio_install;
 pub mod project;
 pub mod session_shutdown;
 pub mod settings;
+pub mod shell_metrics;
 pub mod shutdown;
 pub mod solfege;
 pub mod soundfont_player;

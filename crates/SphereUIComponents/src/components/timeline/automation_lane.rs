@@ -19,7 +19,7 @@ impl Render for LaneTooltipText {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_raised())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
@@ -33,9 +33,9 @@ fn lane_tooltip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView
     move |_window, cx| cx.new(|_| LaneTooltipText(text)).into()
 }
 
-/// Top chrome height above the timeline ruler — mirrors `timeline.rs` so a
-/// window-space click can be mapped into a sub-lane-local value.
-const APP_CHROME_HEIGHT: f32 = 36.0;
+/// Top chrome height above the timeline ruler, so a window-space click can be
+/// mapped into a sub-lane-local value.
+use crate::shell_metrics::APP_CHROME_HEIGHT;
 
 /// Left inset for automation sub-lane header content. Keeps lane titles visually
 /// nested under the parent track without shifting the timeline grid.
@@ -199,7 +199,13 @@ pub fn automation_lane(
         .items_center()
         .gap(px(4.0))
         .min_w(px(0.0))
-        .child(div().w(px(2.0)).h(px(9.0)).rounded_full().bg(accent))
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(9.0))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(accent),
+        )
         .child(
             // Parameter name must stay on a single line — `truncate` applies
             // nowrap + ellipsis so "Volume" can never wrap to "Volu / me".
@@ -451,7 +457,7 @@ fn lane_button(
         .justify_center()
         .w(px(20.0))
         .h(px(20.0))
-        .rounded(px(6.0))
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
         .id(id)
@@ -679,7 +685,7 @@ fn lane_envelope(
                     .top(px(y - size_px / 2.0))
                     .w(px(size_px))
                     .h(px(size_px))
-                    .rounded_full()
+                    .rounded(px(crate::theme::radius::PILL))
                     .bg(fill_color)
                     .border(px(1.0))
                     .border_color(ring),

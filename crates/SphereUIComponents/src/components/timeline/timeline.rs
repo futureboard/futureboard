@@ -33,9 +33,10 @@ use gpui::{
 };
 use std::time::Duration;
 
-/// App chrome (top titlebar/menu strip) — used to convert window-space y into
-/// the timeline track area. Mirrors the value used by app_chrome.
-const APP_CHROME_HEIGHT: f32 = 36.0;
+/// Top chrome (titlebar band + transport bar) — converts window-space y into
+/// the timeline track area. Single definition in `shell_metrics`; this used to
+/// be one of three hand-mirrored copies.
+use crate::shell_metrics::APP_CHROME_HEIGHT;
 const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
 
 /// Sizes of the surrounding chrome panels that the timeline's scroll/grid

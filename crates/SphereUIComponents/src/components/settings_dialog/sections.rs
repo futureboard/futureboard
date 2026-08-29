@@ -42,7 +42,7 @@ pub(crate) fn settings_path_list(paths: &[String]) -> impl IntoElement {
                         .min_w(px(0.0))
                         .h(px(30.0))
                         .px(px(9.0))
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .border(px(1.0))
                         .border_color(Colors::border_subtle())
                         .bg(Colors::surface_input())
@@ -101,7 +101,7 @@ pub fn fb_checkbox(
         .justify_center()
         .w(px(12.0))
         .h(px(12.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_default())
         .bg(if checked {
@@ -1157,19 +1157,23 @@ pub(crate) fn input_test_meter_row(
                     div()
                         .flex_1()
                         .h(px(10.0))
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .border(px(1.0))
                         .border_color(Colors::border_subtle())
                         .bg(Colors::meter_rail())
-                        .child(div().h_full().w(gpui::relative(level)).rounded_sm().bg(
-                            if level >= 0.9 {
-                                Colors::meter_high()
-                            } else if level >= 0.65 {
-                                Colors::meter_mid()
-                            } else {
-                                Colors::meter_low()
-                            },
-                        )),
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(level))
+                                .rounded(px(crate::theme::radius::CONTROL))
+                                .bg(if level >= 0.9 {
+                                    Colors::meter_high()
+                                } else if level >= 0.65 {
+                                    Colors::meter_mid()
+                                } else {
+                                    Colors::meter_low()
+                                }),
+                        ),
                 )
                 .child(
                     div()

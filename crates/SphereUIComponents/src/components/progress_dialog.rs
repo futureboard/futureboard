@@ -264,7 +264,7 @@ impl Render for ProgressDialogWindow {
             .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .shadow(vec![gpui::BoxShadow {
@@ -466,7 +466,7 @@ fn cancel_button(label: String, target: gpui::Entity<ProgressDialogWindow>) -> i
         .h(px(BUTTON_H))
         .min_w(px(BUTTON_MIN_W))
         .px(px(BUTTON_PAD_X))
-        .rounded(px(5.0))
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .text_size(px(12.0))

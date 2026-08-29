@@ -27,7 +27,7 @@ impl Render for SendSlotDrag {
         div()
             .px(px(8.0))
             .h(px(20.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_overlay())
             .border(px(1.0))
             .border_color(Colors::accent_primary())

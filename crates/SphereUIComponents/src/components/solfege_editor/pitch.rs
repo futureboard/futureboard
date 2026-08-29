@@ -364,7 +364,7 @@ impl SolfegeEditorPanel {
             .items_center()
             .h(px(18.0))
             .px(px(7.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             // Active is accent background *and* accent border; hover is only a
             // weaker graphite wash, and only on a tool that is not already
             // armed. Painting both with `surface_hover` made a hovered tool
@@ -2050,7 +2050,7 @@ impl gpui::Render for PitchTooltip {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_raised())
             .border(px(1.0))
             .border_color(Colors::border_subtle())

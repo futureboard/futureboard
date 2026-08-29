@@ -58,7 +58,7 @@ pub fn floating_tools_bar(
         .flex_row()
         .items_center()
         .gap(px(1.0))
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_default())
         .bg(Colors::surface_panel_alt())
@@ -111,7 +111,7 @@ pub fn floating_tools_bar(
                                 .justify_center()
                                 .w(px(28.0))
                                 .h(px(28.0))
-                                .rounded_md()
+                                .rounded(px(crate::theme::radius::CONTROL))
                                 .id(label)
                                 .cursor(gpui::CursorStyle::PointingHand)
                                 .text_size(px(14.0))
@@ -149,7 +149,7 @@ pub fn floating_tools_bar(
                                             .bottom(px(1.0))
                                             .h(px(1.5))
                                             .w(px(16.0))
-                                            .rounded_full()
+                                            .rounded(px(crate::theme::radius::PILL))
                                             .bg(Colors::accent_primary()),
                                     )
                                 } else {

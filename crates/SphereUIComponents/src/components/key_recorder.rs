@@ -86,7 +86,7 @@ pub fn key_recorder_field(
         .items_center()
         .h(px(28.0))
         .px(px(8.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(Colors::surface_input())
         .border(px(1.0))
         .border_color(if armed {

@@ -5,6 +5,7 @@ pub mod automation_lane;
 pub mod automation_target_picker;
 pub mod floating_tools_bar;
 pub mod global_lane_header;
+pub mod marker_flag;
 pub mod midi_clip;
 pub mod midi_export;
 pub mod midi_import;

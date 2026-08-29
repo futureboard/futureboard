@@ -156,7 +156,7 @@ pub fn midi_clip(
         .top(px(pad))
         .w(px(width))
         .h(px(clip_h))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg({
             let mut c = track_color;
             c.a = 0.12;

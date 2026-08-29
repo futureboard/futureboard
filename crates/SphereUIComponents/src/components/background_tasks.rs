@@ -281,7 +281,7 @@ pub fn background_task_button(
         .items_center()
         .gap(px(6.0))
         .px(px(7.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(if store.panel_open {
             Colors::border_accent()
@@ -296,7 +296,13 @@ pub fn background_task_button(
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_hover()))
         .on_click(move |_, w, cx| on_toggle(&(), w, cx))
-        .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color))
+        .child(
+            div()
+                .w(px(5.0))
+                .h(px(5.0))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(color),
+        )
         .child(
             div()
                 .truncate()
@@ -347,7 +353,7 @@ pub fn background_task_panel(
         .max_h(px(392.0))
         .flex()
         .flex_col()
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
@@ -381,7 +387,7 @@ pub fn background_task_panel(
                         .id("background-task-panel-close")
                         .px(px(6.0))
                         .py(px(2.0))
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .text_size(px(10.0))
                         .text_color(Colors::text_faint())
                         .cursor(gpui::CursorStyle::PointingHand)
@@ -471,7 +477,7 @@ fn task_row(task: BackgroundTask, on_cancel: BackgroundTaskCancelCb) -> impl Int
     let id = task.id.clone();
     let cancel_element_id = stable_task_id(&task.id);
     div()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
@@ -508,7 +514,7 @@ fn task_row(task: BackgroundTask, on_cancel: BackgroundTaskCancelCb) -> impl Int
                         .id(("background-task-cancel", cancel_element_id))
                         .px(px(5.0))
                         .py(px(1.0))
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .text_size(px(9.0))
                         .text_color(Colors::text_faint())
                         .cursor(gpui::CursorStyle::PointingHand)
@@ -531,14 +537,14 @@ fn task_row(task: BackgroundTask, on_cancel: BackgroundTaskCancelCb) -> impl Int
         .children(pct.map(|pct| {
             div()
                 .h(px(3.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .overflow_hidden()
                 .bg(Colors::border_subtle())
                 .child(
                     div()
                         .h_full()
                         .w(gpui::relative(pct))
-                        .rounded_full()
+                        .rounded(px(crate::theme::radius::PILL))
                         .bg(Colors::accent_primary()),
                 )
         }))
@@ -556,7 +562,7 @@ fn status_badge(status: BackgroundTaskStatus) -> impl IntoElement {
     div()
         .px(px(5.0))
         .py(px(1.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .text_size(px(9.0))

@@ -548,7 +548,7 @@ fn select_box(text: impl Into<String>) -> impl IntoElement {
         .justify_between()
         .w_full()
         .h(px(28.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
@@ -804,7 +804,7 @@ fn count_field(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
@@ -908,7 +908,7 @@ fn instrument_mode_selector(
                 .h_full()
                 .flex_1()
                 .px(px(8.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(if active {
                     Colors::border_accent()
@@ -973,7 +973,7 @@ fn type_tabs(
             .min_w(px(0.0))
             .px(px(6.0))
             .overflow_hidden()
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(if active {
                 Colors::border_accent()
@@ -1070,7 +1070,7 @@ fn color_row(
         .flex_shrink_0()
         .h(px(22.0))
         .px(px(7.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(if auto_on {
             Colors::border_accent()
@@ -1089,7 +1089,7 @@ fn color_row(
             div()
                 .w(px(11.0))
                 .h(px(11.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::with_alpha(Colors::text_primary(), 0.22))
                 .bg(computed_auto),
@@ -1127,7 +1127,7 @@ fn color_row(
                 .id(("add-track-color", i))
                 .w(px(16.0))
                 .h(px(16.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(if active { 2.0 } else { 1.0 }))
                 .border_color(if active {
                     Colors::text_primary()
@@ -1158,7 +1158,7 @@ fn color_row(
         .flex()
         .flex_col()
         .gap(px(8.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
@@ -1251,7 +1251,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                 .h(px(20.0))
                 .flex()
                 .items_center()
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_input())
@@ -1268,7 +1268,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
 
 fn form_panel(child: impl IntoElement) -> impl IntoElement {
     div()
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel_alt())
@@ -1278,7 +1278,7 @@ fn form_panel(child: impl IntoElement) -> impl IntoElement {
 
 fn disabled_hint(text: &'static str) -> impl IntoElement {
     div()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())

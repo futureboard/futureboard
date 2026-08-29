@@ -327,7 +327,7 @@ fn tab_button(
         .gap(px(6.0))
         .h(px(24.0))
         .px(px(10.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text_color)

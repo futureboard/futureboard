@@ -495,7 +495,7 @@ fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoE
         .child(
             div()
                 .h(px(4.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_panel_alt())
                 .overflow_hidden()
                 .child(
@@ -522,7 +522,7 @@ fn status_badge(label: impl Into<String>, ready: bool) -> impl IntoElement {
         .min_w(px(72.0))
         .px(px(8.0))
         .py(px(3.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(bg)
@@ -598,7 +598,7 @@ fn sidebar_item(
         .w_full()
         .px(px(8.0))
         .py(px(5.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .when(active, |el| el.bg(Colors::accent_muted()))
         .when(!disabled, |el| {
             el.cursor(gpui::CursorStyle::PointingHand)

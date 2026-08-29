@@ -822,18 +822,71 @@ mod tempo_track_tests {
         );
     }
 
+    /// Tempo and meter lanes are on by default; Song Text is opt-in.
+    #[test]
+    fn default_global_lanes_are_tempo_and_time_signature() {
+        let state = TimelineState::default();
+        assert!(state.show_tempo_track);
+        assert!(state.show_time_signature_track);
+        assert!(!state.show_song_text_track);
+        assert_eq!(
+            state.visible_global_lanes(),
+            vec![GlobalLaneKind::Tempo, GlobalLaneKind::TimeSignature]
+        );
+    }
+
+    /// Turning the conductor lanes on by default must not make the transport
+    /// claim the project has tempo automation or meter changes.
+    ///
+    /// The tempo map stays empty — the lane renders the effective BPM as an
+    /// implicit flag rather than writing an anchor point, because
+    /// `tempo_has_automation()` is `!points.is_empty()` and feeds the engine's
+    /// tempo path in several places. The time-signature map does carry a
+    /// default 4/4 at beat 0, which is the project's meter rather than a
+    /// change, and `time_signature_has_markers()` correctly ignores it.
+    #[test]
+    fn default_lanes_do_not_fabricate_automation() {
+        let state = TimelineState::default();
+        assert!(state.tempo_map.points.is_empty());
+        assert!(!state.tempo_has_automation());
+        assert!(!state.time_signature_has_markers());
+    }
+
     #[test]
     fn show_tempo_track_enables_global_lane() {
         let mut state = TimelineState::default();
+        state.hide_tempo_track_lane();
         assert!(!state.show_tempo_track);
-        assert_eq!(state.visible_global_lanes(), vec![GlobalLaneKind::SongText]);
+        assert_eq!(
+            state.visible_global_lanes(),
+            vec![GlobalLaneKind::TimeSignature]
+        );
 
         state.show_tempo_track_lane();
         assert!(state.show_tempo_track);
         assert_eq!(
             state.visible_global_lanes(),
-            vec![GlobalLaneKind::Tempo, GlobalLaneKind::SongText]
+            vec![GlobalLaneKind::Tempo, GlobalLaneKind::TimeSignature]
         );
+    }
+
+    /// A lane counted in `global_lanes_height` but not drawn (or the reverse)
+    /// offsets every window-y -> arrangement-y conversion.
+    #[test]
+    fn song_text_lane_height_follows_visibility() {
+        let mut state = TimelineState::default();
+        assert_eq!(state.song_text_track_height(), 0.0);
+        let hidden = state.global_lanes_height();
+
+        state.show_song_text_track_lane();
+        assert!(state.song_text_track_height() > 0.0);
+        assert_eq!(
+            state.global_lanes_height(),
+            hidden + state.song_text_track_height()
+        );
+
+        state.hide_song_text_track_lane();
+        assert_eq!(state.global_lanes_height(), hidden);
     }
 
     #[test]

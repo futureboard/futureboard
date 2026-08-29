@@ -1,6 +1,8 @@
 use crate::components::timeline::global_lane_header::{
     global_lane_header, GlobalLaneHeaderActions,
 };
+use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
+use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{
     bpm_to_y, TempoMap, TimelineState, TEMPO_LANE_PAD,
 };
@@ -25,7 +27,7 @@ pub type GlobalLaneVoidCallback =
 pub type GlobalLaneMenuCallback =
     std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
-const APP_CHROME_HEIGHT: f32 = 36.0;
+use crate::shell_metrics::APP_CHROME_HEIGHT;
 
 /// Global Tempo Track lane — header + automation curve over the project TempoMap.
 pub fn tempo_track_lane(
@@ -86,17 +88,19 @@ pub fn tempo_track_lane(
                 }
             }
 
+            // One 1px column per pixel: a continuous wash under the curve.
+            // This used to paint a 2px bar every 3rd column, which is a 2-on
+            // 1-off stripe — at any zoom that beats against the pixel grid and
+            // reads as moiré rather than as a filled region.
             for col in 0..num_cols {
                 let top = samples[col].min(samples[col + 1]);
-                if col % 3 == 0 {
-                    let fill_h = (lane_height - top).max(0.0);
-                    if fill_h > 0.5 {
-                        let fr = Bounds::new(
-                            bounds.origin + point(px(col as f32), px(top)),
-                            size(px(2.0), px(fill_h)),
-                        );
-                        window.paint_quad(fill(fr, fill_under));
-                    }
+                let fill_h = (lane_height - top).max(0.0);
+                if fill_h > 0.5 {
+                    let fr = Bounds::new(
+                        bounds.origin + point(px(col as f32), px(top)),
+                        size(px(1.0), px(fill_h)),
+                    );
+                    window.paint_quad(fill(fr, fill_under));
                 }
             }
         },
@@ -107,27 +111,26 @@ pub fn tempo_track_lane(
     let points = state.tempo_map.points.clone();
     let selected_id = state.selected_tempo_point_id.clone();
     let show_all_labels = points.len() <= 1;
-    // Compact single-line pill geometry. The label is drawn as a sibling overlay
-    // (not a child of the tiny handle dot) so it is never width-constrained into
-    // a vertical character stack, and so it can be clamped inside the lane.
-    const TEMPO_LABEL_MIN_W: f32 = 44.0;
-    const TEMPO_LABEL_H: f32 = 16.0;
+    // The dot stays on the curve at the marker's actual BPM height — that is
+    // both the value readout and the drag target. The label moved off it into a
+    // flag anchored on the beat, so the text no longer floats above the curve
+    // needing to be clamped away from the lane edges.
     let mut markers: Vec<gpui::Div> = Vec::new();
+    let mut flags: Vec<MarkerFlag> = Vec::new();
     for p in &points {
         let x = state.beats_to_x(p.beat as f32);
-        if x < -16.0 || x > lane_w + 16.0 {
+        if x < -64.0 || x > lane_w + 64.0 {
             continue;
         }
         let y = bpm_to_y(p.bpm, lane_height, min_bpm, max_bpm);
         let selected = selected_id.as_deref() == Some(p.id.as_str());
-        let show_label = selected || show_all_labels;
-        let size_px = if selected { 10.0 } else { 8.0 };
+        let size_px = if selected { 9.0 } else { 7.0 };
         let (fill_color, ring) = if selected {
             (Colors::text_primary(), Colors::accent_primary())
         } else {
             (
                 Colors::accent_primary(),
-                Colors::with_alpha(Colors::text_primary(), 0.65),
+                Colors::with_alpha(Colors::text_primary(), 0.55),
             )
         };
 
@@ -141,58 +144,34 @@ pub fn tempo_track_lane(
                     div()
                         .w(px(size_px))
                         .h(px(size_px))
-                        .rounded_full()
+                        .rounded(px(crate::theme::radius::PILL))
                         .bg(fill_color)
                         .border(px(1.5))
-                        .border_color(ring)
-                        .shadow(vec![gpui::BoxShadow {
-                            color: Colors::with_alpha(Colors::accent_primary(), 0.35).into(),
-                            offset: point(px(0.0), px(0.0)),
-                            blur_radius: px(4.0),
-                            spread_radius: px(0.0),
-                            inset: false,
-                        }]),
+                        .border_color(ring),
                 ),
         );
 
-        if show_label {
-            let label = TempoMap::format_marker_label(p.bpm);
-            let label_text = format!("{label} BPM");
-            // Single-line pill width: estimate from glyph count, never below the
-            // minimum so it can't shrink to the handle width.
-            let pill_w = (label_text.chars().count() as f32 * 5.5 + 14.0).max(TEMPO_LABEL_MIN_W);
-            // Center the pill over the handle, then clamp it inside the lane.
-            let pill_x = (x - pill_w / 2.0).clamp(2.0, (lane_w - pill_w - 2.0).max(2.0));
-            // Prefer above the dot; drop below if there is no room, then clamp so
-            // it stays fully inside the lane content (no top/bottom clipping).
-            let mut pill_y = y - size_px / 2.0 - TEMPO_LABEL_H - 4.0;
-            if pill_y < 2.0 {
-                pill_y = y + size_px / 2.0 + 4.0;
-            }
-            pill_y = pill_y.clamp(2.0, (lane_height - TEMPO_LABEL_H - 2.0).max(2.0));
-
-            markers.push(
-                div()
-                    .absolute()
-                    .left(px(pill_x))
-                    .top(px(pill_y))
-                    .w(px(pill_w))
-                    .h(px(TEMPO_LABEL_H))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .bg(Colors::with_alpha(Colors::surface_raised(), 0.95))
-                    .border(px(1.0))
-                    .border_color(Colors::with_alpha(Colors::accent_primary(), 0.35))
-                    .text_size(px(9.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(Colors::text_primary())
-                    .whitespace_nowrap()
-                    .child(label_text),
-            );
+        if selected || show_all_labels {
+            flags.push(MarkerFlag {
+                x,
+                label: TempoMap::format_marker_label(p.bpm),
+                selected,
+            });
         }
     }
+    // A project with a constant tempo has no points at all, so without this the
+    // lane would sit empty and give no reading. Show the *effective* value as an
+    // implicit flag instead of writing an anchor point into the map — a real
+    // point would make `tempo_has_automation()` true and light the AUTO badge on
+    // a project that has no automation.
+    if points.is_empty() {
+        flags.push(MarkerFlag {
+            x: state.beats_to_x(0.0),
+            label: TempoMap::format_marker_label(state.bpm as f64),
+            selected: false,
+        });
+    }
+    let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
 
     let subtitle = state.tempo_lane_header_subtitle();
     let content_top = APP_CHROME_HEIGHT + crate::components::timeline::timeline_state::RULER_HEIGHT;
@@ -289,7 +268,14 @@ pub fn tempo_track_lane(
                 .h_full()
                 .relative()
                 .overflow_hidden()
+                // The lane's own surface stops at the header. The content area
+                // takes the arrangement's background and its grid, so musical
+                // time runs unbroken from the ruler down through the tracks.
+                .bg(Colors::timeline_content_background())
+                .child(timeline_grid(state, lane_w, lane_height))
                 .child(curve)
+                .child(flag_layer)
+                .children(flag_labels)
                 .children(markers)
                 .children(interaction)
                 // Debug: outline tempo_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).

@@ -97,6 +97,264 @@ pub mod text {
     pub const TITLE: f32 = UI_MD;
 }
 
+/// Corner radius scale (logical px).
+///
+/// Six names, nothing between them. Before this module the crate carried ~360
+/// ad-hoc radius calls spread over nine different values (`rounded_sm` 4,
+/// `rounded_md` 6, `rounded_lg` 8, plus hand-written 1/2/3/4/5/6/10/18/999 px),
+/// which is why controls of the same height in the same toolbar did not read as
+/// one system. Pick a token by *what the thing is*, never by how big it looks.
+pub mod radius {
+    /// Square. Grid cells, full-bleed lanes, the ruler, meter fills, table rows,
+    /// the chrome row, the status bar, the inner edges of a segmented control,
+    /// and every quad whose short side is under [`MIN_SIDE`].
+    pub const NONE: f32 = 0.0;
+    /// Borderless identity chips, clip bodies 10–15 px tall, MIDI notes,
+    /// fader/slider thumbs, caret and selection highlights. Never pair with a
+    /// 1 px stroke: this low, a border visibly varies in weight around the arc.
+    pub const MICRO: f32 = 3.0;
+    /// Controls in the 16–20 px band (mixer M/S/R/I, insert chips, dense
+    /// toolbar buttons). [`CONTROL`] on a 16 px control would eat nearly 40% of
+    /// its height and read as a lozenge.
+    pub const CONTROL_SM: f32 = 4.0;
+    /// The workhorse: interactive controls 24–32 px tall. Buttons, inputs,
+    /// select triggers, transport, dock tabs, clips.
+    ///
+    /// The scale follows the ratio real systems use — radius ≈ 0.2–0.25 × the
+    /// control's height — rather than one flat value across the whole band,
+    /// which is why there are two control tiers instead of one.
+    pub const CONTROL: f32 = 6.0;
+    /// Containing surfaces that sit visibly above another plane: menus,
+    /// popovers, tooltips, cards, inspector sections, mixer strip frames.
+    pub const SURFACE: f32 = 10.0;
+    /// Window-level surfaces only — modals and client-decorated utility windows,
+    /// matched to the host window radius so a modal never reads sharper than the
+    /// frame behind it.
+    pub const DIALOG: f32 = 14.0;
+    /// Fully round. NON-INTERACTIVE identity objects ≤ 20 px (status chips,
+    /// badges, avatars, scrollbar thumbs, knob bodies, rail caps) and toggle
+    /// switch tracks. Never on transport, mute/solo/arm, clips, notes or rows.
+    pub const PILL: f32 = 9999.0;
+
+    /// Below this short side a radius exceeds a quarter of the shape and the
+    /// corners merge into a lozenge.
+    pub const MIN_SIDE: f32 = 10.0;
+
+    /// Radius for an element nested inside a rounded container.
+    ///
+    /// `inner = outer - padding`, floored at 0. Concentric corners only look
+    /// right when the gap between the two arcs is constant; using the parent's
+    /// radius on a child makes the child's corner look too tight.
+    pub const fn inner(outer: f32, pad: f32) -> f32 {
+        let r = outer - pad;
+        if r > 0.0 {
+            r
+        } else {
+            0.0
+        }
+    }
+
+    /// Radius for a **content** quad whose size is data-driven and unbounded —
+    /// clips at any zoom, notes at any row height, meter segments.
+    ///
+    /// Fixed-geometry chrome (rails, thumbs, switch tracks) does *not* go
+    /// through this; it asks for [`PILL`] or [`MICRO`] directly, because its
+    /// dimensions are chosen by the design rather than by the data.
+    ///
+    /// `Window::paint_quad` does not clamp corner radii the way the `div` path
+    /// does, so batched painters must call this explicitly.
+    pub fn clamped(r: f32, width: f32, height: f32) -> f32 {
+        let short = if width < height { width } else { height };
+        if short < MIN_SIDE {
+            return NONE;
+        }
+        let ceiling = short * 0.25;
+        if r > ceiling {
+            ceiling
+        } else {
+            r
+        }
+    }
+}
+
+/// Spacing scale (logical px). Nine steps, 0–32; nothing above 24 appears in
+/// Studio working chrome.
+pub mod space {
+    pub const NONE: f32 = 0.0;
+    /// Tightest legal gap — adjacent micro toggles, transport icons, menu items.
+    pub const HAIR: f32 = 2.0;
+    /// Menu/popover outer padding, segmented-control inset, row backplate inset.
+    /// Chosen so `radius::inner(SURFACE, TIGHT)` lands exactly on `CONTROL`.
+    pub const TIGHT: f32 = 4.0;
+    /// Icon-to-label gap, stacked dense rows, padding of a 20 px control.
+    pub const SNUG: f32 = 6.0;
+    /// The default: panel and card padding, menu row padding, button padding at
+    /// 20–24 px, gap between toolbar control groups.
+    pub const BASE: f32 = 8.0;
+    /// Dialog body padding, section gaps inside a panel, 32 px button padding.
+    pub const LOOSE: f32 = 12.0;
+    /// Gap between major sections, dialog footer padding.
+    pub const SECTION: f32 = 16.0;
+    /// Gap between unrelated blocks on a settings or welcome surface.
+    pub const BLOCK: f32 = 24.0;
+    /// Outer margin of a full-window empty state. The ceiling of the scale.
+    pub const PAGE: f32 = 32.0;
+}
+
+/// Control height ladder (logical px).
+///
+/// Visual heights are deliberately *smaller* than the old ones while hit targets
+/// get *larger*: the growth goes into transparent padding via [`hit_target`], so
+/// the app reads tighter and clicks easier at the same time.
+pub mod size {
+    /// Inline latching toggles inside a mixer strip (M/S/R/I), track-header
+    /// pills. Visual only — inflate the hit box.
+    pub const MICRO: f32 = 16.0;
+    /// Insert/send chips, automation lane buttons, timeline tool buttons,
+    /// status-bar chips, ruler buttons.
+    pub const DENSE: f32 = 20.0;
+    /// The dense-chrome default: toolbar and transport buttons, panel toggles,
+    /// dock tabs, list/tree/menu rows, inspector control rows.
+    pub const DEFAULT: f32 = 24.0;
+    /// Text inputs, select/combo triggers, key-recorder and color-picker
+    /// triggers, segmented-control outer, secondary dialog buttons.
+    pub const COMFORTABLE: f32 = 28.0;
+    /// Primary dialog actions, command-palette search, welcome CTAs, the app
+    /// chrome row.
+    pub const PROMINENT: f32 = 32.0;
+    /// Browser tree rows. Must stay exact — `gpui::uniform_list` virtualization
+    /// derives its window from this.
+    pub const ROW_DENSE: f32 = 22.0;
+    /// Menu items, picker rows, settings rows, command-palette rows.
+    pub const ROW: f32 = 24.0;
+    /// Minimum arrangement track row. Below this a clip drops to `radius::MICRO`
+    /// and the header hides its control row.
+    pub const TRACK_ROW_MIN: f32 = 40.0;
+    /// Default arrangement track row.
+    pub const TRACK_ROW: f32 = 64.0;
+    /// At or above this row height the track header shows fader/pan/meter.
+    /// Kept strictly below [`TRACK_ROW`] so the default row *does* show them.
+    pub const TRACK_CONTROLS_MIN: f32 = 56.0;
+    /// Mixer channel strip width.
+    pub const STRIP_WIDTH: f32 = 80.0;
+
+    /// Minimum comfortable hit target. A 16 px or 20 px control keeps its
+    /// visual size and grows its clickable area with transparent padding.
+    pub const HIT_MIN: f32 = 24.0;
+
+    /// Transparent padding (per side) needed to lift `visual` to a comfortable
+    /// hit target. Returns 0 when the control is already large enough.
+    pub fn hit_target(visual: f32) -> f32 {
+        let pad = (HIT_MIN - visual) * 0.5;
+        if pad > 0.0 {
+            pad
+        } else {
+            0.0
+        }
+    }
+}
+
+/// State-layer alphas.
+///
+/// Material 3's shipped opacities, reduced ~25% because M3 is tuned for 40 px
+/// touch targets and Studio runs 20–24 px controls. Composite these over the
+/// element's *rest* fill with [`Colors::composite`] — GPUI gives a div exactly
+/// one background, so `.hover(|s| s.bg(..))` replaces the fill rather than
+/// layering over it.
+pub mod state {
+    pub const HOVER: f32 = 0.06;
+    pub const PRESSED: f32 = 0.10;
+    pub const SELECTED: f32 = 0.10;
+    pub const SELECTED_HOVER: f32 = 0.14;
+    pub const DRAGGED: f32 = 0.16;
+    /// Wash behind a latched DAW toggle (mute/solo/arm/monitor/automation).
+    pub const ARMED_WASH: f32 = 0.18;
+    /// Border alpha of that same latched toggle — state is always carried on
+    /// two channels, never hue alone.
+    pub const ARMED_BORDER: f32 = 0.55;
+    pub const DISABLED_CONTENT: f32 = 0.38;
+    /// Keyboard focus ring spread, in px.
+    pub const FOCUS_RING_PX: f32 = 2.0;
+}
+
+/// Motion durations (ms) and the one easing worth having.
+///
+/// A pro tool confirms cause and effect; it does not animate idle space.
+pub mod motion {
+    /// State-layer crossfades on hover/press. Below ~90 ms a transition reads as
+    /// instant, above ~140 ms a dense toolbar starts to feel syrupy.
+    pub const MICRO_MS: u64 = 110;
+    /// Popover and menu entry.
+    pub const FAST_MS: u64 = 160;
+    /// Panel expand/collapse, dialog entry.
+    pub const SLOW_MS: u64 = 240;
+}
+
+/// Elevation levels.
+///
+/// Depth is carried by **value** first, a **hairline** second, and **shadow**
+/// only for genuinely floating layers. On a 23%-lightness panel a black shadow
+/// has almost no dynamic range left, which is why the 25 hand-rolled
+/// `BoxShadow` literals this replaces read as smudges rather than lift.
+pub mod elevation {
+    use gpui::{point, px, BoxShadow};
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct ShadowSpec {
+        pub offset_y: f32,
+        pub blur: f32,
+        pub spread: f32,
+        pub alpha: f32,
+    }
+
+    /// Menus, context menus, dropdowns, select/combo popovers, tooltips,
+    /// the color-picker popover, the background-task panel.
+    ///
+    /// One value replacing the six different (offset, blur) pairs in the crate.
+    pub const OVERLAY: ShadowSpec = ShadowSpec {
+        offset_y: 4.0,
+        blur: 12.0,
+        spread: 0.0,
+        alpha: 0.45,
+    };
+
+    /// Clip drag ghosts, track drag previews, slot and browser drags.
+    pub const DRAG: ShadowSpec = ShadowSpec {
+        offset_y: 8.0,
+        blur: 20.0,
+        spread: 0.0,
+        alpha: 0.50,
+    };
+
+    /// Build the GPUI shadow list for a level, so no component writes a
+    /// `BoxShadow` literal again.
+    pub fn shadow(spec: ShadowSpec) -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: gpui::hsla(0.0, 0.0, 0.0, spec.alpha),
+            offset: point(px(0.0), px(spec.offset_y)),
+            blur_radius: px(spec.blur),
+            spread_radius: px(spec.spread),
+            inset: false,
+        }]
+    }
+
+    /// Keyboard focus ring.
+    ///
+    /// A ring, not a border recolor: swapping a 1 px border color is
+    /// indistinguishable from hover. Drawn as a zero-blur spread shadow so it
+    /// sits outside the control without affecting layout — `.focus_visible`
+    /// cannot change an element's radius, so the ring simply follows it.
+    pub fn focus_ring(color: gpui::Rgba) -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: gpui::Hsla::from(color),
+            offset: point(px(0.0), px(0.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(super::state::FOCUS_RING_PX),
+            inset: false,
+        }]
+    }
+}
+
 pub mod menu {
     pub const PANEL_MIN_WIDTH: f32 = 210.0;
     pub const PANEL_MAX_WIDTH: f32 = 340.0;
@@ -520,8 +778,8 @@ macro_rules! theme_color {
 pub struct Colors;
 
 const DEFAULT_TRACK_COLOR_VALUES: [u32; 12] = [
-    0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0x8FB7FF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
-    0x9CAFE8, 0xC49A6C, 0x71D6B5,
+    0x4FC9D8, 0x4FD39A, 0x8FD165, 0xE3C15E, 0xEC9A5C, 0xF0776F, 0xE87BAF, 0xA98BF5, 0x7FA8FF,
+    0x5FBEE8, 0xC0A177, 0x4FD2BC,
 ];
 
 impl Colors {
@@ -537,111 +795,111 @@ impl Colors {
     }
 
     // Backgrounds
-    theme_color!(surface_base, "surface.base", "#1E1F22");
-    theme_color!(surface_panel, "surface.panel", "#25262B");
-    theme_color!(surface_panel_alt, "surface.panelAlt", "#1B1C20");
-    theme_color!(surface_panel_raised, "surface.panelRaised", "#2B2D33");
-    theme_color!(surface_canvas, "surface.canvas", "#15161A");
-    theme_color!(surface_raised, "surface.raised", "#2B2D33");
-    theme_color!(surface_input, "surface.input", "#181A1F");
-    theme_color!(surface_window, "surface.window", "#15161A");
-    theme_color!(surface_titlebar, "surface.titlebar", "#1B1C20");
-    theme_color!(surface_sidebar, "surface.sidebar", "#1B1C20");
-    theme_color!(surface_card, "surface.card", "#202126");
-    theme_color!(surface_card_hover, "surface.cardHover", "#30323A");
-    theme_color!(surface_card_selected, "surface.cardSelected", "#272536");
-    theme_color!(surface_code, "surface.code", "#181A1F");
-    theme_color!(surface_badge, "surface.badge", "#202126");
-    theme_color!(surface_hover, "surface.hover", "#30323A");
-    theme_color!(surface_active, "surface.active", "#2B2D33");
-    theme_color!(surface_control_hover, "surface.controlHover", "#292B31");
-    theme_color!(surface_overlay, "surface.overlay", "#00000085");
+    theme_color!(surface_base, "surface.base", "#1A1D24");
+    theme_color!(surface_panel, "surface.panel", "#22252E");
+    theme_color!(surface_panel_alt, "surface.panelAlt", "#14161C");
+    theme_color!(surface_panel_raised, "surface.panelRaised", "#2A2E38");
+    theme_color!(surface_canvas, "surface.canvas", "#0E1015");
+    theme_color!(surface_raised, "surface.raised", "#2A2E38");
+    theme_color!(surface_input, "surface.input", "#0E1015");
+    theme_color!(surface_window, "surface.window", "#16181F");
+    theme_color!(surface_titlebar, "surface.titlebar", "#14161C");
+    theme_color!(surface_sidebar, "surface.sidebar", "#14161C");
+    theme_color!(surface_card, "surface.card", "#22252E");
+    theme_color!(surface_card_hover, "surface.cardHover", "#383D48");
+    theme_color!(surface_card_selected, "surface.cardSelected", "#4A4F5C");
+    theme_color!(surface_code, "surface.code", "#16181F");
+    theme_color!(surface_badge, "surface.badge", "#2A2E38");
+    theme_color!(surface_hover, "surface.hover", "#383D48");
+    theme_color!(surface_active, "surface.active", "#4A4F5C");
+    theme_color!(surface_control_hover, "surface.controlHover", "#31353F");
+    theme_color!(surface_overlay, "surface.overlay", "#05070BA6");
 
     // Borders
-    theme_color!(border_subtle, "border.subtle", "#292D36");
-    theme_color!(border_normal, "border.normal", "#343946");
+    theme_color!(border_subtle, "border.subtle", "#FFFFFF14");
+    theme_color!(border_normal, "border.normal", "#FFFFFF1F");
     theme_color!(border_default, "border.default", "#FFFFFF1F");
-    theme_color!(border_strong, "border.strong", "#4C505C");
-    theme_color!(border_focus, "border.focus", "#4C8DFFC0");
-    theme_color!(border_accent, "border.accent", "#4C8DFF80");
+    theme_color!(border_strong, "border.strong", "#FFFFFF33");
+    theme_color!(border_focus, "border.focus", "#2FC9D6E0");
+    theme_color!(border_accent, "border.accent", "#2FC9D68C");
     theme_color!(divider, "border.divider", "#FFFFFF0F");
 
     // Text
-    theme_color!(text_primary, "text.primary", "#DFE1E5");
-    theme_color!(text_secondary, "text.secondary", "#C3C7D0");
-    theme_color!(text_muted, "text.muted", "#8E96A3");
-    theme_color!(text_faint, "text.faint", "#FFFFFF45");
-    theme_color!(text_dim, "text.dim", "#FFFFFF66");
-    theme_color!(text_disabled, "text.disabled", "#FFFFFF3B");
-    theme_color!(text_inverse, "text.inverse", "#1E1F22");
+    theme_color!(text_primary, "text.primary", "#EBEDF2");
+    theme_color!(text_secondary, "text.secondary", "#B9BDC6");
+    theme_color!(text_muted, "text.muted", "#8F949F");
+    theme_color!(text_faint, "text.faint", "#6F7480");
+    theme_color!(text_dim, "text.dim", "#828792");
+    theme_color!(text_disabled, "text.disabled", "#5B606B");
+    theme_color!(text_inverse, "text.inverse", "#0E1015");
 
     // Accent
-    theme_color!(accent_primary, "accent.primary", "#4C8DFF");
-    theme_color!(accent_primary_hover, "accent.primaryHover", "#6BA1FF");
-    theme_color!(accent_hover, "accent.hover", "#6BA1FF");
-    theme_color!(accent_active, "accent.active", "#4C8DFF28");
-    theme_color!(accent_focus, "accent.focus", "#4C8DFFC0");
-    theme_color!(accent_soft, "accent.soft", "#4C8DFF30");
-    theme_color!(accent_muted, "accent.muted", "#4C8DFF20");
-    theme_color!(accent_pressed, "accent.pressed", "#4C8DFF28");
-    theme_color!(on_accent, "accent.onAccent", "#FFFFFF");
+    theme_color!(accent_primary, "accent.primary", "#2FC9D6");
+    theme_color!(accent_primary_hover, "accent.primaryHover", "#54D8E2");
+    theme_color!(accent_hover, "accent.hover", "#54D8E2");
+    theme_color!(accent_active, "accent.active", "#2FC9D62E");
+    theme_color!(accent_focus, "accent.focus", "#2FC9D6E0");
+    theme_color!(accent_soft, "accent.soft", "#2FC9D629");
+    theme_color!(accent_muted, "accent.muted", "#2FC9D61A");
+    theme_color!(accent_pressed, "accent.pressed", "#1AA8B5");
+    theme_color!(on_accent, "accent.onAccent", "#06181B");
 
     // Status / Alert Accents
-    theme_color!(status_error, "status.error", "#FF6B68");
-    theme_color!(status_warning, "status.warning", "#E5C07B");
-    theme_color!(semantic_warning, "semantic.warning", "#E5C07B");
-    theme_color!(status_success, "status.success", "#6FCF97");
-    theme_color!(accent_success, "accent.success", "#6FCF97");
-    theme_color!(accent_warning, "accent.warning", "#E5C07B");
-    theme_color!(accent_danger, "accent.danger", "#FF6B68");
-    theme_color!(accent_purple, "accent.purple", "#AEB7C6");
+    theme_color!(status_error, "status.error", "#F2645F");
+    theme_color!(status_warning, "status.warning", "#E8B75C");
+    theme_color!(semantic_warning, "semantic.warning", "#E8B75C");
+    theme_color!(status_success, "status.success", "#43D18A");
+    theme_color!(accent_success, "accent.success", "#43D18A");
+    theme_color!(accent_warning, "accent.warning", "#E8B75C");
+    theme_color!(accent_danger, "accent.danger", "#F2645F");
+    theme_color!(accent_purple, "accent.purple", "#A78BFA");
 
     // Workspace tab / focused panel tokens.
-    theme_color!(tab_text, "tab.text", "#C3C7D0");
-    theme_color!(tab_text_muted, "tab.text_muted", "#8E96A3");
-    theme_color!(tab_text_active, "tab.text_active", "#78A9FF");
-    theme_color!(tab_indicator_active, "tab.indicator_active", "#78A9FF");
-    theme_color!(tab_bg_active, "tab.backgroundActive", "#4C8DFF20");
-    theme_color!(tab_bg_hover, "tab.backgroundHover", "#30323A");
-    theme_color!(panel_border_focused, "panel.border_focused", "#4C8DFF80");
-    theme_color!(panel_header_active, "panel.header_active", "#4C8DFF");
+    theme_color!(tab_text, "tab.text", "#B9BDC6");
+    theme_color!(tab_text_muted, "tab.text_muted", "#8F949F");
+    theme_color!(tab_text_active, "tab.text_active", "#EBEDF2");
+    theme_color!(tab_indicator_active, "tab.indicator_active", "#2FC9D6");
+    theme_color!(tab_bg_active, "tab.backgroundActive", "#2FC9D61A");
+    theme_color!(tab_bg_hover, "tab.backgroundHover", "#383D48");
+    theme_color!(panel_border_focused, "panel.border_focused", "#2FC9D68C");
+    theme_color!(panel_header_active, "panel.header_active", "#2FC9D6");
 
     // DAW-specific
-    theme_color!(meter_bg, "meter.background", "#FFFFFF0D");
-    theme_color!(meter_low, "meter.low", "#6FCF97");
-    theme_color!(meter_mid, "meter.mid", "#E5C07B");
-    theme_color!(meter_high, "meter.high", "#FF6B68");
-    theme_color!(fader_rail, "fader.rail", "#FFFFFF0F");
-    theme_color!(fader_thumb, "fader.thumb", "#DFE1E5");
-    theme_color!(fader_tick, "fader.tick", "#FFFFFF1F");
-    theme_color!(fader_scale_text, "fader.scaleText", "#8E96A3");
-    theme_color!(knob_bg, "knob.background", "#181A1F");
-    theme_color!(knob_ring, "knob.ring", "#78A9FF");
-    theme_color!(slot_bg, "slot.background", "#20232A");
-    theme_color!(slot_border, "slot.border", "#FFFFFF1F");
-    theme_color!(statusbar_bg, "statusbar.background", "#1B1C20");
-    theme_color!(statusbar_text, "statusbar.text", "#8E96A3");
-    theme_color!(mixer_bg, "mixer.background", "#15161A");
-    theme_color!(master_strip_bg, "mixer.masterStripBackground", "#1B1C20");
-    theme_color!(timeline_grid_major, "timeline.gridMajor", "#303642");
-    theme_color!(timeline_grid_minor, "timeline.gridMinor", "#242832");
-    theme_color!(timeline_grid_bar, "timeline.gridBar", "#3C4351");
-    theme_color!(timeline_playhead, "timeline.playhead", "#FF6B68");
-    theme_color!(timeline_background, "timeline.background", "#1E1F22");
+    theme_color!(meter_bg, "meter.background", "#0000002E");
+    theme_color!(meter_low, "meter.low", "#43D18A");
+    theme_color!(meter_mid, "meter.mid", "#E8B75C");
+    theme_color!(meter_high, "meter.high", "#F2645F");
+    theme_color!(fader_rail, "fader.rail", "#00000029");
+    theme_color!(fader_thumb, "fader.thumb", "#C8CCD4");
+    theme_color!(fader_tick, "fader.tick", "#FFFFFF14");
+    theme_color!(fader_scale_text, "fader.scaleText", "#8F949F");
+    theme_color!(knob_bg, "knob.background", "#14161C");
+    theme_color!(knob_ring, "knob.ring", "#2FC9D6");
+    theme_color!(slot_bg, "slot.background", "#22252E");
+    theme_color!(slot_border, "slot.border", "#FFFFFF12");
+    theme_color!(statusbar_bg, "statusbar.background", "#14161C");
+    theme_color!(statusbar_text, "statusbar.text", "#8F949F");
+    theme_color!(mixer_bg, "mixer.background", "#0E1015");
+    theme_color!(master_strip_bg, "mixer.masterStripBackground", "#191B22");
+    theme_color!(timeline_grid_major, "timeline.gridMajor", "#FFFFFF1C");
+    theme_color!(timeline_grid_minor, "timeline.gridMinor", "#FFFFFF0D");
+    theme_color!(timeline_grid_bar, "timeline.gridBar", "#FFFFFF3D");
+    theme_color!(timeline_playhead, "timeline.playhead", "#FF6A5A");
+    theme_color!(timeline_background, "timeline.background", "#16181F");
     theme_color!(
         timeline_content_background,
         "timeline.contentBackground",
-        "#1E1F22"
+        "#16181F"
     );
     theme_color!(
         timeline_region_background,
         "timeline.regionBackground",
-        "#FFFFFF06"
+        "#FFFFFF0A"
     );
     theme_color!(
         timeline_region_background_alt,
         "timeline.regionBackgroundAlt",
-        "#FFFFFF04"
+        "#FFFFFF05"
     );
     theme_color!(
         timeline_lane_background,
@@ -651,12 +909,12 @@ impl Colors {
     theme_color!(
         timeline_lane_alt_background,
         "timeline.laneAltBackground",
-        "#00000029"
+        "#00000016"
     );
     theme_color!(
         timeline_selected_lane_background,
         "timeline.selectedLaneBackground",
-        "#FFFFFF12"
+        "#2FC9D614"
     );
     theme_color!(
         timeline_empty_body_background,
@@ -666,130 +924,162 @@ impl Colors {
     theme_color!(
         timeline_ruler_background,
         "timeline.rulerBackground",
-        "#25262B"
+        "#22252E"
     );
-    theme_color!(timeline_ruler_tick, "timeline.rulerTick", "#FFFFFF1F");
-    theme_color!(timeline_ruler_text, "timeline.rulerText", "#C3C7D0");
-    theme_color!(timeline_selection, "timeline.selection", "#4C8DFF30");
+    theme_color!(timeline_ruler_tick, "timeline.rulerTick", "#FFFFFF45");
+    theme_color!(timeline_ruler_text, "timeline.rulerText", "#D3D7DE");
+    theme_color!(timeline_selection, "timeline.selection", "#2FC9D62E");
 
     // Track colors (fallbacks)
-    theme_color!(track_audio, "track.audio", "#48D4D0");
-    theme_color!(track_midi, "track.midi", "#E5C07B");
-    theme_color!(track_instrument, "track.instrument", "#78D88F");
-    theme_color!(track_bus, "track.bus", "#78A9FF");
-    theme_color!(track_return, "track.return", "#6FCF97");
-    theme_color!(track_master, "track.master", "#DFE1E5");
+    theme_color!(track_audio, "track.audio", "#38C7B4");
+    theme_color!(track_midi, "track.midi", "#E8B75C");
+    theme_color!(track_instrument, "track.instrument", "#5FD98C");
+    theme_color!(track_bus, "track.bus", "#7FA8FF");
+    theme_color!(track_return, "track.return", "#43D18A");
+    theme_color!(track_master, "track.master", "#EBEDF2");
     // Subdued overlays for track row states — graphite-leaning so the selected
     // track reads as elevated without flooding the header with accent hue.
-    theme_color!(track_selected_overlay, "track.selectedOverlay", "#222532");
-    theme_color!(track_muted_overlay, "track.mutedOverlay", "#17191F");
+    theme_color!(track_selected_overlay, "track.selectedOverlay", "#FFFFFF0F");
+    theme_color!(track_muted_overlay, "track.mutedOverlay", "#0E10158C");
 
     // Surface selection states (used by rows/lanes that shouldn't get the full
     // accent treatment — sublanes, list selections).
-    theme_color!(surface_selected, "surface.selected", "#272536");
-    theme_color!(surface_selected_soft, "surface.selectedSoft", "#232230");
-    theme_color!(surface_pressed, "surface.pressed", "#2A2E39");
-    theme_color!(surface_muted, "surface.muted", "#191B21");
+    theme_color!(surface_selected, "surface.selected", "#4A4F5C");
+    theme_color!(surface_selected_soft, "surface.selectedSoft", "#414652");
+    theme_color!(surface_pressed, "surface.pressed", "#383D48");
+    theme_color!(surface_muted, "surface.muted", "#191B22");
 
     // Extra named accents kept distinct from the purple primary.
-    theme_color!(accent_cyan, "accent.cyan", "#48D4D0");
-    theme_color!(accent_green, "accent.green", "#78D88F");
+    theme_color!(accent_cyan, "accent.cyan", "#2FC9D6");
+    theme_color!(accent_green, "accent.green", "#5FD98C");
+
+    // Neutral state layers. Composited over an element's rest fill via
+    // [`Colors::composite`] rather than replacing it, so one set of alphas
+    // behaves correctly on every surface in the ramp.
+    theme_color!(state_hover, "state.hover", "#FFFFFF0F");
+    theme_color!(state_pressed, "state.pressed", "#FFFFFF1A");
+    theme_color!(state_selected, "state.selected", "#FFFFFF1A");
+    theme_color!(state_selected_hover, "state.selectedHover", "#FFFFFF24");
+    theme_color!(state_dragged, "state.dragged", "#FFFFFF29");
+    theme_color!(state_armed, "state.armed", "#2FC9D62E");
+    // Pressed goes *darker* than rest on a dark theme, which reads as physical
+    // depression with no bevel.
+    theme_color!(state_recessed, "state.recessed", "#0000001F");
+    theme_color!(state_scrim, "state.scrim", "#05070BA6");
+    theme_color!(state_focus_ring, "state.focusRing", "#2FC9D6E0");
+
+    // Latched DAW track states.
+    //
+    // Each gets its own hue and `accent.primary` is deliberately absent: on a
+    // selected, focused, playing, armed track the accent already marks four
+    // things, so reusing it here would make "is anything soloed?" unanswerable
+    // at a glance across a 40-track arrangement. Five well-separated hues,
+    // each carried on fill *and* border *and* glyph.
+    theme_color!(state_mute, "state.mute", "#6F9BFF");
+    theme_color!(state_solo, "state.solo", "#E8B75C");
+    theme_color!(state_arm, "state.arm", "#F2645F");
+    theme_color!(state_monitor, "state.monitor", "#43D18A");
+    theme_color!(state_automation, "state.automation", "#A78BFA");
 
     // Automation sublane tokens — quiet graphite lanes with a purple curve so the
     // envelope is the only saturated element in the section.
-    theme_color!(automation_curve, "automation.curve", "#78A9FF");
-    theme_color!(automation_curve_hover, "automation.curveHover", "#A4C4FF");
+    theme_color!(automation_curve, "automation.curve", "#A78BFA");
+    theme_color!(automation_curve_hover, "automation.curveHover", "#C4B2FD");
     // Left header/label tint (opaque — sits over the header column, not the grid).
-    theme_color!(automation_lane_bg, "automation.laneBg", "#181A21");
+    theme_color!(automation_lane_bg, "automation.laneBg", "#14161C");
     theme_color!(
         automation_lane_bg_selected,
         "automation.laneBgSelected",
-        "#1B1926"
+        "#1A1D24"
     );
     theme_color!(
         automation_lane_header_bg,
         "automation.laneHeaderBg",
-        "#1A1C23"
+        "#191B22"
     );
     // Right-side lane body. TRANSLUCENT overlays (8-digit RGBA) so the timeline
     // grid drawn behind the rows stays visible — never an opaque dark block.
     // Selected ≈ rgba(124,92,255,0.05) over the timeline canvas.
-    theme_color!(automation_canvas_bg, "automation.canvasBg", "#0E0F1417");
+    theme_color!(automation_canvas_bg, "automation.canvasBg", "#0E101524");
     theme_color!(
         automation_canvas_bg_selected,
         "automation.canvasBgSelected",
-        "#4C8DFF0D"
+        "#A78BFA14"
     );
     // Faint value/center guides drawn behind the curve.
     theme_color!(
         automation_value_region_bg,
         "automation.valueRegionBg",
-        "#4C8DFF08"
+        "#A78BFA0F"
     );
-    theme_color!(automation_center_line, "automation.centerLine", "#4C8DFF2E");
-    theme_color!(automation_center_band, "automation.centerBand", "#4C8DFF06");
-    theme_color!(automation_separator, "automation.separator", "#272B35");
+    theme_color!(automation_center_line, "automation.centerLine", "#A78BFA3D");
+    theme_color!(automation_center_band, "automation.centerBand", "#A78BFA0A");
+    theme_color!(automation_separator, "automation.separator", "#FFFFFF0D");
     theme_color!(
         automation_separator_strong,
         "automation.separatorStrong",
-        "#323746"
+        "#FFFFFF1F"
     );
-    theme_color!(automation_rail, "automation.rail", "#4D4380");
-    theme_color!(automation_rail_active, "automation.railActive", "#8A6CFF");
-    theme_color!(automation_point, "automation.point", "#B9A8FF");
+    theme_color!(automation_rail, "automation.rail", "#6B5CA8");
+    theme_color!(automation_rail_active, "automation.railActive", "#A78BFA");
+    theme_color!(automation_point, "automation.point", "#D6C9FE");
 
     // Compact button surface tokens shared by chrome controls.
-    theme_color!(button_bg, "button.bg", "#20232A");
-    theme_color!(button_bg_hover, "button.bgHover", "#292D38");
-    theme_color!(button_bg_pressed, "button.bgPressed", "#303543");
-    theme_color!(button_bg_active, "button.bgActive", "#3A2E70");
-    theme_color!(button_border, "button.border", "#333846");
-    theme_color!(button_border_hover, "button.borderHover", "#454B5C");
-    theme_color!(button_text, "button.text", "#DDE2EC");
-    theme_color!(button_text_muted, "button.textMuted", "#9AA3B2");
+    theme_color!(button_bg, "button.bg", "#22252E");
+    theme_color!(button_bg_hover, "button.bgHover", "#31353F");
+    theme_color!(button_bg_pressed, "button.bgPressed", "#1A1D24");
+    theme_color!(button_bg_active, "button.bgActive", "#1E4650");
+    theme_color!(button_border, "button.border", "#FFFFFF12");
+    theme_color!(button_border_hover, "button.borderHover", "#FFFFFF29");
+    theme_color!(button_text, "button.text", "#EBEDF2");
+    theme_color!(button_text_muted, "button.textMuted", "#8F949F");
 
     // Surfaces
-    theme_color!(bottom_panel_bg, "surface.bottomPanel", "#25262B");
+    theme_color!(bottom_panel_bg, "surface.bottomPanel", "#22252E");
     theme_color!(
         bottom_panel_header_bg,
         "surface.bottomPanelHeader",
-        "#1B1C20"
+        "#14161C"
     );
-    theme_color!(mixer_strip_bg, "surface.mixerStrip", "#25262B");
-    theme_color!(mixer_strip_bg_alt, "surface.mixerStripAlt", "#1B1C20");
+    theme_color!(mixer_strip_bg, "surface.mixerStrip", "#22252E");
+    theme_color!(mixer_strip_bg_alt, "surface.mixerStripAlt", "#1E212A");
     theme_color!(
         mixer_strip_selected_bg,
         "surface.mixerStripSelected",
-        "#272536"
+        "#4A4F5C"
     );
     theme_color!(
         master_strip_header_bg,
         "surface.masterStripHeader",
-        "#181A1F"
+        "#16181F"
     );
 
     // Borders
-    theme_color!(panel_border, "border.panel", "#FFFFFF14");
-    theme_color!(strip_border, "border.strip", "#FFFFFF1F");
-    theme_color!(strip_border_subtle, "border.stripSubtle", "#292D36");
+    theme_color!(panel_border, "border.panel", "#FFFFFF0D");
+    theme_color!(strip_border, "border.strip", "#FFFFFF12");
+    theme_color!(strip_border_subtle, "border.stripSubtle", "#FFFFFF0A");
     theme_color!(master_strip_border, "border.masterStrip", "#FFFFFF1F");
 
     // Slots
-    theme_color!(slot_bg_hover, "slot.backgroundHover", "#292D38");
-    theme_color!(slot_empty_text, "slot.emptyText", "#8E96A3");
+    theme_color!(slot_bg_hover, "slot.backgroundHover", "#31353F");
+    theme_color!(slot_empty_text, "slot.emptyText", "#6F7480");
 
     // Fader
-    theme_color!(fader_groove, "fader.groove", "#15161A");
-    theme_color!(fader_thumb_border, "fader.thumbBorder", "#FFFFFF40");
+    theme_color!(fader_groove, "fader.groove", "#0E1015");
+    theme_color!(fader_thumb_border, "fader.thumbBorder", "#FFFFFF33");
 
     // Meters
-    theme_color!(meter_rail, "meter.rail", "#FFFFFF0A");
-    theme_color!(meter_peak, "meter.peak", "#FFD700");
+    theme_color!(meter_rail, "meter.rail", "#00000024");
+    theme_color!(meter_peak, "meter.peak", "#EBEDF2");
+    // Latched clip cap. Deliberately a different, hotter red than
+    // `meter_high` — a clip indicator painted in the same hex as the meter's
+    // own top band is invisible exactly when it matters.
+    theme_color!(meter_clip, "meter.clip", "#FF2D20");
 
     // Status
-    theme_color!(statusbar_text_muted, "statusbar.textMuted", "#FFFFFF66");
-    theme_color!(statusbar_accent, "statusbar.accent", "#78A9FF");
-    theme_color!(statusbar_warning, "statusbar.warning", "#E5C07B");
+    theme_color!(statusbar_text_muted, "statusbar.textMuted", "#6F7480");
+    theme_color!(statusbar_accent, "statusbar.accent", "#2FC9D6");
+    theme_color!(statusbar_warning, "statusbar.warning", "#E8B75C");
 
     /// Track-tinted audio clip body overlay. The arrangement grid is deliberately
     /// painted behind clips, so these alphas are part of the timeline layering
@@ -817,6 +1107,54 @@ impl Colors {
             b: color.b,
             a: alpha,
         }
+    }
+
+    /// Source-over composite of a translucent `layer` onto an opaque `base`.
+    ///
+    /// This is what makes the state-layer model implementable at all. A GPUI
+    /// div has exactly one `background`, so `.hover(|s| s.bg(state_hover()))`
+    /// *replaces* the rest fill with a 6%-white wash over whatever happens to
+    /// be behind the element — not a 6% lift of the control itself. Every
+    /// hover/pressed/selected rule therefore resolves its color up front:
+    ///
+    /// ```ignore
+    /// let rest = Colors::button_bg();
+    /// let hover = Colors::composite(rest, Colors::state_hover());
+    /// div().bg(rest).hover(move |s| s.bg(hover))
+    /// ```
+    ///
+    /// Control-path only: this is a few float ops, but it belongs in the style
+    /// closure's captured value, not inside a per-frame paint loop.
+    pub fn composite(base: Rgba, layer: Rgba) -> Rgba {
+        let a = layer.a.clamp(0.0, 1.0);
+        let inv = 1.0 - a;
+        Rgba {
+            r: layer.r * a + base.r * inv,
+            g: layer.g * a + base.g * inv,
+            b: layer.b * a + base.b * inv,
+            // The base plane stays opaque; a state layer must never punch a
+            // hole through the control it is lifting.
+            a: base.a + a * (1.0 - base.a),
+        }
+    }
+
+    /// Rest fill lifted by a neutral state layer at an explicit alpha from
+    /// [`crate::theme::state`].
+    pub fn lift(base: Rgba, alpha: f32) -> Rgba {
+        Self::composite(base, Self::with_alpha(Self::state_hover(), alpha))
+    }
+
+    /// Fill and border for a latched DAW toggle (mute, solo, arm, monitor,
+    /// automation-write). Returns `(fill, border)`; the glyph itself is painted
+    /// at the full `semantic` color, so the state reads on three channels.
+    pub fn latched(base: Rgba, semantic: Rgba) -> (Rgba, Rgba) {
+        (
+            Self::composite(
+                base,
+                Self::with_alpha(semantic, crate::theme::state::ARMED_WASH),
+            ),
+            Self::with_alpha(semantic, crate::theme::state::ARMED_BORDER),
+        )
     }
 
     pub const TRACK_COLORS: [u32; 12] = DEFAULT_TRACK_COLOR_VALUES;

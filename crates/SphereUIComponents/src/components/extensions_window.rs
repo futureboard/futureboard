@@ -211,7 +211,7 @@ impl ExtensionsWindow {
                     .items_center()
                     .h(px(TAG_HEIGHT))
                     .px(px(10.0))
-                    .rounded(px(4.0))
+                    .rounded(px(crate::theme::radius::CONTROL_SM))
                     .cursor(gpui::CursorStyle::PointingHand)
                     .bg(if selected {
                         Colors::accent_soft()
@@ -245,7 +245,7 @@ impl ExtensionsWindow {
                 .items_center()
                 .h(px(TAG_HEIGHT))
                 .px(px(10.0))
-                .rounded(px(4.0))
+                .rounded(px(crate::theme::radius::CONTROL_SM))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .bg(Colors::surface_raised())
                 .border(px(1.0))
@@ -264,7 +264,13 @@ impl ExtensionsWindow {
 
         let mut swatches = div().flex().flex_row().gap(px(2.0)).flex_shrink_0();
         for color in item.preview.swatches() {
-            swatches = swatches.child(div().w(px(9.0)).h(px(26.0)).rounded(px(2.0)).bg(color));
+            swatches = swatches.child(
+                div()
+                    .w(px(9.0))
+                    .h(px(26.0))
+                    .rounded(px(crate::theme::radius::MICRO))
+                    .bg(color),
+            );
         }
 
         let subtitle = {
@@ -305,7 +311,7 @@ impl ExtensionsWindow {
                 .h(px(26.0))
                 .px(px(12.0))
                 .flex_shrink_0()
-                .rounded(px(4.0))
+                .rounded(px(crate::theme::radius::CONTROL_SM))
                 .bg(if downloading {
                     Colors::surface_raised()
                 } else {
@@ -373,7 +379,7 @@ impl ExtensionsWindow {
                                 row.child(
                                     div()
                                         .flex_none()
-                                        .rounded_sm()
+                                        .rounded(px(crate::theme::radius::CONTROL))
                                         .bg(Colors::surface_badge())
                                         .px(px(6.0))
                                         .py(px(1.0))

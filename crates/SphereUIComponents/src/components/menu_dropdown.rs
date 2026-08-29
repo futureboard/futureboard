@@ -314,7 +314,7 @@ fn panel_view(
         .flex_col()
         .gap(px(1.0))
         .p(px(menu_style::PANEL_PAD))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(Colors::surface_panel())
         .border(px(1.0))
         .border_color(Colors::border_subtle())
@@ -459,7 +459,7 @@ fn menu_item_row(
         .h(px(menu_style::ROW_HEIGHT))
         .w_full()
         .px(px(menu_style::ROW_PAD_X))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(if is_open_submenu {
             Colors::surface_control_hover()
         } else {

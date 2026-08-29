@@ -59,7 +59,7 @@ fn mixer_menu_bar(i18n: I18n) -> impl IntoElement {
                         .px(px(8.0))
                         .flex()
                         .items_center()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .text_size(px(MIXER_MENU_FONT_SIZE))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(Colors::text_secondary())

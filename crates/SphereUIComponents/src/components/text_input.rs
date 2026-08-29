@@ -1449,7 +1449,7 @@ fn text_field_inner(
         .w_full()
         .h(px(30.0))
         .px(px(9.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .overflow_hidden()
         .border(px(1.0))
         .border_color(border)
@@ -1590,7 +1590,7 @@ fn text_segment(text: String, selected: bool) -> impl IntoElement {
         .min_w(px(0.0))
         .overflow_hidden()
         .truncate()
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .when(selected, |d| {
             d.bg(Colors::with_alpha(Colors::accent_primary(), 0.25))
                 .px(px(2.0))
@@ -1606,7 +1606,7 @@ fn caret() -> impl IntoElement {
         .w(px(1.5))
         .h(px(15.0))
         .bg(Colors::accent_primary())
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
 }
 
 /// Whether a key should keep firing on OS auto-repeat while a text field is

@@ -192,7 +192,7 @@ fn render_knob(
                     .top(px(y - 1.0))
                     .w(px(2.0))
                     .h(px(2.0))
-                    .rounded_full()
+                    .rounded(px(crate::theme::radius::PILL))
                     .bg(accent)
                     .into_any_element(),
             );
@@ -206,7 +206,7 @@ fn render_knob(
         .top(px(0.0))
         .w(px(size))
         .h(px(size))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::knob_bg())
         .border(px(1.5))
         .border_color(Colors::border_strong());
@@ -220,7 +220,7 @@ fn render_knob(
                 .top(px(cy - r))
                 .w(px(1.5))
                 .h(px(3.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::text_muted()),
         )
     } else {
@@ -234,7 +234,7 @@ fn render_knob(
         .top(px(iy - 2.0))
         .w(px(4.0))
         .h(px(4.0))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(accent);
 
     // Center dot, r = 2.5.
@@ -244,7 +244,7 @@ fn render_knob(
         .top(px(cy - 2.5))
         .w(px(5.0))
         .h(px(5.0))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::text_muted());
 
     let disk = div()

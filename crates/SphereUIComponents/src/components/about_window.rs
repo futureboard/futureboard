@@ -85,7 +85,7 @@ fn about_header(version: &str, edition: &str) -> impl IntoElement {
             img(SharedString::from(APP_LOGO_PATH))
                 .w(px(84.0))
                 .h(px(84.0))
-                .rounded(px(18.0))
+                .rounded(px(crate::theme::radius::DIALOG))
                 .object_fit(ObjectFit::Contain),
         )
         .child(
@@ -131,7 +131,7 @@ fn badge(label: String, accent: bool) -> impl IntoElement {
     div()
         .px(px(10.0))
         .py(px(3.0))
-        .rounded(px(999.0))
+        .rounded(px(crate::theme::radius::PILL))
         .bg(bg)
         .border(px(1.0))
         .border_color(border)
@@ -203,7 +203,7 @@ fn credits_panel() -> impl IntoElement {
         .min_h_0()
         .mx(px(16.0))
         .mb(px(12.0))
-        .rounded(px(10.0))
+        .rounded(px(crate::theme::radius::SURFACE))
         .bg(Colors::surface_panel())
         .border(px(1.0))
         .border_color(Colors::border_subtle())

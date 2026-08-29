@@ -263,7 +263,7 @@ fn message_box_body(
                         .flex_shrink_0()
                         .w(px(WARNING_TOKEN_SIZE))
                         .h(px(WARNING_TOKEN_SIZE))
-                        .rounded_full()
+                        .rounded(px(crate::theme::radius::PILL))
                         .border(px(1.0))
                         .border_color(Colors::with_alpha(accent, 0.35))
                         .bg(Colors::with_alpha(accent, 0.10))
@@ -405,7 +405,7 @@ impl Render for MessageBoxWindow {
             .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .shadow(vec![gpui::BoxShadow {

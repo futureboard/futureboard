@@ -360,7 +360,7 @@ fn swatch(
         .id(id.into())
         .w(px(size))
         .h(px(size))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(if active { 2.0 } else { 1.0 }))
         .border_color(if active {
             Colors::text_primary()
@@ -378,7 +378,7 @@ fn auto_chip(size: f32) -> impl IntoElement {
     div()
         .w(px(size))
         .h(px(size))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .flex()
         .items_center()
         .justify_center()
@@ -405,7 +405,7 @@ pub fn color_picker_trigger(
         div()
             .w(px(16.0))
             .h(px(16.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::with_alpha(Colors::text_primary(), 0.22))
             .bg(value
@@ -421,7 +421,7 @@ pub fn color_picker_trigger(
         .gap(px(6.0))
         .h(px(26.0))
         .px(px(7.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(if open {
             Colors::border_focus()
@@ -485,7 +485,7 @@ fn saturation_value_area(
         .relative()
         .w_full()
         .h(px(SV_AREA_HEIGHT))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .overflow_hidden()
         .border(px(1.0))
         .border_color(Colors::border_default())
@@ -512,7 +512,7 @@ fn saturation_value_area(
                 .mt(px(-7.0))
                 .w(px(14.0))
                 .h(px(14.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .border(px(2.0))
                 .border_color(WHITE)
                 .bg(draft),
@@ -544,7 +544,7 @@ fn hue_strip(
         .relative()
         .w_full()
         .h(px(HUE_BAR_HEIGHT))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .overflow_hidden()
         .border(px(1.0))
         .border_color(Colors::border_default())
@@ -569,7 +569,7 @@ fn hue_strip(
                 .left(gpui::relative(hue.clamp(0.0, 1.0)))
                 .ml(px(-6.0))
                 .w(px(12.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .border(px(2.0))
                 .border_color(WHITE)
                 .bg(hsv_to_rgba(hue, 1.0, 1.0)),
@@ -654,7 +654,7 @@ fn color_picker_popover(
 
     let mut menu = div()
         .w(px(POPOVER_WIDTH))
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_default())
         .bg(Colors::surface_panel_raised())
@@ -693,7 +693,7 @@ fn color_picker_popover(
                         .w(px(30.0))
                         .h(px(30.0))
                         .flex_shrink_0()
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .border(px(1.0))
                         .border_color(Colors::with_alpha(Colors::text_primary(), 0.22))
                         .bg(draft),
@@ -825,12 +825,15 @@ pub fn color_picker_field(
         })
 }
 
-/// Convenience: the default DAW palette as runtime colors, for callers that
-/// don't maintain their own preset list.
+/// Convenience: the track palette as runtime colors, for callers that don't
+/// maintain their own preset list.
+///
+/// Reads the *active theme*'s `trackColors` rather than the bundled hex table,
+/// so a user theme that ships its own palette gets its own picker presets
+/// instead of the built-in ones.
 pub fn default_presets() -> Vec<Rgba> {
-    color::DEFAULT_TRACK_COLORS
-        .iter()
-        .filter_map(|h| parse_hex_color(h).ok())
+    (0..crate::theme::Colors::TRACK_COLORS.len())
+        .map(crate::theme::Colors::track_color_for_index)
         .collect()
 }
 

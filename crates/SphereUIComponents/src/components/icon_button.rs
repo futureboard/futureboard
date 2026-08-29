@@ -1,5 +1,5 @@
 use crate::theme::Colors;
-use gpui::{div, svg, Div, InteractiveElement, ParentElement, Pixels, Rgba, Styled};
+use gpui::{div, px, svg, Div, InteractiveElement, ParentElement, Pixels, Rgba, Styled};
 
 /// A reusable icon button component.
 /// If `icon_path` is provided, it attempts to render the SVG asset.
@@ -18,7 +18,7 @@ pub fn icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_color(color)
         .hover(|style| style.bg(Colors::surface_hover()));
 

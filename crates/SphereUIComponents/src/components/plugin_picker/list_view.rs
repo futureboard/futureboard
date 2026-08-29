@@ -279,7 +279,7 @@ fn status_badge(label: &'static str, tone_warn: bool) -> impl IntoElement {
     div()
         .px(px(5.0))
         .py(px(1.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(bg)
@@ -312,7 +312,7 @@ pub fn skeleton_row(index: usize) -> impl IntoElement {
         div()
             .h(px(10.0))
             .w(px(w))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::with_alpha(Colors::text_primary(), alpha))
     };
     let alpha = 0.06 + ((index % 3) as f32) * 0.015;
@@ -331,7 +331,7 @@ pub fn skeleton_row(index: usize) -> impl IntoElement {
                 div()
                     .w(px(12.0))
                     .h(px(12.0))
-                    .rounded_sm()
+                    .rounded(px(crate::theme::radius::CONTROL))
                     .bg(Colors::with_alpha(Colors::text_primary(), alpha)),
             ),
         )

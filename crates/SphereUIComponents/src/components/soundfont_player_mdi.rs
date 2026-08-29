@@ -276,7 +276,7 @@ fn section(title: &'static str) -> gpui::Div {
         .flex_shrink_0()
         .gap(px(6.0))
         .p(px(10.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_card())
@@ -327,7 +327,7 @@ fn header_row(title: &str, subtitle: &str, panel: &SoundfontPlayerPanelState) ->
                 .flex_shrink_0()
                 .w(px(30.0))
                 .h(px(30.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(if playing {
                     Colors::border_accent()
@@ -388,7 +388,7 @@ fn header_badge(panel: &SoundfontPlayerPanelState) -> AnyElement {
         .flex_shrink_0()
         .px(px(7.0))
         .py(px(3.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(if accented {
             Colors::border_accent()
@@ -438,7 +438,7 @@ fn field_row(
                 .items_center()
                 .truncate()
                 .px(px(8.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_input())
@@ -891,7 +891,7 @@ fn status_banner(message: String) -> AnyElement {
         .flex_shrink_0()
         .px(px(8.0))
         .py(px(5.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::status_error())
         .bg(Colors::with_alpha(Colors::status_error(), 0.12))
@@ -1001,7 +1001,7 @@ fn keyboard(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) ->
         .relative()
         .w(px(WHITE_KEY_W * KEYBOARD_WHITE_KEYS as f32))
         .h(px(KEY_H))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .overflow_hidden()
         .border(px(1.0))
         .border_color(Colors::border_subtle())
@@ -1087,7 +1087,9 @@ fn key(
         });
 
     if black {
-        key = key.rounded_b_md().border(px(1.0));
+        key = key
+            .rounded_b(px(crate::theme::radius::CONTROL))
+            .border(px(1.0));
     }
 
     if playable {

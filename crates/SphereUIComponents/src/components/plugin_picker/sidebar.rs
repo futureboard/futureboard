@@ -214,7 +214,7 @@ fn sidebar_item(
             .w_full()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .when(active, |el| el.bg(Colors::accent_muted()))
             .when(!active, |el| {
                 el.hover(|s| s.bg(Colors::surface_control_hover()))

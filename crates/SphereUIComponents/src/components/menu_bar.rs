@@ -138,7 +138,7 @@ fn menu_bar_compact(open_menu_id: Option<&str>, on_open_menu: MenuOpenCb) -> imp
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(if is_open {
                     Colors::surface_control_hover()
                 } else {
@@ -221,7 +221,7 @@ pub fn menu_picker_dropdown(
                 .flex_col()
                 .p(px(menu_style::PANEL_PAD))
                 .gap(px(menu_style::ITEM_GAP))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_raised())
@@ -241,7 +241,7 @@ pub fn menu_picker_dropdown(
                         .px(px(menu_style::ROW_PAD_X))
                         .flex()
                         .items_center()
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .text_size(px(menu_style::LABEL_TEXT_SIZE))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(Colors::text_primary())
@@ -281,7 +281,7 @@ pub fn menu_label_button(
         .px(px(MENU_LABEL_PAD_X))
         .flex()
         .items_center()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(CHROME_TEXT_SIZE))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(if active {

@@ -233,7 +233,7 @@ impl SolfegeEditorPanel {
                     .justify_center()
                     .h(px(18.0))
                     .px(px(10.0))
-                    .rounded_sm()
+                    .rounded(px(crate::theme::radius::CONTROL))
                     .bg(if active {
                         Colors::accent_muted()
                     } else {

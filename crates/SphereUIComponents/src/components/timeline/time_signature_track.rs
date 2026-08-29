@@ -1,6 +1,8 @@
 use crate::components::timeline::global_lane_header::{
     global_lane_header, GlobalLaneHeaderActions,
 };
+use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
+use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::TimelineState;
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -19,8 +21,6 @@ pub type GlobalLaneVoidCallback =
 pub type GlobalLaneMenuCallback =
     std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
-const TS_MARKER_W: f32 = 40.0;
-
 /// Global Time Signature lane — compact marker blocks over the project map.
 pub fn time_signature_track_lane(
     state: &TimelineState,
@@ -35,68 +35,35 @@ pub fn time_signature_track_lane(
     let lane_w = state.viewport.viewport_width.max(1.0);
     let points = state.time_signature_map.points.clone();
     let selected = state.selected_time_signature_point_id.clone();
-    // Keep the pill compact (~24px) and always fully inside the lane so it never
-    // clips against the top/bottom boundary.
-    let marker_h = (lane_height - 12.0).clamp(18.0, 24.0);
-    let marker_top = ((lane_height - marker_h) / 2.0).max(2.0);
 
-    let markers: Vec<_> = points
+    // Anchored flags, not centred pills: a signature change takes effect *at*
+    // its beat, and the old centred pill put half the chip in the bar before it.
+    let flags: Vec<MarkerFlag> = points
         .iter()
         .filter_map(|p| {
             let x = state.beats_to_x(p.beat as f32);
-            if x < -48.0 || x > lane_w + 48.0 {
+            if x < -64.0 || x > lane_w + 64.0 {
                 return None;
             }
-            let selected = selected.as_deref() == Some(p.id.as_str());
-            let (bg, border, text) = if selected {
-                (
-                    Colors::with_alpha(Colors::accent_primary(), 0.22),
-                    Colors::accent_primary(),
-                    Colors::text_primary(),
-                )
-            } else {
-                (
-                    Colors::with_alpha(Colors::surface_raised(), 0.92),
-                    Colors::with_alpha(Colors::accent_primary(), 0.25),
-                    Colors::text_secondary(),
-                )
-            };
-            // Center the pill over the marker beat, then clamp it inside the lane
-            // so labels near the left/right edge stay readable.
-            let pill_x = (x - TS_MARKER_W / 2.0).clamp(2.0, (lane_w - TS_MARKER_W - 2.0).max(2.0));
-            Some(
-                div()
-                    .absolute()
-                    .left(px(pill_x))
-                    .top(px(marker_top))
-                    .w(px(TS_MARKER_W))
-                    .h(px(marker_h))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .bg(bg)
-                    .border(px(1.0))
-                    .border_color(border)
-                    .border_l(px(2.0))
-                    .border_color(if selected {
-                        Colors::accent_primary()
-                    } else {
-                        Colors::with_alpha(Colors::accent_primary(), 0.5)
-                    })
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|s| {
-                        s.bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
-                            .border_color(Colors::accent_primary())
-                    })
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(text)
-                    .whitespace_nowrap()
-                    .child(p.label()),
-            )
+            Some(MarkerFlag {
+                x,
+                label: p.label(),
+                selected: selected.as_deref() == Some(p.id.as_str()),
+            })
         })
         .collect();
+    // `time_signature_at_beat` already resolves an implicit 4/4 for an empty
+    // map; surface that rather than leaving the lane blank.
+    let mut flags = flags;
+    if points.is_empty() {
+        let implicit = state.time_signature_map.time_signature_at_beat(0.0);
+        flags.push(MarkerFlag {
+            x: state.beats_to_x(0.0),
+            label: implicit.label(),
+            selected: false,
+        });
+    }
+    let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
 
     let subtitle = state.time_signature_lane_header_subtitle();
 
@@ -176,7 +143,10 @@ pub fn time_signature_track_lane(
                 .h_full()
                 .relative()
                 .overflow_hidden()
-                .children(markers)
+                .bg(Colors::timeline_content_background())
+                .child(timeline_grid(state, lane_w, lane_height))
+                .child(flag_layer)
+                .children(flag_labels)
                 .children(interaction)
                 // Debug: outline time_signature_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline()),

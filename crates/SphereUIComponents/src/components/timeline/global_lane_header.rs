@@ -30,7 +30,7 @@ impl Render for LaneTooltipText {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_raised())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
@@ -64,18 +64,10 @@ fn lane_icon_button(
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
-        .border(px(1.0))
-        .border_color(Colors::with_alpha(
-            Colors::accent_primary(),
-            if accent { 0.35 } else { 0.0 },
-        ))
-        .bg(Colors::with_alpha(Colors::surface_raised(), 0.35))
+        .rounded(px(crate::theme::radius::CONTROL_SM))
+        .bg(Colors::with_alpha(Colors::surface_raised(), 0.0))
         .cursor(CursorStyle::PointingHand)
-        .hover(|s| {
-            s.bg(Colors::with_alpha(Colors::accent_primary(), 0.12))
-                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.45))
-        })
+        .hover(|s| s.bg(Colors::surface_hover()))
         .tooltip(tooltip_view(tooltip))
         .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
             cx.stop_propagation();
@@ -91,6 +83,13 @@ fn lane_icon_button(
 }
 
 /// Compact conductor-lane header shared by Tempo and Time Signature tracks.
+///
+/// Label first, controls on demand. The previous version washed the whole header
+/// in accent, added a 2px accent left rule, stacked a title over a subtitle, and
+/// showed four permanently-bordered icon buttons — so a lane whose entire job is
+/// to say "Tempo" carried more visual weight than the musical content beside it.
+/// The actions are still all there; they fade in on hover of the row, which is
+/// where the eye already is when you reach for them.
 pub fn global_lane_header(
     lane_id: &'static str,
     title: &'static str,
@@ -104,8 +103,19 @@ pub fn global_lane_header(
     } else {
         assets::ICON_CHEVRON_DOWN_PATH
     };
+    // One group name per lane so hovering Tempo does not reveal Signature's
+    // buttons. `SharedString` keeps the name alive for the element's lifetime.
+    let group: gpui::SharedString = format!("global-lane-{lane_id}").into();
 
-    let mut action_row = div().flex().items_center().gap(px(2.0));
+    let mut action_row = div()
+        .flex()
+        .items_center()
+        .gap(px(crate::theme::space::HAIR))
+        .flex_none()
+        // Hidden until the row is hovered, and never by `display: none` — the
+        // row must not reflow when the buttons appear, or the label jumps.
+        .opacity(0.0)
+        .group_hover(group.clone(), |s| s.opacity(1.0));
 
     if let Some(on_add) = actions.on_add {
         let add = on_add.clone();
@@ -163,47 +173,50 @@ pub fn global_lane_header(
     }
 
     div()
+        .group(group)
         .flex_shrink_0()
         .w(px(HEADER_WIDTH))
         .h_full()
         .border_r(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::with_alpha(Colors::accent_primary(), 0.05))
-        .border_l(px(2.0))
-        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.4))
+        .border_color(Colors::border_normal())
+        .bg(Colors::surface_panel_alt())
         .flex()
-        .flex_col()
-        .justify_center()
-        .px(px(8.0))
-        .gap(px(4.0))
+        .flex_row()
+        .items_center()
+        .gap(px(crate::theme::space::TIGHT))
+        .px(px(crate::theme::space::BASE))
+        .py(px(crate::theme::space::TIGHT))
         .child(
             div()
                 .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(4.0))
+                .flex_col()
+                .min_w_0()
+                .flex_1()
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_primary())
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(8.0))
-                                .text_color(Colors::text_muted())
-                                .overflow_hidden()
-                                .child(subtitle),
-                        ),
+                        .text_size(px(crate::theme::typography::UI_XS))
+                        .text_color(Colors::text_muted())
+                        .truncate()
+                        .whitespace_nowrap()
+                        .child(title),
                 )
-                .child(action_row),
+                // The subtitle carries real state (marker counts, "follows
+                // project tempo"), so it stays — but only while the row is
+                // hovered, so the resting lane is one clean label.
+                .child(
+                    div()
+                        .text_size(px(crate::theme::typography::DENSE_CAPTION))
+                        .text_color(Colors::text_faint())
+                        .truncate()
+                        .whitespace_nowrap()
+                        .h(px(0.0))
+                        .overflow_hidden()
+                        .opacity(0.0)
+                        .group_hover(format!("global-lane-{lane_id}"), |s| {
+                            s.h(px(11.0)).opacity(1.0)
+                        })
+                        .child(subtitle),
+                ),
         )
+        .child(action_row)
 }

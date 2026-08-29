@@ -78,7 +78,7 @@ pub fn plugin_details_panel(
                             .mt(px(6.0))
                             .px(px(8.0))
                             .py(px(6.0))
-                            .rounded_md()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .bg(gpui::rgba(0xE5C07B18))
                             .text_size(px(10.0))
                             .text_color(Colors::status_warning())

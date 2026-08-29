@@ -179,7 +179,7 @@ pub fn vu_meter_vertical_full(level_l: f32, level_r: f32) -> impl IntoElement {
             .w(px(width))
             .h_full()
             .bg(Colors::meter_rail())
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .relative();
 
         if green_n > 0.0 {
@@ -257,7 +257,7 @@ fn vu_meter_sized(
             .w(px(width))
             .h(px(total_height))
             .bg(Colors::meter_rail()) // background track
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .relative()
             // Green segment
             .child(

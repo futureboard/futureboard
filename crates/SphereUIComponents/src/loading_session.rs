@@ -1216,7 +1216,7 @@ impl Render for LoadingSessionWindow {
             .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(if has_error {
                 Colors::accent_danger()

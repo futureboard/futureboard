@@ -184,7 +184,7 @@ pub fn command_palette_overlay(
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .rounded_lg()
+                .rounded(px(crate::theme::radius::SURFACE))
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_card())
@@ -301,7 +301,7 @@ fn format_path_breadcrumb(path: &str) -> String {
 fn shortcut_badge(shortcut: String) -> impl IntoElement {
     div()
         .flex_none()
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_raised())
@@ -334,7 +334,7 @@ fn command_row(
         .gap(px(8.0))
         .pl(px(menu_style::ROW_PAD_X))
         .pr(px(10.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |_, w, cx| on_command(&command, w, cx))
         .child(

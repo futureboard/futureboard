@@ -427,13 +427,18 @@ pub const TEMPO_BPM_MIN: f64 = 20.0;
 pub const TEMPO_BPM_MAX: f64 = 999.0;
 
 /// Default expanded height for the global Tempo Track lane (px).
-pub const TEMPO_TRACK_HEIGHT: f32 = 72.0;
+///
+/// The conductor lanes are secondary utility rows: they say what the tempo and
+/// meter are, not what the music is. At 72 the Tempo lane took more vertical
+/// space than a whole compact track row, so it now sits in the same 40-44 band
+/// as the other global lanes and gives the height back to the arrangement.
+pub const TEMPO_TRACK_HEIGHT: f32 = 44.0;
 
 /// Collapsed/minimal Tempo Track lane height (px).
-pub const TEMPO_TRACK_HEIGHT_COLLAPSED: f32 = 48.0;
+pub const TEMPO_TRACK_HEIGHT_COLLAPSED: f32 = 32.0;
 
 /// Vertical padding inside the tempo lane curve area (px).
-pub const TEMPO_LANE_PAD: f32 = 6.0;
+pub const TEMPO_LANE_PAD: f32 = 5.0;
 
 /// Two tempo points within this many beats are treated as the same slot.
 pub const TEMPO_BEAT_EPSILON: f64 = 1e-6;

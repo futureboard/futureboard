@@ -116,7 +116,7 @@ impl Render for SplashWindow {
                         div()
                             .px(px(10.0))
                             .py(px(3.0))
-                            .rounded(px(6.0))
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .bg(rgba(0x0b0f18cc))
                             .text_size(px(11.0))
                             .text_color(rgb(0xd7dbe6))

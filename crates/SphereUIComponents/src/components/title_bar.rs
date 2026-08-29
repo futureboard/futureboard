@@ -106,38 +106,107 @@ pub fn window_control_icon(
     }
 }
 
+/// Divider between chrome sections.
+///
+/// Shorter and quieter than the controls it separates, with real margin either
+/// side — a full-height hard rule at 3 px margin made the top bar read as a
+/// spreadsheet.
 pub fn section_separator() -> impl gpui::IntoElement {
     div()
         .w(px(1.0))
-        .h(px(18.0))
-        .mx(px(3.0))
-        .bg(Colors::panel_border())
+        .h(px(14.0))
+        .mx(px(theme::space::BASE))
+        .rounded(px(theme::radius::PILL))
+        .bg(Colors::divider())
 }
 
 pub fn chrome_button(
     icon_path: Option<&'static str>,
     fallback_text: impl Into<SharedString>,
-    _active: bool,
+    active: bool,
     color: Rgba,
 ) -> Div {
-    // Transport and panel state is communicated by the semantic icon color
-    // alone. Keeping the chrome flat makes the compact top bar read like a
-    // desktop DAW rather than a row of boxed web controls.
+    // A chrome button is a real control, not a bare glyph. Communicating state
+    // by icon colour alone left the top bar as an undifferentiated row of
+    // floating icons with no hit affordance and nothing to group against — the
+    // single loudest "old DAW" signal in the shell. It now paints a rest
+    // surface (transparent, or an accent wash when latched) on the shared
+    // radius token.
+    //
+    // Hover and pressed are deliberately NOT applied here. GPUI's `.hover`
+    // carries `debug_assert!(hover_style.is_none())`, so a helper that sets its
+    // own hover panics at runtime — in debug only — the moment any caller adds
+    // one, and several callers do. The fills are exposed as
+    // [`chrome_button_hover`] / [`chrome_button_pressed`] for the wrapper that
+    // owns the element id to apply.
     let mut button = div()
         .w(px(CHROME_ICON_BUTTON_SIZE))
         .h(px(CHROME_ICON_BUTTON_SIZE))
         .flex()
         .items_center()
         .justify_center()
+        .rounded(px(theme::radius::CONTROL))
+        .bg(chrome_button_rest(active))
         .text_color(color);
 
     if let Some(path) = icon_path {
-        button = button.child(svg().path(path).w(px(13.0)).h(px(13.0)).text_color(color));
+        button = button.child(svg().path(path).w(px(14.0)).h(px(14.0)).text_color(color));
     } else {
         button = button.child(fallback_text.into());
     }
 
     button
+}
+
+/// Rest fill for a chrome button: transparent, or an accent wash when latched.
+pub fn chrome_button_rest(active: bool) -> Rgba {
+    let base = Colors::surface_titlebar();
+    if active {
+        Colors::composite(base, Colors::accent_active())
+    } else {
+        Colors::with_alpha(base, 0.0)
+    }
+}
+
+/// Hover fill for a chrome button, composited over its rest fill.
+pub fn chrome_button_hover(active: bool) -> Rgba {
+    let base = Colors::surface_titlebar();
+    let under = if active {
+        chrome_button_rest(true)
+    } else {
+        base
+    };
+    Colors::composite(under, Colors::state_hover())
+}
+
+/// Pressed fill for a chrome button. `.active()` needs a `Stateful` element, and
+/// [`chrome_button`] is built before its caller attaches an id, so the wrapper
+/// that owns the id applies this.
+pub fn chrome_button_pressed(active: bool) -> Rgba {
+    let base = Colors::surface_titlebar();
+    let under = if active {
+        chrome_button_rest(true)
+    } else {
+        base
+    };
+    Colors::composite(under, Colors::state_recessed())
+}
+
+/// Groups adjacent chrome controls into one object.
+///
+/// Grouping is carried by rhythm — tight gaps inside a cluster, a wider gap
+/// between clusters — rather than by a filled plate. The plate version worked,
+/// but stacked against the count-in split and the readout panel it put four
+/// framed boxes in a row across a 40px bar, and the frames ended up louder than
+/// the controls they were supposed to organise.
+pub fn chrome_cluster() -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(theme::space::HAIR))
+        .p(px(theme::space::HAIR))
+        .rounded(px(theme::radius::SURFACE))
 }
 
 pub fn window_control_button(
@@ -167,7 +236,7 @@ pub fn window_control_button(
         })
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
-        .rounded_none()
+        .rounded(px(crate::theme::radius::NONE))
         .hover(move |style| {
             style.bg(if area == WindowControlArea::Close {
                 Colors::accent_danger()
@@ -481,7 +550,7 @@ pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElem
         .flex()
         .items_center()
         .px(px(6.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(crate::theme::typography::UI_XS))
         .font(theme::ui_font())
         .font_weight(if strong {

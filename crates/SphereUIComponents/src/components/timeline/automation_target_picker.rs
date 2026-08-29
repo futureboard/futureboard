@@ -153,7 +153,7 @@ pub fn automation_target_picker_overlay(
         .bg(Colors::surface_panel())
         .border(px(1.0))
         .border_color(Colors::border_subtle())
-        .rounded(px(6.0))
+        .rounded(px(crate::theme::radius::CONTROL))
         .shadow_md()
         .flex()
         .flex_col()
@@ -302,7 +302,7 @@ fn picker_row(
         .flex()
         .items_center()
         .px(px(8.0))
-        .rounded(px(4.0))
+        .rounded(px(crate::theme::radius::CONTROL_SM))
         .text_size(px(11.0))
         .text_color(text_color)
         .child(format!("{label}{suffix}"));

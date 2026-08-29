@@ -27,7 +27,11 @@ use super::*;
 /// A clip that looks like something a person would actually be editing: a
 /// melody line, most notes plain, some carrying a drawn pitch curve of the
 /// density `simplify_stroke` leaves behind.
-fn realistic_clip(notes: usize, curved_every: usize, points_per_curve: usize) -> Vec<MidiNoteState> {
+fn realistic_clip(
+    notes: usize,
+    curved_every: usize,
+    points_per_curve: usize,
+) -> Vec<MidiNoteState> {
     let mut out = Vec::with_capacity(notes);
     let scale = [0_i32, 2, 4, 5, 7, 9, 11];
     for index in 0..notes {
@@ -83,7 +87,11 @@ fn draw_stroke_frame_cost_breakdown() {
     const ITERATIONS: usize = 200;
     const COLUMNS: usize = 1600; // a maximised editor on a 1080p display
 
-    for (label, note_count) in [("64-note clip", 64), ("256-note clip", 256), ("1024-note clip", 1024)] {
+    for (label, note_count) in [
+        ("64-note clip", 64),
+        ("256-note clip", 256),
+        ("1024-note clip", 1024),
+    ] {
         let notes = realistic_clip(note_count, 4, 48);
         let directions: Vec<MidiArticulationEvent> = Vec::new();
         println!("\n{label} ({} notes, {COLUMNS} columns):", notes.len());

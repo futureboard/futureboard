@@ -1060,7 +1060,7 @@ fn action_button(label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())

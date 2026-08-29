@@ -107,7 +107,7 @@ impl PianoRoll {
                 .top(px(y + 1.0))
                 .w(px(w))
                 .h(px(h))
-                .rounded(px(2.0))
+                .rounded(px(crate::theme::radius::MICRO))
                 .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
                 .border(px(1.0))
                 .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
@@ -163,7 +163,7 @@ impl PianoRoll {
             .flex_col()
             .p(px(3.0))
             .gap(px(1.0))
-            .rounded(px(6.0))
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_card())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
@@ -187,7 +187,7 @@ impl PianoRoll {
                     .items_center()
                     .h(px(18.0))
                     .px(px(7.0))
-                    .rounded(px(4.0))
+                    .rounded(px(crate::theme::radius::CONTROL_SM))
                     .text_size(px(10.0))
                     .text_color(Colors::text_secondary())
                     .hover(|style| style.bg(Colors::surface_hover()))
@@ -241,7 +241,7 @@ impl PianoRoll {
                 .gap(px(6.0))
                 .h(px(20.0))
                 .px(px(7.0))
-                .rounded(px(4.0))
+                .rounded(px(crate::theme::radius::CONTROL_SM))
                 .text_size(px(10.0))
                 .text_color(if destructive {
                     Colors::status_error()
@@ -286,7 +286,7 @@ impl PianoRoll {
             .flex_col()
             .p(px(3.0))
             .gap(px(1.0))
-            .rounded(px(6.0))
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_card())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
@@ -600,7 +600,7 @@ impl PianoRoll {
                 .flex_col()
                 .p(px(3.0))
                 .gap(px(1.0))
-                .rounded(px(6.0))
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_card())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
@@ -616,7 +616,7 @@ impl PianoRoll {
                         .items_center()
                         .h(px(20.0))
                         .px(px(7.0))
-                        .rounded(px(4.0))
+                        .rounded(px(crate::theme::radius::CONTROL_SM))
                         .text_size(px(10.0))
                         .text_color(if selected {
                             Colors::accent_primary()
@@ -659,7 +659,7 @@ impl PianoRoll {
                     .pl(px(7.0))
                     .pr(px(5.0))
                     .gap(px(6.0))
-                    .rounded(px(4.0))
+                    .rounded(px(crate::theme::radius::CONTROL_SM))
                     .text_size(px(10.0))
                     .text_color(if open {
                         Colors::text_primary()
@@ -777,7 +777,7 @@ impl PianoRoll {
                 .flex_col()
                 .p(px(3.0))
                 .gap(px(1.0))
-                .rounded(px(6.0))
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_card())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
@@ -805,7 +805,7 @@ impl PianoRoll {
                         .justify_between()
                         .h(px(20.0))
                         .px(px(7.0))
-                        .rounded(px(4.0))
+                        .rounded(px(crate::theme::radius::CONTROL_SM))
                         .text_size(px(10.0))
                         .text_color(if selected {
                             Colors::accent_primary()
@@ -823,7 +823,7 @@ impl PianoRoll {
                             row.child(
                                 div()
                                     .size(px(4.0))
-                                    .rounded(px(2.0))
+                                    .rounded(px(crate::theme::radius::MICRO))
                                     .bg(Colors::accent_primary())
                                     .flex_shrink_0(),
                             )
@@ -857,7 +857,7 @@ impl PianoRoll {
                             .justify_between()
                             .h(px(20.0))
                             .px(px(7.0))
-                            .rounded(px(4.0))
+                            .rounded(px(crate::theme::radius::CONTROL_SM))
                             .text_size(px(10.0))
                             .text_color(if selected {
                                 Colors::accent_primary()
@@ -874,7 +874,7 @@ impl PianoRoll {
                             .child(
                                 div()
                                     .size(px(4.0))
-                                    .rounded(px(2.0))
+                                    .rounded(px(crate::theme::radius::MICRO))
                                     .bg(Colors::accent_primary())
                                     .flex_shrink_0(),
                             ),
@@ -900,7 +900,7 @@ impl PianoRoll {
                             .items_center()
                             .justify_center()
                             .size(px(16.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .text_size(px(11.0))
                             .text_color(Colors::text_secondary())
                             .hover(|s| s.bg(Colors::surface_hover()))
@@ -920,7 +920,7 @@ impl PianoRoll {
                             .items_center()
                             .justify_center()
                             .h(px(18.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .text_size(px(10.0))
                             .text_color(
                                 if current
@@ -953,7 +953,7 @@ impl PianoRoll {
                             .items_center()
                             .justify_center()
                             .size(px(16.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .text_size(px(11.0))
                             .text_color(Colors::text_secondary())
                             .hover(|s| s.bg(Colors::surface_hover()))
@@ -999,7 +999,7 @@ impl PianoRoll {
                     .pl(px(7.0))
                     .pr(px(5.0))
                     .gap(px(6.0))
-                    .rounded(px(4.0))
+                    .rounded(px(crate::theme::radius::CONTROL_SM))
                     .text_size(px(10.0))
                     .text_color(if open {
                         Colors::text_primary()
@@ -1359,7 +1359,7 @@ impl PianoRoll {
                             .h(px(22.0))
                             .min_w(px(24.0))
                             .px(px(7.0))
-                            .rounded(px(4.0))
+                            .rounded(px(crate::theme::radius::CONTROL_SM))
                             .text_size(px(10.0))
                             .text_color(if self.quantize_preview {
                                 Colors::text_primary()
@@ -1450,7 +1450,7 @@ impl PianoRoll {
                         .id("pr-pop-out")
                         .px(px(6.0))
                         .py(px(2.0))
-                        .rounded_md()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .text_size(px(9.0))
                         .text_color(Colors::text_secondary())
                         .cursor(gpui::CursorStyle::PointingHand)
@@ -1898,7 +1898,7 @@ impl PianoRoll {
                     .top(px(RULER_H + thumb_y))
                     .w(px(5.0))
                     .h(px(thumb_h))
-                    .rounded(px(3.0))
+                    .rounded(px(crate::theme::radius::MICRO))
                     .bg(Colors::with_alpha(Colors::text_faint(), 0.42))
                     .into_any_element(),
             );
@@ -1920,7 +1920,7 @@ impl PianoRoll {
                     }))
                     .w(px(thumb_w))
                     .h(px(5.0))
-                    .rounded(px(3.0))
+                    .rounded(px(crate::theme::radius::MICRO))
                     .bg(Colors::with_alpha(Colors::text_faint(), 0.42))
                     .into_any_element(),
             );
@@ -2610,7 +2610,7 @@ impl PianoRoll {
                         .top(px(y + 1.0))
                         .w(px(w))
                         .h(px(row_h - 2.0))
-                        .rounded(px(2.0))
+                        .rounded(px(crate::theme::radius::MICRO))
                         .border(px(1.0))
                         .border_color(Colors::with_alpha(accent, 0.9))
                         .bg(Colors::with_alpha(accent, 0.12))
@@ -2723,7 +2723,7 @@ impl PianoRoll {
                         .top(px(y + 1.0))
                         .w(px(w))
                         .h(px(row_h - 2.0))
-                        .rounded(px(2.0))
+                        .rounded(px(crate::theme::radius::MICRO))
                         .bg(fill)
                         .border(px(1.0))
                         .border_color(border)
@@ -2806,7 +2806,7 @@ impl PianoRoll {
                                     .child(
                                         div()
                                             .px(px(2.0))
-                                            .rounded(px(2.0))
+                                            .rounded(px(crate::theme::radius::MICRO))
                                             .bg(Colors::with_alpha(Colors::accent_primary(), 0.85))
                                             .text_size(px(7.0))
                                             .text_color(Colors::text_primary())
@@ -2898,7 +2898,7 @@ impl PianoRoll {
                             .bottom(px(2.0))
                             .w(px(6.0))
                             .h(px(bar_h))
-                            .rounded_t(px(1.0))
+                            .rounded_t(px(crate::theme::radius::MICRO))
                             .bg(fill),
                     )
                     .into_any_element()

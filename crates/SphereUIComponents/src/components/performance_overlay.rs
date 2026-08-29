@@ -49,7 +49,7 @@ pub fn performance_overlay(snapshot: &PerformanceOverlaySnapshot) -> impl IntoEl
         .flex_col()
         .gap(px(2.0))
         .p(px(10.0))
-        .rounded_lg()
+        .rounded(px(crate::theme::radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())

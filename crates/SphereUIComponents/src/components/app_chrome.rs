@@ -8,12 +8,14 @@ use gpui::{
 };
 
 use crate::assets;
+use crate::components::controls::fb_tooltip;
 use crate::components::menu_bar;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::components::title_bar::{
-    chrome_button, draggable_spacer, section_separator, CHROME_TITLE_SIZE, WINDOW_CONTROL_WIDTH,
+    chrome_button, chrome_button_hover, chrome_button_pressed, chrome_cluster, draggable_spacer,
+    section_separator, CHROME_TITLE_SIZE, WINDOW_CONTROL_WIDTH,
 };
 use crate::i18n::I18n;
 use crate::platform_chrome::PlatformChromePolicy;
@@ -33,6 +35,13 @@ pub type BpmMenuCb = Arc<dyn Fn(&(f32, f32), &mut Window, &mut App) + 'static>;
 
 pub const BPM_MIN: f32 = 20.0;
 pub const BPM_MAX: f32 = 999.0;
+
+/// Width budget for the centred project control in the titlebar.
+///
+/// Bounded rather than content-sized: a long project name must truncate instead
+/// of pushing the chip off centre, and the dropdown anchor is derived from this
+/// width, so the two have to agree.
+const PROJECT_CHIP_MAX_WIDTH: f32 = 280.0;
 
 static BPM_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -97,7 +106,16 @@ fn chrome_action_button(
     })
     .focusable()
     .tab_stop(true)
-    .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+    .focus_visible(|style| {
+        style.shadow(crate::theme::elevation::focus_ring(
+            Colors::state_focus_ring(),
+        ))
+    })
+    // `.hover()`/`.active()` are applied here rather than inside `chrome_button`
+    // so a caller that wants its own hover (the red close caption) is not fighting
+    // GPUI's "hover style already set" assertion.
+    .hover(move |style| style.bg(chrome_button_hover(toggled.unwrap_or(false))))
+    .active(move |style| style.bg(chrome_button_pressed(toggled.unwrap_or(false))))
     .cursor(gpui::CursorStyle::PointingHand)
     .on_click(move |_, window, cx| action(&(), window, cx))
     .occlude()
@@ -181,10 +199,12 @@ fn tap_tempo_chip(
     on_menu: BpmMenuCb,
 ) -> gpui::AnyElement {
     let active = session_taps > 0;
+    // Ghost at rest — it already sits inside the readout panel, so a fill and a
+    // border here framed a box inside a box.
     let bg = if active {
         Colors::with_alpha(Colors::accent_primary(), 0.2)
     } else {
-        Colors::surface_input()
+        Colors::with_alpha(Colors::surface_input(), 0.0)
     };
     let text_color = if active {
         Colors::accent_primary()
@@ -199,26 +219,36 @@ fn tap_tempo_chip(
         .focusable()
         .tab_stop(true)
         .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-        .h(px(19.0))
-        .min_w(px(26.0))
+        .h(px(20.0))
+        .min_w(px(30.0))
         .flex()
         .items_center()
         .justify_center()
         .gap(px(2.0))
-        .px(px(4.0))
-        .rounded_md()
+        .px(px(6.0))
+        .rounded(px(crate::theme::radius::CONTROL_SM))
         .bg(bg)
         .text_color(text_color)
-        .text_size(px(8.0))
-        .font_weight(gpui::FontWeight::BOLD)
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
-        .child("TAP")
+        .tooltip(fb_tooltip(
+            "Tap tempo — click in time; right-click for options",
+        ))
+        // The glyph replaces the "TAP" text. The tap-count dots beside it stay:
+        // they are the only feedback that a tap actually registered, and an
+        // icon-only button with no state would give none.
+        .child(
+            svg()
+                .path(assets::ICON_CIRCLE_DOT_PATH)
+                .w(px(12.0))
+                .h(px(12.0))
+                .text_color(text_color),
+        )
         .children((1..=session_taps.min(4)).map(|_| {
             div()
                 .w(px(3.0))
                 .h(px(3.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(Colors::with_alpha(Colors::accent_primary(), 0.85))
         }))
         .occlude()
@@ -279,15 +309,14 @@ fn bpm_display(
         .focusable()
         .tab_stop(true)
         .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-        .w(px(36.0))
+        .min_w(px(38.0))
         .h(px(19.0))
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
-        .bg(Colors::surface_input())
+        .rounded(px(crate::theme::radius::CONTROL_SM))
         .text_color(Colors::text_primary())
-        .text_size(px(11.0))
+        .text_size(px(14.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor(gpui::CursorStyle::ResizeUpDown)
         .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -396,12 +425,22 @@ fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl I
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
-        .h(px(24.0))
-        .px(px(8.0))
-        .rounded_md()
+        .gap(px(crate::theme::space::SNUG))
+        .h(px(crate::theme::size::DEFAULT))
+        .max_w(px(PROJECT_CHIP_MAX_WIDTH))
+        .px(px(crate::theme::space::BASE))
+        .rounded(px(crate::theme::radius::CONTROL))
+        // Ghost at rest: the project name is a label that happens to be
+        // clickable, not a control competing with the transport below it. The
+        // hover fill still composites over the titlebar so the hit area is
+        // discoverable.
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .hover(|s| {
+            s.bg(Colors::composite(
+                Colors::surface_titlebar(),
+                Colors::state_hover(),
+            ))
+        })
         .on_click(move |_event, window, cx| {
             on_open(&anchor_x, window, cx);
         })
@@ -431,11 +470,17 @@ fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl I
                 .gap(px(4.0))
                 .px(px(5.0))
                 .py(px(2.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
-                .child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(status_color))
+                .child(
+                    div()
+                        .w(px(4.0))
+                        .h(px(4.0))
+                        .rounded(px(crate::theme::radius::PILL))
+                        .bg(status_color),
+                )
                 .child(
                     div()
                         .text_color(Colors::text_muted())
@@ -448,16 +493,76 @@ fn project_title(state: ProjectChromeState, anchor_x: f32, i18n: I18n) -> impl I
 
 // ── Right section — transport + panel toggles + utility ───────────────────────
 
-fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
+/// Glyph above a readout field, in place of a text caption.
+///
+/// Quiet by construction: at `text_faint` it sits well below the value it
+/// labels, which is the whole point — the number is what gets read mid-take,
+/// the label only has to say which number it is.
+fn lcd_caption(icon: &'static str) -> impl IntoElement {
+    svg()
+        .path(icon)
+        .flex_none()
+        .w(px(12.0))
+        .h(px(12.0))
+        .text_color(Colors::text_faint())
+}
+
+/// One field of the readout panel: its glyph beside its value.
+///
+/// Stacking the glyph over the value cost a whole line of the 30px panel for a
+/// label, and forced a fixed-height value slot to keep the three glyphs on one
+/// baseline. Side by side, the row is a single line of centred content and the
+/// panel gets its height back for the numbers.
+fn lcd_field(
+    id: &'static str,
+    icon: &'static str,
+    tooltip: &'static str,
+    value: gpui::AnyElement,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .h_full()
+        .gap(px(crate::theme::space::SNUG))
+        .px(px(crate::theme::space::LOOSE))
+        // The glyph replaced a word, so the word has to survive somewhere: an
+        // icon-only label for a numeric readout is not self-describing.
+        .tooltip(fb_tooltip(tooltip))
+        .child(lcd_caption(icon))
+        .child(value)
+}
+
+/// Hairline between readout fields. Inset top and bottom so it separates the
+/// values without drawing a full-height rule through the panel.
+fn lcd_divider() -> impl IntoElement {
+    div()
+        .w(px(1.0))
+        .h(px(20.0))
+        .flex_none()
+        .bg(Colors::border_normal())
+}
+
+/// The transport bar: its own row beneath the titlebar.
+///
+/// Laid out as three tracks — controls, readout, spare — where the outer two are
+/// `flex_1` with a zero basis so they always split the leftover width evenly and
+/// the readout panel sits on the true window centre. The readout is the one
+/// place in the shell that earns large type: position, tempo and meter are what
+/// a player reads mid-take, so they get a recessed panel, tabular figures, and
+/// captions rather than being scattered along a toolbar as bare text.
+fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
     let play_color = if state.playing {
         Colors::accent_primary()
     } else {
-        Colors::text_muted()
+        Colors::text_secondary()
     };
     let record_color = if state.recording {
-        Colors::status_error()
+        Colors::state_arm()
     } else {
-        Colors::text_faint()
+        Colors::text_secondary()
     };
     let loop_color = if state.loop_enabled {
         Colors::accent_primary()
@@ -469,17 +574,18 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
     } else {
         Colors::text_muted()
     };
-    // Continuous mode reads as a distinct accent so the right-click toggle is
+    // Continuous mode reads as a distinct hue so the right-click toggle is
     // visible at a glance; paged follow keeps the standard accent.
     let follow_color = if state.follow_playhead {
         if state.auto_scroll_continuous {
-            Colors::status_success()
+            Colors::state_monitor()
         } else {
             Colors::accent_primary()
         }
     } else {
         Colors::text_muted()
     };
+
     let on_return = state.on_return_to_start.clone();
     let on_play = state.on_play_toggle.clone();
     let on_stop = state.on_stop.clone();
@@ -512,6 +618,7 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
     let ts_den_input = state.ts_den_input.clone();
     let ts_den_input_callbacks = state.ts_den_input_callbacks.clone();
     let ts_edit_focus_num = state.ts_edit_focus_num;
+
     let label_skip_back = i18n.tr_or("transport.skip-back", "<<");
     let label_play = i18n.tr_or("transport.play", ">");
     let label_stop = i18n.tr_or("transport.stop", "[]");
@@ -519,23 +626,17 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
     let label_loop = i18n.tr("transport.loop");
     let label_metronome = i18n.tr("transport.metronome");
     let label_follow = i18n.tr("transport.follow");
-    let label_bpm = i18n.tr("transport.bpm-label");
 
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(1.0))
-        // Skip back
+    // ── Left track: transport, count-in, and the mode toggles ────────────────
+    let transport_group = chrome_cluster()
         .child(chrome_action_button(
             "transport-return-to-start",
             assets::ICON_SKIP_BACK_PATH,
             label_skip_back,
             None,
-            Colors::text_muted(),
+            Colors::text_secondary(),
             on_return,
         ))
-        // Play
         .child(chrome_action_button(
             "transport-play",
             assets::ICON_PLAY_PATH,
@@ -544,16 +645,14 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
             play_color,
             on_play,
         ))
-        // Stop
         .child(chrome_action_button(
             "transport-stop",
             assets::ICON_SQUARE_PATH,
             label_stop,
             None,
-            Colors::text_muted(),
+            Colors::text_secondary(),
             on_stop,
         ))
-        // Record
         .child(chrome_action_button(
             "transport-record",
             assets::ICON_CIRCLE_PATH,
@@ -561,86 +660,118 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
             Some(state.recording),
             record_color,
             on_record,
-        ))
-        // Record count-in split control: the main button is a true on/off
-        // toggle; the visible chevron opens the duration dropdown.
+        ));
+
+    // Count-in split control: the label is a true on/off toggle, the chevron
+    // opens the duration menu. Split buttons share an edge, so only the group's
+    // outer corners round — a radius on the seam would leave a notch between
+    // the two halves.
+    let count_in_rest = Colors::button_bg();
+    let count_in_active = Colors::composite(
+        Colors::surface_titlebar(),
+        Colors::with_alpha(Colors::accent_primary(), crate::theme::state::ARMED_WASH),
+    );
+    let count_in_fill = if state.count_in_enabled {
+        count_in_active
+    } else {
+        // Transparent at rest; the split's own border is what holds its two
+        // halves together as one control.
+        Colors::with_alpha(count_in_rest, 0.0)
+    };
+    let count_in_hover = Colors::composite(count_in_fill, Colors::state_hover());
+    let count_in_split = div()
+        .h(px(crate::theme::size::DENSE))
+        .flex()
+        .flex_row()
+        .items_center()
+        .rounded(px(crate::theme::radius::CONTROL_SM))
+        .overflow_hidden()
+        .border(px(1.0))
+        .border_color(if state.count_in_enabled {
+            Colors::with_alpha(Colors::accent_primary(), crate::theme::state::ARMED_BORDER)
+        } else {
+            Colors::button_border()
+        })
         .child(
             div()
-                .h(px(20.0))
+                .id("transport-count-in")
+                .role(Role::Button)
+                .aria_label("Count in")
+                .aria_toggled(if state.count_in_enabled {
+                    Toggled::True
+                } else {
+                    Toggled::False
+                })
                 .flex()
-                .flex_row()
                 .items_center()
-                .rounded_sm()
-                .bg(Colors::surface_input())
-                .border(px(1.0))
-                .border_color(Colors::border_subtle())
-                .text_size(px(8.0))
-                .font_weight(gpui::FontWeight::BOLD)
+                .h_full()
+                .px(px(crate::theme::space::SNUG))
+                .bg(count_in_fill)
+                .text_color(if state.count_in_enabled {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_muted()
+                })
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(move |s| s.bg(count_in_hover))
+                .tooltip(fb_tooltip("Count-in before recording"))
+                .on_click(move |_, window, cx| on_count_in_toggle(&(), window, cx))
+                .occlude()
                 .child(
-                    div()
-                        .id("transport-count-in")
-                        .role(Role::Button)
-                        .aria_label("Count in")
-                        .aria_toggled(if state.count_in_enabled {
-                            Toggled::True
-                        } else {
-                            Toggled::False
-                        })
-                        .focusable()
-                        .tab_stop(true)
-                        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-                        .h_full()
-                        .min_w(px(34.0))
-                        .px(px(5.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
+                    svg()
+                        .path(assets::ICON_TIMER_PATH)
+                        .w(px(13.0))
+                        .h(px(13.0))
                         .text_color(if state.count_in_enabled {
                             Colors::accent_primary()
                         } else {
                             Colors::text_muted()
-                        })
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .on_click(move |_, window, cx| {
-                            on_count_in_toggle(&(), window, cx);
-                        })
-                        .child("COUNT"),
-                )
-                .child(
-                    div()
-                        .id("transport-count-in-menu")
-                        .role(Role::Button)
-                        .aria_label("Count in settings")
-                        .focusable()
-                        .tab_stop(true)
-                        .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-                        .h_full()
-                        .w(px(13.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .border_l(px(1.0))
-                        .border_color(Colors::border_subtle())
-                        .text_color(Colors::text_muted())
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .on_click(move |event, window, cx| {
-                            let position = event.position();
-                            on_count_in_menu(&(position.x.into(), position.y.into()), window, cx);
-                        })
-                        .child("▾"),
-                )
-                .occlude(),
+                        }),
+                ),
         )
-        // Loop
+        .child(div().w(px(1.0)).h_full().bg(Colors::border_subtle()))
+        .child(
+            div()
+                .id("transport-count-in-menu")
+                .role(Role::Button)
+                .aria_label("Count-in duration")
+                .flex()
+                .items_center()
+                .justify_center()
+                .h_full()
+                .w(px(14.0))
+                .bg(count_in_fill)
+                .text_color(Colors::text_muted())
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(move |s| s.bg(count_in_hover))
+                .tooltip(fb_tooltip("Count-in duration"))
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    let x: f32 = event.position.x.into();
+                    let y: f32 = event.position.y.into();
+                    on_count_in_menu(&(x, y), window, cx);
+                })
+                .occlude()
+                // A real chevron asset rather than the "▾" character, which
+                // depends on the UI font having the glyph and does not scale or
+                // align with the SVG icons either side of it.
+                .child(
+                    svg()
+                        .path(assets::ICON_CHEVRON_DOWN_PATH)
+                        .w(px(9.0))
+                        .h(px(9.0))
+                        .text_color(Colors::text_muted()),
+                ),
+        );
+
+    let mode_group = chrome_cluster()
         .child(chrome_action_button(
             "transport-loop",
-            assets::ICON_REPEAT2_PATH,
+            assets::ICON_REPEAT_PATH,
             label_loop,
             Some(state.loop_enabled),
             loop_color,
             on_loop,
         ))
-        // Metronome
         .child(chrome_action_button(
             "transport-metronome",
             assets::ICON_METRONOME_PATH,
@@ -649,10 +780,6 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
             metronome_color,
             on_metronome,
         ))
-        // Follow playhead / Auto-scroll. Magnet icon reads as "snap to
-        // playhead" — same metaphor most DAWs use for this button.
-        // Left-click toggles follow on/off; right-click switches the auto-scroll
-        // mode between paged (jump) and continuous (smooth) follow.
         .child(
             chrome_action_button(
                 "transport-follow-playhead",
@@ -665,198 +792,236 @@ fn transport_controls(state: TransportChromeState, i18n: I18n) -> impl IntoEleme
             .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
                 on_follow_mode(&(), window, cx);
             }),
-        )
-        .child(section_separator())
-        // Position display
-        .child(
-            div()
-                .id("transport-position")
-                .role(Role::Label)
-                .aria_label(format!("Playhead position {}", state.position_label))
-                .w(px(78.0))
-                .h(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .bg(Colors::surface_base())
-                .border(px(1.0))
-                .border_color(Colors::border_subtle())
-                .text_color(Colors::text_primary())
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(state.position_label),
-        )
-        .child(section_separator())
-        // BPM
-        .child(
-            div()
+        );
+
+    // ── Centre track: the readout panel ──────────────────────────────────────
+    let position_value = div()
+        .id("transport-position")
+        .role(Role::Label)
+        .aria_label(format!("Playhead position {}", state.position_label))
+        .min_w(px(72.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(Colors::text_primary())
+        .text_size(px(17.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .child(state.position_label)
+        .into_any_element();
+
+    let tempo_value = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(crate::theme::space::TIGHT))
+        .child(bpm_display(
+            bpm_value,
+            bpm_label,
+            on_bpm_drag,
+            on_bpm_menu,
+            on_bpm_edit_start,
+            bpm_editing,
+            &bpm_input,
+            bpm_input_callbacks,
+            bpm_edit_focused,
+        ))
+        // AUTO badge — only when tempo automation is active, so the
+        // single-tempo case stays clean.
+        .children(if bpm_has_automation {
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(13.0))
+                    .px(px(3.0))
+                    .rounded(px(crate::theme::radius::MICRO))
+                    .bg(Colors::with_alpha(Colors::state_automation(), 0.18))
+                    .border(px(1.0))
+                    .border_color(Colors::with_alpha(Colors::state_automation(), 0.45))
+                    .text_color(Colors::state_automation())
+                    .text_size(px(8.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("AUTO"),
+            )
+        } else {
+            None
+        })
+        .into_any_element();
+
+    let ts_digit = |text: String| {
+        div()
+            .min_w(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(Colors::text_primary())
+            .text_size(px(13.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(text)
+    };
+    let ts_value = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(1.0))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
+            let x: f32 = event.position.x.into();
+            let y: f32 = event.position.y.into();
+            on_ts_menu(&(x, y), window, cx);
+        })
+        .children(if ts_editing {
+            vec![
+                div()
+                    .w(px(22.0))
+                    .child(text_field_with_callbacks(
+                        &ts_num_input,
+                        ts_edit_focus_num,
+                        ts_num_input_callbacks,
+                    ))
+                    .into_any_element(),
+                div()
+                    .text_color(Colors::text_faint())
+                    .text_size(px(12.0))
+                    .child("/")
+                    .into_any_element(),
+                div()
+                    .w(px(22.0))
+                    .child(text_field_with_callbacks(
+                        &ts_den_input,
+                        !ts_edit_focus_num,
+                        ts_den_input_callbacks,
+                    ))
+                    .into_any_element(),
+            ]
+        } else {
+            let on_ts_edit = on_ts_edit_start.clone();
+            let (num, den) = state
+                .time_signature_label
+                .split_once('/')
+                .map(|(n, d)| (n.to_string(), d.to_string()))
+                .unwrap_or_else(|| ("4".to_string(), "4".to_string()));
+            vec![div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(4.0))
-                .px(px(4.0))
+                .gap(px(1.0))
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    if event.click_count >= 2 {
+                        on_ts_edit(&(), window, cx);
+                    }
+                })
+                .child(ts_digit(num))
                 .child(
                     div()
-                        .text_color(Colors::text_muted())
-                        .text_size(px(9.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(label_bpm),
+                        .text_color(Colors::text_faint())
+                        .text_size(px(12.0))
+                        .child("/"),
                 )
-                .child(bpm_display(
-                    bpm_value,
-                    bpm_label,
-                    on_bpm_drag,
-                    on_bpm_menu,
-                    on_bpm_edit_start,
-                    bpm_editing,
-                    &bpm_input,
-                    bpm_input_callbacks,
-                    bpm_edit_focused,
-                ))
-                // AUTO badge — shown only when tempo automation is active so the
-                // single-tempo case stays clean.
-                .children(if bpm_has_automation {
-                    Some(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(13.0))
-                            .px(px(3.0))
-                            .rounded(px(3.0))
-                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.18))
-                            .border(px(1.0))
-                            .border_color(Colors::with_alpha(Colors::accent_primary(), 0.45))
-                            .text_color(Colors::accent_primary())
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("AUTO"),
-                    )
-                } else {
-                    None
-                })
+                .child(ts_digit(den))
+                .into_any_element()]
+        })
+        .into_any_element();
+
+    let readout = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .h(px(crate::shell_metrics::TRANSPORT_READOUT_HEIGHT))
+        .px(px(crate::theme::space::TIGHT))
+        .rounded(px(crate::theme::radius::SURFACE))
+        // Darkest plane in the shell. The readout is the one element here that
+        // is a display rather than a control, and giving it the canvas token
+        // separates it from the recessed plates the buttons sit in.
+        .bg(Colors::surface_canvas())
+        .border(px(1.0))
+        .border_color(Colors::border_normal())
+        .child(lcd_field(
+            "lcd-position",
+            // Not the playhead-handle asset: that is a solid filled triangle
+            // drawn for the ruler grip, and at label size it out-weighs the two
+            // outline glyphs beside it instead of sitting quietly under them.
+            assets::ICON_CLOCK_PATH,
+            "Playhead position (bars.beats)",
+            position_value,
+        ))
+        .child(lcd_divider())
+        .child(lcd_field(
+            "lcd-tempo",
+            assets::ICON_METRONOME_PATH,
+            "Tempo (BPM) — drag to change, double-click to type",
+            tempo_value,
+        ))
+        .child(lcd_divider())
+        .child(lcd_field(
+            "lcd-timesig",
+            assets::ICON_MUSIC_PATH,
+            "Time signature — double-click to edit, right-click for markers",
+            ts_value,
+        ))
+        .children(if ts_has_markers {
+            Some(
+                div()
+                    .mr(px(crate::theme::space::SNUG))
+                    .px(px(3.0))
+                    .py(px(1.0))
+                    .rounded(px(crate::theme::radius::MICRO))
+                    .bg(Colors::with_alpha(Colors::state_automation(), 0.16))
+                    .text_size(px(8.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::state_automation())
+                    .child("AUTO"),
+            )
+        } else {
+            None
+        })
+        .child(lcd_divider())
+        .child(
+            div()
+                .px(px(crate::theme::space::BASE))
                 .child(tap_tempo_chip(
                     tap_tempo_session_taps,
                     on_tap_tempo,
                     on_tap_tempo_menu,
                 )),
-        )
-        // Time signature
+        );
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .flex_none()
+        .h(px(crate::shell_metrics::TRANSPORT_BAR_HEIGHT))
+        .px(px(crate::theme::space::BASE))
+        .gap(px(crate::theme::space::BASE))
+        // One step up the ramp from the titlebar. The two bands share an edge,
+        // so if they share a surface token as well the shell reads as one
+        // 76px-tall slab of chrome instead of two rows with different jobs.
+        .bg(Colors::surface_base())
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        // Left and right tracks are empty `flex_1` gutters; the whole control
+        // block between them is centred as one object. Pinning the transport to
+        // the far left and the readout to the centre left a dead gap between
+        // two things a player uses together.
+        .child(div().flex_1().min_w(px(0.0)))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(2.0))
-                .px(px(4.0))
-                .cursor(gpui::CursorStyle::PointingHand)
-                .on_mouse_down(gpui::MouseButton::Right, move |event, window, cx| {
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    on_ts_menu(&(x, y), window, cx);
-                })
-                .children(if ts_has_markers {
-                    Some(
-                        div()
-                            .px(px(3.0))
-                            .py(px(1.0))
-                            .rounded(px(3.0))
-                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.16))
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::accent_primary())
-                            .child("AUTO")
-                            .into_any_element(),
-                    )
-                } else {
-                    None
-                })
-                .children(if ts_editing {
-                    vec![
-                        div()
-                            .w(px(22.0))
-                            .child(text_field_with_callbacks(
-                                &ts_num_input,
-                                ts_edit_focus_num,
-                                ts_num_input_callbacks,
-                            ))
-                            .into_any_element(),
-                        div()
-                            .text_color(Colors::text_muted())
-                            .text_size(px(10.0))
-                            .child("/")
-                            .into_any_element(),
-                        div()
-                            .w(px(22.0))
-                            .child(text_field_with_callbacks(
-                                &ts_den_input,
-                                !ts_edit_focus_num,
-                                ts_den_input_callbacks,
-                            ))
-                            .into_any_element(),
-                    ]
-                } else {
-                    let on_ts_edit = on_ts_edit_start.clone();
-                    vec![div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(2.0))
-                        .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                            if event.click_count >= 2 {
-                                on_ts_edit(&(), window, cx);
-                            }
-                        })
-                        .child(
-                            div()
-                                .w(px(18.0))
-                                .h(px(19.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .bg(Colors::surface_input())
-                                .text_color(Colors::text_primary())
-                                .text_size(px(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(
-                                    state
-                                        .time_signature_label
-                                        .split_once('/')
-                                        .map(|(num, _)| num.to_string())
-                                        .unwrap_or_else(|| "4".to_string()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_color(Colors::text_muted())
-                                .text_size(px(10.0))
-                                .child("/"),
-                        )
-                        .child(
-                            div()
-                                .w(px(18.0))
-                                .h(px(19.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .bg(Colors::surface_input())
-                                .text_color(Colors::text_primary())
-                                .text_size(px(11.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(
-                                    state
-                                        .time_signature_label
-                                        .split_once('/')
-                                        .map(|(_, den)| den.to_string())
-                                        .unwrap_or_else(|| "4".to_string()),
-                                ),
-                        )
-                        .into_any_element()]
-                }),
+                .flex_none()
+                .gap(px(crate::theme::space::SNUG))
+                .child(transport_group)
+                .child(count_in_split)
+                .child(mode_group)
+                .child(div().w(px(crate::theme::space::SNUG)))
+                .child(readout),
         )
+        .child(div().flex_1().min_w(px(0.0)))
 }
 
 fn panel_toggle_button(
@@ -951,7 +1116,7 @@ fn report_bug_button(i18n: I18n) -> impl IntoElement {
         .gap(px(4.0))
         .h(px(24.0))
         .px(px(8.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(amber_bg)
         .border_1()
         .border_color(amber_border)
@@ -1021,7 +1186,7 @@ pub(crate) fn account_chip() -> Option<impl IntoElement> {
         .h(px(24.0))
         .px(px(6.0))
         .mr(px(4.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
         .on_click(move |_, window, cx| {
@@ -1071,7 +1236,7 @@ fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElemen
         .justify_center()
         .w(px(18.0))
         .h(px(18.0))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::accent_muted())
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1129,7 +1294,7 @@ fn window_controls(
         })
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
-        .rounded_none()
+        .rounded(px(crate::theme::radius::NONE))
         .hover(move |style| {
             style.bg(if area == WindowControlArea::Close {
                 Colors::accent_danger()
@@ -1213,7 +1378,12 @@ pub fn app_chrome(
     } else {
         0.0
     };
-    let project_anchor_x = chrome_left + menu_width;
+    // The project control is centred in the window now, so its dropdown must be
+    // anchored to where it is actually drawn — not to the end of the menu bar,
+    // which is where it used to sit. `project_title` hands this x straight to
+    // the overlay, so getting it wrong opens the menu under empty chrome.
+    let project_anchor_x = (viewport_width * 0.5 - PROJECT_CHIP_MAX_WIDTH * 0.5)
+        .max(chrome_left + menu_width + crate::theme::space::BASE);
 
     let mut chrome = div()
         .flex()
@@ -1222,8 +1392,6 @@ pub fn app_chrome(
         .h(px(policy.titlebar_height_px))
         .w_full()
         .bg(Colors::surface_titlebar())
-        .border_b_1()
-        .border_color(Colors::border_subtle())
         .pl(policy.traffic_light_left_padding())
         // Windows: NCHITTEST callback returns `HTCAPTION` for hitboxes
         // tagged Drag, letting DefWindowProc start the system move.
@@ -1241,29 +1409,58 @@ pub fn app_chrome(
             window.start_window_move();
         });
 
+    // Three tracks, so the project control lands on the true window centre
+    // regardless of how wide the menu bar or the right-hand cluster is. Both
+    // side tracks are `flex_1` with a zero basis, so they always share the
+    // leftover width equally and the middle stays centred.
+    let mut left = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden();
     if policy.show_in_window_menubar {
-        chrome = chrome
-            .child(menu_area(open_menu_id, on_open_menu, viewport_width, i18n))
-            .child(section_separator());
+        left = left.child(menu_area(open_menu_id, on_open_menu, viewport_width, i18n));
     }
+    left = left.child(draggable_spacer());
 
-    chrome = chrome
-        .child(project_title(project, project_anchor_x, i18n))
+    let mut right = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .flex_1()
+        .min_w(px(0.0))
         .child(draggable_spacer())
-        .child(transport_controls(transport, i18n))
-        .child(section_separator())
-        .child(panel_toggles(panels, i18n))
-        .child(section_separator());
+        .child(panel_toggles(panels, i18n));
 
     // Account chip sits between the panel toggles and the window controls. Only
     // an Exclusive build with an installed account provider renders it.
     if let Some(chip) = account_chip() {
-        chrome = chrome.child(chip).child(section_separator());
+        right = right.child(section_separator()).child(chip);
     }
-
     if policy.show_window_controls {
-        chrome = chrome.child(window_controls(window, on_window_close, i18n));
+        right = right.child(window_controls(window, on_window_close, i18n));
     }
 
-    chrome
+    chrome = chrome
+        .child(left)
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(project_title(project, project_anchor_x, i18n)),
+        )
+        .child(right);
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .flex_none()
+        .child(chrome)
+        .child(transport_bar(transport, i18n))
 }

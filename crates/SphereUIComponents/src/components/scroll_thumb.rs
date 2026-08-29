@@ -28,7 +28,7 @@ pub fn vertical_scrollbar_thumb(scroll: ScrollHandle) -> gpui::AnyElement {
         .right(px(2.0))
         .w(px(4.0))
         .h(px(thumb_h))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::with_alpha(Colors::text_primary(), 0.22))
         .into_any_element()
 }

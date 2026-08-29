@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use crate::components::timeline::global_lane_header::{
     global_lane_header, GlobalLaneHeaderActions,
 };
+use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{SongTextEventType, TimelineState};
 use crate::theme::Colors;
 use gpui::prelude::FluentBuilder;
@@ -12,7 +13,13 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window,
 };
 
-pub const SONG_TEXT_LANE_HEIGHT: f32 = 58.0;
+/// Song Text lane height (px).
+///
+/// Trimmed from 58 to sit in the same secondary band as the other global lanes.
+/// `ROW_HEIGHT` is 18, so this holds 2 rows of colliding text markers where 58
+/// held 3 — a third simultaneous overlap now stacks past the lane instead of
+/// getting its own row.
+pub const SONG_TEXT_LANE_HEIGHT: f32 = 44.0;
 const ROW_HEIGHT: f32 = 18.0;
 
 #[derive(Clone, Debug)]
@@ -73,12 +80,16 @@ pub type SongTextLaneSeekCallback =
 pub type SongTextMarkerContextCallback =
     std::sync::Arc<dyn Fn(&(String, f64, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
+pub type GlobalLaneVoidCallback =
+    std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>;
+
 pub fn song_text_track_lane(
     state: &TimelineState,
     drag_preview: Option<&SongTextDragPreview>,
     on_marker_down: SongTextMarkerDownCallback,
     on_marker_context: Option<SongTextMarkerContextCallback>,
     on_empty_seek: SongTextLaneSeekCallback,
+    on_hide: Option<GlobalLaneVoidCallback>,
 ) -> impl IntoElement {
     let lane_width = state.viewport.viewport_width.max(1.0);
     let overscan_beats = 160.0 / state.viewport.pixels_per_beat.max(1.0) as f64;
@@ -201,7 +212,7 @@ pub fn song_text_track_lane(
                 .flex()
                 .items_center()
                 .px(px(if compact { 3.0 } else { 5.0 }))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(border)
                 .bg(background)
@@ -300,11 +311,11 @@ pub fn song_text_track_lane(
         "Song Text",
         active_summary,
         false,
-        "Song Text lane is always visible",
+        "Hide Song Text Track",
         GlobalLaneHeaderActions {
             on_add: None,
             on_menu: None,
-            on_hide: None,
+            on_hide,
             on_toggle_collapsed: None,
         },
     );
@@ -324,6 +335,8 @@ pub fn song_text_track_lane(
                 .h_full()
                 .relative()
                 .overflow_hidden()
+                .bg(Colors::timeline_content_background())
+                .child(timeline_grid(state, lane_width, SONG_TEXT_LANE_HEIGHT))
                 .child(empty_seek)
                 .children(markers)
                 .children(crate::perf::debug_clip_outline()),

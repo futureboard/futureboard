@@ -204,6 +204,12 @@ pub struct TimelineState {
     pub show_time_signature_track: bool,
     pub time_signature_track_collapsed: bool,
     pub selected_time_signature_point_id: Option<String>,
+    /// When true, the global Song Text lane is shown below the ruler.
+    ///
+    /// This lane used to be unconditional — rendered and measured whether or not
+    /// the project had any lyrics in it. Tempo and meter apply to every project;
+    /// song text does not, so it is now opt-in like the other conductor lanes.
+    pub show_song_text_track: bool,
     /// Per-track arrangement row heights (layout/view state, persisted in project).
     pub track_view_layout: TrackViewLayout,
     /// Active track-height resize gesture, if any.
@@ -318,12 +324,19 @@ impl Default for TimelineState {
             follow_playhead: true,
             auto_scroll_mode: AutoScrollMode::Page,
             arrangement_range: None,
-            show_tempo_track: false,
+            // Tempo and meter are properties of every project, so both
+            // conductor lanes are on by default. Neither seeds a point into its
+            // map: the lanes render the *effective* value as an implicit marker
+            // instead, because writing an anchor point would make
+            // `tempo_has_automation()` true and light the AUTO badge on a
+            // project whose tempo is a constant.
+            show_tempo_track: true,
             tempo_track_collapsed: false,
             selected_tempo_point_id: None,
-            show_time_signature_track: false,
+            show_time_signature_track: true,
             time_signature_track_collapsed: false,
             selected_time_signature_point_id: None,
+            show_song_text_track: false,
             track_view_layout: TrackViewLayout::default(),
             track_height_resize: None,
             track_height_resize_arm: None,

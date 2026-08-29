@@ -244,7 +244,7 @@ impl PianoRoll {
                         .max_w(px(region_w - 8.0))
                         .flex()
                         .items_center()
-                        .rounded(px(3.0))
+                        .rounded(px(crate::theme::radius::MICRO))
                         .bg(Colors::with_alpha(
                             accent,
                             if is_selected { 0.9 } else { 0.55 },
@@ -294,7 +294,7 @@ impl PianoRoll {
                             .px(px(5.0))
                             .flex()
                             .items_center()
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .text_size(px(9.0))
                             .text_color(if active {
                                 Colors::text_primary()

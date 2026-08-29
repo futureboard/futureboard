@@ -314,7 +314,7 @@ fn tree_row(
                 div()
                     .w(px(6.0))
                     .h(px(6.0))
-                    .rounded_full()
+                    .rounded(px(crate::theme::radius::PILL))
                     .bg(color)
                     .flex_shrink_0(),
             )

@@ -1839,19 +1839,32 @@ impl StudioLayout {
                 ));
                 entries.push(ContextMenuEntry::Separator);
                 entries.push(ContextMenuEntry::item(
-                    "Show Tempo Track",
-                    "tempo:open-track",
-                ));
-                entries.push(ContextMenuEntry::Separator);
-                entries.push(ContextMenuEntry::item(
                     "Add Time Signature Marker Here",
                     "ruler:add-ts-marker",
                 ));
                 entries.push(ContextMenuEntry::item("Edit Time Signature…", "ts:edit"));
-                entries.push(ContextMenuEntry::item(
-                    "Show Time Signature Track",
-                    "ts:open-track",
-                ));
+                entries.push(ContextMenuEntry::Separator);
+                // The conductor lanes are on by default now, so these have to
+                // reflect what is actually on screen — a permanent "Show …"
+                // entry on a lane that is already visible does nothing when
+                // picked, which is exactly the kind of dead control the design
+                // contract forbids.
+                let st = self.timeline.read(cx);
+                entries.push(if st.state.show_tempo_track {
+                    ContextMenuEntry::item("Hide Tempo Track", "tempo:hide-track")
+                } else {
+                    ContextMenuEntry::item("Show Tempo Track", "tempo:open-track")
+                });
+                entries.push(if st.state.show_time_signature_track {
+                    ContextMenuEntry::item("Hide Time Signature Track", "ts:hide-track")
+                } else {
+                    ContextMenuEntry::item("Show Time Signature Track", "ts:open-track")
+                });
+                entries.push(if st.state.show_song_text_track {
+                    ContextMenuEntry::item("Hide Song Text Track", "songtext:hide-track")
+                } else {
+                    ContextMenuEntry::item("Show Song Text Track", "songtext:open-track")
+                });
                 entries
             }
         }

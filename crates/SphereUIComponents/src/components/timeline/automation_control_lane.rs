@@ -105,7 +105,7 @@ fn control_header(
             div()
                 .w(px(2.0))
                 .h(px(8.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(Colors::automation_rail_active()),
         )
         .child(
@@ -229,7 +229,7 @@ fn control_button(
         .justify_center()
         .h(px(18.0))
         .px(px(7.0))
-        .rounded(px(6.0))
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(8.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .cursor(gpui::CursorStyle::PointingHand)

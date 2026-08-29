@@ -159,7 +159,7 @@ fn import_status_canvas(
                 .justify_center()
                 .child(
                     div()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .border(px(1.0))
                         .border_color(if is_error {
                             Colors::status_error()

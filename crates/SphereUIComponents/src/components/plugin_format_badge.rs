@@ -74,7 +74,7 @@ fn labeled_format_badge(
     div()
         .px(px(5.0))
         .py(px(1.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(border)
         .bg(bg)

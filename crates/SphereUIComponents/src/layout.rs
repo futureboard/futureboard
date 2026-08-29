@@ -1772,6 +1772,20 @@ impl StudioLayout {
             "ts:hide-track" => {
                 self.hide_time_signature_track(cx);
             }
+            "songtext:open-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.show_song_text_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
+            "songtext:hide-track" => {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.hide_song_text_track_lane();
+                    cx.notify();
+                });
+                cx.notify();
+            }
             "ts:add-point-here" => {
                 if let Some(beat) = self.ts_track_context_position() {
                     self.add_time_signature_point_at_beat(beat, cx);

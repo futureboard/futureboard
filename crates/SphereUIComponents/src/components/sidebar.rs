@@ -77,7 +77,7 @@ impl Render for BrowserDragPreview {
             .gap(px(6.0))
             .px(px(8.0))
             .py(px(5.0))
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .bg(Colors::surface_raised())
@@ -411,7 +411,7 @@ fn browser_waveform_pane(
                 .relative()
                 .h(px(40.0))
                 .w_full()
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .overflow_hidden()
                 .bg(Colors::surface_base())
                 .child(waveform),
@@ -879,7 +879,7 @@ fn scrollbar_thumb(scroll: ScrollHandle) -> impl IntoElement {
         .right(px(2.0))
         .w(px(4.0))
         .h(px(thumb_h))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::with_alpha(Colors::text_primary(), 0.2))
         .into_any_element()
 }

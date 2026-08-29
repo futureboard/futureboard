@@ -29,10 +29,31 @@ pub fn y_to_bpm(y: f32, lane_height: f32, min_bpm: f64, max_bpm: f64) -> f64 {
 }
 
 impl TimelineState {
+    /// Total height of the visible conductor lanes.
+    ///
+    /// `arrangement_content_top()` is built from this and drives every
+    /// window-y -> arrangement-y conversion, so a lane counted here but not
+    /// drawn (or vice versa) offsets all arrangement hit-testing.
     pub fn global_lanes_height(&self) -> f32 {
         self.tempo_track_height()
             + self.time_signature_track_height()
-            + crate::components::timeline::song_text_track::SONG_TEXT_LANE_HEIGHT
+            + self.song_text_track_height()
+    }
+
+    /// Height of the global Song Text lane when visible, else 0.
+    pub fn song_text_track_height(&self) -> f32 {
+        if !self.show_song_text_track {
+            return 0.0;
+        }
+        crate::components::timeline::song_text_track::SONG_TEXT_LANE_HEIGHT
+    }
+
+    pub fn show_song_text_track_lane(&mut self) {
+        self.show_song_text_track = true;
+    }
+
+    pub fn hide_song_text_track_lane(&mut self) {
+        self.show_song_text_track = false;
     }
 
     /// Visible global/system lanes (Tempo then Time Signature when shown).
@@ -44,7 +65,9 @@ impl TimelineState {
         if self.show_time_signature_track {
             lanes.push(GlobalLaneKind::TimeSignature);
         }
-        lanes.push(GlobalLaneKind::SongText);
+        if self.show_song_text_track {
+            lanes.push(GlobalLaneKind::SongText);
+        }
         lanes
     }
 }

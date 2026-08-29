@@ -51,7 +51,7 @@ pub fn settings_nav_item(
         .h(px(30.0))
         .px(px(10.0))
         .mx(px(8.0))
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(if active {
             Colors::accent_muted()
         } else {
@@ -121,7 +121,7 @@ pub fn settings_page_header(
 /// Bordered settings group card.
 pub fn settings_section_card() -> Div {
     div()
-        .rounded_md()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_card())
@@ -224,7 +224,7 @@ pub fn settings_status_badge(label: impl Into<String>, ok: bool) -> impl IntoEle
     div()
         .px(px(7.0))
         .py(px(2.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(if ok {
             Colors::accent_muted()
         } else {

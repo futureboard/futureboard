@@ -134,7 +134,7 @@ pub fn compact_slider_with_reset(
                 .top(px(3.5))
                 .h(px(3.0))
                 .bg(Colors::divider())
-                .rounded_full(),
+                .rounded(px(crate::theme::radius::PILL)),
         )
         .child(
             div()
@@ -144,7 +144,7 @@ pub fn compact_slider_with_reset(
                 .h(px(3.0))
                 .w(gpui::relative(value))
                 .bg(fill)
-                .rounded_full(),
+                .rounded(px(crate::theme::radius::PILL)),
         )
         .on_drag(
             SliderDrag {
@@ -261,7 +261,7 @@ pub fn slider_with_drag_callbacks(
                 .bg(Colors::divider())
                 .border(px(1.0))
                 .border_color(Colors::with_alpha(Colors::surface_canvas(), 0.25))
-                .rounded_full(),
+                .rounded(px(crate::theme::radius::PILL)),
         )
         // Fill bar
         .child(
@@ -272,7 +272,7 @@ pub fn slider_with_drag_callbacks(
                 .h(px(6.0))
                 .w(gpui::relative(value))
                 .bg(fill)
-                .rounded_full(),
+                .rounded(px(crate::theme::radius::PILL)),
         )
         // Soft glow halo behind the thumb so it reads as the active element.
         .child(
@@ -283,7 +283,7 @@ pub fn slider_with_drag_callbacks(
                 .ml(px(-6.0))
                 .w(px(12.0))
                 .h(px(16.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(accent_glow),
         )
         // Handle thumb — bordered, brighter, and a hair taller than the rail.
@@ -295,7 +295,7 @@ pub fn slider_with_drag_callbacks(
                 .ml(px(-4.0))
                 .w(px(8.0))
                 .h(px(14.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::text_primary())
                 .border(px(1.0))
                 .border_color(Colors::border_strong())

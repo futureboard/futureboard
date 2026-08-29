@@ -18,9 +18,16 @@ use gpui::Rgba;
 /// Kept in lock-step with [`crate::theme::Colors::TRACK_COLORS`] so that
 /// auto-color assignment and the picker's quick presets stay consistent and
 /// existing projects keep loading with the same swatches.
+/// Bundled default track palette, as authoring-friendly hex.
+///
+/// This mirrors `trackColors` in `packages/shared/themes/Default.json` and the
+/// `DEFAULT_TRACK_COLOR_VALUES` fallback in [`crate::theme`]. It exists only so
+/// the strings are readable here; `default_palette_matches_theme` below is the
+/// guard that stops the two copies drifting. Runtime code should ask the theme
+/// via [`auto_color_for_index`], which follows whatever theme is active.
 pub const DEFAULT_TRACK_COLORS: &[&str] = &[
-    "#56C7C9", "#7EDB9A", "#F2C96D", "#F27E77", "#8FB7FF", "#6EB7E8", "#E89B61", "#D982B6",
-    "#A8D36F", "#9CAFE8", "#C49A6C", "#71D6B5",
+    "#4FC9D8", "#4FD39A", "#8FD165", "#E3C15E", "#EC9A5C", "#F0776F", "#E87BAF", "#A98BF5",
+    "#7FA8FF", "#5FBEE8", "#C0A177", "#4FD2BC",
 ];
 
 /// Maximum number of recent custom colors kept in user preferences.

@@ -110,7 +110,7 @@ pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
                 .items_center()
                 .px(px(5.0))
                 .py(px(1.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::button_bg())
                 .border(px(1.0))
                 .border_color(Colors::border_default())
@@ -128,8 +128,6 @@ fn section_header(
     plus: Option<HeaderPlus>,
 ) -> impl IntoElement {
     let label = label.into();
-    let section_accent = Colors::accent_primary();
-    let soft_accent = Colors::with_alpha(section_accent, 0.55); // Approved: dynamic accent decoration alpha
 
     // The trailing "+" — interactive when `plus` is Some, otherwise an inert
     // decorative glyph. Interactive variant carries its own id + occlude so the
@@ -142,7 +140,7 @@ fn section_header(
             .flex()
             .items_center()
             .justify_center()
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .cursor(gpui::CursorStyle::PointingHand)
             .hover(|s| s.bg(Colors::surface_control_hover()))
             .child(
@@ -163,7 +161,7 @@ fn section_header(
             .flex()
             .items_center()
             .justify_center()
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .child(
                 svg()
                     .path(assets::ICON_PLUS_PATH)
@@ -183,20 +181,26 @@ fn section_header(
         .gap(px(3.0))
         .h(px(SEC_SECTION_HEADER_H))
         .px(px(5.0))
+        // A caption plus a hairline rule, not a coloured tick. The 2px accent
+        // bar in front of every section title put the signal colour on pure
+        // decoration in a strip where cyan already means selection and routing.
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(4.0))
-                .child(div().w(px(2.0)).h(px(8.0)).rounded_full().bg(soft_accent))
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(crate::theme::space::SNUG))
                 .child(
                     div()
-                        .text_size(px(7.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_secondary())
+                        .flex_none()
+                        .text_size(px(crate::theme::typography::DENSE_CAPTION))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(Colors::text_faint())
                         .child(label),
-                ),
+                )
+                .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle())),
         )
         .child(plus_el)
 }
@@ -209,7 +213,7 @@ fn empty_slot(i18n: I18n) -> impl IntoElement {
         .justify_center()
         .mx(px(4.0))
         .py(px(2.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(8.0))
         .text_color(Colors::text_muted())
         .child(i18n.tr("mixer.insert.empty"))
@@ -270,7 +274,7 @@ fn msri_button(
         .h(px(16.0))
         .flex_1()
         .min_w(px(0.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::BOLD)
         .id(id)
@@ -456,7 +460,13 @@ fn strip_header(
         .px(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(track.color))
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(20.0))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(track.color),
+        )
         .child(
             div()
                 .flex()
@@ -509,7 +519,7 @@ fn strip_header(
                     .justify_center()
                     .w(px(18.0))
                     .h(px(20.0))
-                    .rounded_sm()
+                    .rounded(px(crate::theme::radius::CONTROL))
                     .border(px(1.0))
                     .border_color(Colors::border_default())
                     .bg(if count > 0 {
@@ -744,7 +754,7 @@ fn insert_chip(
         .mx(px(2.0))
         .px(px(4.0))
         .h(px(18.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(bg)
         .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -773,7 +783,7 @@ fn insert_chip(
                 )))
                 .w(px(8.0))
                 .h(px(8.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(if bypassed {
                     Colors::text_faint()
                 } else {
@@ -860,7 +870,7 @@ fn add_insert_button(
         .mx(px(2.0))
         .px(px(4.0))
         .h(px(18.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_dashed()
         .border_color(Colors::border_default())
@@ -1114,7 +1124,7 @@ fn send_chip(
         .mx(px(2.0))
         .px(px(3.0))
         .h(px(26.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(bg)
         .text_size(px(typography::DENSE_CAPTION))
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -1224,7 +1234,7 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
         .mx(px(2.0))
         .px(px(4.0))
         .h(px(18.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .border(px(1.0))
         .border_dashed()
         .border_color(Colors::border_default())
@@ -1427,7 +1437,7 @@ fn fader_area(
                             .h(px(14.0))
                             .min_w(px(16.0))
                             .px(px(3.0))
-                            .rounded_sm()
+                            .rounded(px(crate::theme::radius::CONTROL))
                             .bg(if automation_reading {
                                 Colors::accent_muted()
                             } else {
@@ -1558,7 +1568,7 @@ fn output_button(
                 .px(px(6.0))
                 .max_w_full()
                 .min_w(px(0.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::button_bg())
                 .border(px(1.0))
                 .border_color(Colors::border_default())
@@ -1641,7 +1651,13 @@ fn vertical_split_handle(
         .border_b(px(1.0))
         .border_color(Colors::border_default())
         .cursor(gpui::CursorStyle::ResizeUpDown)
-        .child(div().w(px(20.0)).h(px(1.0)).rounded_full().bg(grip))
+        .child(
+            div()
+                .w(px(20.0))
+                .h(px(1.0))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(grip),
+        )
         .on_mouse_down(gpui::MouseButton::Left, move |e: &MouseDownEvent, w, cx| {
             let y: f32 = e.position.y.into();
             on_down(MixerSplitAction::ResizeStart(target, y), w, cx);
@@ -2138,7 +2154,7 @@ impl gpui::Render for StripTooltip {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_raised())
             .border(px(1.0))
             .border_color(Colors::border_subtle())
@@ -2214,7 +2230,7 @@ fn control_room_selector(
                 .min_w(px(0.0))
                 .px(px(4.0))
                 .py(px(2.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::button_bg())
                 .border(px(1.0))
                 .border_color(if accent_value {
@@ -2295,7 +2311,7 @@ fn control_room_output_button(
                 .px(px(6.0))
                 .max_w_full()
                 .min_w(px(0.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::button_bg())
                 .border(px(1.0))
                 .border_color(Colors::border_default())
@@ -2359,7 +2375,13 @@ fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> i
         .px(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(20.0))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(accent),
+        )
         .child(
             div()
                 .flex()
@@ -2407,7 +2429,7 @@ fn control_room_toggle(
         .items_center()
         .justify_center()
         .h(px(15.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .cursor(gpui::CursorStyle::PointingHand)
         .bg(if active {
             Colors::with_alpha(active_color, 0.22)
@@ -2793,7 +2815,7 @@ fn mixer_horizontal_scrollbar(
                     .top(px(2.0))
                     .bottom(px(2.0))
                     .w(px(geometry.thumb_w))
-                    .rounded_full()
+                    .rounded(px(crate::theme::radius::PILL))
                     .bg(Colors::with_alpha(Colors::text_primary(), 0.2)),
             )
             .into_any_element(),

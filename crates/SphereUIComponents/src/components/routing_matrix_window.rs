@@ -196,7 +196,13 @@ impl Render for RoutingMatrixWindow {
                         .w(px(SOURCE_COL_W))
                         .h_full()
                         .px(px(10.0))
-                        .child(div().w(px(9.0)).h(px(9.0)).rounded_full().bg(track.color))
+                        .child(
+                            div()
+                                .w(px(9.0))
+                                .h(px(9.0))
+                                .rounded(px(crate::theme::radius::PILL))
+                                .bg(track.color),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -238,7 +244,7 @@ impl Render for RoutingMatrixWindow {
                         div()
                             .w(px(14.0))
                             .h(px(14.0))
-                            .rounded_full()
+                            .rounded(px(crate::theme::radius::PILL))
                             .border(px(2.0))
                             .border_color(Colors::accent_primary())
                             .bg(Colors::accent_soft()),
@@ -248,7 +254,7 @@ impl Render for RoutingMatrixWindow {
                         div()
                             .w(px(12.0))
                             .h(px(12.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .bg(Colors::status_success()),
                     )
                 } else if toggleable {
@@ -257,7 +263,7 @@ impl Render for RoutingMatrixWindow {
                         div()
                             .w(px(6.0))
                             .h(px(6.0))
-                            .rounded_full()
+                            .rounded(px(crate::theme::radius::PILL))
                             .bg(Colors::with_alpha(Colors::text_muted(), 0.35)),
                     )
                 } else {
@@ -327,7 +333,7 @@ impl Render for RoutingMatrixWindow {
                         div()
                             .w(px(11.0))
                             .h(px(11.0))
-                            .rounded_full()
+                            .rounded(px(crate::theme::radius::PILL))
                             .border(px(2.0))
                             .border_color(Colors::accent_primary())
                             .bg(Colors::accent_soft()),
@@ -343,7 +349,7 @@ impl Render for RoutingMatrixWindow {
                         div()
                             .w(px(10.0))
                             .h(px(10.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .bg(Colors::status_success()),
                     )
                     .child("Send (click a cell to toggle)"),

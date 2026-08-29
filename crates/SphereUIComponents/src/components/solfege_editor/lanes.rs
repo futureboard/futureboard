@@ -768,7 +768,7 @@ impl SolfegeEditorPanel {
                 .items_center()
                 .justify_center()
                 .size(px(12.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .text_size(px(8.0))
                 .text_color(Colors::text_faint())
                 .cursor(gpui::CursorStyle::PointingHand)
@@ -791,7 +791,7 @@ impl SolfegeEditorPanel {
             .items_center()
             .gap(px(4.0))
             .px(px(4.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             // The overlay sits inside the lane body, which owns the draw
             // gesture. Without occluding, clicking the close button would also
             // paint a value into the lane on the way out.
@@ -1104,7 +1104,7 @@ impl SolfegeEditorPanel {
                     .items_center()
                     .h(px(16.0))
                     .px(px(7.0))
-                    .rounded_sm()
+                    .rounded(px(crate::theme::radius::CONTROL))
                     .bg(if self.lanes.menu_open {
                         Colors::accent_muted()
                     } else {
@@ -1170,7 +1170,7 @@ impl SolfegeEditorPanel {
             .items_center()
             .h(px(16.0))
             .px(px(7.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(if running {
                 Colors::surface_panel()
             } else {
@@ -1203,7 +1203,7 @@ impl SolfegeEditorPanel {
             .justify_center()
             .h(px(16.0))
             .w(px(14.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(if self.accent_menu_open {
                 Colors::accent_muted()
             } else {
@@ -1230,7 +1230,7 @@ impl SolfegeEditorPanel {
                 .flex_col()
                 .w(px(200.0))
                 .py(px(3.0))
-                .rounded_md()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .border(px(1.0))
                 .border_color(Colors::border_default())
                 .bg(Colors::surface_overlay())
@@ -1279,7 +1279,7 @@ impl SolfegeEditorPanel {
             .items_center()
             .h(px(16.0))
             .px(px(7.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_input())
             .text_size(px(9.5))
             .text_color(if has_accents {
@@ -1338,7 +1338,7 @@ impl SolfegeEditorPanel {
             .flex_col()
             .w(px(180.0))
             .py(px(3.0))
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_default())
             .bg(Colors::surface_overlay());

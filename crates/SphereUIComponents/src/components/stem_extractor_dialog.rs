@@ -657,7 +657,7 @@ impl Render for StemExtractorWindow {
             .font(theme::ui_font())
             .bg(Colors::surface_base())
             .overflow_hidden()
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .shadow(vec![gpui::BoxShadow {
@@ -912,7 +912,7 @@ impl StemExtractorWindow {
             .gap(px(6.0))
             .px(px(10.0))
             .py(px(8.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::theme::radius::CONTROL))
             .bg(Colors::surface_panel_alt())
             .child(
                 div()
@@ -1350,7 +1350,7 @@ fn banner(message: String, color: gpui::Rgba) -> impl IntoElement {
     div()
         .px(px(10.0))
         .py(px(6.0))
-        .rounded(px(5.0))
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(Colors::surface_panel_alt())
         .text_size(px(10.0))
         .text_color(color)

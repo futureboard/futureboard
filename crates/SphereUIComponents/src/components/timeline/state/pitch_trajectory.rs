@@ -734,7 +734,11 @@ mod tests {
             ),
             (
                 "one drawn note among plain ones",
-                vec![note(60, 0.0, 1.0), curved(62, 2.0, 40.0), note(64, 4.0, 1.0)],
+                vec![
+                    note(60, 0.0, 1.0),
+                    curved(62, 2.0, 40.0),
+                    note(64, 4.0, 1.0),
+                ],
                 vec![],
             ),
             (

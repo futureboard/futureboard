@@ -292,7 +292,7 @@ impl ProjectSettingsWindow {
             .flex_row()
             .items_center()
             .px(px(8.0))
-            .rounded_md()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color(Colors::border_subtle())
             .bg(Colors::surface_input())

@@ -137,7 +137,7 @@ fn compact_gain_control(
                 .right(px(4.0))
                 .top(px(7.0))
                 .h(px(2.0))
-                .rounded_full()
+                .rounded(px(crate::theme::radius::PILL))
                 .bg(Colors::fader_rail())
                 .border(px(1.0))
                 .border_color(Colors::fader_groove()),
@@ -150,7 +150,7 @@ fn compact_gain_control(
                 .top(px(2.0))
                 .w(px(6.0))
                 .h(px(12.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::fader_thumb_border())
@@ -295,7 +295,7 @@ fn fade_drag_zone(
                 })
                 .w(px(6.0))
                 .h(px(6.0))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::accent_primary()),
@@ -328,7 +328,7 @@ impl Render for ClipDragPreview {
             .min_w(px(96.0))
             .max_w(px(220.0))
             .px(px(8.0))
-            .rounded_sm()
+            .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
             .border_color({
                 let mut c = self.color;
@@ -468,7 +468,7 @@ pub fn audio_clip(
         .top(px(pad))
         .w(px(width))
         .h(px(clip_h))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .overflow_hidden()
         .bg(Colors::timeline_audio_clip_fill(track_color, selected))
         .border(px(1.0))
@@ -569,7 +569,13 @@ pub fn audio_clip(
                 .flex()
                 .items_center()
                 .gap(px(5.0))
-                .child(div().w(px(2.0)).h(px(10.0)).rounded_sm().bg(track_color))
+                .child(
+                    div()
+                        .w(px(2.0))
+                        .h(px(10.0))
+                        .rounded(px(crate::theme::radius::CONTROL))
+                        .bg(track_color),
+                )
                 .child(
                     div()
                         .text_size(px(9.0))
@@ -603,7 +609,7 @@ pub fn audio_clip(
                     div()
                         .flex_none()
                         .px(px(4.0))
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .bg(Colors::accent_soft())
                         .text_size(px(7.5))
                         .font_weight(gpui::FontWeight::BOLD)
@@ -613,7 +619,7 @@ pub fn audio_clip(
                 .children(stretch_badge.map(|label| {
                     div()
                         .px(px(4.0))
-                        .rounded_sm()
+                        .rounded(px(crate::theme::radius::CONTROL))
                         .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
                         .text_size(px(8.0))
                         .font_weight(gpui::FontWeight::BOLD)

@@ -131,7 +131,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .bg(Colors::fader_rail())
             .border(px(1.0))
             .border_color(Colors::fader_groove())
-            .rounded_full(),
+            .rounded(px(crate::theme::radius::PILL)),
     );
 
     // Tick marks (absolute, layered) at fractional positions on the rail.
@@ -165,7 +165,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .flex_none()
                 .w(px(THUMB_W))
                 .h(px(FADER_THUMB_HEIGHT))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::fader_thumb_border())
@@ -216,7 +216,7 @@ fn horizontal_fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .bg(Colors::fader_rail())
             .border(px(1.0))
             .border_color(Colors::fader_groove())
-            .rounded_full(),
+            .rounded(px(crate::theme::radius::PILL)),
     );
 
     for &(db, _) in SCALE_MARKS.iter() {
@@ -248,7 +248,7 @@ fn horizontal_fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 .flex_none()
                 .w(px(HORIZONTAL_THUMB_W))
                 .h(px(HORIZONTAL_THUMB_H))
-                .rounded_sm()
+                .rounded(px(crate::theme::radius::CONTROL))
                 .bg(Colors::surface_input())
                 .border(px(1.0))
                 .border_color(Colors::fader_thumb_border())
@@ -298,7 +298,7 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         .flex_none()
         .h(px(18.0))
         .px(px(6.0))
-        .rounded_sm()
+        .rounded(px(crate::theme::radius::CONTROL))
         .bg(Colors::button_bg())
         .border(px(1.0))
         .border_color(border)

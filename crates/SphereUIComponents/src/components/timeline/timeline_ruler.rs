@@ -121,8 +121,11 @@ pub fn timeline_ruler(
         .h(px(RULER_HEIGHT))
         .w_full()
         .bg(Colors::timeline_ruler_background())
+        // A decisive edge, not a hairline. The ruler is the boundary between
+        // chrome and musical content, so it has to close firmly against the
+        // arrangement canvas or the two planes bleed together.
         .border_b(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(Colors::border_normal())
         .child(
             // Left Ruler Header Area — uses the same deeper background
             // and strong right border as the TrackHeader rows so the
@@ -159,7 +162,7 @@ pub fn timeline_ruler(
                                 .justify_center()
                                 .h(px(20.0))
                                 .px(px(5.0))
-                                .rounded_md()
+                                .rounded(px(crate::theme::radius::CONTROL))
                                 .bg(Colors::surface_raised())
                                 .border(px(1.0))
                                 .border_color(Colors::border_subtle())
@@ -182,7 +185,7 @@ pub fn timeline_ruler(
                                 .justify_center()
                                 .h(px(20.0))
                                 .w(px(20.0))
-                                .rounded_md()
+                                .rounded(px(crate::theme::radius::CONTROL))
                                 // Active = accent stroke + accent icon, not a
                                 // filled accent background (matches transport
                                 // toolbar styling).
@@ -218,7 +221,7 @@ pub fn timeline_ruler(
                                 .justify_center()
                                 .h(px(20.0))
                                 .px(px(4.0))
-                                .rounded_md()
+                                .rounded(px(crate::theme::radius::CONTROL))
                                 .bg(Colors::surface_raised())
                                 .border(px(1.0))
                                 .border_color(Colors::border_subtle())
@@ -399,7 +402,7 @@ pub fn timeline_ruler(
                                     .top(px(4.0))
                                     .w(px(3.0))
                                     .h(px(12.0))
-                                    .rounded(px(1.0))
+                                    .rounded(px(crate::theme::radius::MICRO))
                                     .bg(Colors::with_alpha(Colors::timeline_selection(), 0.95)),
                             )
                             .child(
@@ -409,7 +412,7 @@ pub fn timeline_ruler(
                                     .top(px(4.0))
                                     .w(px(3.0))
                                     .h(px(12.0))
-                                    .rounded(px(1.0))
+                                    .rounded(px(crate::theme::radius::MICRO))
                                     .bg(Colors::with_alpha(Colors::timeline_selection(), 0.95)),
                             ),
                     )
@@ -460,7 +463,7 @@ pub fn timeline_ruler(
                             .top(px(1.0))
                             .h(px(13.0))
                             .w(px(width))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .bg(Colors::with_alpha(color, 0.20))
                             .border(px(1.0))
                             .border_color(Colors::with_alpha(color, 0.55))
@@ -541,7 +544,7 @@ pub fn timeline_ruler(
                                     .top(px(2.0))
                                     .w(px(9.0))
                                     .h(px(9.0))
-                                    .rounded(px(2.0))
+                                    .rounded(px(crate::theme::radius::MICRO))
                                     .bg(color),
                             )
                             .child(
@@ -702,7 +705,14 @@ pub fn timeline_ruler(
                 // the top. Visible whenever the project has tempo automation,
                 // even when the Tempo Track lane is hidden. Only markers inside
                 // the visible viewport are emitted.
+                // Fallback chips only. When the lane is open it already draws
+                // the marker as an anchored flag, and duplicating it here put a
+                // second chip in a 30px band that also holds the bar numbers —
+                // which is what made the label at bar 1 unreadable.
                 .children(state.time_signature_map.points.iter().filter_map(|point| {
+                    if state.show_time_signature_track {
+                        return None;
+                    }
                     let x = state.beats_to_x(point.beat as f32);
                     if x < -24.0 || x > ruler_grid_width + 24.0 {
                         return None;
@@ -721,7 +731,7 @@ pub fn timeline_ruler(
                             .items_center()
                             .h(px(12.0))
                             .px(px(3.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .bg(Colors::with_alpha(Colors::text_muted(), 0.12))
                             .border_l(px(1.0))
                             .border_color(Colors::with_alpha(Colors::text_muted(), 0.35))
@@ -732,6 +742,9 @@ pub fn timeline_ruler(
                     )
                 }))
                 .children(state.tempo_map.points.iter().filter_map(|point| {
+                    if state.show_tempo_track {
+                        return None;
+                    }
                     let x = state.beats_to_x(point.beat as f32);
                     if x < -24.0 || x > ruler_grid_width + 24.0 {
                         return None;
@@ -749,7 +762,7 @@ pub fn timeline_ruler(
                             .items_center()
                             .h(px(12.0))
                             .px(px(3.0))
-                            .rounded(px(3.0))
+                            .rounded(px(crate::theme::radius::MICRO))
                             .bg(Colors::with_alpha(Colors::accent_primary(), 0.18))
                             .border_l(px(1.0))
                             .border_color(Colors::with_alpha(Colors::accent_primary(), 0.6))

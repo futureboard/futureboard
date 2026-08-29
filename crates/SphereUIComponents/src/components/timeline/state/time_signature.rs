@@ -527,8 +527,8 @@ impl TimelineState {
         self.time_signature_den = pt.denominator as u32;
     }
 
-    pub const TIME_SIGNATURE_TRACK_HEIGHT: f32 = 48.0;
-    pub const TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED: f32 = 36.0;
+    pub const TIME_SIGNATURE_TRACK_HEIGHT: f32 = 40.0;
+    pub const TIME_SIGNATURE_TRACK_HEIGHT_COLLAPSED: f32 = 28.0;
 
     pub fn time_signature_track_height(&self) -> f32 {
         if !self.show_time_signature_track {

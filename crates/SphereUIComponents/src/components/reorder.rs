@@ -30,7 +30,7 @@ pub fn drag_handle() -> Div {
         div()
             .w(px(2.0))
             .h(px(2.0))
-            .rounded_full()
+            .rounded(px(crate::theme::radius::PILL))
             .bg(Colors::text_faint())
     };
     let column = || {

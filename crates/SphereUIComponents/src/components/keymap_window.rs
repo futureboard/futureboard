@@ -898,7 +898,7 @@ fn keymap_scrollbar_thumb(scroll: ScrollHandle) -> gpui::AnyElement {
         .right(px(2.0))
         .w(px(4.0))
         .h(px(thumb_h))
-        .rounded_full()
+        .rounded(px(crate::theme::radius::PILL))
         .bg(Colors::with_alpha(Colors::text_primary(), 0.22))
         .into_any_element()
 }
@@ -952,7 +952,7 @@ fn edit_dialog_overlay(
                 .flex_col()
                 .gap(px(10.0))
                 .p(px(14.0))
-                .rounded_lg()
+                .rounded(px(crate::theme::radius::SURFACE))
                 .bg(Colors::surface_panel())
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
