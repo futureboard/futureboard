@@ -1,7 +1,7 @@
 //! The Pitch tab: a continuous musical pitch-performance editor.
 //!
 //! ```text
-//! Select Draw Line Erase │ Smooth Transition Vibrato Reset        +17 ct
+//! Select Draw Line Erase │ Smooth Transition Vibrato Reset │ − + Fit  +17 ct
 //! ────────────────────────────────────────────────────────────────────────
 //!        │      3.1        3.2        3.3         4
 //! ───────┼────────────────────────────────────────────────────────────────
@@ -306,6 +306,16 @@ fn format_cents(cents: f32) -> String {
     format!("{cents:+.0} ct")
 }
 
+/// Multiplicative step for one Zoom +/- button press. Matches the wheel's own
+/// feel — a few clicks to double, not one jarring jump.
+const PITCH_ZOOM_BUTTON_FACTOR: f32 = 1.25;
+/// Semitones of headroom the Fit button leaves above and below the range it
+/// centers, so the trajectory never sits flush against the grid edge.
+const PITCH_FIT_PAD_SEMITONES: f32 = 2.0;
+/// Fallback pitch range for Fit when the clip has no notes yet: one octave
+/// around middle C, the same neutral center the piano roll itself defaults to.
+const PITCH_FIT_DEFAULT_RANGE: (f32, f32) = (54.0, 66.0);
+
 impl SolfegeEditorPanel {
     pub(super) fn render_pitch_tab(
         &mut self,
@@ -470,6 +480,42 @@ impl SolfegeEditorPanel {
             )
         });
 
+        let fit_ctx = ctx.cloned();
+        let zoom: Vec<gpui::AnyElement> = [
+            self.pitch_button(
+                ("solfege-pitch-zoom", 0),
+                "\u{2212}",
+                "Zoom out on pitch",
+                false,
+                true,
+                |this, cx| this.zoom_pitch_view(1.0 / PITCH_ZOOM_BUTTON_FACTOR, cx),
+                cx,
+            ),
+            self.pitch_button(
+                ("solfege-pitch-zoom", 1),
+                "+",
+                "Zoom in on pitch",
+                false,
+                true,
+                |this, cx| this.zoom_pitch_view(PITCH_ZOOM_BUTTON_FACTOR, cx),
+                cx,
+            ),
+            self.pitch_button(
+                ("solfege-pitch-zoom", 2),
+                "Fit",
+                "Fit pitch zoom to the selected note, or the whole clip",
+                false,
+                fit_ctx.is_some(),
+                move |this, cx| {
+                    if let Some(ctx) = fit_ctx.clone() {
+                        this.fit_pitch_view(&ctx, cx);
+                    }
+                },
+                cx,
+            ),
+        ]
+        .into();
+
         let readout = self.pitch.readout.clone().map(|text| {
             div()
                 .ml_auto()
@@ -502,7 +548,78 @@ impl SolfegeEditorPanel {
             )
             .children(actions)
             .children(delete)
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(12.0))
+                    .mx(px(3.0))
+                    .bg(Colors::border_subtle()),
+            )
+            .children(zoom)
             .children(readout)
+    }
+
+    /// Zoom Y around the pitch canvas's own vertical center. A button press
+    /// has no cursor position to anchor on, unlike the Alt+scroll gesture the
+    /// grid also supports, so the view center is the next best fixed point.
+    fn zoom_pitch_view(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let (_, view_h) = self.pitch.grid_size();
+        self.piano_roll.update(cx, |roll, rcx| {
+            roll.zoom_viewport_vertically(factor, view_h, view_h * 0.5);
+            rcx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Zoom and scroll the pitch axis to fit the selected note, or the whole
+    /// clip when nothing is selected.
+    fn fit_pitch_view(&mut self, ctx: &SolfegeEditContext, cx: &mut Context<Self>) {
+        let (_, view_h) = self.pitch.grid_size();
+        let (min_pitch, max_pitch) = self.pitch_fit_range(&ctx.clip_id, cx);
+        self.piano_roll.update(cx, |roll, rcx| {
+            roll.fit_viewport_vertically(view_h, min_pitch, max_pitch);
+            rcx.notify();
+        });
+        cx.notify();
+    }
+
+    /// Pitch span the Fit button should bring into view.
+    ///
+    /// Uses the selected note's range when one is selected, otherwise every
+    /// note in the clip, and in both cases the drawn curve's extremes rather
+    /// than just the notated pitch — a scoop or fall is exactly what a
+    /// performer wants centered, not clipped at the row's edge.
+    fn pitch_fit_range(&self, clip_id: &str, cx: &Context<Self>) -> (f32, f32) {
+        let notes = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(clip_id)
+            .cloned()
+            .unwrap_or_default();
+        let target: Vec<&MidiNoteState> = match self.pitch.selected_note {
+            Some(id) => notes.iter().filter(|n| n.id == id).collect(),
+            None => notes.iter().collect(),
+        };
+        if target.is_empty() {
+            return PITCH_FIT_DEFAULT_RANGE;
+        }
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for note in target {
+            let base = note.pitch as f32;
+            let (curve_lo, curve_hi) = note
+                .pitch_curve
+                .as_ref()
+                .map(|curve| {
+                    curve.points.iter().fold((0.0f32, 0.0f32), |(lo, hi), p| {
+                        (lo.min(p.cents), hi.max(p.cents))
+                    })
+                })
+                .unwrap_or((0.0, 0.0));
+            lo = lo.min(base + curve_lo / 100.0);
+            hi = hi.max(base + curve_hi / 100.0);
+        }
+        (lo - PITCH_FIT_PAD_SEMITONES, hi + PITCH_FIT_PAD_SEMITONES)
     }
 
     // ── Ruler ────────────────────────────────────────────────────────────
