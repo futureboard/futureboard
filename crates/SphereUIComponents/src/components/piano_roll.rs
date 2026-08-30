@@ -54,10 +54,18 @@ const ROW_H: f32 = DEFAULT_ROW_H;
 /// sharing [`PianoRollViewport`] can derive the same vertical extent.
 pub const PITCH_COUNT: i32 = 128;
 const PITCH_CNT: i32 = PITCH_COUNT;
-/// Vertical zoom clamps (px/semitone). Floor keeps notes hittable; ceiling
-/// stops rows from becoming a handful of oversized slabs.
+/// Vertical zoom clamps (px/semitone). Floor keeps notes hittable.
+///
+/// The ceiling used to be 48px — plenty for note editing, where a semitone is
+/// the finest grid that matters. The Solfege Pitch tab shares this exact
+/// field for its continuous cents axis, though, and at 48px/semitone a cent
+/// is under half a pixel: dragging a breakpoint to a specific cent value was
+/// unworkable, and the Pitch tab's own Zoom In button hit this ceiling after
+/// a handful of clicks with no further room to zoom. 200px/semitone (2
+/// px/cent) is comfortable for that without changing anything for a MIDI-tab
+/// user who never zooms this deep.
 const PIANO_ROLL_MIN_ROW_H: f32 = 6.0;
-const PIANO_ROLL_MAX_ROW_H: f32 = 48.0;
+const PIANO_ROLL_MAX_ROW_H: f32 = 200.0;
 /// Horizontal overview zoom floor for long MIDI clips. 1 px/beat lets a
 /// 200-bar/800-beat song fit in an ~800px editor while preserving interactions.
 const PIANO_ROLL_MIN_PPB: f32 = 1.0;
@@ -2367,6 +2375,27 @@ impl PianoRoll {
         let target_top = (PITCH_CNT - 1) as f32 * new_row_h - anchor_pitch * new_row_h;
         self.scroll_y =
             (target_top + new_row_h * 0.5 - anchor_y).clamp(0.0, self.max_scroll_y_for(view_h));
+    }
+
+    /// Zoom Y and scroll so `[min_pitch, max_pitch]` fills `view_h` with the
+    /// same edge padding [`Self::fit_piano_roll_to_notes`] uses horizontally.
+    ///
+    /// `view_h` belongs to the calling surface, for the same reason as
+    /// [`Self::scroll_viewport_vertically_by`] — this is what backs the Pitch
+    /// tab's own Fit button, and the piano roll is not mounted while that tab
+    /// is showing.
+    pub fn fit_viewport_vertically(&mut self, view_h: f32, min_pitch: f32, max_pitch: f32) {
+        if view_h <= 1.0 {
+            return;
+        }
+        let span = (max_pitch - min_pitch).max(1.0);
+        let fit_h = (view_h - PIANO_ROLL_FIT_PAD_PX * 2.0).max(24.0);
+        let new_row_h = (fit_h / span).clamp(PIANO_ROLL_MIN_ROW_H, PIANO_ROLL_MAX_ROW_H);
+        self.row_h = new_row_h;
+        let anchor_pitch = (min_pitch + max_pitch) * 0.5;
+        let target_top = (PITCH_CNT - 1) as f32 * new_row_h - anchor_pitch * new_row_h;
+        self.scroll_y =
+            (target_top + new_row_h * 0.5 - view_h * 0.5).clamp(0.0, self.max_scroll_y_for(view_h));
     }
 
     fn grid_view_size(&self) -> (f32, f32) {
