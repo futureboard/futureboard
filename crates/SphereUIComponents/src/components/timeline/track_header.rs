@@ -113,47 +113,6 @@ const PAN_PILL_H: f32 = 14.0;
 const GROUP_FRAME_INSET: f32 = space::SNUG;
 const GROUP_FRAME_CAP: f32 = space::TIGHT;
 
-/// Semantic hue for a track type — keeps badges readable by type at a glance,
-/// independent of the per-track identity color used for the accent strip.
-fn track_type_color(kind: TrackType) -> gpui::Rgba {
-    match kind {
-        TrackType::Audio => Colors::accent_cyan(),
-        TrackType::Instrument => Colors::accent_green(),
-        TrackType::Midi => Colors::track_midi(),
-        TrackType::Bus => Colors::track_bus(),
-        TrackType::Return => Colors::track_return(),
-        TrackType::Group => Colors::accent_primary(),
-        TrackType::Master => Colors::track_master(),
-        TrackType::Video => Colors::accent_purple(),
-    }
-}
-
-fn type_badge(kind: TrackType) -> impl IntoElement {
-    let label = match kind {
-        TrackType::Audio => "AUD",
-        TrackType::Midi => "MID",
-        TrackType::Instrument => "INS",
-        TrackType::Bus => "BUS",
-        TrackType::Return => "RTN",
-        TrackType::Group => "GRP",
-        TrackType::Master => "MAS",
-        TrackType::Video => "VID",
-    };
-    let color = track_type_color(kind);
-    // An identity chip, not a control: fully round, quiet fill, and no border.
-    // The type is the least urgent thing in the header, so it must not compete
-    // with the track name beside it.
-    div()
-        .flex_none()
-        .px(px(space::SNUG))
-        .rounded(px(radius::PILL))
-        .bg(Colors::with_alpha(color, 0.14))
-        .text_color(Colors::with_alpha(color, 0.85))
-        .text_size(px(typography::DENSE_CAPTION))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(label)
-}
-
 /// One latching track-state toggle inside the M/S/R/I/A strip.
 ///
 /// The five toggles are a *touching group*, so the contract's rule for any
@@ -415,27 +374,6 @@ pub fn track_header(
     } else {
         Colors::with_alpha(Colors::surface_canvas(), 0.22)
     };
-    // The parent header stays clean: it never names a single automation target.
-    // When the automation section is expanded it shows only a compact lane count
-    // indicator; the lane names live on the sub-lane headers below the track.
-    let sub_label = if is_group {
-        let child_count = state
-            .tracks
-            .iter()
-            .filter(|child| child.parent_group_id.as_deref() == Some(track.id.as_str()))
-            .count();
-        format!("{child_count} grouped tracks")
-    } else if is_automation {
-        let lane_count = track.automation_lanes.iter().filter(|l| l.visible).count();
-        if lane_count == 1 {
-            "1 automation lane".to_string()
-        } else {
-            format!("{lane_count} automation lanes")
-        }
-    } else {
-        format!("CH {:02} · {} clips", index + 1, track.clips.len())
-    };
-
     let id_num = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -600,10 +538,9 @@ pub fn track_header(
         })
         // State tint over the opaque base. Group children get theirs from the
         // inset frame below instead, so the tint would double up here.
-        .when_some(
-            header_tint.filter(|_| !is_group_child),
-            |header, tint| header.child(div().absolute().inset_0().bg(tint)),
-        )
+        .when_some(header_tint.filter(|_| !is_group_child), |header, tint| {
+            header.child(div().absolute().inset_0().bg(tint))
+        })
         // Child rows share one continuous inset surface. The Folder header
         // itself keeps the standard full-row Track Header geometry.
         .when(is_group_child, |header| {
@@ -741,93 +678,67 @@ pub fn track_header(
                                 .child(
                                     div()
                                         .flex()
-                                        .flex_col()
-                                        .flex_1()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(space::TIGHT))
                                         .min_w(px(0.0))
+                                        .flex_1()
                                         .overflow_hidden()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_row()
-                                                .items_center()
-                                                .gap(px(space::TIGHT))
-                                                .min_w(px(0.0))
-                                                .w_full()
-                                                .when(is_group, |row| {
-                                                    row.child(
-                                                        div()
-                                                            .id(("folder-collapse", id_num))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .w(px(size::MICRO))
-                                                            .h(px(size::MICRO))
-                                                            .rounded(px(radius::CONTROL_SM))
-                                                            .hover(|style| {
-                                                                style.bg(Colors::surface_hover())
-                                                            })
-                                                            .on_mouse_down(
-                                                                gpui::MouseButton::Left,
-                                                                move |_event, window, cx| {
-                                                                    toggle_group_collapsed(
-                                                                        &collapse_group_id,
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            )
-                                                            .occlude()
-                                                            .child(
-                                                                svg()
-                                                                    .path(if track.group_collapsed {
-                                                                        assets::ICON_CHEVRON_RIGHT_PATH
-                                                                    } else {
-                                                                        assets::ICON_CHEVRON_DOWN_PATH
-                                                                    })
-                                                                    .w(px(GLYPH_SM))
-                                                                    .h(px(GLYPH_SM))
-                                                                    .text_color(
-                                                                        Colors::text_secondary(),
-                                                                    ),
-                                                            ),
+                                        .when(is_group, |row| {
+                                            row.child(
+                                                div()
+                                                    .id(("folder-collapse", id_num))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .w(px(size::MICRO))
+                                                    .h(px(size::MICRO))
+                                                    .rounded(px(radius::CONTROL_SM))
+                                                    .hover(|style| {
+                                                        style.bg(Colors::surface_hover())
+                                                    })
+                                                    .on_mouse_down(
+                                                        gpui::MouseButton::Left,
+                                                        move |_event, window, cx| {
+                                                            toggle_group_collapsed(
+                                                                &collapse_group_id,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                            cx.stop_propagation();
+                                                        },
                                                     )
+                                                    .occlude()
                                                     .child(
                                                         svg()
-                                                            .path(assets::ICON_FOLDER_PATH)
-                                                            .w(px(GLYPH_MD))
-                                                            .h(px(GLYPH_MD))
-                                                            .text_color(Colors::accent_primary()),
-                                                    )
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w(px(0.0))
-                                                        .overflow_hidden()
-                                                        .truncate()
-                                                        .text_size(px(typography::UI_SM))
-                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                        .text_color(Colors::text_primary())
-                                                        .child(track.name.clone()),
-                                                )
-                                                .child(type_badge(track.track_type)),
-                                        )
+                                                            .path(if track.group_collapsed {
+                                                                assets::ICON_CHEVRON_RIGHT_PATH
+                                                            } else {
+                                                                assets::ICON_CHEVRON_DOWN_PATH
+                                                            })
+                                                            .w(px(GLYPH_SM))
+                                                            .h(px(GLYPH_SM))
+                                                            .text_color(Colors::text_secondary()),
+                                                    ),
+                                            )
+                                            .child(
+                                                svg()
+                                                    .path(assets::ICON_FOLDER_PATH)
+                                                    .w(px(GLYPH_MD))
+                                                    .h(px(GLYPH_MD))
+                                                    .text_color(Colors::accent_primary()),
+                                            )
+                                        })
                                         .child(
-                                            // Metadata stays in the muted text
-                                            // ramp — never bright accent — so it
-                                            // reads as secondary info, not a link.
                                             div()
+                                                .flex_1()
                                                 .min_w(px(0.0))
                                                 .overflow_hidden()
-                                                .text_size(px(typography::DENSE_CAPTION))
                                                 .truncate()
-                                                .text_color(if is_automation {
-                                                    Colors::text_secondary()
-                                                } else {
-                                                    Colors::text_muted()
-                                                })
-                                                .child(sub_label),
+                                                .text_size(px(typography::UI_SM))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(Colors::text_primary())
+                                                .child(track.name.clone()),
                                         ),
                                 ),
                         )
@@ -956,7 +867,8 @@ pub fn track_header(
                                                 -1.0,
                                                 1.0,
                                                 Some(0.001),
-                                            ) as f32;
+                                            )
+                                                as f32;
                                             drag_preview_cb(
                                                 &(drag_track_id.clone(), next),
                                                 window,
@@ -964,20 +876,13 @@ pub fn track_header(
                                             );
                                         },
                                     )
-                                    .on_mouse_up(
-                                        gpui::MouseButton::Left,
-                                        move |_, window, cx| {
-                                            drag_commit_cb(&commit_track_id, window, cx)
-                                        },
-                                    )
+                                    .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
+                                        drag_commit_cb(&commit_track_id, window, cx)
+                                    })
                                     .on_mouse_up_out(
                                         gpui::MouseButton::Left,
                                         move |_, window, cx| {
-                                            on_pan_drag_commit(
-                                                &commit_track_id_out,
-                                                window,
-                                                cx,
-                                            )
+                                            on_pan_drag_commit(&commit_track_id_out, window, cx)
                                         },
                                     )
                                     .on_click(move |event, window, cx| {

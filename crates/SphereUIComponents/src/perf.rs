@@ -686,6 +686,18 @@ pub fn perf_debug_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PERF_DEBUG").is_some())
 }
 
+/// Whether engine-sync tracing is on (`FUTUREBOARD_ENGINE_SYNC_DEBUG`).
+///
+/// The engine sync runs on the UI thread, and every committed MIDI note edit
+/// forces one. Its trace was unconditional and prints a line per insert and per
+/// clip plus a six-line route-graph block, so a single click in the piano roll
+/// paid for a few dozen synchronous console writes — which on Windows is slow
+/// enough to feel, and is charged whether or not anyone is reading stderr.
+pub fn engine_sync_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_ENGINE_SYNC_DEBUG").is_some())
+}
+
 /// Whether the optional perf HUD overlay is enabled.
 pub fn perf_hud_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -911,26 +923,242 @@ pub fn tick_root_frame(reason: &'static str) {
 /// asking the kernel thirty times a second would cost more than it reports.
 /// `None` surfaces as a hidden readout rather than a zero — a RAM meter reading
 /// 0 MB is a lie, an absent one is not.
-pub fn process_memory_bytes() -> Option<u64> {
+/// CPU the calling thread has burned, as a share of one core, over the last
+/// sampling window.
+///
+/// Called from the meter poll, which runs on the UI thread, so this reads the
+/// UI thread and nothing else — which is the point. The transport's load
+/// readout showed only the audio callback's deadline fraction, and an audio
+/// engine sitting at 5% while the interface stutters is exactly the case that
+/// readout could not describe.
+///
+/// `None` until two samples exist, and on any platform that cannot report
+/// per-thread CPU: an unknown load prints as "—" rather than as zero.
+///
+/// This is CPU time, not responsiveness. A UI thread blocked in a syscall burns
+/// no CPU and still stutters — use `FUTUREBOARD_UI_PERF=1` and its `[ui-stall]`
+/// lines for that. What this catches is the other half: the interface using a
+/// whole core to keep up.
+pub fn ui_thread_cpu_load() -> Option<f32> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// Long enough that the reading is a load and not one frame's noise, short
+    /// enough that a stall shows up while the user is still looking at it.
+    const WINDOW: Duration = Duration::from_millis(500);
+    struct Sample {
+        thread: std::thread::ThreadId,
+        at: Instant,
+        cpu: Duration,
+        load: Option<f32>,
+    }
+    static LAST: std::sync::OnceLock<Mutex<Option<Sample>>> = std::sync::OnceLock::new();
+
+    let now = Instant::now();
+    let thread = std::thread::current().id();
+    let Ok(mut slot) = LAST.get_or_init(|| Mutex::new(None)).lock() else {
+        return None;
+    };
+    // Called at the meter's ~60 Hz but sampled twice a second, so the syscall
+    // waits until a window has actually closed. This function exists to make a
+    // busy UI thread visible; it must not be part of what makes it busy.
+    if let Some(prev) = slot.as_ref() {
+        if prev.thread == thread && now.duration_since(prev.at) < WINDOW {
+            return prev.load;
+        }
+    }
+    let cpu = read_current_thread_cpu_time()?;
+    // Two threads' CPU clocks are not comparable, so a sample from a different
+    // caller starts the window over rather than being subtracted from this
+    // one's. In practice this only ever runs on the UI thread; the guard is
+    // here so that stays true by construction rather than by convention.
+    if slot.as_ref().is_some_and(|prev| prev.thread != thread) {
+        *slot = None;
+    }
+    match slot.as_mut() {
+        // First sample establishes the baseline; there is no interval to divide
+        // by yet, so there is no load to report.
+        None => {
+            *slot = Some(Sample {
+                thread,
+                at: now,
+                cpu,
+                load: None,
+            });
+            None
+        }
+        Some(prev) => {
+            let elapsed = now.duration_since(prev.at);
+            let burned = cpu.saturating_sub(prev.cpu);
+            // The clock has 100 ns granularity, so a short window can round the
+            // load a few percent either way; the readout only shows whole
+            // percent and the window is half a second.
+            let load = (burned.as_secs_f32() / elapsed.as_secs_f32()).clamp(0.0, 8.0);
+            prev.at = now;
+            prev.cpu = cpu;
+            prev.load = Some(load);
+            Some(load)
+        }
+    }
+}
+
+/// Kernel + user CPU time of the calling thread.
+#[cfg(windows)]
+fn read_current_thread_cpu_time() -> Option<std::time::Duration> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .ok()?;
+    // The two intervals are 100 ns units in a split u64; only the durations are
+    // meaningful (the creation/exit stamps are absolute FILETIMEs).
+    let ticks = filetime_ticks(kernel).saturating_add(filetime_ticks(user));
+    Some(std::time::Duration::from_nanos(ticks.saturating_mul(100)))
+}
+
+#[cfg(windows)]
+fn filetime_ticks(value: windows::Win32::Foundation::FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+#[cfg(not(windows))]
+fn read_current_thread_cpu_time() -> Option<std::time::Duration> {
+    None
+}
+
+/// Working set attributable to Futureboard, split by process.
+///
+/// Studio hosts plug-ins out of process, and that is where the memory goes: a
+/// session with a sampler loaded can hold a couple of gigabytes in
+/// `FutureboardPluginHostX64` while Studio's own process sits near 1.5 GB.
+/// Reporting only Studio's process made the readout disagree with Task Manager
+/// by more than it agreed, and understated the number that actually decides
+/// whether this session still fits in RAM.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryUsage {
+    /// Studio's own working set. `None` where the platform cannot report it —
+    /// the readout hides itself rather than printing a partial total.
+    pub studio_bytes: Option<u64>,
+    /// Summed working set of the plugin-host children that answered.
+    pub plugin_host_bytes: u64,
+    /// How many host processes contributed. Zero is a real answer: no plug-in
+    /// has been loaded yet.
+    pub plugin_hosts: usize,
+}
+
+impl MemoryUsage {
+    /// What the machine is actually holding for this session.
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.studio_bytes
+            .map(|studio| studio.saturating_add(self.plugin_host_bytes))
+    }
+}
+
+/// Cached memory reading for the transport readout.
+///
+/// Polled at the meter cadence but sampled once a second: `GetProcessMemoryInfo`
+/// on a handful of processes is a syscall each, and the readout only shows
+/// megabytes.
+pub fn memory_usage() -> MemoryUsage {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     const POLL_INTERVAL: Duration = Duration::from_secs(1);
-    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, Option<u64>)>>> =
+    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, MemoryUsage)>>> =
         std::sync::OnceLock::new();
 
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     let Ok(mut slot) = cache.lock() else {
-        return None;
+        return MemoryUsage::default();
     };
     if let Some((at, value)) = *slot {
         if at.elapsed() < POLL_INTERVAL {
             return value;
         }
     }
-    let value = read_process_memory_bytes();
+    let (plugin_host_bytes, plugin_hosts) = read_plugin_host_memory_bytes();
+    let value = MemoryUsage {
+        studio_bytes: read_process_memory_bytes(),
+        plugin_host_bytes,
+        plugin_hosts,
+    };
     *slot = Some((Instant::now(), value));
     value
+}
+
+/// Studio's own working set, uncached. Prefer [`memory_usage`].
+pub fn process_memory_bytes() -> Option<u64> {
+    memory_usage().studio_bytes
+}
+
+/// Summed working set of the live plugin hosts, and how many answered.
+///
+/// The registry keeps `Exited` records around, so only `Running` hosts are
+/// opened — a recycled PID would otherwise charge this session for a stranger's
+/// memory. A host that exits between the listing and the `OpenProcess` simply
+/// does not contribute; it is not an error worth reporting on a readout.
+#[cfg(windows)]
+fn read_plugin_host_memory_bytes() -> (u64, usize) {
+    use SpherePluginHost::plugin_host_lifecycle::{BridgeHostManager, HostLifecycleState};
+
+    let mut total = 0u64;
+    let mut counted = 0usize;
+    for record in BridgeHostManager::global().host_records() {
+        if record.state != HostLifecycleState::Running {
+            continue;
+        }
+        if let Some(bytes) = read_pid_memory_bytes(record.pid) {
+            total = total.saturating_add(bytes);
+            counted += 1;
+        }
+    }
+    (total, counted)
+}
+
+#[cfg(not(windows))]
+fn read_plugin_host_memory_bytes() -> (u64, usize) {
+    (0, 0)
+}
+
+#[cfg(windows)]
+fn read_pid_memory_bytes(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // `PROCESS_QUERY_LIMITED_INFORMATION` is the minimum this needs and is the
+    // mask the host's own parent-liveness watchdog uses; `PROCESS_VM_READ` is
+    // required by `GetProcessMemoryInfo`.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            false,
+            pid,
+        )
+    }
+    .ok()?;
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(handle, &mut counters, size) };
+    let bytes = ok.ok().map(|_| counters.WorkingSetSize as u64);
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    bytes
 }
 
 #[cfg(windows)]

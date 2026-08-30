@@ -463,7 +463,7 @@ pub(crate) fn apply_engine_track_input_state(
 /// the mixer changes the audio path on the next engine sync. This runs on the
 /// UI thread inside snapshot construction — never the audio callback.
 fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
-    if inserts.is_empty() {
+    if inserts.is_empty() || !crate::perf::engine_sync_debug_enabled() {
         return;
     }
     let chain: Vec<String> = inserts
@@ -587,10 +587,12 @@ fn build_engine_inserts_for(
                 params.insert("bridge".to_string(), serde_json::json!(true));
                 params.insert("role".to_string(), serde_json::json!(role));
 
-                eprintln!(
-                    "[GraphBuild] track={} insert={} instance={} kind=external-bridge-plugin",
-                    track_id, slot.id, slot.id
-                );
+                if crate::perf::engine_sync_debug_enabled() {
+                    eprintln!(
+                        "[GraphBuild] track={} insert={} instance={} kind=external-bridge-plugin",
+                        track_id, slot.id, slot.id
+                    );
+                }
 
                 Some(EngineInsertSnapshot {
                     id: slot.id.clone(),
@@ -1198,6 +1200,13 @@ pub(super) fn log_engine_sync_snapshot(
     dirty: bool,
     reason: &'static str,
 ) {
+    // The MIDI forensic trace has its own flag and stays on the outside of this
+    // one, so a session debugging note delivery is not forced to also print the
+    // whole insert and clip inventory.
+    DirectAudio::forensic_trace::log_engine_sync_midi(snapshot);
+    if !crate::perf::engine_sync_debug_enabled() {
+        return;
+    }
     let clips_with_path = snapshot
         .clips
         .iter()
@@ -1210,7 +1219,6 @@ pub(super) fn log_engine_sync_snapshot(
         .count();
     let insert_count: usize = snapshot.tracks.iter().map(|t| t.inserts.len()).sum();
     let midi_note_count: usize = snapshot.midi_clips.iter().map(|c| c.notes.len()).sum();
-    DirectAudio::forensic_trace::log_engine_sync_midi(snapshot);
     eprintln!(
         "[engine-sync] reason={} tracks={} clips={} clips_with_path={} inserts={} midi_clips={} midi_notes={} dirty={}",
         reason,

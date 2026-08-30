@@ -162,7 +162,7 @@ impl SplashWindowHandle {
         Ok(Self { window: handle })
     }
 
-    /// Update the splash boot status line (e.g. "Reading GPU list…").
+    /// Update the splash boot status line (e.g. "Opening Studio…").
     pub fn set_status(&self, cx: &mut App, status: impl Into<SharedString>) {
         let status = status.into();
         let _ = self.window.update(cx, |splash, _window, cx| {

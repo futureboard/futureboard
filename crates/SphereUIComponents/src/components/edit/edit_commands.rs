@@ -23,10 +23,6 @@ pub enum EditImpact {
     Midi,
     /// Persisted UI metadata; never invalidates the audio graph.
     Metadata,
-    /// Pure view state (global lane heights). Not persisted and not part of the
-    /// audio graph, so it must not mark the project dirty — it is undoable only
-    /// so the gesture behaves like every other resize in the arrangement.
-    View,
     /// Tempo map or fixed BPM — the engine needs a fresh `set_tempo_map`.
     TempoMap,
     /// Time-signature map — the engine needs a fresh meter map.
@@ -300,8 +296,9 @@ pub enum EditCommand {
         prev: Vec<TimelineRegionState>,
         next: Vec<TimelineRegionState>,
     },
-    /// One global-lane height gesture (drag or reset-to-default). View state, so
-    /// it never invalidates the audio graph.
+    /// One global-lane height gesture (drag or reset-to-default). Persisted
+    /// with the project since v40, but view state all the same, so it never
+    /// invalidates the audio graph.
     SetGlobalLaneHeights {
         prev: GlobalLaneHeights,
         next: GlobalLaneHeights,
@@ -325,7 +322,7 @@ impl EditCommand {
             | EditCommand::SetMidiArticulations { .. }
             | EditCommand::SplitMidiNote { .. } => EditImpact::Midi,
             EditCommand::SetSongTextEvents { .. } => EditImpact::Metadata,
-            EditCommand::SetGlobalLaneHeights { .. } => EditImpact::View,
+            EditCommand::SetGlobalLaneHeights { .. } => EditImpact::Metadata,
             EditCommand::SetTempoState { .. } => EditImpact::TempoMap,
             EditCommand::SetTimeSignatureState { .. } => EditImpact::TimeSignatureMap,
             _ => EditImpact::Project,
@@ -1276,10 +1273,11 @@ mod conductor_command_tests {
         );
     }
 
-    /// Lane heights are session view state: undoable like any other resize, but
-    /// they must never report themselves as a project or engine change.
+    /// Lane heights are persisted view state: undoable like any other resize,
+    /// and dirtying the project so the height survives a save — but never an
+    /// engine-graph change.
     #[test]
-    fn global_lane_height_is_undoable_view_state() {
+    fn global_lane_height_is_undoable_persisted_view_state() {
         let mut state = TimelineState::default();
         let mut history = EditHistory::new(4);
         let prev = state.global_lane_heights.clone();
@@ -1293,7 +1291,10 @@ mod conductor_command_tests {
         state.global_lane_heights = next;
         assert!((state.tempo_track_height() - 120.0).abs() < 0.01);
 
-        assert_eq!(history.undo_with_impact(&mut state), Some(EditImpact::View));
+        assert_eq!(
+            history.undo_with_impact(&mut state),
+            Some(EditImpact::Metadata)
+        );
         assert!(
             (state.tempo_track_height()
                 - TimelineState::global_lane_default_height(GlobalLaneKind::Tempo))

@@ -621,6 +621,37 @@ impl Default for ProjectMixer {
     }
 }
 
+// ── Conductor lanes ──────────────────────────────────────────────────────────
+
+/// Fold state of the global (conductor) lanes — Arranger, Markers, Tempo,
+/// Signature, Song Text (v40+).
+///
+/// View state, like the mixer tree's expanded set: none of it reaches the
+/// engine. It is persisted for the same reason a track's row height is — a
+/// player who folds the tempo lane away, or drags the marker lane taller, has
+/// arranged their workspace, and reopening the project should return it rather
+/// than the factory defaults.
+///
+/// Song Text has a draggable height but no collapse latch (its header offers no
+/// collapse button), so it appears in the heights and not in the flags. Lane
+/// *visibility* is deliberately not here: hiding a lane is a menu command, not
+/// a fold, and it is not what this block promises to restore.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectGlobalLanes {
+    pub arranger_collapsed: bool,
+    pub marker_collapsed: bool,
+    pub tempo_collapsed: bool,
+    pub time_signature_collapsed: bool,
+    /// Dragged heights. `None` means the lane is at its default height, which
+    /// is a distinct state from "happens to equal the default today": the
+    /// default may change, and an un-dragged lane should follow it.
+    pub arranger_height: Option<f32>,
+    pub marker_height: Option<f32>,
+    pub tempo_height: Option<f32>,
+    pub time_signature_height: Option<f32>,
+    pub song_text_height: Option<f32>,
+}
+
 // ── Assets ───────────────────────────────────────────────────────────────────
 
 /// An audio (or other media) file referenced by the project.
@@ -795,6 +826,8 @@ pub struct FutureboardProject {
     /// v35+: latch for the one-time output-routing bootstrap, so a deliberately
     /// deleted Master output is not recreated on the next load.
     pub output_routing_initialized: bool,
+    /// v40+: fold state of the conductor lanes above the arrangement.
+    pub global_lanes: ProjectGlobalLanes,
 }
 
 /// One persisted logical audio bus. Runtime-derived status is deliberately not
@@ -840,6 +873,7 @@ impl FutureboardProject {
             tracks: Vec::new(),
             mixer: ProjectMixer::default(),
             assets: Vec::new(),
+            global_lanes: ProjectGlobalLanes::default(),
         }
     }
 }
@@ -1416,6 +1450,17 @@ impl From<&TimelineState> for FutureboardProject {
             .as_ref()
             .map(|id| id.as_str().to_string());
         project.output_routing_initialized = tl.output_routing_initialized;
+        project.global_lanes = ProjectGlobalLanes {
+            arranger_collapsed: tl.region_track_collapsed,
+            marker_collapsed: tl.marker_track_collapsed,
+            tempo_collapsed: tl.tempo_track_collapsed,
+            time_signature_collapsed: tl.time_signature_track_collapsed,
+            arranger_height: tl.global_lane_heights.region,
+            marker_height: tl.global_lane_heights.marker,
+            tempo_height: tl.global_lane_heights.tempo,
+            time_signature_height: tl.global_lane_heights.time_signature,
+            song_text_height: tl.global_lane_heights.song_text,
+        };
         project
     }
 }
@@ -1606,6 +1651,33 @@ pub fn apply_to_timeline(
             &project.mixer.tree_pinned_channel_ids,
             &project.mixer.tree_hidden_channel_ids,
         );
+
+    // Conductor lane fold state. Heights go through `set`, which clamps to the
+    // drag limits, so a hand-edited or newer file cannot restore a lane tall
+    // enough to push the arrangement off screen.
+    tl.region_track_collapsed = project.global_lanes.arranger_collapsed;
+    tl.marker_track_collapsed = project.global_lanes.marker_collapsed;
+    tl.tempo_track_collapsed = project.global_lanes.tempo_collapsed;
+    tl.time_signature_track_collapsed = project.global_lanes.time_signature_collapsed;
+    {
+        use crate::components::timeline::timeline_state::{GlobalLaneHeights, GlobalLaneKind};
+        let mut heights = GlobalLaneHeights::default();
+        heights.set(
+            GlobalLaneKind::Arranger,
+            project.global_lanes.arranger_height,
+        );
+        heights.set(GlobalLaneKind::Marker, project.global_lanes.marker_height);
+        heights.set(GlobalLaneKind::Tempo, project.global_lanes.tempo_height);
+        heights.set(
+            GlobalLaneKind::TimeSignature,
+            project.global_lanes.time_signature_height,
+        );
+        heights.set(
+            GlobalLaneKind::SongText,
+            project.global_lanes.song_text_height,
+        );
+        tl.global_lane_heights = heights;
+    }
 
     tl.tracks = project
         .tracks
@@ -2774,10 +2846,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v39"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v40"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 39);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 39);
+        assert_eq!(version, 40);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 40);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────
@@ -4071,6 +4143,69 @@ mod vsti_substrip_persistence_tests {
             fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
             Some(class_info),
             "the AU's opaque ClassInfo bytes must survive save/load"
+        );
+    }
+}
+
+#[cfg(test)]
+mod conductor_lane_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        GlobalLaneKind, TimelineState, GLOBAL_LANE_MAX_HEIGHT,
+    };
+
+    /// Folding the tempo lane away is an arrangement of the workspace, not a
+    /// transient view: reopening the project has to return it folded.
+    #[test]
+    fn folded_conductor_lanes_survive_a_project_roundtrip() {
+        let mut state = TimelineState::default();
+        state.tempo_track_collapsed = true;
+        state.marker_track_collapsed = true;
+        state
+            .global_lane_heights
+            .set(GlobalLaneKind::Arranger, Some(60.0));
+        state
+            .global_lane_heights
+            .set(GlobalLaneKind::TimeSignature, Some(88.0));
+
+        let bytes = encode_project(&FutureboardProject::from(&state));
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        assert!(restored.tempo_track_collapsed);
+        assert!(restored.marker_track_collapsed);
+        assert!(!restored.region_track_collapsed);
+        assert!(!restored.time_signature_track_collapsed);
+        assert_eq!(
+            restored.global_lane_heights.get(GlobalLaneKind::Arranger),
+            Some(60.0)
+        );
+        assert_eq!(
+            restored
+                .global_lane_heights
+                .get(GlobalLaneKind::TimeSignature),
+            Some(88.0)
+        );
+        // An un-dragged lane stays at "default", not at whatever the default
+        // happened to be on the machine that saved the file.
+        assert_eq!(
+            restored.global_lane_heights.get(GlobalLaneKind::Marker),
+            None
+        );
+    }
+
+    /// The conductor lanes never scroll, so a height from a hand-edited or
+    /// newer file must not be able to push the arrangement off screen.
+    #[test]
+    fn a_lane_height_from_disk_is_clamped_to_the_drag_limits() {
+        let mut project = FutureboardProject::new("Hostile");
+        project.global_lanes.tempo_height = Some(10_000.0);
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&project, &mut restored);
+        assert_eq!(
+            restored.global_lane_heights.get(GlobalLaneKind::Tempo),
+            Some(GLOBAL_LANE_MAX_HEIGHT)
         );
     }
 }

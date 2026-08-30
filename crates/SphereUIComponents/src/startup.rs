@@ -95,7 +95,9 @@ pub fn log_startup_phase(phase: StartupPhase) {
 pub struct GpuProbe {
     /// Names of detected hardware GPUs (software/CPU adapters excluded).
     pub devices: Vec<String>,
-    /// One-line status suitable for the splash screen.
+    /// One-line status for the boot log. Deliberately not shown on the
+    /// splash: the probe finishes after boot has moved on, so the line would
+    /// either arrive too late to read or hold the splash open waiting for it.
     pub summary: String,
     pub has_gpu: bool,
 }
@@ -104,6 +106,10 @@ pub struct GpuProbe {
 /// stem extraction can automatically prefer GPU inference. Safe to call without
 /// the `gpu-renderer` feature (returns "no GPU"). Never panics — enumeration is
 /// already `catch_unwind`-guarded.
+///
+/// Call this off the main thread. Enumeration constructs a Vulkan/DX12/GL
+/// instance and can take seconds; nothing in boot depends on the answer, so it
+/// must never sit in front of a window that is trying to paint.
 pub fn probe_gpus() -> GpuProbe {
     let devices: Vec<String> = crate::components::timeline::render::list_available_gpu_devices()
         .into_iter()

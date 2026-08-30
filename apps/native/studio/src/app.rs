@@ -182,14 +182,20 @@ pub fn setup(cx: &mut App) {
     };
 
     cx.spawn(async move |cx| {
-        // Reading the GPU list first: enumerate adapters and record availability
-        // so stem extraction can auto-select GPU (DirectML on Windows).
+        // Adapter enumeration builds a Vulkan/DX12/GL instance and can take
+        // seconds on a machine with several GPUs. It only records availability
+        // for stem extraction's automatic device choice, which the user reaches
+        // long after boot — so it runs off the main thread and boot does not
+        // wait for it. It used to run inside `cx.update`, which froze the splash
+        // for the whole enumeration while the splash was showing the adapter
+        // names it had not finished reading.
+        cx.background_executor()
+            .spawn(async {
+                let _ = sphere_ui_components::startup::probe_gpus();
+            })
+            .detach();
         if let Some(splash) = splash.as_ref() {
-            cx.update(|app| splash.set_status(app, "Reading GPU list…"));
-        }
-        let gpu_summary = cx.update(|_app| sphere_ui_components::startup::probe_gpus().summary);
-        if let Some(splash) = splash.as_ref() {
-            cx.update(|app| splash.set_status(app, gpu_summary.clone()));
+            cx.update(|app| splash.set_status(app, "Starting up…"));
         }
 
         let plan = run_lightweight_boot(cx).await;

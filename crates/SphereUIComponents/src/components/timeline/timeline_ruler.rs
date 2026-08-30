@@ -4,6 +4,7 @@ use crate::components::timeline::timeline_state::{
     RULER_HEIGHT,
 };
 use crate::theme::Colors;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     canvas, div, px, svg, AppContext, Bounds, Empty, InteractiveElement, IntoElement,
     ParentElement, Pixels, Render, StatefulInteractiveElement, Styled, Window,
@@ -98,11 +99,65 @@ pub struct TimelineLoopDragUpdate {
     pub end_beat: f32,
 }
 
+/// One global M / S latch in the Arrangement header.
+///
+/// Deliberately an *indicator that can be cleared*, not a "mute everything"
+/// button. Muting every track would have to overwrite the per-track mutes the
+/// user set by hand, and there is no state left to restore them from; clearing
+/// only ever removes latches the user can see are on, so the gesture is
+/// reversible by hand and never invents mixer state.
+///
+/// Dark when nothing is latched, and inert then — pressing it would have
+/// nothing to clear, so it does not pretend to be a control.
+fn global_latch(
+    id: &'static str,
+    label: &'static str,
+    active: bool,
+    tone: gpui::Rgba,
+    tooltip: &'static str,
+    on_click: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(crate::theme::size::MICRO))
+        .w(px(crate::theme::size::MICRO))
+        .rounded(px(crate::theme::radius::CONTROL_SM))
+        .bg(if active {
+            Colors::with_alpha(tone, 0.18)
+        } else {
+            Colors::surface_raised()
+        })
+        .border(px(1.0))
+        .border_color(if active {
+            Colors::with_alpha(tone, 0.55)
+        } else {
+            Colors::border_subtle()
+        })
+        .text_size(px(crate::theme::typography::DENSE_LABEL))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(if active { tone } else { Colors::text_faint() })
+        .tooltip(crate::components::controls::fb_tooltip(tooltip))
+        .when(active, |latch| {
+            latch
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|style| style.bg(Colors::with_alpha(tone, 0.28)))
+                .on_click(move |_, window, cx| {
+                    on_click(&(), window, cx);
+                })
+        })
+        .child(label)
+}
+
 pub fn timeline_ruler(
     state: &TimelineState,
     on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_toggle_snap: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_cycle_grid: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_clear_all_mutes: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
+    on_clear_all_solos: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>,
     on_seek: std::sync::Arc<
         dyn Fn(&f32, crate::layout::SeekReason, &mut gpui::Window, &mut gpui::App) + 'static,
     >,
@@ -127,6 +182,8 @@ pub fn timeline_ruler(
     let on_toggle_snap_clone = on_toggle_snap.clone();
     let on_cycle_grid_clone = on_cycle_grid.clone();
     let on_add_track_clone = on_add_track.clone();
+    let any_muted = state.any_track_muted();
+    let any_soloed = state.any_track_soloed();
 
     let ruler_grid_width = state.viewport.viewport_width.max(1.0);
     let lines = state.get_arrangement_grid_lines(ruler_grid_width);
@@ -177,10 +234,54 @@ pub fn timeline_ruler(
                 .border_color(Colors::border_strong())
                 .child(
                     div()
-                        .text_color(Colors::timeline_ruler_text())
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("Arrangement"),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(crate::theme::space::SNUG))
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(Colors::timeline_ruler_text())
+                                .text_size(px(11.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Arrangement"),
+                        )
+                        // The two global latches sit at the head of the column
+                        // whose rows carry the per-track M and S, which is what
+                        // makes them read as "M and S for all of this".
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(2.0))
+                                .flex_none()
+                                .child(global_latch(
+                                    "ruler-clear-all-mutes",
+                                    "M",
+                                    any_muted,
+                                    Colors::status_warning(),
+                                    if any_muted {
+                                        "Tracks are muted — click to unmute all"
+                                    } else {
+                                        "No track is muted"
+                                    },
+                                    on_clear_all_mutes,
+                                ))
+                                .child(global_latch(
+                                    "ruler-clear-all-solos",
+                                    "S",
+                                    any_soloed,
+                                    Colors::accent_primary(),
+                                    if any_soloed {
+                                        "Tracks are soloed — click to clear all solo"
+                                    } else {
+                                        "No track is soloed"
+                                    },
+                                    on_clear_all_solos,
+                                )),
+                        ),
                 )
                 .child(
                     div()

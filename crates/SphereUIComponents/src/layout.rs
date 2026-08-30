@@ -911,12 +911,20 @@ impl StudioLayout {
                     cx.defer(move |cx| {
                         let _ = target.update(cx, |this, cx| {
                             // MIDI note edits must reach the native scheduler
-                            // at commit time. The normal project path is
-                            // intentionally throttled for drag gestures; using
-                            // the forced, background snapshot here removes the
-                            // audible “note written, then appears later” gap.
+                            // promptly, and the throttle already delivers that:
+                            // it is leading-edge, so an isolated edit publishes
+                            // on the spot and only a burst waits out the window.
+                            //
+                            // This used to force the sync, which skipped the
+                            // throttle entirely and bought a full-project
+                            // snapshot plus a JSON serialize of every note in
+                            // the project, on the UI thread, per committed
+                            // note. Drawing a run of notes therefore paid that
+                            // once per click and the editor visibly stalled.
+                            // `mark_dirty` keeps the graph dirty, so the engine
+                            // poll publishes the last state of the burst.
                             this.mark_dirty();
-                            this.schedule_audio_project_sync(cx, true, "midi_edit");
+                            this.schedule_audio_project_sync(cx, false, "midi_edit");
                         });
                     });
                 })));
@@ -943,7 +951,7 @@ impl StudioLayout {
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_open_editor_callback(Some(Arc::new(move |_window, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.panels.mixer_docked = true;
+                        this.panels.bottom_docked = true;
                         this.set_active_bottom_tab(components::BottomTab::Editor, cx);
                         cx.notify();
                     });
@@ -2098,6 +2106,10 @@ impl StudioLayout {
             "panel:toggle-mixer" | "view:toggle-mixer" | "window.show_mixer" => {
                 self.toggle_mixer_panel(cx)
             }
+            // The dock itself, not one of its tabs. "Show Mixer" above still
+            // means the Mixer; this one means "get the bottom panel out of the
+            // way", whichever tab is in it.
+            "panel:toggle-bottom" => self.toggle_bottom_panel(cx),
             "panel:show-chord-display" => {
                 self.panels.inspector = true;
                 self.right_dock_tab = RightDockTab::ChordDisplay;
@@ -2595,9 +2607,9 @@ impl StudioLayout {
         components::PanelChromeState {
             browser_visible: self.panels.browser,
             inspector_visible: self.panels.inspector,
-            mixer_visible: self.mixer_panel_chrome_visible(),
+            bottom_panel_visible: self.panels.bottom_docked,
             on_toggle_browser: make_handler("panel:toggle-browser"),
-            on_toggle_mixer: make_handler("panel:toggle-mixer"),
+            on_toggle_bottom_panel: make_handler("panel:toggle-bottom"),
             on_toggle_inspector: make_handler("panel:toggle-inspector"),
         }
     }

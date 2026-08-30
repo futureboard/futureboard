@@ -489,6 +489,46 @@ impl TimelineState {
         false
     }
 
+    /// Is anything currently muted / soloed anywhere in the arrangement?
+    ///
+    /// Backs the two global latches in the Arrangement header. They are
+    /// indicators first: a mute left on a track scrolled off screen is the
+    /// classic reason a mix has a hole in it, and until now nothing in the
+    /// shell said so.
+    pub fn any_track_muted(&self) -> bool {
+        self.tracks.iter().any(|track| track.muted)
+    }
+
+    pub fn any_track_soloed(&self) -> bool {
+        self.tracks.iter().any(|track| track.solo)
+    }
+
+    /// Unmute everything. Returns the ids that actually changed, so the caller
+    /// pushes exactly those to the engine instead of re-sending the whole
+    /// arrangement's mute state.
+    pub fn clear_all_track_mutes(&mut self) -> Vec<String> {
+        let mut cleared = Vec::new();
+        for track in self.tracks.iter_mut() {
+            if track.muted {
+                track.muted = false;
+                cleared.push(track.id.clone());
+            }
+        }
+        cleared
+    }
+
+    /// Clear every solo. Same contract as [`Self::clear_all_track_mutes`].
+    pub fn clear_all_track_solos(&mut self) -> Vec<String> {
+        let mut cleared = Vec::new();
+        for track in self.tracks.iter_mut() {
+            if track.solo {
+                track.solo = false;
+                cleared.push(track.id.clone());
+            }
+        }
+        cleared
+    }
+
     pub fn toggle_track_arm(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.armed = !t.armed;

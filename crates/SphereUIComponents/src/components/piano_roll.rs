@@ -1334,13 +1334,25 @@ impl PianoRoll {
             return;
         };
 
-        let valid_note_ids: HashSet<u64> = self
-            .timeline
-            .read(cx)
-            .state
-            .midi_clip_notes(clip_id)
-            .map(|notes| notes.iter().map(|note| note.id).collect())
-            .unwrap_or_default();
+        // Pruning runs every frame, and building this set is O(notes in clip)
+        // plus an allocation. With nothing selected, hovering, or queued for
+        // erase there is nothing to prune, and the three `retain`s below would
+        // walk empty collections — so do not pay for the set at all. That is
+        // the common case: the editor sits idle with no selection far more
+        // often than it holds one.
+        let needs_note_ids = !self.selection.is_empty()
+            || !self.selection_before_marquee.is_empty()
+            || !self.erase_preview_ids.is_empty();
+        let valid_note_ids: HashSet<u64> = if needs_note_ids {
+            self.timeline
+                .read(cx)
+                .state
+                .midi_clip_notes(clip_id)
+                .map(|notes| notes.iter().map(|note| note.id).collect())
+                .unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
 
         self.selection.retain(|id| valid_note_ids.contains(id));
         if self.selection.is_empty() {
@@ -2608,6 +2620,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let _scope = crate::perf::PerfScope::enter("PianoRoll::grid_down");
         cx.stop_propagation();
         // Any grid interaction dismisses the lane selector dropdown and the
         // note context menu.
@@ -3460,10 +3473,12 @@ impl PianoRoll {
                 Some(pitch) => {
                     // Debounce: only (re)trigger when the pitch actually changes.
                     if self.key_lane_pressed_pitch != Some(pitch) {
-                        eprintln!(
-                            "[PianoKeyPreview] move old={:?} new={}",
-                            self.key_lane_pressed_pitch, pitch
-                        );
+                        if midi_debug_enabled() {
+                            eprintln!(
+                                "[PianoKeyPreview] move old={:?} new={}",
+                                self.key_lane_pressed_pitch, pitch
+                            );
+                        }
                         // `begin_preview_note` sends note-off for the previous
                         // pitch before note-on for the new one (no stuck notes).
                         self.begin_preview_note(pitch, 100, "piano_key_drag", cx);
@@ -3475,7 +3490,9 @@ impl PianoRoll {
                     // Cursor left the lane: stop the current note but keep the
                     // drag active so returning to the lane resumes auditioning.
                     if self.key_lane_pressed_pitch.take().is_some() {
-                        eprintln!("[PianoKeyPreview] off note=outside_lane");
+                        if midi_debug_enabled() {
+                            eprintln!("[PianoKeyPreview] off note=outside_lane");
+                        }
                         self.end_preview_note("piano_key_drag_out", cx);
                         cx.notify();
                     }
@@ -3836,10 +3853,12 @@ impl PianoRoll {
         // and `on_mouse_up_out` on the root. A key-lane drag never edits clip
         // notes, so just clear its state (the note-off was sent above).
         if self.piano_key_drag_active || self.key_lane_pressed_pitch.is_some() {
-            eprintln!(
-                "[PianoKeyPreview] off note={:?} reason=mouse_up",
-                self.key_lane_pressed_pitch
-            );
+            if midi_debug_enabled() {
+                eprintln!(
+                    "[PianoKeyPreview] off note={:?} reason=mouse_up",
+                    self.key_lane_pressed_pitch
+                );
+            }
             self.piano_key_drag_active = false;
             self.key_lane_pressed_pitch = None;
             cx.notify();

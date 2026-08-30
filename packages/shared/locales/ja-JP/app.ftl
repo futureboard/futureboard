@@ -355,6 +355,7 @@ menu.midi-transpose_down = Transpose Down
 menu.midi-transpose_octave_down = Transpose Down One Octave
 menu.midi-transpose_octave_up = Transpose Up One Octave
 menu.midi-transpose_up = Transpose Up
+menu.more = その他
 menu.project = Project
 menu.project-add_audio_track = Add Audio Track
 menu.project-add_bus_track = Add Bus Track
@@ -488,6 +489,7 @@ mixer.track-type.video = VID
 panel.browser = BROWSER
 panel.inspector = INSPECT
 panel.mixer = MIXER
+panel.bottom = PANEL
 
 ## Plugins
 

@@ -61,6 +61,11 @@ pub mod icons {
     pub const MIC: &str = include_str!("../../../packages/shared/lucide/icons/mic.svg");
     pub const FILM: &str = include_str!("../../../packages/shared/lucide/icons/film.svg");
     pub const CPU: &str = include_str!("../../../packages/shared/lucide/icons/cpu.svg");
+    pub const MEMORY_STICK: &str =
+        include_str!("../../../packages/shared/lucide/icons/memory-stick.svg");
+    pub const AUDIO_LINES: &str =
+        include_str!("../../../packages/shared/lucide/icons/audio-lines.svg");
+    pub const MONITOR: &str = include_str!("../../../packages/shared/lucide/icons/monitor.svg");
     pub const MUSIC: &str = include_str!("../../../packages/shared/lucide/icons/music.svg");
     pub const GIT_MERGE: &str = include_str!("../../../packages/shared/lucide/icons/git-merge.svg");
     pub const GIT_FORK: &str = include_str!("../../../packages/shared/lucide/icons/git-fork.svg");
@@ -135,6 +140,9 @@ pub const ICON_ROUTE_PATH: &str = "icons/route.svg";
 pub const ICON_MIC_PATH: &str = "icons/mic.svg";
 pub const ICON_FILM_PATH: &str = "icons/film.svg";
 pub const ICON_CPU_PATH: &str = "icons/cpu.svg";
+pub const ICON_MEMORY_STICK_PATH: &str = "icons/memory-stick.svg";
+pub const ICON_AUDIO_LINES_PATH: &str = "icons/audio-lines.svg";
+pub const ICON_MONITOR_PATH: &str = "icons/monitor.svg";
 pub const ICON_MUSIC_PATH: &str = "icons/music.svg";
 pub const ICON_GIT_MERGE_PATH: &str = "icons/git-merge.svg";
 pub const ICON_GIT_FORK_PATH: &str = "icons/git-fork.svg";

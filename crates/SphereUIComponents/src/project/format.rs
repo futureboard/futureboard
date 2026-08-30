@@ -88,7 +88,11 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// saved in — and "no accent" is a distinct state from "neutral accent", so
 /// re-analysis treats a pre-v39 project as never analysed rather than as
 /// analysed-and-found-flat.
-pub const PROJECT_VERSION: u32 = 39;
+/// v40 appends the conductor lanes' fold state — four collapse latches and five
+/// dragged heights — after the output routing. A v39 file loads with every lane
+/// expanded at its default height, which is the state it was saved in, since
+/// that is what v39 always restored.
+pub const PROJECT_VERSION: u32 = 40;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -1327,6 +1331,19 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
     w.write_opt_str(&project.monitor_output_connection_id);
     w.write_bool(project.output_routing_initialized);
 
+    // Conductor lane fold state (v40+). Appended after the output routing for
+    // the reason that block was appended after the registry: the body is
+    // positional, so a v39 file simply ends here and must decode as v39.
+    w.write_bool(project.global_lanes.arranger_collapsed);
+    w.write_bool(project.global_lanes.marker_collapsed);
+    w.write_bool(project.global_lanes.tempo_collapsed);
+    w.write_bool(project.global_lanes.time_signature_collapsed);
+    w.write_opt_f32(&project.global_lanes.arranger_height);
+    w.write_opt_f32(&project.global_lanes.marker_height);
+    w.write_opt_f32(&project.global_lanes.tempo_height);
+    w.write_opt_f32(&project.global_lanes.time_signature_height);
+    w.write_opt_f32(&project.global_lanes.song_text_height);
+
     w.into_bytes()
 }
 
@@ -2345,8 +2362,28 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             (None, None, false)
         };
 
+    // Conductor lane fold state (v40+). A v39 file has none, and every lane
+    // comes back expanded at its default height — the state such a file was
+    // saved in.
+    let global_lanes = if version >= 40 {
+        super::ProjectGlobalLanes {
+            arranger_collapsed: r.read_bool()?,
+            marker_collapsed: r.read_bool()?,
+            tempo_collapsed: r.read_bool()?,
+            time_signature_collapsed: r.read_bool()?,
+            arranger_height: r.read_opt_f32()?,
+            marker_height: r.read_opt_f32()?,
+            tempo_height: r.read_opt_f32()?,
+            time_signature_height: r.read_opt_f32()?,
+            song_text_height: r.read_opt_f32()?,
+        }
+    } else {
+        super::ProjectGlobalLanes::default()
+    };
+
     Ok(FutureboardProject {
         audio_connections,
+        global_lanes,
         master_output_connection_id,
         monitor_output_connection_id,
         output_routing_initialized,
@@ -2678,12 +2715,19 @@ mod tests {
     fn encode_legacy_song_text_project(version: u32, cues: &[LegacyProjectSongTextCue]) -> Vec<u8> {
         let mut body = encode_body(&FutureboardProject::new("Legacy Song Text"));
         // `encode_body` ends with the Song Text count, the v34 Audio
-        // Connections count, and the v35 output-routing block (two absent
-        // optional strings plus the bootstrap latch). A v24-v26 fixture reads
-        // none of them, so drop the whole tail before appending the legacy cue
-        // block in its place.
+        // Connections count, the v35 output-routing block (two absent optional
+        // strings plus the bootstrap latch), and the v40 conductor-lane fold
+        // block (four collapse latches plus five absent optional heights). A
+        // v24-v26 fixture reads none of them, so drop the whole tail before
+        // appending the legacy cue block in its place.
         let v35_output_routing_bytes = 1 + 1 + 1;
-        body.truncate(body.len() - 2 * std::mem::size_of::<u32>() - v35_output_routing_bytes);
+        let v40_global_lane_bytes = 4 + 5;
+        body.truncate(
+            body.len()
+                - 2 * std::mem::size_of::<u32>()
+                - v35_output_routing_bytes
+                - v40_global_lane_bytes,
+        );
 
         let mut tail = FbWriter::new();
         tail.write_u32(cues.len() as u32);
@@ -3661,6 +3705,41 @@ mod tests {
             decode_project(&bytes),
             Err(ProjectError::Corrupted(_))
         ));
+    }
+
+    /// The conductor lanes' fold state is view state, but it is view state the
+    /// player set by hand, so it has to survive the file like a track height.
+    #[test]
+    fn conductor_lane_fold_state_roundtrips_v40() {
+        let mut project = FutureboardProject::new("Folded");
+        project.global_lanes = super::super::ProjectGlobalLanes {
+            arranger_collapsed: true,
+            marker_collapsed: false,
+            tempo_collapsed: true,
+            time_signature_collapsed: false,
+            arranger_height: Some(52.0),
+            marker_height: None,
+            tempo_height: Some(120.0),
+            time_signature_height: None,
+            song_text_height: Some(64.0),
+        };
+        let decoded = decode_project(&encode_project(&project)).expect("decode");
+        assert_eq!(decoded.global_lanes, project.global_lanes);
+    }
+
+    /// A v39 file has no fold block, and every lane must come back expanded at
+    /// its default height — the state such a file was actually saved in.
+    #[test]
+    fn a_v39_project_loads_with_every_conductor_lane_expanded() {
+        let mut body = encode_body(&FutureboardProject::new("legacy"));
+        // Four collapse latches plus five absent optional heights.
+        body.truncate(body.len() - (4 + 5));
+        let bytes = project_bytes_with_version(body, 39);
+        let decoded = decode_project(&bytes).expect("v39 loads");
+        assert_eq!(
+            decoded.global_lanes,
+            super::super::ProjectGlobalLanes::default()
+        );
     }
 
     /// v33 files predate the section entirely and must still load.

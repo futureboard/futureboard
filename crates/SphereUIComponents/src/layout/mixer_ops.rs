@@ -195,7 +195,12 @@ impl StudioLayout {
                 stats.callback_deadline_us,
                 stats.active_voices,
             ),
-            None => crate::components::TransportPerfSnapshot::default(),
+            // Memory and the UI thread's load do not depend on the engine, so
+            // a stopped engine still gets a real snapshot — with no audio load
+            // in it — rather than a default that blanks the whole readout.
+            None => {
+                crate::components::transport_perf_meter::perf_snapshot_from_engine(false, 0, 0, 0)
+            }
         };
         let _ = self
             .transport_perf_meter
@@ -986,7 +991,7 @@ impl StudioLayout {
         if self.external_windows.mixer.is_some() {
             return true;
         }
-        self.panels.mixer_docked && self.active_bottom_tab == crate::components::BottomTab::Mixer
+        self.panels.bottom_docked && self.active_bottom_tab == crate::components::BottomTab::Mixer
     }
 
     /// The master-volume gesture, extracted so the mixer's master fader and the

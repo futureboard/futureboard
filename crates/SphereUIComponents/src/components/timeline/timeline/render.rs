@@ -144,6 +144,43 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        // Global latches in the Arrangement header. They clear, never set: the
+        // per-track mutes they would otherwise overwrite are not recoverable
+        // from anywhere. Each cleared track goes to the engine through the same
+        // live param path a single M/S press uses, so the engine never has to
+        // be told about a mute it already knows about.
+        let on_clear_all_mutes = cx.listener(|this, _: &(), _window, cx| {
+            let cleared = this.state.clear_all_track_mutes();
+            if cleared.is_empty() {
+                return;
+            }
+            if let Some(cb) = this.on_track_param_change.as_ref() {
+                for track_id in &cleared {
+                    cb(track_id.clone(), "muted".to_string(), 0.0);
+                }
+            }
+            this.mark_control_state_changed(cx);
+            cx.notify();
+        });
+        let on_clear_all_mutes: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_clear_all_mutes);
+
+        let on_clear_all_solos = cx.listener(|this, _: &(), _window, cx| {
+            let cleared = this.state.clear_all_track_solos();
+            if cleared.is_empty() {
+                return;
+            }
+            if let Some(cb) = this.on_track_param_change.as_ref() {
+                for track_id in &cleared {
+                    cb(track_id.clone(), "solo".to_string(), 0.0);
+                }
+            }
+            this.mark_control_state_changed(cx);
+            cx.notify();
+        });
+        let on_clear_all_solos: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(on_clear_all_solos);
+
         let on_toggle_arm = cx.listener(|this, track_id: &String, _window, cx| {
             let previous = this
                 .state
@@ -1184,6 +1221,9 @@ impl Render for Timeline {
 
         let on_tempo_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.tempo_track_collapsed = !this.state.tempo_track_collapsed;
+            // Persisted with the project since v40, so folding a lane away is an
+            // unsaved change — view-only, though: the audio graph is untouched.
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
         let on_tempo_toggle_collapsed: crate::components::timeline::tempo_track::GlobalLaneVoidCallback =
@@ -1249,6 +1289,9 @@ impl Render for Timeline {
 
         let on_marker_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.marker_track_collapsed = !this.state.marker_track_collapsed;
+            // Persisted with the project since v40, so folding a lane away is an
+            // unsaved change — view-only, though: the audio graph is untouched.
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
         let on_marker_toggle_collapsed: crate::components::timeline::marker_track::GlobalLaneVoidCallback =
@@ -1311,6 +1354,9 @@ impl Render for Timeline {
 
         let on_region_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.region_track_collapsed = !this.state.region_track_collapsed;
+            // Persisted with the project since v40, so folding a lane away is an
+            // unsaved change — view-only, though: the audio graph is untouched.
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
         let on_region_toggle_collapsed: crate::components::timeline::region_track::GlobalLaneVoidCallback =
@@ -1375,6 +1421,9 @@ impl Render for Timeline {
 
         let on_ts_toggle_collapsed = cx.listener(|this, _: &(), _window, cx| {
             this.state.time_signature_track_collapsed = !this.state.time_signature_track_collapsed;
+            // Persisted with the project since v40, so folding a lane away is an
+            // unsaved change — view-only, though: the audio graph is untouched.
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
         let on_ts_toggle_collapsed: crate::components::timeline::time_signature_track::GlobalLaneVoidCallback =
@@ -2158,6 +2207,8 @@ impl Render for Timeline {
                 on_add_track.clone(),
                 on_toggle_snap.clone(),
                 on_cycle_grid.clone(),
+                on_clear_all_mutes,
+                on_clear_all_solos,
                 on_seek.clone(),
                 on_region_drag.clone(),
                 on_loop_drag.clone(),
@@ -2350,12 +2401,19 @@ impl Render for Timeline {
                         crate::components::timeline::playhead::playhead_head_overlay_at(playhead_x)
                     }),
             )
+            // The body runs from directly under the ruler, not from
+            // `content_top`: the conductor lanes sit in between, they are drawn
+            // on two opaque planes, and starting the line below them left the
+            // playhead broken into a head in the ruler and a body in the
+            // arrangement with a gap through Regions/Markers/Tempo/Signature —
+            // a gap that grew every time a lane was shown or dragged taller.
+            // The lanes are earlier siblings, so this paints over them.
             .child(
                 div()
                     .absolute()
                     .left(px(HEADER_WIDTH))
                     .right_0()
-                    .top(px(content_top))
+                    .top(px(RULER_HEIGHT))
                     .bottom_0()
                     .overflow_hidden()
                     .child({

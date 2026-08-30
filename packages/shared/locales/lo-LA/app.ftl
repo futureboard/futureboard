@@ -355,6 +355,7 @@ menu.midi-transpose_down = ປ່ຽນຄີລົງ
 menu.midi-transpose_octave_down = ປ່ຽນຄີລົງໜຶ່ງອັອກເທັບ
 menu.midi-transpose_octave_up = ປ່ຽນຄີຂຶ້ນໜຶ່ງອັອກເທັບ
 menu.midi-transpose_up = ປ່ຽນຄີຂຶ້ນ
+menu.more = ເພີ່ມເຕີມ
 menu.project = ໂປຣເຈັກ
 menu.project-add_audio_track = ເພີ່ມແທຣັກສຽງ
 menu.project-add_bus_track = ເພີ່ມແທຣັກບັສ
@@ -488,6 +489,7 @@ mixer.track-type.video = ວິດີໂອ
 panel.browser = ບຣາວເຊີ
 panel.inspector = ອິນສະເປັກ
 panel.mixer = ມິກເຊີ
+panel.bottom = ແຜງລຸ່ມ
 
 ## Plugins
 

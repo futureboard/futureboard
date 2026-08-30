@@ -236,7 +236,10 @@ pub enum ContextTarget {
 pub struct StudioPanelVisibility {
     pub browser: bool,
     pub inspector: bool,
-    pub mixer_docked: bool,
+    /// The bottom dock, whichever tab it is showing. It was called
+    /// `mixer_docked`, which is how the chrome ended up treating the dock as
+    /// the Mixer's own panel and left the Editor tab with no toggle of its own.
+    pub bottom_docked: bool,
 }
 
 impl Default for StudioPanelVisibility {
@@ -244,7 +247,7 @@ impl Default for StudioPanelVisibility {
         Self {
             browser: true,
             inspector: true,
-            mixer_docked: true,
+            bottom_docked: true,
         }
     }
 }

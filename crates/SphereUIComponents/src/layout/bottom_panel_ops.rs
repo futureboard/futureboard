@@ -41,17 +41,17 @@ pub(crate) fn bottom_tab_toggle_action(
 
 impl StudioLayout {
     pub(crate) fn bottom_panel_docked(&self) -> bool {
-        self.panels.mixer_docked
+        self.panels.bottom_docked
     }
 
     /// Show the bottom dock on `tab`, docking it first if it was hidden.
     ///
     /// The single "open the dock at X" path. Opening used to be spelled inline
-    /// at each call site as `mixer_docked = true` plus some subset of the
+    /// at each call site as `bottom_docked = true` plus some subset of the
     /// follow-up work, which is how the dock ended up open on a tab nobody had
     /// asked for.
     pub(crate) fn show_bottom_panel_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
-        self.panels.mixer_docked = true;
+        self.panels.bottom_docked = true;
         self.ensure_mixer_tree_defaults_once(cx);
         self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
         self.set_active_bottom_tab(tab, cx);
@@ -60,9 +60,26 @@ impl StudioLayout {
         cx.notify();
     }
 
+    /// Show or hide the bottom dock without choosing a tab for the user.
+    ///
+    /// This is what the chrome's panel button does. `toggle_bottom_panel_tab`
+    /// is the *other* gesture — "show me the Mixer" — and using it for the
+    /// panel button is what left the Editor out: standing on the Editor tab the
+    /// button read unlit and switched the dock to the Mixer instead of closing
+    /// it, so there was no single control that hid the dock you were looking
+    /// at. Reopening restores `active_bottom_tab`, which `close_bottom_panel`
+    /// deliberately leaves alone.
+    pub(crate) fn toggle_bottom_panel(&mut self, cx: &mut Context<Self>) {
+        if self.panels.bottom_docked {
+            self.close_bottom_panel(cx);
+        } else {
+            self.show_bottom_panel_tab(self.active_bottom_tab, cx);
+        }
+    }
+
     /// Press the dock toggle that belongs to `tab`.
     pub(crate) fn toggle_bottom_panel_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
-        match bottom_tab_toggle_action(self.panels.mixer_docked, self.active_bottom_tab, tab) {
+        match bottom_tab_toggle_action(self.panels.bottom_docked, self.active_bottom_tab, tab) {
             BottomTabToggleAction::CloseDock => self.close_bottom_panel(cx),
             BottomTabToggleAction::ShowTab => self.show_bottom_panel_tab(tab, cx),
         }
@@ -112,20 +129,23 @@ impl StudioLayout {
     /// silently die until the user clicks a control. See the reclaim guard in
     /// `studio_render`.
     pub(crate) fn docked_midi_editor_visible(&self) -> bool {
-        self.panels.mixer_docked && self.active_bottom_tab == BottomTab::Editor
+        self.panels.bottom_docked && self.active_bottom_tab == BottomTab::Editor
     }
 
     pub(crate) fn bottom_panel_state(&self) -> BottomPanelState {
         self.bottom_panel_state
     }
 
-    /// Hide the dock from its own header. This mirrors the top-chrome Mixer
-    /// toggle, but keeps the action discoverable in the current workspace.
+    /// Hide the dock from its own header. Same action as the chrome's panel
+    /// button, kept on the dock so it is discoverable from the workspace.
+    ///
+    /// `active_bottom_tab` is deliberately left untouched: hiding the dock is
+    /// not a decision about which tab it should show when it comes back.
     pub(crate) fn close_bottom_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.panels.mixer_docked {
+        if !self.panels.bottom_docked {
             return;
         }
-        self.panels.mixer_docked = false;
+        self.panels.bottom_docked = false;
         if matches!(
             self.active_panel,
             WorkspaceActivePanel::Mixer
@@ -195,7 +215,7 @@ impl StudioLayout {
         let metrics = crate::components::timeline::TimelineChromeMetrics {
             browser_width: if show_browser { SIDEBAR_WIDTH } else { 0.0 },
             inspector_width: if show_inspector { INSPECTOR_WIDTH } else { 0.0 },
-            bottom_panel_height: if self.panels.mixer_docked {
+            bottom_panel_height: if self.panels.bottom_docked {
                 self.bottom_panel_state.height_px
             } else {
                 0.0
@@ -214,7 +234,7 @@ impl StudioLayout {
     }
 
     pub(crate) fn notify_bottom_panel_shell(&self, cx: &mut Context<Self>) {
-        if self.panels.mixer_docked {
+        if self.panels.bottom_docked {
             let _ = self.bottom_panel_shell.update(cx, |_, cx| cx.notify());
         }
     }

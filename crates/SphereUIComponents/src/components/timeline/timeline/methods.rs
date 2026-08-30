@@ -306,9 +306,6 @@ impl Timeline {
             EditImpact::Project => self.mark_project_changed(cx),
             EditImpact::Midi => self.mark_midi_changed(cx),
             EditImpact::Metadata => self.mark_control_state_changed(cx),
-            // Nothing to propagate: the caller's `cx.notify()` repaints, and
-            // there is no project or engine state behind it.
-            EditImpact::View => {}
             EditImpact::TempoMap => self.mark_tempo_map_changed(cx),
             EditImpact::TimeSignatureMap => self.mark_time_signature_map_changed(cx),
         }

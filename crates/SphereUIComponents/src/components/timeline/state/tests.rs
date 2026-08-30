@@ -2761,3 +2761,58 @@ mod lane_pointer_transform_tests {
         assert_eq!(flag_hit_index(&spans, 110.0, 0.0), Some(0));
     }
 }
+
+#[cfg(test)]
+mod global_latch_tests {
+    use super::*;
+
+    fn two_audio_tracks(state: &mut TimelineState) -> (String, String) {
+        state.tracks.clear();
+        (state.create_audio_track(), state.create_audio_track())
+    }
+
+    /// The latches are indicators before they are buttons: they must report on
+    /// a mute the user cannot see because the track is scrolled away.
+    #[test]
+    fn a_latch_reports_any_track_not_just_the_visible_ones() {
+        let mut state = TimelineState::default();
+        let (_first, second) = two_audio_tracks(&mut state);
+        assert!(!state.any_track_muted());
+        assert!(!state.any_track_soloed());
+
+        assert!(state.set_track_mute(&second, true));
+        assert!(state.any_track_muted());
+        assert!(!state.any_track_soloed());
+
+        assert!(state.set_track_solo(&second, true));
+        assert!(state.any_track_soloed());
+    }
+
+    /// Clearing returns exactly the tracks it changed, because the caller sends
+    /// one engine param message per id and must not re-send the rest.
+    #[test]
+    fn clearing_reports_only_the_tracks_it_changed() {
+        let mut state = TimelineState::default();
+        let (first, second) = two_audio_tracks(&mut state);
+        assert!(state.set_track_mute(&first, true));
+        assert!(state.set_track_solo(&second, true));
+
+        let unmuted = state.clear_all_track_mutes();
+        assert_eq!(unmuted, vec![first.clone()]);
+        assert!(!state.any_track_muted());
+
+        let unsoloed = state.clear_all_track_solos();
+        assert_eq!(unsoloed, vec![second.clone()]);
+        assert!(!state.any_track_soloed());
+    }
+
+    /// Pressing a dark latch has nothing to clear, so it must not report work
+    /// the caller would turn into engine traffic and a dirty project.
+    #[test]
+    fn clearing_nothing_reports_nothing() {
+        let mut state = TimelineState::default();
+        let _ = two_audio_tracks(&mut state);
+        assert!(state.clear_all_track_mutes().is_empty());
+        assert!(state.clear_all_track_solos().is_empty());
+    }
+}

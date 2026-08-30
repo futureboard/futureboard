@@ -1946,7 +1946,7 @@ impl StudioLayout {
                 .update(cx, |_mixer, window, _cx| window.activate_window())
                 .is_ok()
             {
-                self.panels.mixer_docked = false;
+                self.panels.bottom_docked = false;
                 self.sync_timeline_chrome_metrics(cx);
                 self.push_mixer_snapshot_to_window(cx);
                 cx.notify();
@@ -1958,7 +1958,7 @@ impl StudioLayout {
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
         self.overlay.open_popover = None;
-        self.panels.mixer_docked = false;
+        self.panels.bottom_docked = false;
 
         let snapshot = self.build_mixer_snapshot(cx);
         let callbacks = self.build_mixer_callbacks(cx.entity().clone());
@@ -2029,7 +2029,7 @@ impl StudioLayout {
             }
             Err(err) => {
                 eprintln!("[mixer] failed to open external mixer window: {err}");
-                self.panels.mixer_docked = true;
+                self.panels.bottom_docked = true;
                 self.sync_timeline_chrome_metrics(cx);
                 self.set_active_panel(crate::layout::WorkspaceActivePanel::Mixer, cx);
                 cx.notify();

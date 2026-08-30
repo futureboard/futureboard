@@ -473,6 +473,11 @@ impl PianoRoll {
 
 impl Render for PianoRoll {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The piano roll had no perf scope at all, so `FUTUREBOARD_UI_PERF=1`
+        // attributed every repaint it caused to the arrangement's `Timeline`
+        // scope and none of its own work to anything.
+        let _scope = crate::perf::PerfScope::enter("PianoRoll");
+        crate::perf::count("piano_roll_paint_count", 1);
         if self.focus_lost_subscription.is_none() {
             self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
                 if !matches!(this.drag, PianoDrag::None) || this.active_preview_note.is_some() {

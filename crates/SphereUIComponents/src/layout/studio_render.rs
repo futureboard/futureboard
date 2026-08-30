@@ -1292,7 +1292,7 @@ impl Render for StudioLayout {
         let panel_chrome = self.panel_chrome_state(cx);
         let show_browser = self.panels.browser;
         let show_inspector = self.panels.inspector;
-        let show_mixer_docked = self.panels.mixer_docked;
+        let show_bottom_docked = self.panels.bottom_docked;
         let active_panel = self.active_panel;
 
         let project_chrome = components::ProjectChromeState {
@@ -1833,7 +1833,7 @@ impl Render for StudioLayout {
                 }
                 main_row
             })
-            .children(if show_mixer_docked {
+            .children(if show_bottom_docked {
                 let _s = crate::perf::PerfScope::enter("BottomPanel");
                 Some(self.bottom_panel_shell.clone().into_any_element())
             } else {

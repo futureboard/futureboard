@@ -186,6 +186,15 @@ pub(crate) struct AudioBridgeState {
     pub route_graph_in_flight_version: u64,
     pub route_graph_in_flight_child_channels: usize,
     pub route_graph_in_flight_master_routes: usize,
+    /// Fingerprint of only the *routing* half of the snapshot — the tracks and
+    /// their inserts, sends, and outputs. `route_graph_version` advances when
+    /// this changes, and not merely when the snapshot does.
+    ///
+    /// Editing a MIDI note changes the snapshot (it carries the notes) but
+    /// cannot change the graph, and the version was bumped for it anyway, which
+    /// invalidated the mixer tree cache and forced a sidebar rebuild on every
+    /// committed note.
+    pub routing_fingerprint: Option<u64>,
     /// Fingerprint (cheap hash of the engine snapshot) of the last graph actually
     /// published to the audio thread. `None` until the first publish. Used to skip
     /// a redundant route-graph rebuild / `load_project` when the graph is unchanged
@@ -259,6 +268,7 @@ impl Default for AudioBridgeState {
             route_graph_in_flight_version: 0,
             route_graph_in_flight_child_channels: 0,
             route_graph_in_flight_master_routes: 0,
+            routing_fingerprint: None,
             graph_fingerprint: None,
             engine_sync_count: 0,
             audio_load_project_count: 0,
@@ -290,6 +300,38 @@ pub(crate) fn graph_fingerprint_of(signature: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     signature.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Longest a burst of edits may coalesce before the engine is re-published.
+///
+/// A scrub, a velocity drag, or a run of drawn notes emits dozens of commits a
+/// second, and each one would otherwise cost a full-project snapshot plus a
+/// JSON serialize of every note in the project, on the UI thread.
+const UI_GESTURE_SYNC_INTERVAL: Duration = Duration::from_millis(75);
+
+/// Should this request build a snapshot now, or ride the open window?
+///
+/// Leading-edge on purpose: an isolated edit — the common case — publishes on
+/// the spot, and only the second and later edits inside one window wait. The
+/// caller leaves the graph dirty either way, so the 60 Hz engine poll publishes
+/// the burst's final state as soon as the window closes; nothing is dropped.
+///
+/// `force` skips both gates and is for the paths that must publish an unchanged
+/// graph (a device change, a retry after a failed load), not for edit volume.
+pub(crate) fn sync_should_build_now(
+    force: bool,
+    dirty: bool,
+    since_last_snapshot: Option<Duration>,
+) -> bool {
+    if force {
+        return true;
+    }
+    // Nothing to publish. Dirty is cleared the moment a sync commits, so a
+    // quiescent graph never reaches the (locking) snapshot build.
+    if !dirty {
+        return false;
+    }
+    since_last_snapshot.is_none_or(|elapsed| elapsed >= UI_GESTURE_SYNC_INTERVAL)
 }
 
 impl StudioLayout {
@@ -397,9 +439,11 @@ impl StudioLayout {
                     velocity,
                     ..
                 } => {
-                    eprintln!(
-                        "[midi-preview-ui] note_on track={track_id} pitch={pitch} velocity={velocity} source=piano_key"
-                    );
+                    if crate::forensic_trace::preview_perf_trace_enabled() {
+                        eprintln!(
+                            "[midi-preview-ui] note_on track={track_id} pitch={pitch} velocity={velocity} source=piano_key"
+                        );
+                    }
                     engine.plugin_preview_note_on(
                         track_id.clone(),
                         instance_id.clone(),
@@ -411,9 +455,11 @@ impl StudioLayout {
                 components::piano_roll::UiMidiPreviewCommand::NoteOff {
                     channel, pitch, ..
                 } => {
-                    eprintln!(
-                        "[midi-preview-ui] note_off track={track_id} pitch={pitch} source=piano_key"
-                    );
+                    if crate::forensic_trace::preview_perf_trace_enabled() {
+                        eprintln!(
+                            "[midi-preview-ui] note_off track={track_id} pitch={pitch} source=piano_key"
+                        );
+                    }
                     engine.plugin_preview_note_off(
                         track_id.clone(),
                         instance_id.clone(),
@@ -453,9 +499,11 @@ impl StudioLayout {
                             velocity,
                             ..
                         } => {
-                            eprintln!(
-                                "[midi-preview-ui] note_on source=piano_roll pitch={pitch} velocity={velocity} instance={instance_id} (IPC fallback — DSP bridge pending)"
-                            );
+                            if crate::forensic_trace::preview_perf_trace_enabled() {
+                                eprintln!(
+                                    "[midi-preview-ui] note_on source=piano_roll pitch={pitch} velocity={velocity} instance={instance_id} (IPC fallback — DSP bridge pending)"
+                                );
+                            }
                             bridge.preview_note_on(instance_id.clone(), channel, pitch, velocity)
                         }
                         components::piano_roll::UiMidiPreviewCommand::NoteOff {
@@ -482,7 +530,13 @@ impl StudioLayout {
             eprintln!("[PopoutMidiEditor] engine_command_bus_connected=false");
             return;
         };
-        eprintln!("[PopoutMidiEditor] engine_command_bus_connected=true");
+        // Per-note preview dispatch: a piano-roll click auditions a note, so
+        // these lines are charged per click and were unconditional. The trace is
+        // the same one `preview_perf_trace_enabled` already gates.
+        let preview_trace = crate::forensic_trace::preview_perf_trace_enabled();
+        if preview_trace {
+            eprintln!("[PopoutMidiEditor] engine_command_bus_connected=true");
+        }
         let result = match command {
             components::piano_roll::UiMidiPreviewCommand::NoteOn {
                 channel,
@@ -490,24 +544,30 @@ impl StudioLayout {
                 velocity,
                 ..
             } => {
-                eprintln!(
-                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOn -> engine",
-                    track_id
-                );
+                if preview_trace {
+                    eprintln!(
+                        "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOn -> engine",
+                        track_id
+                    );
+                }
                 engine.midi_preview_note_on(track_id, channel, pitch, velocity)
             }
             components::piano_roll::UiMidiPreviewCommand::NoteOff { channel, pitch, .. } => {
-                eprintln!(
-                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOff -> engine",
-                    track_id
-                );
+                if preview_trace {
+                    eprintln!(
+                        "[PopoutMidiEditor] active_track_id={} dispatch PreviewNoteOff -> engine",
+                        track_id
+                    );
+                }
                 engine.midi_preview_note_off(track_id, channel, pitch)
             }
             components::piano_roll::UiMidiPreviewCommand::AllNotesOff { .. } => {
-                eprintln!(
-                    "[PopoutMidiEditor] active_track_id={} dispatch PreviewAllNotesOff -> engine",
-                    track_id
-                );
+                if preview_trace {
+                    eprintln!(
+                        "[PopoutMidiEditor] active_track_id={} dispatch PreviewAllNotesOff -> engine",
+                        track_id
+                    );
+                }
                 engine.midi_preview_all_notes_off(track_id)
             }
             components::piano_roll::UiMidiPreviewCommand::MidiPanic { .. } => {
@@ -1177,6 +1237,11 @@ impl StudioLayout {
         force: bool,
         reason: &'static str,
     ) {
+        // Every committed MIDI note edit forces one of these, on the UI thread,
+        // between the click and the frame that draws the note. Scoped so that
+        // cost lands under its own name in the perf report instead of inside
+        // whichever entity happened to be updating.
+        let _scope = crate::perf::PerfScope::enter("EngineProjectSync");
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
@@ -1189,26 +1254,16 @@ impl StudioLayout {
         crate::perf::count("sync_request_count", self.audio_bridge.sync_request_count);
         self.audio_bridge.last_sync_reason = reason;
 
-        // Cheap gate: nothing to publish unless forced or the graph is dirty. Dirty
-        // is cleared the moment a sync is committed below, so a quiescent graph
-        // never reaches the (locking) snapshot build — this keeps the per-frame
-        // `engine_dirty_poll` from rebuilding a snapshot every tick while a sync is
-        // in flight.
-        if !force && !self.audio_bridge.project_dirty && !self.audio_bridge.media_dirty {
-            return;
-        }
-
-        // A scrub can emit dozens of UI updates per second. Building a full
-        // serialized engine snapshot for each one blocks the UI and provides no
-        // audible benefit; retain dirty state and let the poll publish the most
-        // recent value on the next short control-rate slot.
-        const UI_GESTURE_SYNC_INTERVAL: Duration = Duration::from_millis(75);
-        if !force
-            && self
-                .audio_bridge
+        // Cheap gate plus the burst window; see `sync_should_build_now`. Both
+        // leave `project_dirty` / `media_dirty` set, so the 60 Hz engine poll
+        // publishes the last state of a burst once the window closes.
+        if !sync_should_build_now(
+            force,
+            self.audio_bridge.project_dirty || self.audio_bridge.media_dirty,
+            self.audio_bridge
                 .last_sync_snapshot_at
-                .is_some_and(|last| last.elapsed() < UI_GESTURE_SYNC_INTERVAL)
-        {
+                .map(|last| last.elapsed()),
+        ) {
             return;
         }
         self.audio_bridge.last_sync_snapshot_at = Some(Instant::now());
@@ -1227,14 +1282,16 @@ impl StudioLayout {
             let settings = self.settings.read(cx);
             settings.current.hardware.audio.device_out.clone()
         };
-        eprintln!(
-            "[AudioSettings] selected input device = {:?}",
-            preferred_input_device
-        );
-        eprintln!(
-            "[AudioSettings] selected output device = {:?}",
-            preferred_output_device
-        );
+        if crate::perf::engine_sync_debug_enabled() {
+            eprintln!(
+                "[AudioSettings] selected input device = {:?}",
+                preferred_input_device
+            );
+            eprintln!(
+                "[AudioSettings] selected output device = {:?}",
+                preferred_output_device
+            );
+        }
         let snapshot = {
             let timeline = self.timeline.read(cx);
             build_engine_project_snapshot(
@@ -1251,6 +1308,14 @@ impl StudioLayout {
         );
         let signature = serde_json::to_string(&snapshot).unwrap_or_default();
         let fingerprint = graph_fingerprint_of(&signature);
+        // A second, narrower fingerprint over the graph-shaped fields only. It
+        // costs another serialize, but of the tracks alone — no clips, no notes
+        // — and it buys the difference between "the project changed" and "the
+        // routing changed", which are not the same question and had one answer.
+        let routing_fingerprint = graph_fingerprint_of(
+            &serde_json::to_string(&(&snapshot.tracks, &snapshot.routing)).unwrap_or_default(),
+        );
+        let routing_changed = self.audio_bridge.routing_fingerprint != Some(routing_fingerprint);
 
         // Single-flight coalescing. A sync is already running; fold this request
         // into at most one pending sync rather than starting a second. Only a
@@ -1324,16 +1389,19 @@ impl StudioLayout {
         self.audio_bridge.sync_in_flight = true;
         self.audio_bridge.engine_sync_count = self.audio_bridge.engine_sync_count.saturating_add(1);
         crate::perf::count("engine_sync_count", self.audio_bridge.engine_sync_count);
-        self.audio_bridge.route_graph_version =
-            self.audio_bridge.route_graph_version.saturating_add(1);
-        self.audio_bridge.route_graph_rebuild_count = self
-            .audio_bridge
-            .route_graph_rebuild_count
-            .saturating_add(1);
-        crate::perf::count(
-            "route_graph_rebuild_count",
-            self.audio_bridge.route_graph_rebuild_count,
-        );
+        self.audio_bridge.routing_fingerprint = Some(routing_fingerprint);
+        if routing_changed {
+            self.audio_bridge.route_graph_version =
+                self.audio_bridge.route_graph_version.saturating_add(1);
+            self.audio_bridge.route_graph_rebuild_count = self
+                .audio_bridge
+                .route_graph_rebuild_count
+                .saturating_add(1);
+            crate::perf::count(
+                "route_graph_rebuild_count",
+                self.audio_bridge.route_graph_rebuild_count,
+            );
+        }
         let graph_version_after = self.audio_bridge.route_graph_version;
         let num_plugin_child_channels = snapshot
             .tracks
@@ -1353,11 +1421,15 @@ impl StudioLayout {
         // once, now — this is what makes the tree appear on first Studio open: the
         // handoff built the cache before the real graph was ready, and nothing else
         // re-triggered it. Meter/fader updates don't reach here (graph unchanged →
-        // deduped above), so this does not rebuild the tree on transient updates.
-        self.refresh_mixer_tree_sidebar_entity(cx);
-        eprintln!(
-            "[ROUTE GRAPH REBUILD]\nreason={reason}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nnum_plugin_child_channels={num_plugin_child_channels}\nnum_routes_to_master={num_routes_to_master}\npublished_to_audio_thread=false"
-        );
+        // deduped above), and a content-only sync no longer reaches it either.
+        if routing_changed {
+            self.refresh_mixer_tree_sidebar_entity(cx);
+        }
+        if routing_changed && crate::perf::engine_sync_debug_enabled() {
+            eprintln!(
+                "[ROUTE GRAPH REBUILD]\nreason={reason}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nnum_plugin_child_channels={num_plugin_child_channels}\nnum_routes_to_master={num_routes_to_master}\npublished_to_audio_thread=false"
+            );
+        }
         self.start_background_task(
             "native-sync",
             crate::components::BackgroundTaskKind::NativeSync,
@@ -3522,5 +3594,133 @@ mod transport_repaint_tests {
         };
         assert_eq!(at(4.01), at(4.99), "same beat, no shell repaint");
         assert_ne!(at(4.99), at(5.01), "beat boundary does repaint");
+    }
+}
+
+#[cfg(test)]
+mod routing_fingerprint_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::TimelineState;
+
+    /// The two fingerprints the sync compares: the whole snapshot, and the
+    /// routing half that `route_graph_version` is supposed to track.
+    fn fingerprints(state: &TimelineState) -> (u64, u64) {
+        let snapshot = build_engine_project_snapshot(state, 48_000, None, None);
+        let full = graph_fingerprint_of(&serde_json::to_string(&snapshot).unwrap_or_default());
+        let routing = graph_fingerprint_of(
+            &serde_json::to_string(&(&snapshot.tracks, &snapshot.routing)).unwrap_or_default(),
+        );
+        (full, routing)
+    }
+
+    /// The whole point: writing a note changes the project the engine must load,
+    /// but cannot change the graph — so the mixer tree's cache generation must
+    /// not move, and the sidebar must not rebuild.
+    #[test]
+    fn writing_a_note_changes_the_project_but_not_the_routing() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_midi_track();
+        let clip = state.create_midi_clip(&track, 0.0, 8.0).expect("midi clip");
+        let (full_before, routing_before) = fingerprints(&state);
+
+        state
+            .add_midi_note(&clip, 60, 0.0, 1.0, 100)
+            .expect("note added");
+        let (full_after, routing_after) = fingerprints(&state);
+
+        assert_ne!(
+            full_before, full_after,
+            "the engine still has to be told about the note"
+        );
+        assert_eq!(
+            routing_before, routing_after,
+            "a note is not a routing change"
+        );
+    }
+
+    /// A real graph change still has to move the routing fingerprint, or the
+    /// mixer tree would keep a stale cache forever.
+    #[test]
+    fn adding_a_track_changes_the_routing() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let _ = state.create_midi_track();
+        let (_, routing_before) = fingerprints(&state);
+
+        let _ = state.create_audio_track();
+        let (_, routing_after) = fingerprints(&state);
+
+        assert_ne!(routing_before, routing_after);
+    }
+
+    /// Mute is carried in the track snapshot, so it is a routing change and the
+    /// mixer strip that draws it has to see the new generation.
+    #[test]
+    fn muting_a_track_changes_the_routing() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        let (_, routing_before) = fingerprints(&state);
+
+        assert!(state.set_track_mute(&track, true));
+        let (_, routing_after) = fingerprints(&state);
+
+        assert_ne!(routing_before, routing_after);
+    }
+}
+
+#[cfg(test)]
+mod sync_gate_tests {
+    use super::*;
+
+    /// The common case: one edit, nothing recent, publish now. This is what
+    /// makes the coalescing window safe to apply to MIDI edits at all — a note
+    /// written on its own still reaches the scheduler on the spot.
+    #[test]
+    fn an_isolated_edit_publishes_immediately() {
+        assert!(sync_should_build_now(false, true, None));
+        assert!(sync_should_build_now(
+            false,
+            true,
+            Some(UI_GESTURE_SYNC_INTERVAL)
+        ));
+        assert!(sync_should_build_now(
+            false,
+            true,
+            Some(UI_GESTURE_SYNC_INTERVAL * 2)
+        ));
+    }
+
+    /// A burst rides the open window. The caller keeps the graph dirty, so the
+    /// engine poll publishes the burst's last state once it closes.
+    #[test]
+    fn a_burst_rides_the_open_window() {
+        assert!(!sync_should_build_now(false, true, Some(Duration::ZERO)));
+        assert!(!sync_should_build_now(
+            false,
+            true,
+            Some(UI_GESTURE_SYNC_INTERVAL - Duration::from_millis(1))
+        ));
+    }
+
+    /// A quiescent graph must never reach the snapshot build, or the 60 Hz poll
+    /// would rebuild the whole project every tick.
+    #[test]
+    fn a_clean_graph_is_never_rebuilt() {
+        assert!(!sync_should_build_now(false, false, None));
+        assert!(!sync_should_build_now(
+            false,
+            false,
+            Some(UI_GESTURE_SYNC_INTERVAL * 10)
+        ));
+    }
+
+    /// Force is for publishing an unchanged graph (device change, retry), so it
+    /// has to beat both gates.
+    #[test]
+    fn force_beats_both_gates() {
+        assert!(sync_should_build_now(true, false, Some(Duration::ZERO)));
+        assert!(sync_should_build_now(true, true, Some(Duration::ZERO)));
     }
 }

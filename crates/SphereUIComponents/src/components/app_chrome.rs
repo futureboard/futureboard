@@ -41,7 +41,7 @@ pub const BPM_MAX: f32 = 999.0;
 /// Bounded rather than content-sized: a long project name must truncate instead
 /// of pushing the chip off centre, and the dropdown anchor is derived from this
 /// width, so the two have to agree.
-const PROJECT_CHIP_MAX_WIDTH: f32 = 280.0;
+pub(super) const PROJECT_CHIP_MAX_WIDTH: f32 = 280.0;
 
 static BPM_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -132,9 +132,13 @@ pub struct ProjectChromeState {
 pub struct PanelChromeState {
     pub browser_visible: bool,
     pub inspector_visible: bool,
-    pub mixer_visible: bool,
+    /// The bottom dock, whichever tab it holds — not "the Mixer is on screen".
+    /// The button carries the `panel-bottom` glyph and sits beside the browser
+    /// and inspector toggles, so it is read as the third dock toggle; scoping
+    /// it to the Mixer left the Editor tab with no toggle at all.
+    pub bottom_panel_visible: bool,
     pub on_toggle_browser: ChromeActionCb,
-    pub on_toggle_mixer: ChromeActionCb,
+    pub on_toggle_bottom_panel: ChromeActionCb,
     pub on_toggle_inspector: ChromeActionCb,
 }
 
@@ -1105,7 +1109,7 @@ fn panel_toggle_button(
 
 fn panel_toggles(state: PanelChromeState, i18n: I18n) -> impl IntoElement {
     let on_browser = state.on_toggle_browser.clone();
-    let on_mixer = state.on_toggle_mixer.clone();
+    let on_bottom_panel = state.on_toggle_bottom_panel.clone();
     let on_inspector = state.on_toggle_inspector.clone();
     div()
         .flex()
@@ -1120,11 +1124,11 @@ fn panel_toggles(state: PanelChromeState, i18n: I18n) -> impl IntoElement {
             on_browser,
         ))
         .child(panel_toggle_button(
-            "panel-mixer-toggle",
+            "panel-bottom-toggle",
             assets::ICON_PANEL_BOTTOM_PATH,
-            i18n.tr("panel.mixer"),
-            state.mixer_visible,
-            on_mixer,
+            i18n.tr("panel.bottom"),
+            state.bottom_panel_visible,
+            on_bottom_panel,
         ))
         .child(panel_toggle_button(
             "panel-inspector-toggle",
