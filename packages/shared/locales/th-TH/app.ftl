@@ -358,6 +358,7 @@ menu.midi-transpose_down = Transpose ลง
 menu.midi-transpose_octave_down = Transpose ลง 1 Octave
 menu.midi-transpose_octave_up = Transpose ขึ้น 1 Octave
 menu.midi-transpose_up = Transpose ขึ้น
+menu.more = ดูเพิ่มเติม
 menu.project = โปรเจกต์
 menu.project-add_audio_track = เพิ่มแทร็กเสียง
 menu.project-add_bus_track = เพิ่มแทร็กบัส
@@ -491,6 +492,7 @@ mixer.track-type.video = VID
 panel.browser = เบราว์เซอร์
 panel.inspector = ตรวจสอบ
 panel.mixer = มิกเซอร์
+panel.bottom = แผงล่าง
 
 ## Plugins
 
