@@ -314,7 +314,11 @@ impl Render for Timeline {
             cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
                 this.state.set_track_volume(track_id, *volume);
                 this.state.clear_track_volume_preview(track_id);
-                this.mark_project_changed(cx);
+                // Double-click reset to 0 dB is the same live control edit a drag
+                // is — the value goes down the realtime path on the next line, so
+                // the engine graph must not be rebuilt for it. `mark_project_changed`
+                // here made a single reset click cost a whole `load_project`.
+                this.mark_control_state_changed(cx);
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(track_id.clone(), "volume".to_string(), *volume);
                 }
@@ -349,7 +353,9 @@ impl Render for Timeline {
                         cx,
                     );
                 } else {
-                    this.mark_project_changed(cx);
+                    // Gesture that ended where it began: still a live control
+                    // edit, never an engine-graph change. See `on_volume_change`.
+                    this.mark_control_state_changed(cx);
                 }
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(track_id.clone(), "volume".to_string(), next);

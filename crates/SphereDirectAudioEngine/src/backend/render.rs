@@ -894,7 +894,18 @@ pub fn fill_output_f32(
         block_frames,
         shared.sample_rate.load(Ordering::Relaxed),
     );
-    if elapsed_us >= 5_000 {
+    // Classify against *this block's* deadline, not a fixed microsecond count.
+    // A flat 5 ms / 10 ms pair says the same thing about a 5.3 ms block (buffer
+    // 256, a near-miss) and a 21 ms one (buffer 1024, half idle), so the line
+    // could not be read without knowing the buffer size that produced it.
+    // `record_output_callback_timing` just published the real deadline; reuse it.
+    let deadline_us = shared.callback_deadline_us.load(Ordering::Relaxed);
+    let warn_us = if deadline_us > 0 {
+        deadline_us / 2
+    } else {
+        5_000
+    };
+    if elapsed_us >= warn_us {
         let cb = shared.output_cb_count.load(Ordering::Relaxed);
         let last = SLOW_CALLBACK_LAST_LOG.load(Ordering::Relaxed);
         if cb.wrapping_sub(last) > 200 {
@@ -902,13 +913,20 @@ pub fn fill_output_f32(
             let state = crate::engine::AudioEngineState::from_u8(
                 shared.engine_state.load(Ordering::Relaxed),
             );
-            let severity = if elapsed_us >= 10_000 {
+            // `error` means the block genuinely missed its deadline (the device
+            // starves); `warning` means it is over halfway there.
+            let severity = if deadline_us > 0 && elapsed_us >= deadline_us {
                 "error"
             } else {
                 "warning"
             };
+            let load_pct = if deadline_us > 0 {
+                (elapsed_us as u64 * 100 / deadline_us as u64) as u32
+            } else {
+                0
+            };
             eprintln!(
-                "[AudioCallback] slow block severity={severity} duration_us={elapsed_us} state={} frames={frames}",
+                "[AudioCallback] slow block severity={severity} duration_us={elapsed_us} deadline_us={deadline_us} load={load_pct}% state={} frames={frames}",
                 state.as_str()
             );
         }

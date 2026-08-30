@@ -478,19 +478,48 @@ fn log_track_insert_chain(track_id: &str, inserts: &[EngineInsertSnapshot]) {
     );
 }
 
+/// Whether `track_type` can host an instrument at all.
+///
+/// Only an Instrument or MIDI track carries note events. Everything else —
+/// audio, bus, return, group, master, video — carries audio and nothing but.
+fn track_type_hosts_instrument(track_type: TrackType) -> bool {
+    matches!(track_type, TrackType::Instrument | TrackType::Midi)
+}
+
+/// `params["role"]` for a bridged insert, which the engine turns into
+/// `RuntimeInsert::bridge_is_effect`.
+///
+/// The role is not cosmetic — it selects two different bridge behaviours in
+/// `engine::render::apply_external_bridge_insert_block`:
+///
+/// * `"effect"` writes the track's dry block into the plugin's shared input
+///   region and **replaces** the block with the returned wet block;
+/// * `"instrument"` writes no input at all and **adds** the plugin's output on
+///   top of the dry signal.
+///
+/// So a plug-in that mis-declares itself on an audio track is not merely
+/// mislabelled: it is fed silence and its output is summed over the untouched
+/// dry signal, which is indistinguishable from the insert not being there. A
+/// VST3 whose `subCategories` lead with `Instrument` while it is in fact an EQ
+/// does exactly this, and the scanner has no better source than what the module
+/// declares about itself (`SpherePluginHost::registry::classify_kind`).
+///
+/// The track type is the authority the declaration is not: an audio/bus/return/
+/// master track has no note source, so an insert on one can only ever run as an
+/// effect regardless of what it claims. On a track that *can* host an instrument
+/// the declaration is trusted as before.
 fn bridge_insert_role(
     track_type: TrackType,
     slot_index: usize,
     plugin_is_instrument: Option<bool>,
 ) -> &'static str {
+    if !track_type_hosts_instrument(track_type) {
+        return "effect";
+    }
     match plugin_is_instrument {
         Some(true) => "instrument",
         Some(false) => "effect",
-        None if matches!(track_type, TrackType::Instrument | TrackType::Midi)
-            && slot_index == 0 =>
-        {
-            "instrument"
-        }
+        None if slot_index == 0 => "instrument",
         None => "effect",
     }
 }
@@ -2312,6 +2341,41 @@ mod tests {
             Some("effect"),
             "registry role must override the legacy slot-zero heuristic"
         );
+    }
+
+    /// A plug-in that declares itself an instrument still runs as an effect on a
+    /// track that carries audio rather than notes.
+    ///
+    /// The role picks the bridge's processing shape, not a label: `"instrument"`
+    /// makes the engine skip `write_input` and *add* the plugin's output to the
+    /// dry block instead of replacing it, so a mis-declaring VST3 (an EQ whose
+    /// `subCategories` lead with `Instrument`) inserted on an audio track was fed
+    /// silence and left the dry signal untouched — an insert that did nothing.
+    #[test]
+    fn instrument_declaration_is_ignored_on_tracks_that_carry_audio() {
+        for track_type in [
+            TrackType::Audio,
+            TrackType::Bus,
+            TrackType::Return,
+            TrackType::Group,
+            TrackType::Master,
+        ] {
+            assert_eq!(
+                bridge_insert_role(track_type, 0, Some(true)),
+                "effect",
+                "{track_type:?} has no note source, so slot 0 cannot be an instrument"
+            );
+            assert_eq!(bridge_insert_role(track_type, 2, Some(true)), "effect");
+            assert_eq!(bridge_insert_role(track_type, 0, None), "effect");
+        }
+        // Tracks that do carry notes keep trusting the declaration.
+        for track_type in [TrackType::Instrument, TrackType::Midi] {
+            assert_eq!(bridge_insert_role(track_type, 0, Some(true)), "instrument");
+            assert_eq!(bridge_insert_role(track_type, 3, Some(true)), "instrument");
+            assert_eq!(bridge_insert_role(track_type, 0, Some(false)), "effect");
+            assert_eq!(bridge_insert_role(track_type, 0, None), "instrument");
+            assert_eq!(bridge_insert_role(track_type, 1, None), "effect");
+        }
     }
 
     #[test]

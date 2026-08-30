@@ -2395,9 +2395,32 @@ impl EngineInner {
 
         for t in &snapshot.tracks {
             let track_clips = runtime.clips.iter().filter(|c| c.track_id == t.id).count();
+            // Tag 0 is TrackVolume (see `EngineAutomationTargetSnapshot`). An
+            // enabled lane with points makes the runtime ignore `volume`
+            // entirely (`engine/render.rs`, `automation.volume.unwrap_or`), so
+            // a fader that appears to do nothing has to be explainable from
+            // this line rather than from reading the render pass.
+            //
+            // The point count is part of the report, not a filter on it. This
+            // read `enabled && !points.is_empty()` and so printed `off` for the
+            // enabled-but-empty lane — which was the one case that silently
+            // overrode the fader, until `RuntimeAutomationLane::evaluate_normalized`
+            // learned to skip empty lanes. A diagnostic that hides the state it
+            // exists to expose is worse than none.
+            let volume_lane = t
+                .automation_lanes
+                .iter()
+                .find(|lane| lane.target.tag == 0 && lane.enabled);
+            let volume_automation = match volume_lane {
+                Some(lane) if !lane.points.is_empty() => {
+                    format!("on(fader ignored, points={})", lane.points.len())
+                }
+                Some(_) => "enabled-but-empty(fader wins)".to_string(),
+                None => "off".to_string(),
+            };
             eprintln!(
-                "[SphereAudio] track '{}' type={} clips={} volume={:.2} pan={:.2} muted={} solo={}",
-                t.id, t.track_type, track_clips, t.volume, t.pan, t.muted, t.solo
+                "[SphereAudio] track '{}' type={} clips={} volume={:.2} pan={:.2} muted={} solo={} volume_automation={}",
+                t.id, t.track_type, track_clips, t.volume, t.pan, t.muted, t.solo, volume_automation
             );
         }
         // Initialise the graveyard drop-thread on this (control) thread so the

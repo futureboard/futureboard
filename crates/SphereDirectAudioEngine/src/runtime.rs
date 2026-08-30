@@ -1040,8 +1040,28 @@ impl RuntimeAutomationLane {
     }
 
     #[inline]
+    /// The lane's value at `beat`, or `None` when the lane has nothing to say.
+    ///
+    /// An **empty** lane says nothing. It used to answer with
+    /// [`RuntimeAutomationTarget::default_value`], and for a track lane that
+    /// answer *wins*: `apply_fader` reads
+    /// `automation.volume.unwrap_or(track.volume)`, so an enabled Track Volume
+    /// lane carrying no points pinned the channel at its default 0 dB and threw
+    /// the fader away. `SetTrackVolume` still landed — `update_track_volume`
+    /// reported `applied=true` with the right linear gain — it was simply never
+    /// read again, which is why the fader moved, the meter followed the lane and
+    /// nothing got quieter. Pan and Mute lanes had the same hole: an empty lane
+    /// forced centre and un-muted.
+    ///
+    /// [`build_plugin_param_bindings`] already skipped empty lanes for exactly
+    /// this reason ("a freshly added empty lane never forces the parameter to its
+    /// default value"); the track lanes now agree. A lane with points still
+    /// overrides the fader, which is what Read mode is supposed to do.
     pub fn evaluate_normalized(&self, beat: f64) -> Option<f32> {
-        if !self.enabled || matches!(self.target, RuntimeAutomationTarget::Unresolved) {
+        if !self.enabled
+            || self.points.is_empty()
+            || matches!(self.target, RuntimeAutomationTarget::Unresolved)
+        {
             return None;
         }
         Some(evaluate_automation_points(
@@ -5333,6 +5353,142 @@ mod midi_tests {
                 }
             }
         }
+    }
+
+    /// An enabled lane with no points must not speak for the channel.
+    ///
+    /// `automation_values_at_beat` feeds `apply_fader`, which prefers the lane
+    /// over `RuntimeTrack::volume`. An empty Track Volume lane answering with its
+    /// 0 dB default therefore discarded every `SetTrackVolume` the fader sent —
+    /// the command applied, the value was simply never read. Pan and Mute lanes
+    /// pinned centre and un-muted the same way.
+    #[test]
+    fn an_empty_track_lane_leaves_the_fader_in_charge() {
+        let lane = |target: RuntimeAutomationTarget| RuntimeAutomationLane {
+            id: "lane".into(),
+            name: "Lane".into(),
+            target,
+            enabled: true,
+            points: Vec::new(),
+        };
+        for target in [
+            RuntimeAutomationTarget::TrackVolume,
+            RuntimeAutomationTarget::TrackPan,
+            RuntimeAutomationTarget::TrackMute,
+        ] {
+            assert!(
+                lane(target.clone()).evaluate_normalized(0.0).is_none(),
+                "an empty {target:?} lane must not produce a value"
+            );
+        }
+
+        // Through the real snapshot → runtime path, on the track the fader talks
+        // to. `automation_values_at_beat` is what `apply_fader` consults.
+        let mut track = automation_track_snapshot(vec![
+            empty_lane_snapshot("vol", 0),
+            empty_lane_snapshot("pan", 1),
+            empty_lane_snapshot("mute", 2),
+        ]);
+        track.volume = 0.2818; // -11 dB, as sent by SetTrackVolume
+        let runtime = automation_runtime(track);
+        let values = runtime.tracks[0].automation_values_at_beat(0.0);
+        assert_eq!(values.volume, None, "the fader must survive an empty lane");
+        assert_eq!(values.pan, None);
+        assert_eq!(values.muted, None);
+        assert!((runtime.tracks[0].volume - 0.2818).abs() < 1.0e-6);
+    }
+
+    /// Read mode is unchanged: a lane that actually carries points still drives
+    /// the channel and still overrides the fader.
+    #[test]
+    fn a_lane_with_points_still_overrides_the_fader() {
+        let mut lane = empty_lane_snapshot("vol", 0);
+        lane.points = vec![crate::types::EngineAutomationPointSnapshot {
+            beat: 0.0,
+            value: volume_db_to_norm(-11.0),
+            curve: 0,
+            tension: 0.0,
+        }];
+        let mut track = automation_track_snapshot(vec![lane]);
+        track.volume = 1.0;
+        let runtime = automation_runtime(track);
+        let volume = runtime.tracks[0]
+            .automation_values_at_beat(0.0)
+            .volume
+            .expect("a lane with points drives the channel");
+        let expected = 10.0f32.powf(-11.0 / 20.0);
+        assert!(
+            (volume - expected).abs() < 1.0e-3,
+            "expected {expected:.4} from the lane, got {volume:.4}"
+        );
+    }
+
+    fn empty_lane_snapshot(id: &str, tag: u8) -> EngineAutomationLaneSnapshot {
+        EngineAutomationLaneSnapshot {
+            id: id.to_string(),
+            name: id.to_string(),
+            target: crate::types::EngineAutomationTargetSnapshot {
+                tag,
+                ..Default::default()
+            },
+            enabled: true,
+            points: Vec::new(),
+        }
+    }
+
+    fn automation_track_snapshot(
+        automation_lanes: Vec<EngineAutomationLaneSnapshot>,
+    ) -> crate::types::EngineTrackSnapshot {
+        crate::types::EngineTrackSnapshot {
+            id: "track-1".to_string(),
+            track_type: "audio".to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: false,
+            input_source: Default::default(),
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes,
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
+            solfege_engine: None,
+        }
+    }
+
+    fn automation_runtime(track: crate::types::EngineTrackSnapshot) -> RuntimeProject {
+        let snapshot = EngineProjectSnapshot {
+            project_id: "automation-lane".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks: vec![track],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: crate::types::EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            },
+        };
+        RuntimeProject::build(&snapshot, 48_000, &mut HashMap::new(), None, true)
+            .expect("automation runtime")
     }
 
     #[test]

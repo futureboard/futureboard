@@ -1071,7 +1071,9 @@ impl StudioLayout {
                 eprintln!("[fader] preview target=master norm={v:.4}");
             }
             StudioLayout::defer_update(&owner_master_preview, cx, |this, cx| {
-                this.push_mixer_snapshot_to_window(cx);
+                // Throttled for the same reason as the track fader above; the
+                // commit handler pushes unthrottled so the released value lands.
+                this.push_mixer_meter_snapshot_throttled(cx);
                 let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
             });
             if let Some(engine) = audio_engine_master_preview.as_ref() {
@@ -1228,16 +1230,46 @@ impl StudioLayout {
                 return;
             }
             crate::perf::count("fader_drag_preview_count", 1);
-            if crate::components::timeline::timeline_state::TimelineState::fader_debug_enabled() {
-                eprintln!("[fader] preview track={id} norm={v:.4}");
+            let fader_debug =
+                crate::components::timeline::timeline_state::TimelineState::fader_debug_enabled();
+            if fader_debug {
+                // The engine handle is captured when these callbacks are built.
+                // `engine=none` here means the mixer strip is wired to a studio
+                // that has no audio engine, and every fader move is silently
+                // dropped before it can reach `SetTrackVolume` — which looks
+                // exactly like the engine ignoring the fader.
+                eprintln!(
+                    "[fader] preview source=mixer track={id} norm={v:.4} linear={:.4} engine={}",
+                    volume_norm_to_linear(v),
+                    if audio_engine_volume_preview.is_some() {
+                        "some"
+                    } else {
+                        "none"
+                    }
+                );
             }
             StudioLayout::defer_update(&owner_preview, cx, |this, cx| {
-                this.push_mixer_snapshot_to_window(cx);
+                // Throttled: a fader drag is a per-pointer-sample stream, not a
+                // structural edit. The unthrottled push clones every `TrackState`
+                // (inserts, sends, automation lanes) and rebuilds the detached
+                // mixer's element tree once per mouse-move. The drag *commit*
+                // below still pushes unthrottled, so the final value always lands
+                // even if the last preview sample was dropped by the cap.
+                this.push_mixer_meter_snapshot_throttled(cx);
                 let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
             });
             if let Some(engine) = audio_engine_volume_preview.as_ref() {
                 crate::perf::count("mixer_fader_audio_control_update_count", 1);
-                let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
+                let result =
+                    engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
+                if let Err(error) = result {
+                    // Silent until now: the dispatch result was discarded, so a
+                    // rejected command (no stream open, unknown track) was
+                    // indistinguishable from one the engine applied.
+                    if fader_debug {
+                        eprintln!("[fader] preview source=mixer track={id} dispatch_error={error}");
+                    }
+                }
             }
         });
 

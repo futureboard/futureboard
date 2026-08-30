@@ -23,6 +23,18 @@ pub enum EditImpact {
     Midi,
     /// Persisted UI metadata; never invalidates the audio graph.
     Metadata,
+    /// Live channel-strip value (fader / pan) that the engine already applies
+    /// through the realtime `SetTrackVolume` / `SetTrackPan` command path.
+    ///
+    /// Persisted in the project file, but **not** an audio-graph change: routing
+    /// nodes, clips, inserts and plugin instances are all identical before and
+    /// after. Classifying it as [`Self::Project`] made every fader release
+    /// rebuild the whole engine project — a UI-thread snapshot build, two full
+    /// `serde_json` passes over the project for the sync fingerprint, then a
+    /// `load_project` that re-decoded clips, rebuilt the graph, re-registered
+    /// the plugin bridges and cycled the engine `Running → LoadingProject →
+    /// Running` under the playing transport. Mute/solo already took this route.
+    MixerControl,
     /// Tempo map or fixed BPM — the engine needs a fresh `set_tempo_map`.
     TempoMap,
     /// Time-signature map — the engine needs a fresh meter map.
@@ -323,6 +335,9 @@ impl EditCommand {
             | EditCommand::SplitMidiNote { .. } => EditImpact::Midi,
             EditCommand::SetSongTextEvents { .. } => EditImpact::Metadata,
             EditCommand::SetGlobalLaneHeights { .. } => EditImpact::Metadata,
+            EditCommand::SetTrackVolume { .. } | EditCommand::SetTrackPan { .. } => {
+                EditImpact::MixerControl
+            }
             EditCommand::SetTempoState { .. } => EditImpact::TempoMap,
             EditCommand::SetTimeSignatureState { .. } => EditImpact::TimeSignatureMap,
             _ => EditImpact::Project,
@@ -335,6 +350,21 @@ impl EditCommand {
 
     pub fn is_metadata_only(&self) -> bool {
         self.impact() == EditImpact::Metadata
+    }
+
+    /// `(track_id, engine param id)` for an [`EditImpact::MixerControl`] command.
+    ///
+    /// Every UI gesture that produces one of these already pushes the value down
+    /// the realtime control path itself; undo/redo do not, because they only
+    /// mutate `TimelineState`. Since these commands no longer dirty the engine
+    /// graph, undo/redo have to make that push instead of leaning on the next
+    /// project sync to carry the value across.
+    pub fn mixer_control_target(&self) -> Option<(&str, &'static str)> {
+        match self {
+            EditCommand::SetTrackVolume { track_id, .. } => Some((track_id.as_str(), "volume")),
+            EditCommand::SetTrackPan { track_id, .. } => Some((track_id.as_str(), "pan")),
+            _ => None,
+        }
     }
 
     pub fn label(&self) -> &'static str {
@@ -718,6 +748,87 @@ fn restore_clip_snapshot(state: &mut TimelineState, snapshot: &ClipSnapshot) {
         if !track.clips.iter().any(|c| c.id == snapshot.clip.id) {
             track.clips.push(snapshot.clip.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod mixer_control_impact_tests {
+    use super::*;
+
+    /// Fader and pan are live channel-strip values, not graph structure.
+    ///
+    /// [`EditImpact::Project`] routes to `mark_project_changed`, which dirties
+    /// the engine and makes the next poll build a full project snapshot, JSON-
+    /// serialize it twice for the sync fingerprint and run `load_project` —
+    /// rebuilding the graph, re-decoding clips and re-registering the plug-in
+    /// bridges under a playing transport, once per fader release. The value
+    /// itself already reached the audio thread through `SetTrackVolume` /
+    /// `SetTrackPan` before the command was ever recorded.
+    #[test]
+    fn fader_and_pan_do_not_dirty_the_audio_graph() {
+        let volume = EditCommand::SetTrackVolume {
+            track_id: "track-1".to_string(),
+            prev: 0.8,
+            next: 0.2,
+        };
+        let pan = EditCommand::SetTrackPan {
+            track_id: "track-1".to_string(),
+            prev: 0.0,
+            next: -0.5,
+        };
+        assert_eq!(volume.impact(), EditImpact::MixerControl);
+        assert_eq!(pan.impact(), EditImpact::MixerControl);
+        assert_eq!(volume.mixer_control_target(), Some(("track-1", "volume")));
+        assert_eq!(pan.mixer_control_target(), Some(("track-1", "pan")));
+    }
+
+    /// A structural edit must not be swept into the live-control path with them.
+    #[test]
+    fn structural_edits_still_report_project_impact() {
+        let heights = EditCommand::SetTrackHeights {
+            prev: Vec::new(),
+            next: Vec::new(),
+        };
+        assert_eq!(heights.impact(), EditImpact::Project);
+        assert_eq!(heights.mixer_control_target(), None);
+    }
+
+    /// Undo/redo push the restored value themselves now that the sync no longer
+    /// carries it, and they find the applied command on the opposite stack.
+    #[test]
+    fn history_exposes_the_command_undo_and_redo_just_applied() {
+        let mut state = TimelineState::default();
+        let track_id = "track-1".to_string();
+        let mut history = EditHistory::new(10);
+        let command = EditCommand::SetTrackVolume {
+            track_id: track_id.clone(),
+            prev: 0.8,
+            next: 0.2,
+        };
+        command.execute(&mut state);
+        history.push(command);
+
+        assert_eq!(
+            history.undo_with_impact(&mut state),
+            Some(EditImpact::MixerControl)
+        );
+        assert_eq!(
+            history
+                .last_undone()
+                .and_then(EditCommand::mixer_control_target),
+            Some((track_id.as_str(), "volume"))
+        );
+
+        assert_eq!(
+            history.redo_with_impact(&mut state),
+            Some(EditImpact::MixerControl)
+        );
+        assert_eq!(
+            history
+                .last_redone()
+                .and_then(EditCommand::mixer_control_target),
+            Some((track_id.as_str(), "volume"))
+        );
     }
 }
 
@@ -1418,6 +1529,20 @@ impl EditHistory {
 
     pub fn redo(&mut self, state: &mut TimelineState) -> bool {
         self.redo_with_impact(state).is_some()
+    }
+
+    /// The command [`Self::undo_with_impact`] just reverted — it now sits on top
+    /// of the redo stack. Borrowed rather than cloned: the caller only needs the
+    /// `(track_id, param)` of a [`EditImpact::MixerControl`] entry, and several
+    /// command variants carry whole clip/tempo snapshots.
+    pub fn last_undone(&self) -> Option<&EditCommand> {
+        self.redo_stack.back()
+    }
+
+    /// The command [`Self::redo_with_impact`] just re-applied — now on top of
+    /// the undo stack. Counterpart to [`Self::last_undone`].
+    pub fn last_redone(&self) -> Option<&EditCommand> {
+        self.undo_stack.back()
     }
 
     /// Extend the newest entry when it is a tempo entry with `label`, instead

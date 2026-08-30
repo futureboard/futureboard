@@ -78,6 +78,47 @@ fn pointer_x_to_norm(pointer_x: f32, bounds_x: f32, bounds_w: f32) -> f32 {
     rail_x / rail_w
 }
 
+/// How far the pointer may travel between press and release and still count as
+/// a click rather than a drag, in window pixels.
+const RESET_CLICK_SLOP_PX: f32 = 3.0;
+
+/// Whether a click should reset the fader to its default.
+///
+/// `click_count() >= 2` on its own is not enough. A drag that starts and ends on
+/// the fader also produces a click, and the platform counts two gestures begun
+/// near the same point within the double-click interval as one double-click — so
+/// **two fader drags in a row fired the reset**, snapping the channel back to
+/// 0 dB and discarding the level the user had just set. Repeatedly grabbing the
+/// same fader to audition a change is exactly that gesture, which is why the
+/// value would not stay down: the engine received the new gain and then received
+/// `1.0000` right behind it.
+///
+/// Requiring the pointer to have stayed put separates the two. A keyboard-driven
+/// click has no travel to measure and is always a real activation.
+fn is_reset_double_click(event: &gpui::ClickEvent) -> bool {
+    if event.click_count() < 2 {
+        return false;
+    }
+    match event {
+        gpui::ClickEvent::Mouse(mouse) => {
+            let dx = f32::from(mouse.up.position.x - mouse.down.position.x).abs();
+            let dy = f32::from(mouse.up.position.y - mouse.down.position.y).abs();
+            dx <= RESET_CLICK_SLOP_PX && dy <= RESET_CLICK_SLOP_PX
+        }
+        gpui::ClickEvent::Keyboard(_) => true,
+    }
+}
+
+/// `FUTUREBOARD_FADER_DEBUG=1` — trace the pointer-to-value mapping.
+///
+/// A fader that reports the rail maximum while the user drags it down is a
+/// mapping fault, not an audio fault, and the four numbers below are the whole
+/// mapping. Cached: this is read once per pointer sample during a drag.
+fn fader_map_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_FADER_DEBUG").is_some())
+}
+
 /// dB scale column — uses `h_full` so it stretches with the strip's flex_1
 /// fader slot. Labels are anchored via fractional `top` positions; a small
 /// negative `mt` centers each ~7px label vertically on its tick.
@@ -384,6 +425,11 @@ pub fn fader_with_drag_callbacks(
             let oy: f32 = bounds.origin.y.into();
             let oh: f32 = f32::from(bounds.size.height).max(FADER_THUMB_HEIGHT + 1.0);
             let new_value = pointer_y_to_norm(y, oy, oh);
+            if fader_map_debug_enabled() {
+                eprintln!(
+                    "[fader-map] v id={id_string} pointer_y={y:.1} bounds_y={oy:.1}                      bounds_h={oh:.1} norm={new_value:.4}"
+                );
+            }
             if let Some(preview) = on_drag_preview.as_ref() {
                 preview(&new_value, window, cx);
             }
@@ -401,7 +447,7 @@ pub fn fader_with_drag_callbacks(
         })
         .when_some(on_double_click_reset, |this, reset| {
             this.on_click(move |event, window, cx| {
-                if event.click_count() >= 2 {
+                if is_reset_double_click(event) {
                     reset(window, cx);
                 }
             })
@@ -453,6 +499,11 @@ pub fn horizontal_fader_with_drag_callbacks(
             let ox: f32 = bounds.origin.x.into();
             let ow: f32 = f32::from(bounds.size.width).max(HORIZONTAL_THUMB_W + 1.0);
             let new_value = pointer_x_to_norm(x, ox, ow);
+            if fader_map_debug_enabled() {
+                eprintln!(
+                    "[fader-map] h id={id_string} pointer_x={x:.1} bounds_x={ox:.1}                      bounds_w={ow:.1} norm={new_value:.4}"
+                );
+            }
             if let Some(preview) = on_drag_preview.as_ref() {
                 preview(&new_value, window, cx);
             }
@@ -470,7 +521,7 @@ pub fn horizontal_fader_with_drag_callbacks(
         })
         .when_some(on_double_click_reset, |this, reset| {
             this.on_click(move |event, window, cx| {
-                if event.click_count() >= 2 {
+                if is_reset_double_click(event) {
                     reset(window, cx);
                 }
             })
@@ -508,5 +559,52 @@ mod tests {
         assert!((pointer_x_to_norm(left, 0.0, w) - 0.0).abs() < 1.0e-6);
         assert!((pointer_x_to_norm(right, 0.0, w) - 1.0).abs() < 1.0e-6);
         assert!((pointer_x_to_norm(w / 2.0, 0.0, w) - 0.5).abs() < 1.0e-6);
+    }
+
+    fn mouse_click(
+        down: gpui::Point<gpui::Pixels>,
+        up: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) -> gpui::ClickEvent {
+        gpui::ClickEvent::Mouse(gpui::MouseClickEvent {
+            down: gpui::MouseDownEvent {
+                position: down,
+                ..Default::default()
+            },
+            up: gpui::MouseUpEvent {
+                position: up,
+                click_count,
+                ..Default::default()
+            },
+        })
+    }
+
+    /// The second of two quick drags on the same fader arrives with
+    /// `click_count == 2`, and used to fire the double-click reset — pushing the
+    /// channel back to 0 dB right after the drag had set it somewhere else.
+    #[test]
+    fn a_drag_never_counts_as_a_double_click_reset() {
+        let down = gpui::point(px(100.0), px(80.0));
+        let dragged_up = gpui::point(px(101.0), px(150.0));
+        assert!(
+            !is_reset_double_click(&mouse_click(down, dragged_up, 2)),
+            "a gesture that travelled 70px down the rail is a drag, not a reset"
+        );
+        assert!(!is_reset_double_click(&mouse_click(down, dragged_up, 1)));
+    }
+
+    /// A real double-click still resets: the pointer stays put between press and
+    /// release, give or take a pixel of hand tremor.
+    #[test]
+    fn a_stationary_double_click_still_resets() {
+        let down = gpui::point(px(100.0), px(80.0));
+        assert!(is_reset_double_click(&mouse_click(down, down, 2)));
+        assert!(is_reset_double_click(&mouse_click(
+            down,
+            gpui::point(px(101.0), px(82.0)),
+            2
+        )));
+        // One click is never a reset, however still the pointer was held.
+        assert!(!is_reset_double_click(&mouse_click(down, down, 1)));
     }
 }

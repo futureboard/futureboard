@@ -13,6 +13,19 @@ use super::*;
 use crate::monitor::{ListenMode, TapStage};
 use SphereAudioProcessor::StretchBackend;
 
+/// `FUTUREBOARD_FADER_DEBUG=1` — trace the gain [`apply_fader`] actually applies.
+///
+/// Shares its variable with the UI-side fader traces so one run covers the whole
+/// chain: the pointer→norm mapping, the norm→linear conversion, the dispatch
+/// into `update_track_param`, the `[DAUx] SetTrackVolume` drain, and this — the
+/// measured pre/post ratio on the block that reaches the device. "The fader
+/// moves and nothing gets quieter" is one of those five links, and reading the
+/// code cannot tell you which.
+fn fader_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_FADER_DEBUG").is_some())
+}
+
 #[inline]
 pub fn render_project_sample(
     runtime: &mut RuntimeProject,
@@ -353,6 +366,14 @@ fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64, smooth: bool)
     let (pan_l, pan_r) = pan_gains(pan);
     let target_l = volume * pan_l;
     let target_r = volume * pan_r;
+    // Measured, not asserted: `pre` is what the channel produced, `post` is what
+    // routing will sum. `automation_override=yes` is the case where `track.volume`
+    // is set correctly and ignored anyway, which looks identical from outside.
+    let fader_trace_pre = (fader_debug_enabled() && frames > 0).then(|| {
+        track.block_l[..frames]
+            .iter()
+            .fold(0.0f32, |peak, s| peak.max(s.abs()))
+    });
     if !smooth {
         // Offline export / tests: exact constant per-block gain (unchanged
         // behavior, deterministic bounce). Keep the smoother aligned with the
@@ -368,6 +389,7 @@ fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64, smooth: bool)
         }
         track.smoothed_gain_l = target_l;
         track.smoothed_gain_r = target_r;
+        log_fader_trace(track, frames, fader_trace_pre, volume, &automation);
         return;
     }
     // Realtime: ramp from the previously applied gain to the new target across
@@ -392,6 +414,55 @@ fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64, smooth: bool)
     }
     track.smoothed_gain_l = target_l;
     track.smoothed_gain_r = target_r;
+    log_fader_trace(track, frames, fader_trace_pre, volume, &automation);
+}
+
+/// Report what [`apply_fader`] measured. `FUTUREBOARD_FADER_DEBUG=1` only, and
+/// throttled — this writes to stderr from the audio callback, which is a
+/// diagnostic exception to the realtime rules, not a steady-state path.
+///
+/// Read it as: `applied` is the ratio the block actually moved by, `volume` is
+/// what the engine believes the fader is set to. They agree ⇒ the engine is
+/// doing its job and the fault is upstream of `SetTrackVolume`. They disagree ⇒
+/// the fault is here.
+#[inline]
+fn log_fader_trace(
+    track: &RuntimeTrack,
+    frames: usize,
+    pre_peak: Option<f32>,
+    volume: f32,
+    automation: &crate::runtime::RuntimeTrackAutomationValues,
+) {
+    let Some(pre) = pre_peak else {
+        return;
+    };
+    if pre <= 1.0e-6 {
+        return; // silent block — the ratio would be meaningless
+    }
+    static FADER_TRACE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if !FADER_TRACE_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
+        return;
+    }
+    let post = track.block_l[..frames]
+        .iter()
+        .fold(0.0f32, |peak, s| peak.max(s.abs()));
+    eprintln!(
+        "[fader-apply] track={} volume={:.4} pan={:.2} automation_override={} pre_peak={:.6} post_peak={:.6} applied={:.4}",
+        track.id,
+        volume,
+        track.pan,
+        if automation.volume.is_some() {
+            "yes(fader ignored)"
+        } else {
+            "no"
+        },
+        pre,
+        post,
+        post / pre
+    );
 }
 
 #[inline]
@@ -2730,6 +2801,38 @@ mod live_input_monitor_tests {
         let (muted_l, muted_r) = render_monitored_block(&mut runtime, FRAMES as u64);
         assert!(muted_l.abs() < 1.0e-6);
         assert!(muted_r.abs() < 1.0e-6);
+    }
+
+    /// The channel fader has to attenuate what actually leaves the engine, and
+    /// `SetTrackVolume` (which is all `update_track_volume` is) has to be what
+    /// moves it. Reported as "master works, the channel strip does not": the
+    /// master gain is an atomic applied to the interleaved output, while a track
+    /// fader travels the command queue into `RuntimeTrack::volume` and is applied
+    /// in `apply_fader`, so the two halves fail independently.
+    #[test]
+    fn track_fader_attenuates_the_rendered_block() {
+        let mut runtime = runtime();
+        // Exact per-block gain, no first-block ramp, so the ratio is strict.
+        runtime.fader_smoothing = false;
+
+        let (unity_l, unity_r) = render_monitored_block(&mut runtime, 0);
+        assert!(unity_l > 0.1, "test signal must be audible at unity");
+
+        // -11 dB, the level from the bug report.
+        let minus_11_db = 10.0f32.powf(-11.0 / 20.0);
+        assert!(
+            runtime.update_track_volume("audio-1", minus_11_db),
+            "the command must find the track by id"
+        );
+        let (faded_l, faded_r) = render_monitored_block(&mut runtime, FRAMES as u64);
+
+        let expected_l = unity_l * minus_11_db;
+        let expected_r = unity_r * minus_11_db;
+        assert!(
+            (faded_l - expected_l).abs() < 1.0e-4 && (faded_r - expected_r).abs() < 1.0e-4,
+            "fader must scale the output: unity=({unity_l:.6}, {unity_r:.6}) \
+             faded=({faded_l:.6}, {faded_r:.6}) expected=({expected_l:.6}, {expected_r:.6})"
+        );
     }
 
     #[test]

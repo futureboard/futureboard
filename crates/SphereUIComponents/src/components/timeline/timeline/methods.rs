@@ -316,6 +316,7 @@ impl Timeline {
             EditImpact::Project => self.mark_project_changed(cx),
             EditImpact::Midi => self.mark_midi_changed(cx),
             EditImpact::Metadata => self.mark_control_state_changed(cx),
+            EditImpact::MixerControl => self.mark_control_state_changed(cx),
             EditImpact::TempoMap => self.mark_tempo_map_changed(cx),
             EditImpact::TimeSignatureMap => self.mark_time_signature_map_changed(cx),
         }
@@ -480,8 +481,35 @@ impl Timeline {
         true
     }
 
+    /// Push the value a just-applied [`EditImpact::MixerControl`] command left in
+    /// `state` straight down the realtime control path.
+    ///
+    /// Fader/pan edits no longer dirty the engine graph, so nothing else would
+    /// carry an undo/redo of one to the audio thread — the UI would show the
+    /// restored fader while the engine kept playing at the other value.
+    fn push_mixer_control_to_engine(&self, cmd: Option<&EditCommand>) {
+        let Some((track_id, param_id)) = cmd.and_then(EditCommand::mixer_control_target) else {
+            return;
+        };
+        let Some(callback) = self.on_track_param_change.as_ref() else {
+            return;
+        };
+        let Some(track) = self.state.tracks.iter().find(|t| t.id == track_id) else {
+            return;
+        };
+        let value = match param_id {
+            "volume" => track.display_volume(),
+            "pan" => track.pan,
+            _ => return,
+        };
+        callback(track_id.to_string(), param_id.to_string(), value);
+    }
+
     pub fn undo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
         if let Some(impact) = self.edit_history.undo_with_impact(&mut self.state) {
+            if impact == EditImpact::MixerControl {
+                self.push_mixer_control_to_engine(self.edit_history.last_undone());
+            }
             self.notify_edit_impact(impact, cx);
             cx.notify();
             true
@@ -492,6 +520,9 @@ impl Timeline {
 
     pub fn redo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
         if let Some(impact) = self.edit_history.redo_with_impact(&mut self.state) {
+            if impact == EditImpact::MixerControl {
+                self.push_mixer_control_to_engine(self.edit_history.last_redone());
+            }
             self.notify_edit_impact(impact, cx);
             cx.notify();
             true
