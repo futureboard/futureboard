@@ -373,6 +373,17 @@ impl TimelineState {
         let debug = automation_sync_debug_enabled();
         let mut changed = false;
         for track in &mut self.tracks {
+            // Without a curve to read, the effective volume is the base volume
+            // and cannot have moved since the last tick. Checked before the
+            // lane scan because this runs on the playback tick for every track,
+            // and most projects automate the volume of none of them.
+            if !track.volume_automation_read || track.automation_lanes.is_empty() {
+                if (track.volume_effective - track.volume).abs() > 1.0e-5 {
+                    track.volume_effective = track.volume;
+                    changed = true;
+                }
+                continue;
+            }
             let resolved = track
                 .automation_lanes
                 .iter()

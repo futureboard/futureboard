@@ -67,6 +67,15 @@ pub type AutomationDownCallback = std::sync::Arc<
         + 'static,
 >;
 
+/// Sub-lane right-click payload: `(track_id, lane_id, beat, value_norm)`.
+///
+/// Right-click deletes the point under the cursor. It is a separate callback
+/// from [`AutomationDownCallback`] because it is a different gesture, not a
+/// modifier on the same one: nothing about it selects, drags, or adds.
+pub type AutomationDeleteCallback = std::sync::Arc<
+    dyn Fn(&(String, String, f32, f32), &mut gpui::Window, &mut gpui::App) -> bool + 'static,
+>;
+
 /// Sub-lane header action payload: `(track_id, lane_id, action)`.
 pub type AutomationLaneActionCallback = std::sync::Arc<
     dyn Fn(&(String, String, AutomationLaneAction), &mut gpui::Window, &mut gpui::App) + 'static,
@@ -107,6 +116,7 @@ pub fn automation_lane(
     on_automation_down: Option<AutomationDownCallback>,
     on_lane_action: Option<AutomationLaneActionCallback>,
     on_automation_hover: Option<AutomationHoverCallback>,
+    on_automation_delete: Option<AutomationDeleteCallback>,
     marquee: Option<&AutomationMarquee>,
     hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
@@ -351,6 +361,38 @@ pub fn automation_lane(
                     );
                 },
             );
+
+        // Right-click deletes the point under the cursor.
+        //
+        // Only when there is one: on empty lane space the press is left alone
+        // so the arrangement's own context menu still opens behind it. That is
+        // why the callback answers whether it deleted anything — the decision
+        // to swallow the event cannot be made here, where the points are not
+        // known.
+        if let Some(delete_cb) = on_automation_delete.clone() {
+            let state_for = std::rc::Rc::clone(gesture);
+            let tid = track_id.clone();
+            let lid = lane_id.clone();
+            hit = hit.on_mouse_down(
+                gpui::MouseButton::Right,
+                move |event: &gpui::MouseDownEvent, window, cx| {
+                    let wx: f32 = event.position.x.into();
+                    let wy: f32 = event.position.y.into();
+                    let lane_x = state_for.lane_x_from_window_x(wx);
+                    // Unsnapped: the click has to resolve to the point actually
+                    // under the cursor, and snapping would move the probe onto
+                    // a grid line the point is not on.
+                    let beat = state_for.x_to_beats(lane_x).max(0.0);
+                    let content_y = wy - APP_CHROME_HEIGHT - state_for.arrangement_content_top()
+                        + state_for.viewport.scroll_y;
+                    let local_y = content_y - lane_y_abs;
+                    let value = automation_y_to_value(local_y, lane_height);
+                    if delete_cb(&(tid.clone(), lid.clone(), beat, value), window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            );
+        }
 
         if let Some(cursor) = hover_cursor {
             hit = hit.cursor(cursor);

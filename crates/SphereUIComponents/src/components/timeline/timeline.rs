@@ -257,6 +257,20 @@ pub struct Timeline {
     /// then resolves through the same origin the pixels were drawn at, instead
     /// of through chrome constants that go stale whenever a panel moves.
     lane_origin_probe: LaneOriginProbe,
+    /// Where the playhead is this frame. Written by `render` (which is the only
+    /// place that knows the current scroll and zoom) and by the playback poll
+    /// between renders; read by the overlay entity below.
+    playhead_frame: crate::components::timeline::playhead::PlayheadFrameCell,
+    /// The playhead's own entity, built on first render.
+    ///
+    /// The line has to move at the display rate while the transport runs, and
+    /// notifying `Timeline` for it rebuilt the whole arrangement per frame.
+    /// Isolated here, a playback tick repaints one line.
+    playhead_overlay: Option<gpui::Entity<crate::components::timeline::playhead::PlayheadOverlay>>,
+    /// One meter entity per track header, so a level change repaints a bar
+    /// instead of the arrangement. Built and pruned by `render`, fed by the
+    /// audio poll.
+    track_meters: crate::components::timeline::vu_meter::TrackMeterViews,
     /// Absolute root folder of the saved project, pushed by `StudioLayout` each
     /// render. `None` for an Untitled (unsaved) project. Used to eagerly copy
     /// dropped audio into the project's `Assets/Audio` folder.

@@ -31,8 +31,8 @@ pub fn timeline_grid(
     let _s = crate::perf::PerfScope::enter("TimelineGrid");
 
     let lines: Vec<(f32, GridLineLevel)> = state
-        .get_arrangement_grid_lines(grid_width)
-        .into_iter()
+        .arrangement_grid_lines(grid_width)
+        .iter()
         .map(|line| (line.x, line.level))
         .collect();
     crate::perf::count("grid_lines", lines.len() as u64);

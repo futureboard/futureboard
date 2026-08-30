@@ -869,7 +869,13 @@ fn build_engine_project_snapshot_inner(
         .map(|track| EngineTrackSnapshot {
             id: track.id.clone(),
             track_type: track_type_name(track.track_type).to_string(),
-            volume: volume_norm_to_linear(track.volume),
+            // The value under the user's finger, not the one they moved away
+            // from. A fader drag holds its new value in the preview map and
+            // only writes `track.volume` on release, so a sync landing mid-drag
+            // published the *old* volume and overwrote the live param push that
+            // had already made the track quieter — the fader would jump back to
+            // being loud until the user let go.
+            volume: volume_norm_to_linear(state.display_track_volume(track)),
             pan: track.pan.clamp(-1.0, 1.0),
             muted: track.muted,
             solo: track.solo,
@@ -930,7 +936,7 @@ fn build_engine_project_snapshot_inner(
     tracks.push(EngineTrackSnapshot {
         id: "master".to_string(),
         track_type: "master".to_string(),
-        volume: volume_norm_to_linear(state.master.volume),
+        volume: volume_norm_to_linear(state.display_master_volume()),
         pan: 0.0,
         muted: false,
         solo: false,

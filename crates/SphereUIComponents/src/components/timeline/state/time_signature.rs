@@ -186,6 +186,18 @@ pub struct TimeSignatureMap {
     revision: u64,
 }
 
+/// The map every project starts with: one implicit 4/4 at bar one.
+///
+/// Built once. It used to be allocated fresh — `String` id and all — on every
+/// call that needed the point list of a project with no meter changes, which is
+/// most projects and dozens of calls a frame.
+fn implicit_time_signature_points() -> &'static [TimeSignaturePoint] {
+    static IMPLICIT: std::sync::OnceLock<Vec<TimeSignaturePoint>> = std::sync::OnceLock::new();
+    IMPLICIT
+        .get_or_init(|| vec![TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4)])
+        .as_slice()
+}
+
 impl TimeSignatureMap {
     pub fn new() -> Self {
         Self {
@@ -265,9 +277,30 @@ impl TimeSignatureMap {
         self.points[idx].clone()
     }
 
+    /// The meter in force at `beat`, without materialising a point.
+    ///
+    /// `time_signature_at_beat` clones the point — and so its `String` id — and
+    /// the grid builder calls it once per sub-beat slot while laying out the
+    /// ruler. Everything that only wants the numbers should come here.
+    pub fn time_signature_values_at_beat(&self, beat: f64) -> (u16, u16) {
+        if self.points.is_empty() {
+            return (4, 4);
+        }
+        let mut idx = 0usize;
+        for (i, p) in self.points.iter().enumerate() {
+            if p.beat <= beat + TS_BEAT_EPSILON {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        let point = &self.points[idx];
+        (point.numerator, point.denominator)
+    }
+
     pub fn beats_per_bar_at_beat(&self, beat: f64) -> f64 {
-        let pt = self.time_signature_at_beat(beat);
-        beats_per_bar_from_sig(pt.numerator, pt.denominator)
+        let (numerator, denominator) = self.time_signature_values_at_beat(beat);
+        beats_per_bar_from_sig(numerator, denominator)
     }
 
     pub fn bar_beat_at_beat(&self, beat: f64) -> BarBeat {
@@ -486,18 +519,35 @@ impl TimeSignatureMap {
         });
     }
 
-    fn sorted_points(&self) -> Vec<TimeSignaturePoint> {
-        let mut points = if self.points.is_empty() {
-            vec![TimeSignaturePoint::with_id("implicit-4-4", 0.0, 4, 4)]
-        } else {
-            self.points.clone()
-        };
+    /// The meter map in beat order, borrowed whenever it already is.
+    ///
+    /// `bar_beat_at_beat` runs once per ruler label and twice per visible bar
+    /// shade — dozens of times per frame — and this used to clone the point
+    /// list (each point owning a `String` id) and sort it on every one of them.
+    /// A project with no meter changes paid a heap allocation per call just to
+    /// materialise the implicit 4/4.
+    ///
+    /// The list is kept sorted by every mutator, so the sorted-check is the
+    /// path taken; the owned branch is the safety net for a list that arrived
+    /// out of order (an older project file, a hand-edited one).
+    fn sorted_points(&self) -> std::borrow::Cow<'_, [TimeSignaturePoint]> {
+        if self.points.is_empty() {
+            return std::borrow::Cow::Borrowed(implicit_time_signature_points());
+        }
+        if self
+            .points
+            .windows(2)
+            .all(|pair| pair[0].beat <= pair[1].beat)
+        {
+            return std::borrow::Cow::Borrowed(self.points.as_slice());
+        }
+        let mut points = self.points.clone();
         points.sort_by(|a, b| {
             a.beat
                 .partial_cmp(&b.beat)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        points
+        std::borrow::Cow::Owned(points)
     }
 
     fn bump_revision(&mut self) {

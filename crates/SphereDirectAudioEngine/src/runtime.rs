@@ -3577,10 +3577,16 @@ impl RuntimeProject {
     }
 
     #[inline]
-    pub fn update_track_volume(&mut self, track_id: &str, volume: f32) {
+    /// Returns `false` when no track carries `track_id` — the value is then
+    /// dropped, which is what a fader that moves without changing the sound
+    /// looks like from the outside. The callers log the answer under their
+    /// debug flags; this stays allocation- and IO-free for the audio thread.
+    pub fn update_track_volume(&mut self, track_id: &str, volume: f32) -> bool {
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             track.volume = volume.clamp(0.0, 2.0);
+            return true;
         }
+        false
     }
 
     #[inline]

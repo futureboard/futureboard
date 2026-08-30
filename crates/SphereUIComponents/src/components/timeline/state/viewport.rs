@@ -1,5 +1,14 @@
 use super::*;
 
+/// `FUTUREBOARD_AUTOSCROLL_DEBUG=1` — trace follow-playhead scrolling.
+///
+/// Cached: in Continuous mode this is on the playback tick, so an uncached
+/// `var_os` here was an environment-block lookup per frame.
+fn autoscroll_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some())
+}
+
 /// Arrangement overview zoom floor. At 120 BPM this is 0.25 px/beat, enough to
 /// fit very long MIDI songs on screen while the grid LOD thins bar lines.
 const TIMELINE_MIN_PIXELS_PER_SECOND: f32 = 0.5;
@@ -327,7 +336,7 @@ impl TimelineState {
         if (new_scroll_x - scroll_x).abs() < 0.5 {
             return false;
         }
-        if std::env::var_os("FUTUREBOARD_AUTOSCROLL_DEBUG").is_some() {
+        if autoscroll_debug_enabled() {
             eprintln!(
                 "[autoscroll] playhead_x={:.1} viewport=[{:.1}..{:.1}] scroll_x: {:.1} -> {:.1} mode={:?}",
                 playhead_content_x,

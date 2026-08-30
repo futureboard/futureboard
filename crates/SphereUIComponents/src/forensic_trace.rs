@@ -14,9 +14,12 @@ pub fn forensic_trace_enabled() -> bool {
 }
 
 pub fn plugin_trace_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     forensic_trace_enabled()
-        || std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some()
-        || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_DEBUG").is_some()
+        || *FLAG.get_or_init(|| {
+            std::env::var_os("FUTUREBOARD_PLUGIN_DEBUG").is_some()
+                || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_DEBUG").is_some()
+        })
 }
 
 pub fn midi_model_trace_enabled() -> bool {
@@ -24,7 +27,9 @@ pub fn midi_model_trace_enabled() -> bool {
 }
 
 pub fn shell_layout_trace_enabled() -> bool {
-    forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    forensic_trace_enabled()
+        || *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
 }
 
 /// Plugin editor safe mode (`FUTUREBOARD_PLUGIN_EDITOR_SAFE=1`): disables
@@ -68,8 +73,13 @@ impl LogRateLimiter {
     }
 }
 
+/// Cached, unlike the rest of this module used to be: this one is read twice on
+/// every previewed note — a piano-roll click audition — and an uncached
+/// `var_os` is an environment-block lookup and a UTF-16 allocation each time.
 pub fn preview_perf_trace_enabled() -> bool {
-    forensic_trace_enabled() || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    forensic_trace_enabled()
+        || *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some())
 }
 
 /// Stable editor window id: `track_id::insert_id`.

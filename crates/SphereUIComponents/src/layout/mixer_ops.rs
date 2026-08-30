@@ -175,8 +175,13 @@ impl StudioLayout {
         }
         self.engine_sync.last_meter_notify_sig = sig;
 
-        // Track headers show meters — notify timeline only, not the studio shell.
-        let _ = self.timeline.update(cx, |_, cx| cx.notify());
+        // Track-header meters, each in its own entity. This used to notify the
+        // whole `Timeline`, which rebuilt the ruler, the grid, every visible
+        // row, every clip and every waveform so a few pixels of green could
+        // move — at display refresh, for as long as anything was audible.
+        let _ = self
+            .timeline
+            .update(cx, |timeline, cx| timeline.publish_track_meters(cx));
 
         // The transport bar's master strip is always on screen, so it is polled
         // every tick — but it repaints only when its own quantised signature

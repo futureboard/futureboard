@@ -7,7 +7,8 @@ use crate::components::timeline::automation_control_lane::{
     automation_control_lane, AutomationControlCallback,
 };
 use crate::components::timeline::automation_lane::{
-    automation_lane, AutomationDownCallback, AutomationHoverCallback, AutomationLaneActionCallback,
+    automation_lane, AutomationDeleteCallback, AutomationDownCallback, AutomationHoverCallback,
+    AutomationLaneActionCallback,
 };
 use crate::components::timeline::timeline_state::{
     AutomationHover, AutomationMarquee, TimelineGestureContext, TimelineState, TrackRowLayout,
@@ -20,6 +21,7 @@ use crate::components::timeline::track_resize::{
     track_row_resize_handle, visible_track_row_range, TrackHeightResizeArmCb,
     TrackHeightResizeResetCb,
 };
+use crate::components::timeline::vu_meter::TrackMeterViews;
 use crate::theme::Colors;
 
 /// Rows above/below the visible viewport that are kept rendered to prevent
@@ -42,6 +44,7 @@ fn timeline_bg_debug_enabled() -> bool {
 pub fn track_list(
     state: &TimelineState,
     row_layout: &TrackRowLayout,
+    meters: &TrackMeterViews,
     header_callbacks: TrackHeaderCallbacks,
     on_resize_arm: TrackHeightResizeArmCb,
     on_resize_reset: TrackHeightResizeResetCb,
@@ -75,6 +78,7 @@ pub fn track_list(
     on_automation_down: Option<AutomationDownCallback>,
     on_automation_lane_action: Option<AutomationLaneActionCallback>,
     on_automation_hover: Option<AutomationHoverCallback>,
+    on_automation_delete: Option<AutomationDeleteCallback>,
     on_automation_control: Option<AutomationControlCallback>,
     automation_marquee: Option<&AutomationMarquee>,
     automation_hover: Option<&AutomationHover>,
@@ -182,6 +186,7 @@ pub fn track_list(
                         on_automation_down.clone(),
                         on_automation_lane_action.clone(),
                         on_automation_hover.clone(),
+                        on_automation_delete.clone(),
                         automation_marquee,
                         automation_hover,
                     )
@@ -217,6 +222,7 @@ pub fn track_list(
                                 state,
                                 row_height,
                                 header_callbacks.clone(),
+                                meters,
                             ))
                             .child(track_lane(
                                 track,

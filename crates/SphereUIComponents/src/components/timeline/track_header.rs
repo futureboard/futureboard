@@ -12,7 +12,7 @@ use crate::components::timeline::timeline_state::{
     is_arrangement_hidden_track, volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState,
     TrackType, HEADER_WIDTH, TRACK_HEADER_CONTROLS_MIN_HEIGHT,
 };
-use crate::components::timeline::vu_meter::vu_meter_with_levels;
+use crate::components::timeline::vu_meter::{vu_meter_with_levels, TrackMeterViews};
 use crate::theme::{radius, size, space, typography, Colors};
 
 type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
@@ -318,6 +318,7 @@ pub fn track_header(
     state: &TimelineState,
     row_height: f32,
     callbacks: TrackHeaderCallbacks,
+    meters: &TrackMeterViews,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackHeader");
     let track_id = track.id.clone();
@@ -891,11 +892,17 @@ pub fn track_header(
                                         }
                                     })
                             })
-                            // Compact meter
-                            .child(vu_meter_with_levels(
-                                track.meter_level_l,
-                                track.meter_level_r,
-                            ))
+                            // Compact meter. Its own entity, so a level change
+                            // repaints the bar and not the arrangement behind
+                            // it; the inline draw is the fallback for the frame
+                            // before the entity exists.
+                            .child(match meters.get(track.id.as_str()) {
+                                Some(meter) => meter.clone().into_any_element(),
+                                None => {
+                                    vu_meter_with_levels(track.meter_level_l, track.meter_level_r)
+                                        .into_any_element()
+                                }
+                            })
                             // Bordered dB pill
                             .child(db_value_pill(
                                 volume::format_db(state.display_track_volume(track)),

@@ -414,3 +414,124 @@ fn paint_meter_bar_horizontal(
         window.paint_quad(fill(rect(tick_x, tick_w), Colors::text_primary()));
     }
 }
+
+/// A track header's VU meter as its own GPUI entity.
+///
+/// Meters move on every audio poll — at display refresh while anything is
+/// audible — and the track headers' meters used to be refreshed by notifying
+/// the whole `Timeline`, which rebuilt the ruler, the grid, every visible
+/// track row, every clip and every waveform so that a few pixels of green
+/// could move. That single line is why a playing project stuttered while the
+/// audio engine sat near idle.
+///
+/// GPUI invalidates per entity, so each header's meter owns one. The mixer's
+/// master strip and the transport's readout already work this way; this is the
+/// same pattern applied to the one surface that was missing it.
+pub struct TrackMeterView {
+    level_l: f32,
+    level_r: f32,
+    last_sig: u32,
+}
+
+impl Default for TrackMeterView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrackMeterView {
+    pub fn new() -> Self {
+        Self {
+            level_l: 0.0,
+            level_r: 0.0,
+            // Not zero: a meter that has never been fed must repaint once, and
+            // a real signature of 0 is silence.
+            last_sig: u32::MAX,
+        }
+    }
+
+    /// Quantised identity. The bar is a handful of pixels tall, so anything
+    /// finer than 1/255 of full scale draws the same meter.
+    fn signature(level_l: f32, level_r: f32) -> u32 {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u32;
+        q(level_l) | (q(level_r) << 8)
+    }
+
+    /// Push one poll tick. Repaints only when a drawn pixel would change.
+    pub fn apply(&mut self, level_l: f32, level_r: f32, cx: &mut gpui::Context<Self>) -> bool {
+        let sig = Self::signature(level_l, level_r);
+        self.level_l = level_l;
+        self.level_r = level_r;
+        if sig == self.last_sig {
+            return false;
+        }
+        self.last_sig = sig;
+        cx.notify();
+        true
+    }
+}
+
+impl gpui::Render for TrackMeterView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        crate::perf::count("track_meter_paint_count", 1);
+        vu_meter_with_levels(self.level_l, self.level_r)
+    }
+}
+
+/// The header meters, keyed by track id. Owned by `Timeline`, handed to the
+/// header renderer by reference.
+pub type TrackMeterViews = std::collections::HashMap<String, gpui::Entity<TrackMeterView>>;
+
+#[cfg(test)]
+mod track_meter_tests {
+    use super::*;
+
+    /// The gate is what makes a per-track entity worth having: the poll runs at
+    /// display refresh, and most ticks move a level by less than a drawn pixel.
+    #[test]
+    fn sub_pixel_drift_is_the_same_meter() {
+        let a = TrackMeterView::signature(0.5000, 0.2500);
+        let b = TrackMeterView::signature(0.5001, 0.2501);
+        assert_eq!(a, b);
+    }
+
+    /// A visible step must not be swallowed by it.
+    #[test]
+    fn a_visible_step_is_a_different_meter() {
+        let quiet = TrackMeterView::signature(0.10, 0.10);
+        let loud = TrackMeterView::signature(0.90, 0.10);
+        assert_ne!(quiet, loud);
+    }
+
+    /// Left and right occupy their own bits, so one channel moving cannot be
+    /// mistaken for the other moving back.
+    #[test]
+    fn the_two_channels_do_not_alias() {
+        let left = TrackMeterView::signature(1.0, 0.0);
+        let right = TrackMeterView::signature(0.0, 1.0);
+        assert_ne!(left, right);
+        assert_ne!(left, TrackMeterView::signature(0.0, 0.0));
+    }
+
+    /// Levels arrive from the engine and are not guaranteed in range; a meter
+    /// is drawn clamped, so its identity has to be clamped the same way.
+    #[test]
+    fn out_of_range_levels_clamp_like_the_drawing_does() {
+        assert_eq!(
+            TrackMeterView::signature(1.5, -0.5),
+            TrackMeterView::signature(1.0, 0.0)
+        );
+    }
+
+    /// A freshly built meter has never drawn, so its first tick must repaint
+    /// even if the levels are silent.
+    #[test]
+    fn a_new_meter_has_not_drawn_silence_yet() {
+        let meter = TrackMeterView::new();
+        assert_ne!(meter.last_sig, TrackMeterView::signature(0.0, 0.0));
+    }
+}

@@ -99,6 +99,48 @@ pub struct TimelineLoopDragUpdate {
     pub end_beat: f32,
 }
 
+/// The ruler's tick marks as a single painted layer.
+fn ruler_ticks(
+    lines: &[crate::components::timeline::timeline_state::GridLine],
+) -> impl IntoElement {
+    // Resolved here, off the paint closure: the colour lookup and the level
+    // match are per line, and the closure runs again on every repaint.
+    let ticks: Vec<(f32, f32, gpui::Rgba)> = lines
+        .iter()
+        .map(|line| {
+            let (height, alpha) = match line.level {
+                GridLineLevel::Bar => (RULER_HEIGHT - 2.0, 0.28),
+                GridLineLevel::Beat => (RULER_HEIGHT * 0.46, 0.18),
+                GridLineLevel::Sub => (RULER_HEIGHT * 0.18, 0.10),
+            };
+            (
+                line.x,
+                height,
+                Colors::with_alpha(Colors::timeline_ruler_tick(), alpha),
+            )
+        })
+        .collect();
+    canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds: gpui::Bounds<gpui::Pixels>, (), window, _cx| {
+            let bottom: f32 = bounds.size.height.into();
+            for (x, height, color) in &ticks {
+                // Anchored to the bottom edge, which is what `.bottom_0()` did.
+                let top = (bottom - height).max(0.0);
+                window.paint_quad(gpui::fill(
+                    gpui::Bounds::new(
+                        bounds.origin + gpui::point(px(*x), px(top)),
+                        gpui::size(px(1.0), px(*height)),
+                    ),
+                    *color,
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// One global M / S latch in the Arrangement header.
 ///
 /// Deliberately an *indicator that can be cleared*, not a "mute everything"
@@ -186,7 +228,7 @@ pub fn timeline_ruler(
     let any_soloed = state.any_track_soloed();
 
     let ruler_grid_width = state.viewport.viewport_width.max(1.0);
-    let lines = state.get_arrangement_grid_lines(ruler_grid_width);
+    let lines = state.arrangement_grid_lines(ruler_grid_width);
 
     let on_seek_clone = on_seek.clone();
     let on_seek_drag = on_seek.clone();
@@ -715,28 +757,12 @@ pub fn timeline_ruler(
                 // Ticks: every visible grid line, drawn as a 1 px vertical mark
                 // anchored to the bottom of the ruler. Bar lines reach the top;
                 // beat and sub lines are shorter.
-                .children(lines.iter().map(|line| {
-                    let tick_h = match line.level {
-                        GridLineLevel::Bar => RULER_HEIGHT - 2.0,
-                        GridLineLevel::Beat => RULER_HEIGHT * 0.46,
-                        GridLineLevel::Sub => RULER_HEIGHT * 0.18,
-                    };
-                    let tick_alpha = match line.level {
-                        GridLineLevel::Bar => 0.28,
-                        GridLineLevel::Beat => 0.18,
-                        GridLineLevel::Sub => 0.10,
-                    };
-                    div()
-                        .absolute()
-                        .left(px(line.x))
-                        .bottom_0()
-                        .w(px(1.0))
-                        .h(px(tick_h))
-                        .bg(Colors::with_alpha(
-                            Colors::timeline_ruler_tick(),
-                            tick_alpha,
-                        ))
-                }))
+                //
+                // One canvas, not a div per line — the same move the grid layer
+                // made. At a typical zoom this is 70-150 lines and the budget
+                // allows 1200, and each one was a laid-out node whose only job
+                // was to be a coloured rectangle.
+                .child(ruler_ticks(&lines))
                 // Labels: emitted as siblings of the ticks (not children of a
                 // 1 px-wide tick div, which previously made labels wrap one
                 // character per line and look like random digits). Each label

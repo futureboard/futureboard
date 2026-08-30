@@ -916,10 +916,17 @@ impl PluginHostPreviewEngine {
         pitch: u8,
         velocity: u8,
     ) {
-        eprintln!(
-            "[plugin-host-midi-consume] preview note_on instance={plugin_instance_id} pitch={pitch}"
-        );
+        // Gated like the shared-memory consume path above. These two lines ran
+        // per previewed note — per piano-roll click in the studio — and the
+        // host's stderr is a pipe: back-pressure on it is felt as a stall by
+        // whoever is writing to the host's stdin, which is the UI thread.
+        if forensic_trace_enabled() {
+            eprintln!(
+                "[plugin-host-midi-consume] preview note_on instance={plugin_instance_id} pitch={pitch}"
+            );
+        }
         let Some(instance) = self.instances.get(plugin_instance_id) else {
+            // A dropped note is a real fault, so it is reported regardless.
             eprintln!(
                 "[plugin-host-midi] preview note_on dropped instance={plugin_instance_id} reason=unknown_instance"
             );
@@ -929,13 +936,17 @@ impl PluginHostPreviewEngine {
             .midi
             .lock()
             .preview_note_on(channel, pitch, velocity);
-        eprintln!("[plugin-host-midi] queued note_on to VSTi");
+        if forensic_trace_enabled() {
+            eprintln!("[plugin-host-midi] queued note_on to VSTi");
+        }
     }
 
     pub fn preview_note_off(&mut self, plugin_instance_id: &str, channel: u8, pitch: u8) {
-        eprintln!(
-            "[plugin-host-midi-consume] preview note_off instance={plugin_instance_id} pitch={pitch}"
-        );
+        if forensic_trace_enabled() {
+            eprintln!(
+                "[plugin-host-midi-consume] preview note_off instance={plugin_instance_id} pitch={pitch}"
+            );
+        }
         let Some(instance) = self.instances.get(plugin_instance_id) else {
             return;
         };

@@ -162,6 +162,16 @@ impl PluginBridgeRuntime {
         self.host_pid
     }
 
+    /// Whether this instance has a realtime sink, without building one.
+    ///
+    /// [`Self::audio_sink_for`] allocates an `Arc` and takes a reference on the
+    /// shared audio region; asking it `.is_some()` on every previewed note —
+    /// twice per piano-roll click — paid for a sink that was dropped on the
+    /// next line.
+    pub fn has_audio_sink(&self, instance_id: &str) -> bool {
+        self.shared_audio.contains_key(instance_id)
+    }
+
     /// Stage 3b: realtime sink for one insert instance.
     pub fn audio_sink_for(
         &self,

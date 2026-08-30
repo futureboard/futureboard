@@ -923,6 +923,33 @@ impl TimelineState {
 
     /// Delete every selected automation point on a track. Committed edit —
     /// caller marks dirty once. Returns how many were removed.
+    /// Remove one automation point by id. Returns `true` when it was there.
+    ///
+    /// The single-point counterpart to
+    /// [`Self::delete_selected_automation_points`], for the right-click delete:
+    /// that gesture acts on what is under the cursor, which is not necessarily
+    /// what is selected, and must not take the selection with it.
+    pub fn delete_automation_point(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        point_id: u64,
+    ) -> bool {
+        let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
+            return false;
+        };
+        let Some(lane) = track.automation_lanes.iter_mut().find(|l| l.id == lane_id) else {
+            return false;
+        };
+        let before = lane.points.len();
+        lane.points.retain(|point| point.id != point_id);
+        let removed = before != lane.points.len();
+        if removed && automation_debug_enabled() {
+            eprintln!("[automation] delete_point track={track_id} lane={lane_id} id={point_id}");
+        }
+        removed
+    }
+
     pub fn delete_selected_automation_points(&mut self, track_id: &str) -> usize {
         let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) else {
             return 0;

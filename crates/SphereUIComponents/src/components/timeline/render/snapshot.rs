@@ -188,8 +188,8 @@ impl TimelineRenderSnapshot {
         let lanes = build_lanes(state, row_layout, &visible_tracks);
         let clips = build_clips(state, row_layout, &visible_tracks, &viewport);
         let grid_lines = state
-            .get_arrangement_grid_lines(grid_width)
-            .into_iter()
+            .arrangement_grid_lines(grid_width)
+            .iter()
             .map(|line| GridLineSnapshot {
                 x: line.x,
                 beat: line.beat,

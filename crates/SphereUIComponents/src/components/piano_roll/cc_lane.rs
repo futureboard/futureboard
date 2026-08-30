@@ -98,6 +98,40 @@ impl PianoRoll {
     /// Begin a CC paint (`erase = false`) or erase (`erase = true`) gesture:
     /// ensure the active lane, snapshot its points for undo, and apply the first
     /// edit at the cursor.
+    /// Delete one controller point, as its own undo step.
+    ///
+    /// The right-click gesture: it acts on the point under the cursor, so it
+    /// borrows the paint gesture's undo bookkeeping rather than the selection's
+    /// — the point being deleted need not be selected, and deleting it must not
+    /// take the selection with it.
+    pub(super) fn delete_cc_point(&mut self, point_id: u64, cx: &mut Context<Self>) -> bool {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return false;
+        };
+        let kind = self.active_cc;
+        self.cc_edit_prev = Some(
+            self.timeline
+                .read(cx)
+                .state
+                .controller_points_snapshot(&clip_id, kind),
+        );
+        self.cc_edit_target = Some((clip_id.clone(), kind));
+        let removed = self.timeline.update(cx, |tl, _| {
+            tl.state.delete_controller_point(&clip_id, kind, point_id)
+        });
+        if !removed {
+            self.cc_edit_prev = None;
+            self.cc_edit_target = None;
+            return false;
+        }
+        self.cc_selection.remove(&point_id);
+        // `commit_cc_edit` no-ops when the points are unchanged, so this is the
+        // whole edit: mutate, then record what actually changed.
+        self.commit_cc_edit(cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn begin_cc_paint(
         &mut self,
         erase: bool,
@@ -951,7 +985,7 @@ impl PianoRoll {
                 .justify_center()
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
-                .child("Drag to draw · Alt free · Shift-drag line · Right-click curves")
+                .child("Drag to draw · Alt free · Shift-drag line · Right-click a point to delete")
         });
         let curve_menu = self.build_cc_curve_menu(cx);
         let selection_overlay = self.build_cc_selection_overlay();
@@ -1004,12 +1038,23 @@ impl PianoRoll {
                             if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
                                 let toggle = ev.modifiers.control || ev.modifiers.platform;
                                 if toggle {
+                                    // Toggle, then fall through into the move so
+                                    // Ctrl+*drag* still drags. This used to
+                                    // return here, which left Ctrl+drag doing
+                                    // nothing at all: the press was spent on the
+                                    // selection and the gesture never started.
+                                    // A Ctrl+click that does not move commits
+                                    // nothing — `commit_cc_edit` no-ops when the
+                                    // points are unchanged — so the toggle still
+                                    // reads as a plain click.
                                     if this.cc_selection.contains(&id) {
                                         this.cc_selection.remove(&id);
-                                    } else {
-                                        this.cc_selection.insert(id);
+                                        // Nothing left under the cursor to drag.
+                                        cx.notify();
+                                        return;
                                     }
-                                    cx.notify();
+                                    this.cc_selection.insert(id);
+                                    this.begin_cc_move(id, free, window, cx);
                                     return;
                                 }
                                 if ev.modifiers.shift && this.tool == PianoTool::Select {
@@ -1038,8 +1083,22 @@ impl PianoRoll {
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     window.focus(&this.focus, cx);
-                    // Alt+right keeps the legacy erase paint; plain right-click
-                    // opens the CC curve context menu (controller lane only).
+                    // Right-click on a point deletes it, which is the gesture
+                    // this lane was missing: erasing one point otherwise meant
+                    // holding Alt and sweeping, and a sweep is a poor way to
+                    // remove exactly one. Empty space keeps the curve menu.
+                    if !ev.modifiers.alt {
+                        if let Some((lx, ly)) = this.cc_local(ev.position) {
+                            if let Some(cid) = this.editing_clip_id(cx) {
+                                if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
+                                    this.delete_cc_point(id, cx);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    // Alt+right keeps the erase paint sweep; plain right-click on
+                    // empty lane space opens the CC curve context menu.
                     if ev.modifiers.alt {
                         if let Some((lx, ly)) = this.cc_local(ev.position) {
                             // Alt already means "free" on this lane, so the

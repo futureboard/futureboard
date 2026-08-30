@@ -1255,7 +1255,20 @@ impl StudioLayout {
                     if let Err(error) =
                         param_engine.update_track_param(&track_id, &param_id, engine_value)
                     {
-                        if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
+                        if matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
+                            // Once, not per pointer sample: a fader drag would
+                            // otherwise write a line per mouse-move. Once is
+                            // enough — this says the live control path is dead,
+                            // which until now produced no output at all and
+                            // left "the fader moves but nothing gets quieter"
+                            // with nothing to look at.
+                            static REPORTED: std::sync::Once = std::sync::Once::new();
+                            REPORTED.call_once(|| {
+                                eprintln!(
+                                    "[audio] track param dropped: no audio stream open                                      (track={track_id} param={param_id}); values will only                                      reach the engine on the next project sync"
+                                );
+                            });
+                        } else {
                             eprintln!(
                                 "[audio] track param update failed: track={} param={} error={}",
                                 track_id, param_id, error

@@ -4623,7 +4623,12 @@ where
                             }
                         }
                         EngineCommand::SetTrackVolume { track_id, value } => {
-                            runtime.update_track_volume(&track_id, value);
+                            let applied = runtime.update_track_volume(&track_id, value);
+                            if callback_debug_enabled() {
+                                eprintln!(
+                                    "[SphereAudio callback] SetTrackVolume track={track_id} linear={value:.4} applied={applied}"
+                                );
+                            }
                         }
                         EngineCommand::SetTrackPan { track_id, value } => {
                             runtime.update_track_pan(&track_id, value);

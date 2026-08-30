@@ -2816,3 +2816,187 @@ mod global_latch_tests {
         assert!(state.clear_all_track_solos().is_empty());
     }
 }
+
+#[cfg(test)]
+mod per_frame_cost_tests {
+    use super::*;
+
+    fn scrolled_state(scroll_x: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.viewport.scroll_x = scroll_x;
+        state
+    }
+
+    /// The ruler, the arrangement snapshot and every conductor lane ask for the
+    /// same lines with the same arguments, so a default layout used to build
+    /// the identical vector six times a frame.
+    #[test]
+    fn the_same_frame_builds_the_grid_once() {
+        let state = scrolled_state(0.0);
+        let first = state.arrangement_grid_lines(1200.0);
+        let second = state.arrangement_grid_lines(1200.0);
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "the second call must reuse the first build"
+        );
+    }
+
+    /// Anything the geometry depends on has to invalidate it, or the grid would
+    /// stay behind while the arrangement scrolled under it.
+    #[test]
+    fn moving_the_viewport_rebuilds_the_grid() {
+        let a = scrolled_state(0.0);
+        let lines_a = a.arrangement_grid_lines(1200.0);
+        let b = scrolled_state(500.0);
+        let lines_b = b.arrangement_grid_lines(1200.0);
+        assert!(!std::rc::Rc::ptr_eq(&lines_a, &lines_b));
+
+        // A different width is a different grid too.
+        let lines_c = b.arrangement_grid_lines(900.0);
+        assert!(!std::rc::Rc::ptr_eq(&lines_b, &lines_c));
+    }
+
+    /// A meter change must invalidate even when nothing about the viewport
+    /// moved — bar positions are derived from the map.
+    #[test]
+    fn a_meter_change_rebuilds_the_grid() {
+        let mut state = scrolled_state(0.0);
+        let before = state.arrangement_grid_lines(1200.0);
+        state.time_signature_map.points = vec![TimeSignaturePoint::with_id("ts-1", 0.0, 7, 8)];
+        let after = state.arrangement_grid_lines(1200.0);
+        assert!(!std::rc::Rc::ptr_eq(&before, &after));
+    }
+
+    /// The cached lines have to be the lines, not a stale or different build.
+    #[test]
+    fn the_cached_grid_matches_a_fresh_build() {
+        let state = scrolled_state(320.0);
+        let cached = state.arrangement_grid_lines(1200.0);
+        let fresh = state.get_arrangement_grid_lines(1200.0);
+        assert_eq!(cached.len(), fresh.len());
+        for (a, b) in cached.iter().zip(fresh.iter()) {
+            assert_eq!(a.x, b.x);
+            assert_eq!(a.level, b.level);
+            assert_eq!(a.show_label, b.show_label);
+        }
+    }
+
+    /// The values accessor exists so the grid loop stops cloning a point (and
+    /// its `String` id) once per sub-beat slot; it must agree with the point.
+    #[test]
+    fn the_meter_values_match_the_meter_point() {
+        let mut state = TimelineState::default();
+        // No points: the implicit 4/4.
+        assert_eq!(
+            state.time_signature_map.time_signature_values_at_beat(0.0),
+            (4, 4)
+        );
+        state.time_signature_map.points = vec![
+            TimeSignaturePoint::with_id("ts-1", 0.0, 4, 4),
+            TimeSignaturePoint::with_id("ts-2", 8.0, 7, 8),
+        ];
+        for beat in [0.0_f64, 4.0, 7.9, 8.0, 100.0] {
+            let point = state.time_signature_map.time_signature_at_beat(beat);
+            assert_eq!(
+                state.time_signature_map.time_signature_values_at_beat(beat),
+                (point.numerator, point.denominator),
+                "beat {beat}"
+            );
+        }
+    }
+
+    /// The playback tick calls this for every track on every frame. A track
+    /// with no automation still has to follow its own base volume.
+    #[test]
+    fn a_track_without_automation_still_follows_its_volume() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        // Written straight to the base value, the way a project load does: the
+        // fader path already keeps `volume_effective` in step, so it would not
+        // exercise the early-out at all.
+        if let Some(entry) = state.tracks.iter_mut().find(|t| t.id == track) {
+            entry.volume = 0.25;
+        }
+        assert!(state.recompute_effective_volumes(0.0, "test"));
+        let entry = state.find_track(&track).expect("track");
+        assert!((entry.volume_effective - 0.25).abs() < 1.0e-6);
+        // Nothing moved, so nothing to report the second time.
+        assert!(!state.recompute_effective_volumes(4.0, "test"));
+    }
+}
+
+#[cfg(test)]
+mod point_delete_tests {
+    use super::*;
+
+    /// Right-click deletes what is under the cursor, which is not necessarily
+    /// what is selected — so the by-id delete must take exactly one point.
+    #[test]
+    fn deleting_an_automation_point_leaves_its_neighbours() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        let lane = state
+            .ensure_automation_lane(&track, AutomationTarget::TrackVolume)
+            .expect("lane");
+        let first = state
+            .add_automation_point(&track, &lane, 0.0, 0.2)
+            .expect("first");
+        let second = state
+            .add_automation_point(&track, &lane, 4.0, 0.8)
+            .expect("second");
+
+        assert!(state.delete_automation_point(&track, &lane, first));
+        let points = state
+            .automation_lane(&track, &lane)
+            .expect("lane")
+            .points
+            .clone();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].id, second);
+    }
+
+    /// A point that is not there is not an error, but it must not report a
+    /// deletion — the lane uses that answer to decide whether to swallow the
+    /// press, and a false positive would eat the context menu.
+    #[test]
+    fn deleting_a_missing_automation_point_reports_nothing() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        let lane = state
+            .ensure_automation_lane(&track, AutomationTarget::TrackVolume)
+            .expect("lane");
+        assert!(!state.delete_automation_point(&track, &lane, 4242));
+        assert!(!state.delete_automation_point("no-such-track", &lane, 1));
+        assert!(!state.delete_automation_point(&track, "no-such-lane", 1));
+    }
+
+    /// The controller lane's delete is by id for the same reason: two points
+    /// can share a beat, and only the one under the cursor should go.
+    #[test]
+    fn deleting_a_controller_point_takes_only_that_point() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_midi_track();
+        let clip = state.create_midi_clip(&track, 0.0, 8.0).expect("clip");
+        let kind = MidiControllerKind::CC(1);
+        assert!(state.ensure_controller_lane(&clip, kind));
+        state.put_controller_point(&clip, kind, 1.0, 0.25);
+        state.put_controller_point(&clip, kind, 3.0, 0.75);
+        let first = state
+            .controller_points_snapshot(&clip, kind)
+            .first()
+            .expect("first point")
+            .id;
+
+        assert!(state.delete_controller_point(&clip, kind, first));
+        let points = state.controller_points_snapshot(&clip, kind);
+        assert_eq!(points.len(), 1);
+        assert!(points.iter().all(|p| p.id != first));
+
+        // Already gone: nothing more to delete, and nothing to report.
+        assert!(!state.delete_controller_point(&clip, kind, first));
+    }
+}

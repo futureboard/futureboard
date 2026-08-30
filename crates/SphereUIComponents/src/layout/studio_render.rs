@@ -616,6 +616,14 @@ impl Render for StudioLayout {
                                 ContextTarget::AutomationTargetPicker { track_id }
                             }
                         };
+                        // A right-click that landed on a marker, a region, a
+                        // tempo marker or a meter mark deletes it outright.
+                        // Removing one used to mean opening the menu and
+                        // finding Delete, which is a lot of ceremony for the
+                        // most common thing anyone does to them.
+                        if this.delete_context_target(&context_target, cx) {
+                            return;
+                        }
                         this.try_open_context_menu(
                             ContextMenuRequest::new(
                                 window_id,

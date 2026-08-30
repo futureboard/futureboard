@@ -1,5 +1,8 @@
 use crate::theme::Colors;
-use gpui::{canvas, div, fill, px, size, svg, Bounds, IntoElement, ParentElement, Pixels, Styled};
+use gpui::{
+    canvas, div, fill, px, size, svg, Bounds, Context, IntoElement, ParentElement, Pixels, Render,
+    Styled, Window,
+};
 
 /// `FUTUREBOARD_PLAYHEAD_LAYER_DEBUG=1` — trace the playhead body layer.
 /// Cached: this is read inside the per-frame paint closure, which runs on
@@ -82,4 +85,87 @@ pub fn playhead_head_overlay_at(x: f32) -> impl IntoElement {
             .h(px(12.0))
             .text_color(color),
     )
+}
+
+/// Where the playhead is this frame, shared between the arrangement and the
+/// overlay that draws it.
+///
+/// A cell rather than an entity field so `Timeline::render` can refresh it
+/// without leasing the overlay: the arrangement recomputes x whenever it lays
+/// itself out (a scroll, a zoom, a resize), and the playback poll recomputes it
+/// between those.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlayheadFrame {
+    /// x within the lane column, in the same space `beats_to_x` returns.
+    pub x: f32,
+}
+
+pub type PlayheadFrameCell = std::rc::Rc<std::cell::Cell<PlayheadFrame>>;
+
+/// The playhead as its own GPUI entity.
+///
+/// The line moves on every playback tick — up to the display refresh rate — and
+/// it used to move by notifying the whole `Timeline`, which rebuilt the entire
+/// arrangement (row layout, every lane, every clip, every waveform, every
+/// label) for a one-pixel translation. Playing a project therefore cost a full
+/// arrangement rebuild per frame, and it is why the interface stuttered while
+/// the audio engine sat near idle.
+///
+/// GPUI invalidates per entity, so the fix is an entity: notifying this one
+/// repaints the line and nothing else. It carries no state of its own beyond
+/// the shared frame — the geometry is the arrangement's, and duplicating it
+/// here would be a second coordinate system to keep in step.
+pub struct PlayheadOverlay {
+    frame: PlayheadFrameCell,
+    /// y of the first row under the ruler. The head is clipped above it and the
+    /// body starts at it.
+    ruler_height: f32,
+    /// Left edge of the lane column — the track headers keep their own strip.
+    header_width: f32,
+}
+
+impl PlayheadOverlay {
+    pub fn new(frame: PlayheadFrameCell, ruler_height: f32, header_width: f32) -> Self {
+        Self {
+            frame,
+            ruler_height,
+            header_width,
+        }
+    }
+}
+
+impl Render for PlayheadOverlay {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let _scope = crate::perf::PerfScope::enter("PlayheadOverlay");
+        crate::perf::count("playhead_overlay_paint_count", 1);
+        let x = self.frame.get().x;
+        div()
+            .absolute()
+            .left(px(self.header_width))
+            .right_0()
+            .top_0()
+            .bottom_0()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_0()
+                    .h(px(self.ruler_height))
+                    .overflow_hidden()
+                    .child(playhead_head_overlay_at(x)),
+            )
+            .child(
+                // From directly under the ruler, so the line stays continuous
+                // through the conductor lanes instead of restarting below them.
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(self.ruler_height))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(playhead_body_overlay_at(x)),
+            )
+    }
 }

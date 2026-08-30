@@ -41,6 +41,8 @@ const FIELD_ICON: f32 = 12.0;
 const CPU_VALUE_W: f32 = 34.0;
 /// `1024 MB` — the widest form before the unit switches to `1.9 GB`.
 const MEMORY_VALUE_W: f32 = 58.0;
+/// `1023 KB/s` — the widest form any of the three units produces.
+const DISK_VALUE_W: f32 = 62.0;
 /// `256` — the SoundFont player's polyphony ceiling.
 const VOICE_VALUE_W: f32 = 30.0;
 
@@ -50,13 +52,6 @@ const VOICE_VALUE_W: f32 = 30.0;
 const CPU_WARN: f32 = 0.75;
 /// Above this the engine is effectively at its budget.
 const CPU_DANGER: f32 = 0.92;
-
-// The UI thread has no deadline to miss, so its thresholds are about headroom
-// rather than dropouts: past two thirds of a core there is nothing left to
-// absorb a spike, and near a whole core the interface cannot keep a frame rate
-// however fast the machine is.
-const UI_WARN: f32 = 0.65;
-const UI_DANGER: f32 = 0.90;
 
 /// One frame of engine load, pushed in by `StudioLayout`'s meter poll.
 ///
@@ -69,13 +64,14 @@ pub struct TransportPerfSnapshot {
     /// is open, or when the backend has not reported a deadline yet — the
     /// readout says so instead of printing 0%.
     pub cpu_load: Option<f32>,
-    /// CPU the UI thread is burning, as a share of one core. `None` before the
-    /// first sampling window closes, and on platforms that cannot report it.
+    /// Disk traffic in bytes per second, Studio plus its plugin hosts. `None`
+    /// before the first sampling window closes, and where the platform cannot
+    /// report it.
     ///
-    /// The audio and interface threads fail in different ways and the readout
-    /// used to describe only the first: an engine idling at 5% while the
-    /// arrangement stutters is a real and common state, and it had no number.
-    pub ui_load: Option<f32>,
+    /// The other way a session runs out of headroom: a stream the disk cannot
+    /// feed is heard as a dropout, and nothing else in the shell said whether
+    /// the disk was the reason.
+    pub disk_bytes_per_sec: Option<f64>,
     /// SoundFont voices sounding in the last block. See
     /// `EngineInner::active_voice_count` for what this does and does not count.
     pub voices: u32,
@@ -99,9 +95,14 @@ impl TransportPerfSnapshot {
             .cpu_load
             .map(|load| (load.clamp(0.0, 4.0) * 100.0).round() as u64 + 1)
             .unwrap_or(0);
-        let ui = self
-            .ui_load
-            .map(|load| (load.clamp(0.0, 4.0) * 100.0).round() as u64 + 1)
+        // Quantised to the drawn unit: the readout shows whole megabytes per
+        // second, so anything finer would repaint for a number that did not
+        // change. `+ 1` keeps "unmeasured" distinct from "idle".
+        // Clamped before the `+ 1`: `as u64` saturates, and a rate arriving as
+        // an absurd number would otherwise overflow the increment.
+        let disk = self
+            .disk_bytes_per_sec
+            .map(|rate| ((rate.max(0.0) / (1024.0 * 1024.0)).round() as u64).min(510) + 1)
             .unwrap_or(0);
         let mem = self
             .memory_bytes
@@ -112,12 +113,12 @@ impl TransportPerfSnapshot {
         // would then keep naming a process that has exited. `cpu` needs nine
         // bits and `voices` starts at twelve, so it rides the gap between them.
         let hosts = (self.plugin_hosts.min(7) as u64) << 9;
-        // Each field gets its own bits: `cpu` and `ui` nine each, `hosts`
+        // Each field gets its own bits: `cpu` and `disk` nine each, `hosts`
         // three, `voices` ten, and memory the top half. Voices is clamped to
         // its ten bits rather than trusted — an engine reporting a wild count
         // would otherwise carry into the field above and freeze that readout.
         let voices = (self.voices.min(1023) as u64) << 12;
-        cpu | hosts | voices | (ui << 22) | (mem << 32)
+        cpu | hosts | voices | (disk << 22) | (mem << 32)
     }
 }
 
@@ -165,18 +166,6 @@ fn cpu_color(load: f32) -> gpui::Rgba {
     }
 }
 
-/// Colour for the UI thread's load. Same two-channel idea as [`cpu_color`],
-/// against the interface's own thresholds.
-fn ui_color(load: f32) -> gpui::Rgba {
-    if load >= UI_DANGER {
-        Colors::status_error()
-    } else if load >= UI_WARN {
-        Colors::status_warning()
-    } else {
-        Colors::text_secondary()
-    }
-}
-
 /// `1536` MB, `1.9` GB — one significant place past a gigabyte, because at that
 /// size the megabyte digits are noise and the column would grow to fit them.
 fn format_memory(bytes: u64) -> String {
@@ -199,6 +188,25 @@ fn mark(path: &'static str) -> impl IntoElement {
         .w(px(FIELD_ICON))
         .h(px(FIELD_ICON))
         .text_color(Colors::text_faint())
+}
+
+/// `820 KB/s`, `14 MB/s`, `1.5 GB/s` — whole units below a gigabyte.
+///
+/// No decimal place on the megabyte form on purpose: a disk rate is read to see
+/// whether it is busy, not to be totalled, and the extra digit only widens the
+/// column and flickers.
+fn format_disk_rate(bytes_per_sec: f64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let rate = bytes_per_sec.max(0.0);
+    if rate >= GB {
+        format!("{:.1} GB/s", rate / GB)
+    } else if rate >= MB {
+        format!("{:.0} MB/s", rate / MB)
+    } else {
+        format!("{:.0} KB/s", rate / KB)
+    }
 }
 
 /// Where the memory figure comes from, named process by process.
@@ -298,14 +306,13 @@ impl Render for TransportPerfMeter {
                 cpu_color(load),
             ),
         };
-        let (ui_text, ui_hue) = match snapshot.ui_load {
+        let (disk_text, disk_hue) = match snapshot.disk_bytes_per_sec {
             // No window has closed yet. Same reasoning as the engine: an
-            // unmeasured load is not a load of zero.
+            // unmeasured rate is not a rate of zero.
             None => ("—".to_string(), Colors::text_faint()),
-            Some(load) => (
-                format!("{:.0}%", (load.clamp(0.0, 9.99) * 100.0).round()),
-                ui_color(load),
-            ),
+            // An idle disk is a real answer, but a quiet one.
+            Some(rate) if rate < 1024.0 => ("0 KB/s".to_string(), Colors::text_faint()),
+            Some(rate) => (format_disk_rate(rate), Colors::text_secondary()),
         };
 
         // No fixed plate width. The fields reserve their own columns, so the
@@ -333,16 +340,14 @@ impl Render for TransportPerfMeter {
                 cpu_hue,
                 CPU_VALUE_W,
             ))
-            // Second, beside the engine's, because the two answer different
-            // questions and only together say which thread is in trouble.
             .child(divider())
             .child(field(
-                "perf-ui",
-                assets::ICON_MONITOR_PATH,
-                "UI thread load — Studio's interface thread, as a share of one core",
-                ui_text,
-                ui_hue,
-                CPU_VALUE_W,
+                "perf-disk",
+                assets::ICON_HARD_DRIVE_PATH,
+                "Disk — read and write per second, Studio and its plug-in hosts",
+                disk_text,
+                disk_hue,
+                DISK_VALUE_W,
             ));
 
         // Memory is dropped entirely where the platform cannot report it,
@@ -389,10 +394,7 @@ pub fn perf_snapshot_from_engine(
     let memory = crate::perf::memory_usage();
     TransportPerfSnapshot {
         cpu_load,
-        // Sampled here rather than in `perf`'s frame accounting because this
-        // poll is the one thing that runs on the UI thread every tick whether
-        // or not tracing is on.
-        ui_load: crate::perf::ui_thread_cpu_load(),
+        disk_bytes_per_sec: crate::perf::disk_io_bytes_per_sec(),
         voices,
         memory_bytes: memory.total_bytes(),
         plugin_host_bytes: memory.plugin_host_bytes,
@@ -517,7 +519,7 @@ mod memory_readout_tests {
     fn with_hosts(total_mb: u64, host_mb: u64, hosts: usize) -> TransportPerfSnapshot {
         TransportPerfSnapshot {
             cpu_load: Some(0.2),
-            ui_load: Some(0.2),
+            disk_bytes_per_sec: Some(0.0),
             voices: 4,
             memory_bytes: Some(total_mb * 1024 * 1024),
             plugin_host_bytes: host_mb * 1024 * 1024,
@@ -601,13 +603,13 @@ mod memory_readout_tests {
 }
 
 #[cfg(test)]
-mod ui_load_tests {
+mod disk_io_tests {
     use super::*;
 
     fn snapshot() -> TransportPerfSnapshot {
         TransportPerfSnapshot {
             cpu_load: Some(0.05),
-            ui_load: Some(0.30),
+            disk_bytes_per_sec: Some(4.0 * 1024.0 * 1024.0),
             voices: 4,
             memory_bytes: Some(1500 * 1024 * 1024),
             plugin_host_bytes: 0,
@@ -615,16 +617,65 @@ mod ui_load_tests {
         }
     }
 
-    /// The case the second readout exists for: an idle engine and a UI thread
-    /// pinned to a core. One number cannot say that; two can.
+    /// Whole units, and no decimal below a gigabyte: the rate is read to see
+    /// whether the disk is busy, not to be totalled.
     #[test]
-    fn the_two_loads_are_independent() {
+    fn the_rate_reads_in_whole_units() {
+        assert_eq!(format_disk_rate(0.0), "0 KB/s");
+        assert_eq!(format_disk_rate(820.0 * 1024.0), "820 KB/s");
+        assert_eq!(format_disk_rate(14.0 * 1024.0 * 1024.0), "14 MB/s");
+        assert_eq!(format_disk_rate(1.5 * 1024.0 * 1024.0 * 1024.0), "1.5 GB/s");
+    }
+
+    /// The column has to hold the widest string each branch can produce.
+    #[test]
+    fn every_rate_form_fits_its_column() {
+        let width = |text: &str| {
+            crate::theme::menu::estimate_label_width(text) * (typography::UI_SM / typography::UI_XS)
+        };
+        for widest in ["1023 KB/s", "1023 MB/s", "9.9 GB/s"] {
+            let needed = width(widest);
+            assert!(
+                DISK_VALUE_W >= needed,
+                "disk reserves {DISK_VALUE_W} px but {widest:?} needs {needed}"
+            );
+        }
+    }
+
+    /// A rate below the drawn unit is idle, not a repaint reason — and it must
+    /// not be confused with a rate that has not been measured yet.
+    #[test]
+    fn an_unmeasured_rate_is_distinct_from_an_idle_disk() {
+        let unmeasured = TransportPerfSnapshot {
+            disk_bytes_per_sec: None,
+            ..snapshot()
+        };
+        let idle = TransportPerfSnapshot {
+            disk_bytes_per_sec: Some(0.0),
+            ..snapshot()
+        };
+        assert_ne!(unmeasured.signature(), idle.signature());
+    }
+
+    /// Sub-megabyte drift draws the same number, so it must not repaint.
+    #[test]
+    fn drift_inside_one_megabyte_does_not_repaint() {
         let a = snapshot();
         let b = TransportPerfSnapshot {
-            ui_load: Some(0.95),
+            disk_bytes_per_sec: Some(4.0 * 1024.0 * 1024.0 + 1024.0),
             ..a
         };
-        assert_eq!(a.cpu_load, b.cpu_load);
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    /// A real change in the drawn number must.
+    #[test]
+    fn a_drawn_megabyte_repaints() {
+        let a = snapshot();
+        let b = TransportPerfSnapshot {
+            disk_bytes_per_sec: Some(9.0 * 1024.0 * 1024.0),
+            ..a
+        };
         assert_ne!(a.signature(), b.signature());
     }
 
@@ -639,7 +690,7 @@ mod ui_load_tests {
                 ..base
             },
             TransportPerfSnapshot {
-                ui_load: Some(0.31),
+                disk_bytes_per_sec: Some(9.0 * 1024.0 * 1024.0),
                 ..base
             },
             TransportPerfSnapshot { voices: 5, ..base },
@@ -660,45 +711,20 @@ mod ui_load_tests {
         }
     }
 
-    /// An engine reporting a wild voice count must not carry into the load
-    /// above it and freeze that reading.
+    /// An absurd voice count, or a disk rate far past anything real, must stay
+    /// in its own bits rather than carrying into the field above.
     #[test]
-    fn an_absurd_voice_count_stays_in_its_own_bits() {
+    fn out_of_range_values_stay_in_their_own_bits() {
         let base = snapshot();
         let wild = TransportPerfSnapshot {
             voices: u32::MAX,
+            disk_bytes_per_sec: Some(f64::MAX),
             ..base
         };
-        let wild_and_busier = TransportPerfSnapshot {
-            ui_load: Some(0.95),
+        let wild_and_more_memory = TransportPerfSnapshot {
+            memory_bytes: Some(2000 * 1024 * 1024),
             ..wild
         };
-        assert_ne!(wild.signature(), wild_and_busier.signature());
-    }
-
-    /// The hue is the second channel on the load, so it has to change at the
-    /// interface's own thresholds and not the engine's.
-    #[test]
-    fn ui_colour_changes_at_the_ui_thresholds() {
-        assert_eq!(ui_color(0.10), Colors::text_secondary());
-        assert_eq!(ui_color(UI_WARN), Colors::status_warning());
-        assert_eq!(ui_color(UI_DANGER), Colors::status_error());
-        // The engine's warning point is not the interface's.
-        assert_eq!(ui_color(CPU_WARN), Colors::status_warning());
-        assert_eq!(cpu_color(UI_WARN), Colors::text_secondary());
-    }
-
-    /// A load that has not been measured yet is not a load of zero.
-    #[test]
-    fn an_unmeasured_load_is_distinct_from_idle() {
-        let unmeasured = TransportPerfSnapshot {
-            ui_load: None,
-            ..snapshot()
-        };
-        let idle = TransportPerfSnapshot {
-            ui_load: Some(0.0),
-            ..snapshot()
-        };
-        assert_ne!(unmeasured.signature(), idle.signature());
+        assert_ne!(wild.signature(), wild_and_more_memory.signature());
     }
 }

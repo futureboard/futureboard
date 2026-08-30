@@ -242,6 +242,28 @@ impl TimelineState {
     }
 
     /// Delete points within `tol` beats of `beat`. Returns how many were removed.
+    /// Remove one controller point by id. Returns `true` when it was there.
+    ///
+    /// By id, not by beat: the right-click delete acts on the point the cursor
+    /// is actually over, and [`Self::delete_controller_points_near`] would take
+    /// every point sharing that beat with it.
+    pub fn delete_controller_point(
+        &mut self,
+        clip_id: &str,
+        kind: MidiControllerKind,
+        point_id: u64,
+    ) -> bool {
+        let Some(lanes) = self.controller_lanes_mut(clip_id) else {
+            return false;
+        };
+        let Some(lane) = lanes.iter_mut().find(|l| l.kind == kind) else {
+            return false;
+        };
+        let before = lane.points.len();
+        lane.points.retain(|point| point.id != point_id);
+        before != lane.points.len()
+    }
+
     pub fn delete_controller_points_near(
         &mut self,
         clip_id: &str,

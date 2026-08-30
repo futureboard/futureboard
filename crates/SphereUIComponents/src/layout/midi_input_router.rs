@@ -196,7 +196,7 @@ impl StudioLayout {
         {
             Some(Ok(bridge)) => bridge_instance
                 .as_ref()
-                .is_some_and(|id| bridge.audio_sink_for(id).is_some()),
+                .is_some_and(|id| bridge.has_audio_sink(id)),
             Some(Err(_)) => bridge_instance.is_some(),
             None => false,
         };

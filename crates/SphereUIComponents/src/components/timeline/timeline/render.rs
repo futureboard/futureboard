@@ -35,6 +35,35 @@ impl Render for Timeline {
             cx.notify();
         }
         row_layout.scroll_y = self.state.viewport.scroll_y;
+        // One meter entity per track that has a header. Built here because this
+        // is where the track set is known, and pruned in the same pass so a
+        // deleted track does not leave its entity behind.
+        {
+            let ids: std::collections::HashSet<&str> =
+                self.state.tracks.iter().map(|t| t.id.as_str()).collect();
+            self.track_meters.retain(|id, _| ids.contains(id.as_str()));
+            for index in 0..self.state.tracks.len() {
+                let id = self.state.tracks[index].id.clone();
+                if self.track_meters.contains_key(&id) {
+                    continue;
+                }
+                let meter =
+                    cx.new(|_| crate::components::timeline::vu_meter::TrackMeterView::new());
+                self.track_meters.insert(id, meter);
+            }
+        }
+        if self.playhead_overlay.is_none() {
+            // Built on first render for the same reason the focus subscription
+            // below is: `Timeline::new` has no context to create an entity in.
+            let frame = self.playhead_frame.clone();
+            self.playhead_overlay = Some(cx.new(|_| {
+                crate::components::timeline::playhead::PlayheadOverlay::new(
+                    frame,
+                    RULER_HEIGHT,
+                    HEADER_WIDTH,
+                )
+            }));
+        }
         if self.focus_lost_subscription.is_none() {
             self.focus_lost_subscription = Some(cx.on_focus_lost(window, |this, _window, cx| {
                 if this.range_select_drag.is_some()
@@ -53,6 +82,25 @@ impl Render for Timeline {
                 }
             }));
         }
+
+        // The arrangement has just resolved this frame's scroll and zoom, so it
+        // is the only place that can put the playhead back in step with them.
+        // Written straight to the cell: the overlay is about to be rendered
+        // anyway, and notifying it here would queue a second pass.
+        self.playhead_frame
+            .set(crate::components::timeline::playhead::PlayheadFrame {
+                x: self.state.beats_to_x(self.state.transport.playhead_beats),
+            });
+        if playhead_debug_enabled() {
+            eprintln!(
+                "[playhead x] beat={:.3} scroll_x={:.1} px_per_beat={:.3} x={:.1}",
+                self.state.transport.playhead_beats,
+                self.state.viewport.scroll_x,
+                self.state.viewport.pixels_per_beat,
+                self.playhead_frame.get().x
+            );
+        }
+        let playhead_overlay = self.playhead_overlay.clone();
 
         // Diagnostic only, and it walks every track: skip the sum entirely when
         // the perf collector is off.
@@ -1085,6 +1133,21 @@ impl Render for Timeline {
         );
         let on_automation_down: crate::components::timeline::automation_lane::AutomationDownCallback =
             std::sync::Arc::new(on_automation_down);
+
+        // Not a `cx.listener`: the lane needs the answer back to decide whether
+        // to swallow the press, and a listener returns nothing.
+        let on_automation_delete: crate::components::timeline::automation_lane::AutomationDeleteCallback = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(
+                move |payload: &(String, String, f32, f32), _window, cx: &mut gpui::App| {
+                    let (track_id, lane_id, beat, value) =
+                        (payload.0.clone(), payload.1.clone(), payload.2, payload.3);
+                    this.update(cx, |this, cx| {
+                        this.delete_automation_point_at(&track_id, &lane_id, beat, value, cx)
+                    })
+                },
+            )
+        };
 
         // Hover resolver: a normal move resolves the point/segment under the
         // cursor; a negative-sentinel payload (hover-out) clears this lane's hover.
@@ -2292,6 +2355,7 @@ impl Render for Timeline {
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,
                 &row_layout,
+                &self.track_meters,
                 header_callbacks.clone(),
                 on_track_height_resize_arm.clone(),
                 on_track_height_resize_reset.clone(),
@@ -2311,6 +2375,7 @@ impl Render for Timeline {
                 Some(on_automation_down.clone()),
                 Some(on_automation_lane_action.clone()),
                 Some(on_automation_hover.clone()),
+                Some(on_automation_delete),
                 on_automation_control.clone(),
                 self.automation_marquee.as_ref(),
                 self.automation_hover.as_ref(),
@@ -2379,48 +2444,12 @@ impl Render for Timeline {
                     .overflow_hidden()
                     .child(overlay)
             }))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(HEADER_WIDTH))
-                    .right_0()
-                    .top_0()
-                    .h(px(RULER_HEIGHT))
-                    .overflow_hidden()
-                    .child({
-                        let playhead_x = state.beats_to_x(state.transport.playhead_beats);
-                        if playhead_debug_enabled() {
-                            eprintln!(
-                                "[playhead x] beat={:.3} scroll_x={:.1} px_per_beat={:.3} x={:.1}",
-                                state.transport.playhead_beats,
-                                state.viewport.scroll_x,
-                                state.viewport.pixels_per_beat,
-                                playhead_x
-                            );
-                        }
-                        crate::components::timeline::playhead::playhead_head_overlay_at(playhead_x)
-                    }),
-            )
-            // The body runs from directly under the ruler, not from
-            // `content_top`: the conductor lanes sit in between, they are drawn
-            // on two opaque planes, and starting the line below them left the
-            // playhead broken into a head in the ruler and a body in the
-            // arrangement with a gap through Regions/Markers/Tempo/Signature —
-            // a gap that grew every time a lane was shown or dragged taller.
-            // The lanes are earlier siblings, so this paints over them.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(HEADER_WIDTH))
-                    .right_0()
-                    .top(px(RULER_HEIGHT))
-                    .bottom_0()
-                    .overflow_hidden()
-                    .child({
-                        let playhead_x = state.beats_to_x(state.transport.playhead_beats);
-                        crate::components::timeline::playhead::playhead_body_overlay_at(playhead_x)
-                    }),
-            )
+            // The playhead is its own entity: it moves at the display rate
+            // while the transport runs, and drawing it inline meant every one of
+            // those frames rebuilt the whole arrangement behind it. Its head and
+            // body are both in there, so the line stays continuous through the
+            // conductor lanes rather than restarting below them.
+            .children(playhead_overlay)
             // 4. Floating Tools Bar (above playhead)
             .child(
                 div()

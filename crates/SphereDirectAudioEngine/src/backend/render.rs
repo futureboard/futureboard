@@ -728,7 +728,16 @@ pub fn drain_commands(
                 }
             }
             EngineCommand::SetTrackVolume { track_id, value } => {
-                runtime.update_track_volume(&track_id, value);
+                // Whether the id matched is the whole question when a fader
+                // moves and nothing gets quieter: `update_track_volume` is a
+                // silent no-op for an id the graph does not have, and that is
+                // indistinguishable from "applied" without this line.
+                let applied = runtime.update_track_volume(&track_id, value);
+                if command_debug_enabled() {
+                    eprintln!(
+                        "[DAUx] SetTrackVolume track={track_id} linear={value:.4} applied={applied}"
+                    );
+                }
             }
             EngineCommand::SetTrackPan { track_id, value } => {
                 runtime.update_track_pan(&track_id, value);

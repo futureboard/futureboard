@@ -923,119 +923,124 @@ pub fn tick_root_frame(reason: &'static str) {
 /// asking the kernel thirty times a second would cost more than it reports.
 /// `None` surfaces as a hidden readout rather than a zero — a RAM meter reading
 /// 0 MB is a lie, an absent one is not.
-/// CPU the calling thread has burned, as a share of one core, over the last
-/// sampling window.
+/// Disk traffic attributable to Futureboard, in bytes per second.
 ///
-/// Called from the meter poll, which runs on the UI thread, so this reads the
-/// UI thread and nothing else — which is the point. The transport's load
-/// readout showed only the audio callback's deadline fraction, and an audio
-/// engine sitting at 5% while the interface stutters is exactly the case that
-/// readout could not describe.
+/// Replaces the UI-thread load that used to sit here. A DAW's other resource
+/// question is whether the disk is keeping up: streaming audio, sampler
+/// libraries paging in, and peak files being written all land here, and a
+/// stream that cannot be fed is heard as a dropout rather than seen as a stall.
 ///
-/// `None` until two samples exist, and on any platform that cannot report
-/// per-thread CPU: an unknown load prints as "—" rather than as zero.
+/// Counts the same processes the memory readout does — Studio plus its plugin
+/// hosts — because a sampler streaming from disk does it in the host, not here.
 ///
-/// This is CPU time, not responsiveness. A UI thread blocked in a syscall burns
-/// no CPU and still stutters — use `FUTUREBOARD_UI_PERF=1` and its `[ui-stall]`
-/// lines for that. What this catches is the other half: the interface using a
-/// whole core to keep up.
-pub fn ui_thread_cpu_load() -> Option<f32> {
+/// `None` until two samples exist and on any platform that cannot report it: an
+/// unmeasured rate is not a rate of zero.
+pub fn disk_io_bytes_per_sec() -> Option<f64> {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    /// Long enough that the reading is a load and not one frame's noise, short
-    /// enough that a stall shows up while the user is still looking at it.
+    /// Long enough to smooth a burst into a rate, short enough that a stream
+    /// starting is visible while the user is still looking.
     const WINDOW: Duration = Duration::from_millis(500);
     struct Sample {
-        thread: std::thread::ThreadId,
         at: Instant,
-        cpu: Duration,
-        load: Option<f32>,
+        bytes: u64,
+        rate: Option<f64>,
     }
     static LAST: std::sync::OnceLock<Mutex<Option<Sample>>> = std::sync::OnceLock::new();
 
     let now = Instant::now();
-    let thread = std::thread::current().id();
     let Ok(mut slot) = LAST.get_or_init(|| Mutex::new(None)).lock() else {
         return None;
     };
-    // Called at the meter's ~60 Hz but sampled twice a second, so the syscall
-    // waits until a window has actually closed. This function exists to make a
-    // busy UI thread visible; it must not be part of what makes it busy.
+    // Called at the meter's cadence but sampled twice a second: this opens a
+    // handle per plugin host, and a readout that only shows whole megabytes has
+    // no use for more.
     if let Some(prev) = slot.as_ref() {
-        if prev.thread == thread && now.duration_since(prev.at) < WINDOW {
-            return prev.load;
+        if now.duration_since(prev.at) < WINDOW {
+            return prev.rate;
         }
     }
-    let cpu = read_current_thread_cpu_time()?;
-    // Two threads' CPU clocks are not comparable, so a sample from a different
-    // caller starts the window over rather than being subtracted from this
-    // one's. In practice this only ever runs on the UI thread; the guard is
-    // here so that stays true by construction rather than by convention.
-    if slot.as_ref().is_some_and(|prev| prev.thread != thread) {
-        *slot = None;
-    }
+    let bytes = read_total_io_bytes()?;
     match slot.as_mut() {
-        // First sample establishes the baseline; there is no interval to divide
-        // by yet, so there is no load to report.
         None => {
             *slot = Some(Sample {
-                thread,
                 at: now,
-                cpu,
-                load: None,
+                bytes,
+                rate: None,
             });
             None
         }
         Some(prev) => {
-            let elapsed = now.duration_since(prev.at);
-            let burned = cpu.saturating_sub(prev.cpu);
-            // The clock has 100 ns granularity, so a short window can round the
-            // load a few percent either way; the readout only shows whole
-            // percent and the window is half a second.
-            let load = (burned.as_secs_f32() / elapsed.as_secs_f32()).clamp(0.0, 8.0);
+            let elapsed = now.duration_since(prev.at).as_secs_f64();
+            // A host that exits between samples takes its counters with it, so
+            // the total can go backwards; that is not negative disk traffic.
+            let moved = bytes.saturating_sub(prev.bytes);
+            let rate = if elapsed > 0.0 {
+                moved as f64 / elapsed
+            } else {
+                0.0
+            };
             prev.at = now;
-            prev.cpu = cpu;
-            prev.load = Some(load);
-            Some(load)
+            prev.bytes = bytes;
+            prev.rate = Some(rate);
+            Some(rate)
         }
     }
 }
 
-/// Kernel + user CPU time of the calling thread.
+/// Bytes transferred by this process and every live plugin host since each one
+/// started. Only the difference between two readings is meaningful.
 #[cfg(windows)]
-fn read_current_thread_cpu_time() -> Option<std::time::Duration> {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-
-    let mut created = FILETIME::default();
-    let mut exited = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    unsafe {
-        GetThreadTimes(
-            GetCurrentThread(),
-            &mut created,
-            &mut exited,
-            &mut kernel,
-            &mut user,
-        )
+fn read_total_io_bytes() -> Option<u64> {
+    let mut total = read_current_process_io_bytes()?;
+    for pid in running_plugin_host_pids() {
+        if let Some(bytes) = read_pid_io_bytes(pid) {
+            total = total.saturating_add(bytes);
+        }
     }
-    .ok()?;
-    // The two intervals are 100 ns units in a split u64; only the durations are
-    // meaningful (the creation/exit stamps are absolute FILETIMEs).
-    let ticks = filetime_ticks(kernel).saturating_add(filetime_ticks(user));
-    Some(std::time::Duration::from_nanos(ticks.saturating_mul(100)))
-}
-
-#[cfg(windows)]
-fn filetime_ticks(value: windows::Win32::Foundation::FILETIME) -> u64 {
-    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+    Some(total)
 }
 
 #[cfg(not(windows))]
-fn read_current_thread_cpu_time() -> Option<std::time::Duration> {
+fn read_total_io_bytes() -> Option<u64> {
     None
+}
+
+#[cfg(windows)]
+fn read_current_process_io_bytes() -> Option<u64> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    io_bytes_for_handle(unsafe { GetCurrentProcess() })
+}
+
+#[cfg(windows)]
+fn read_pid_io_bytes(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let bytes = io_bytes_for_handle(handle);
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    bytes
+}
+
+#[cfg(windows)]
+fn io_bytes_for_handle(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows::Win32::System::Threading::GetProcessIoCounters;
+
+    // `IO_COUNTERS` counts every transfer through the I/O manager, so this is
+    // the same figure Task Manager's Disk column is built from rather than a
+    // filesystem-only one. Named "Disk" on the readout because that is what it
+    // is in practice for a DAW.
+    let mut counters = Default::default();
+    unsafe { GetProcessIoCounters(handle, &mut counters) }.ok()?;
+    Some(
+        counters
+            .ReadTransferCount
+            .saturating_add(counters.WriteTransferCount),
+    )
 }
 
 /// Working set attributable to Futureboard, split by process.
@@ -1103,23 +1108,32 @@ pub fn process_memory_bytes() -> Option<u64> {
     memory_usage().studio_bytes
 }
 
-/// Summed working set of the live plugin hosts, and how many answered.
+/// PIDs of the plugin hosts that are actually alive.
 ///
 /// The registry keeps `Exited` records around, so only `Running` hosts are
 /// opened — a recycled PID would otherwise charge this session for a stranger's
-/// memory. A host that exits between the listing and the `OpenProcess` simply
-/// does not contribute; it is not an error worth reporting on a readout.
+/// memory or disk traffic. A host that exits between the listing and the
+/// `OpenProcess` simply does not contribute; it is not an error worth reporting
+/// on a readout.
 #[cfg(windows)]
-fn read_plugin_host_memory_bytes() -> (u64, usize) {
+fn running_plugin_host_pids() -> Vec<u32> {
     use SpherePluginHost::plugin_host_lifecycle::{BridgeHostManager, HostLifecycleState};
 
+    BridgeHostManager::global()
+        .host_records()
+        .into_iter()
+        .filter(|record| record.state == HostLifecycleState::Running)
+        .map(|record| record.pid)
+        .collect()
+}
+
+/// Summed working set of the live plugin hosts, and how many answered.
+#[cfg(windows)]
+fn read_plugin_host_memory_bytes() -> (u64, usize) {
     let mut total = 0u64;
     let mut counted = 0usize;
-    for record in BridgeHostManager::global().host_records() {
-        if record.state != HostLifecycleState::Running {
-            continue;
-        }
-        if let Some(bytes) = read_pid_memory_bytes(record.pid) {
+    for pid in running_plugin_host_pids() {
+        if let Some(bytes) = read_pid_memory_bytes(pid) {
             total = total.saturating_add(bytes);
             counted += 1;
         }

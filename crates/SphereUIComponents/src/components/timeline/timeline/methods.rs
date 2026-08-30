@@ -225,6 +225,11 @@ impl Timeline {
             on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             lane_origin_probe: std::rc::Rc::new(std::cell::Cell::new(None)),
+            playhead_frame: std::rc::Rc::new(std::cell::Cell::new(
+                crate::components::timeline::playhead::PlayheadFrame::default(),
+            )),
+            playhead_overlay: None,
+            track_meters: Default::default(),
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -285,6 +290,11 @@ impl Timeline {
             on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             lane_origin_probe: std::rc::Rc::new(std::cell::Cell::new(None)),
+            playhead_frame: std::rc::Rc::new(std::cell::Cell::new(
+                crate::components::timeline::playhead::PlayheadFrame::default(),
+            )),
+            playhead_overlay: None,
+            track_meters: Default::default(),
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -656,6 +666,57 @@ impl Timeline {
         } else {
             self.mark_project_changed(cx);
         }
+    }
+
+    /// Push this tick's levels to the header meters.
+    ///
+    /// Returns `true` if any meter repainted. As with [`Self::publish_playhead`]
+    /// the caller must not follow this with a `Timeline` notify — the whole
+    /// point is that a moving meter no longer rebuilds the arrangement.
+    ///
+    /// Only entities that exist are fed: `render` creates them for the tracks
+    /// it draws, so a track scrolled out of view costs nothing here either.
+    pub(crate) fn publish_track_meters(&self, cx: &mut gpui::App) -> bool {
+        if self.track_meters.is_empty() {
+            return false;
+        }
+        let mut repainted = false;
+        for track in &self.state.tracks {
+            let Some(meter) = self.track_meters.get(track.id.as_str()) else {
+                continue;
+            };
+            repainted |= meter.update(cx, |meter, cx| {
+                meter.apply(track.meter_level_l, track.meter_level_r, cx)
+            });
+        }
+        repainted
+    }
+
+    /// Push the current playhead position to its own entity.
+    ///
+    /// Returns `true` when the overlay actually had to repaint. The caller must
+    /// *not* follow this with a `Timeline` notify: moving the playhead is the
+    /// one per-frame visual that has no business rebuilding the arrangement,
+    /// and re-adding that notify puts the stutter straight back.
+    ///
+    /// A no-op before the first render, which is when the overlay is built —
+    /// the arrangement has not been laid out yet, so there is no x to publish.
+    pub(crate) fn publish_playhead(&self, cx: &mut gpui::App) -> bool {
+        let Some(overlay) = self.playhead_overlay.as_ref() else {
+            return false;
+        };
+        let next = crate::components::timeline::playhead::PlayheadFrame {
+            x: self.state.beats_to_x(self.state.transport.playhead_beats),
+        };
+        // Sub-pixel motion draws the same line. At 144 Hz on a zoomed-out
+        // arrangement most ticks land inside one pixel, and repainting for them
+        // is work with nothing to show for it.
+        if (self.playhead_frame.get().x - next.x).abs() < 0.5 {
+            return false;
+        }
+        self.playhead_frame.set(next);
+        overlay.update(cx, |_, cx| cx.notify());
+        true
     }
 
     pub(crate) fn mark_project_changed(&self, cx: &mut gpui::App) {
@@ -1258,6 +1319,47 @@ impl Timeline {
     /// Mouse-down inside an automation lane: hit-test a point (select + begin
     /// move), else add a point (Pen) or start a marquee (Pointer).
     #[allow(clippy::too_many_arguments)]
+    /// Delete the automation point under the cursor. Returns `true` if one was
+    /// there, which is what tells the lane whether to swallow the click.
+    ///
+    /// Same hit tolerances as [`Self::begin_automation_interaction`], but the
+    /// caller passes the *unsnapped* beat: a delete must act on the point the
+    /// cursor is actually over, and snapping the probe to the grid first would
+    /// step past a point that sits between grid lines. Anywhere else the press
+    /// is left alone and the arrangement's context menu opens as before.
+    pub(super) fn delete_automation_point_at(
+        &mut self,
+        track_id: &str,
+        lane_id: &str,
+        beat: f32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::components::timeline::timeline_state::{
+            AUTOMATION_LANE_PAD, AUTOMATION_SUBLANE_HEIGHT,
+        };
+        let ppb = self.state.viewport.pixels_per_beat.max(1.0);
+        let usable = (AUTOMATION_SUBLANE_HEIGHT - 2.0 * AUTOMATION_LANE_PAD).max(1.0);
+        let Some(point_id) =
+            self.state
+                .automation_point_at(track_id, lane_id, beat, value, 8.0 / ppb, 8.0 / usable)
+        else {
+            return false;
+        };
+        // Captured before the removal: undo has to put the point back, and on
+        // the last point of a lane it has to put the lane back too.
+        let lanes_before = self.state.capture_automation_lanes(track_id);
+        if !self
+            .state
+            .delete_automation_point(track_id, lane_id, point_id)
+        {
+            return false;
+        }
+        self.record_automation_lanes_edit(track_id, lanes_before, cx);
+        cx.notify();
+        true
+    }
+
     pub(super) fn begin_automation_interaction(
         &mut self,
         track_id: &str,

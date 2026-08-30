@@ -2939,21 +2939,6 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                 },
             );
         }
-        // Transport key claimed from a focused plug-in editor. The main app owns
-        // what play/pause means; this only reports that the key was pressed
-        // somewhere the main app's window could not see it.
-        timed_section!("transport_key_poll", {
-            let toggles = platform::take_transport_toggle_requests();
-            for _ in 0..toggles {
-                eprintln!("[PluginEditorInput] transport toggle requested from editor focus");
-                let _ = ipc::write_frame(
-                    &mut out,
-                    &HostEvent::TransportToggleRequested {
-                        source: "editor".to_string(),
-                    },
-                );
-            }
-        });
         timed_section!("resize_poll", {
             let resizes = preview
                 .try_lock_for(Duration::from_millis(2))
@@ -3011,6 +2996,29 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         });
         platform::set_editor_roots(registry.values().map(|state| state.host_hwnd).collect());
         let dispatched = platform::pump_messages();
+
+        // Reported after the pumps, not before them: both pumps claim the key
+        // into the counter this drains, so draining first meant a press was
+        // held until the *next* iteration — and with an editor open the loop
+        // then parks in `wait_for_input` first, so a single Space with no
+        // further input waited out that timeout before the transport heard it.
+        //
+        // The main app owns what play/pause means; this only reports that the
+        // key was pressed somewhere the main app's window could not see it.
+        timed_section!("transport_key_poll", {
+            let toggles = platform::take_transport_toggle_requests();
+            for _ in 0..toggles {
+                if platform::plugin_debug() {
+                    eprintln!("[PluginEditorInput] transport toggle requested from editor focus");
+                }
+                let _ = ipc::write_frame(
+                    &mut out,
+                    &HostEvent::TransportToggleRequested {
+                        source: "editor".to_string(),
+                    },
+                );
+            }
+        });
         // Freeze watchdog tiers (spec item 10):
         //  >50ms   name the slow section,
         //  >1000ms dump the window/thread snapshot,
@@ -5275,17 +5283,17 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, CallNextHookEx, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow,
         DispatchMessageW, EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW,
-        GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindow, GetWindowLongPtrW,
-        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsChild, IsDialogMessageW,
-        IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
-        SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-        WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT, GUITHREADINFO,
-        GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, KBDLLHOOKSTRUCT,
-        LLKHF_INJECTED, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_SHOWWINDOW, SW_SHOWNORMAL, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_SYSKEYDOWN, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
-        WS_VISIBLE,
+        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetParent, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsChild,
+        IsDialogMessageW, IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
+        PostThreadMessageW, SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow,
+        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT,
+        GA_ROOT, GUITHREADINFO, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER,
+        HWND_TOP, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE,
+        QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WH_KEYBOARD_LL,
+        WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+        WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN,
+        WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -5391,6 +5399,24 @@ mod platform {
     /// the calling thread's focus, which is wrong for plug-ins that create a
     /// dedicated JUCE/CEF UI thread and caused Space in their text fields to be
     /// mistaken for a transport command.
+    /// The window that would receive a key this thread just peeked.
+    ///
+    /// `GetFocus` answers for the *calling thread's* queue, which is exactly
+    /// the queue the message came off. [`foreground_focus_window`] answers for
+    /// whichever thread owns the foreground window — and when an editor is
+    /// embedded under a window owned by the Studio process, that is Studio's
+    /// GPUI thread, so the text-entry veto was reading the class of a window
+    /// in another process and vetoing (or failing to veto) on it.
+    fn keyboard_focus_window() -> HWND {
+        unsafe {
+            let focus = GetFocus();
+            if !focus.is_invalid() {
+                return focus;
+            }
+        }
+        foreground_focus_window()
+    }
+
     fn foreground_focus_window() -> HWND {
         unsafe {
             let foreground = GetForegroundWindow();
@@ -5450,24 +5476,56 @@ mod platform {
     /// own UI thread (CEF / JUCE / browser editors) owns the message queue.
     /// Only claims when *this process* owns the foreground window — the main
     /// Studio process keeps Space when the arrangement is focused.
+    ///
+    /// On a thread of its own, and that is not a detail.
+    ///
+    /// Windows calls a `WH_KEYBOARD_LL` proc on the thread that installed it,
+    /// and every keystroke *system-wide* waits for that call to return. This
+    /// hook used to live on the editor UI thread, which also loads plug-ins
+    /// (30 s timeout), drains up to 512 messages a pass, and blocks on the DSP
+    /// mutex. While that thread was busy, typing anywhere on the machine
+    /// stalled — and once a call exceeded `LowLevelHooksTimeout` (300 ms by
+    /// default) Windows silently dropped the hook, which a `OnceLock` never
+    /// reinstalls. That is the "Space worked, then stopped working" shape.
+    ///
+    /// This thread does nothing but service the hook, so it is always ready to
+    /// answer. It parks in `GetMessageW` and exits with the process.
     fn install_transport_keyboard_hook() {
         static HOOK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         HOOK.get_or_init(|| {
-            unsafe {
-                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(transport_ll_keyboard_proc), None, 0)
-                {
-                    Ok(hook) if !hook.is_invalid() => {
-                        // Keep the hook alive for process lifetime: never call
-                        // UnhookWindowsHookEx. The OS unhooks on process exit.
-                        let _ = hook;
-                        eprintln!("[PluginEditorInput] WH_KEYBOARD_LL transport hook installed");
+            let spawned = std::thread::Builder::new()
+                .name("plugin-host-transport-hook".into())
+                .spawn(|| unsafe {
+                    let hook = match SetWindowsHookExW(
+                        WH_KEYBOARD_LL,
+                        Some(transport_ll_keyboard_proc),
+                        None,
+                        0,
+                    ) {
+                        Ok(hook) if !hook.is_invalid() => hook,
+                        Ok(_) | Err(_) => {
+                            eprintln!(
+                                "[PluginEditorInput] WARNING failed to install WH_KEYBOARD_LL transport hook"
+                            );
+                            return;
+                        }
+                    };
+                    eprintln!("[PluginEditorInput] WH_KEYBOARD_LL transport hook installed");
+                    // A hook thread must pump, or the proc is never called.
+                    // Nothing posts to this queue, so the loop simply parks
+                    // here for the life of the process.
+                    let mut msg = MSG::default();
+                    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
                     }
-                    Ok(_) | Err(_) => {
-                        eprintln!(
-                            "[PluginEditorInput] WARNING failed to install WH_KEYBOARD_LL transport hook"
-                        );
-                    }
-                }
+                    let _ = UnhookWindowsHookEx(hook);
+                });
+            if spawned.is_err() {
+                eprintln!(
+                    "[PluginEditorInput] WARNING could not start the transport hook thread; \
+                     Space still reaches the transport through the editor message pumps"
+                );
             }
         });
     }
@@ -5717,6 +5775,24 @@ mod platform {
             while pumped < MAX_PUMP_PER_CALL
                 && PeekMessageW(&mut msg, Some(host), 0, 0, PM_REMOVE).as_bool()
             {
+                // Same claim the general pump makes, and it has to be here too:
+                // this drain runs first and takes the editor subtree with it, so
+                // with focus on a plug-in's own child view — the normal case —
+                // Space was dispatched straight into the plug-in and the
+                // transport never heard about it. That is why Play/Pause from a
+                // plug-in editor did nothing.
+                if is_transport_toggle_key(&msg) {
+                    TRANSPORT_TOGGLE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if plugin_debug() {
+                        eprintln!(
+                            "[PluginEditorInput] transport key claimed (editor pump) hwnd=0x{:x} class='{}'",
+                            msg.hwnd.0 as u64,
+                            class_name(msg.hwnd)
+                        );
+                    }
+                    pumped += 1;
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 // Generic dialog routing: only treat real `#32770` dialogs as
                 // dialogs; never run IsDialogMessage against plugin windows.
@@ -5743,9 +5819,11 @@ mod platform {
     /// for pathological message storms — it never drops messages.
     const MAX_PUMP_PER_CALL: u32 = 512;
 
-    /// Transport-key presses seen by this thread's pump and not yet reported to
-    /// the main app. Written only by the UI thread; drained by the IPC loop on
-    /// the same thread, so a plain relaxed counter is enough.
+    /// Transport-key presses claimed and not yet reported to the main app.
+    ///
+    /// Written by the editor UI thread's two message pumps and by the hook
+    /// thread; drained by the IPC loop. Nothing else is published alongside it,
+    /// so the count needs atomicity but no ordering.
     static TRANSPORT_TOGGLE_REQUESTS: std::sync::atomic::AtomicU32 =
         std::sync::atomic::AtomicU32::new(0);
 
@@ -5781,7 +5859,7 @@ mod platform {
             if held(VK_CONTROL) || held(VK_MENU) || held(VK_LWIN) || held(VK_RWIN) {
                 return false;
             }
-            let focus = foreground_focus_window();
+            let focus = keyboard_focus_window();
             if !focus.is_invalid() && is_text_entry_class(&class_name(focus)) {
                 return false;
             }

@@ -205,6 +205,65 @@ impl TimelineState {
         interval
     }
 
+    /// The arrangement grid for this frame, built at most once.
+    ///
+    /// The ruler, the arrangement snapshot, and each visible conductor lane all
+    /// want the same lines with the same arguments, so a default layout built
+    /// the identical `Vec` six times per frame — dedupe, sort and all. This
+    /// hands out one `Arc` and rebuilds only when something the geometry
+    /// actually depends on has moved.
+    ///
+    /// Thread-local rather than a field on `TimelineState`: the state derives
+    /// `Clone` and `PartialEq`, and a render cache is neither cloneable state
+    /// nor part of a project's identity.
+    pub fn arrangement_grid_lines(&self, viewport_width: f32) -> std::rc::Rc<Vec<GridLine>> {
+        use std::cell::RefCell;
+        use std::hash::{Hash, Hasher};
+
+        let key = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            // Everything `beat_to_x`, the visible range, and the LOD resolver
+            // read. The meter map goes in by revision, which it already keeps.
+            self.viewport.pixels_per_beat.to_bits().hash(&mut hasher);
+            self.viewport.pixels_per_second.to_bits().hash(&mut hasher);
+            self.viewport.scroll_x.to_bits().hash(&mut hasher);
+            viewport_width.to_bits().hash(&mut hasher);
+            self.bpm.to_bits().hash(&mut hasher);
+            // The map by content, not only by revision: the cache is
+            // thread-wide, and two different maps can sit at the same revision
+            // number. Meter changes are a handful of points at most.
+            self.time_signature_map.revision().hash(&mut hasher);
+            self.time_signature_map.points.len().hash(&mut hasher);
+            for point in &self.time_signature_map.points {
+                point.beat.to_bits().hash(&mut hasher);
+                point.numerator.hash(&mut hasher);
+                point.denominator.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+
+        thread_local! {
+            static CACHE: RefCell<Option<(u64, std::rc::Rc<Vec<GridLine>>)>> =
+                const { RefCell::new(None) };
+        }
+        if let Some(hit) = CACHE.with(|cache| {
+            cache
+                .borrow()
+                .as_ref()
+                .filter(|(cached, _)| *cached == key)
+                .map(|(_, lines)| std::rc::Rc::clone(lines))
+        }) {
+            crate::perf::count("grid_line_cache_hit", 1);
+            return hit;
+        }
+        crate::perf::count("grid_line_cache_miss", 1);
+        let lines = std::rc::Rc::new(self.get_arrangement_grid_lines(viewport_width));
+        CACHE.with(|cache| {
+            *cache.borrow_mut() = Some((key, std::rc::Rc::clone(&lines)));
+        });
+        lines
+    }
+
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
         let power = crate::perf::power_mode();
         const MAX_GRID_LINES_BASE: usize = 1200;
@@ -225,19 +284,27 @@ impl TimelineState {
         // left edge of the visible range. This decides how many bar lines to thin
         // away, whether beats / subdivisions appear, and how far apart ruler
         // labels must sit. See [`resolve_timeline_grid_lod`].
-        let start_sig = self
+        let (start_numerator, start_denominator) = self
             .time_signature_map
-            .time_signature_at_beat(start_beat as f64);
+            .time_signature_values_at_beat(start_beat as f64);
         let lod = resolve_timeline_grid_lod(&TimelineGridLodParams {
             pixels_per_beat: ppb,
             bpm: self.bpm,
-            numerator: start_sig.numerator,
-            denominator: start_sig.denominator,
+            numerator: start_numerator,
+            denominator: start_denominator,
             viewport_width,
             scroll_x: self.viewport.scroll_x,
         });
 
         let mut lines: Vec<GridLine> = Vec::new();
+        // Placed x positions, kept sorted so the "is anything already within
+        // 3 px" test is a binary search plus two neighbour comparisons.
+        //
+        // It used to be a linear scan of every placed line for every candidate,
+        // which is O(n^2): a few thousand comparisons at typical zoom and about
+        // three quarters of a million at the 1200-line budget — per call, and
+        // this is called once per conductor lane plus the ruler plus the
+        // arrangement snapshot on every frame.
         let mut occupied_x: Vec<i32> = Vec::new();
 
         let mut add_line = |beat: f32, level: GridLineLevel, label_candidate: bool| {
@@ -250,13 +317,25 @@ impl TimelineState {
             if x < -1.0 || x > viewport_width + 1.0 {
                 return;
             }
-            if occupied_x
-                .iter()
-                .any(|existing| (x_key - *existing).abs() < MIN_GRID_LINE_SPACING_PX)
-            {
+            let slot = match occupied_x.binary_search(&x_key) {
+                // An exact duplicate is trivially inside the spacing.
+                Ok(_) => return,
+                Err(slot) => slot,
+            };
+            let too_close = |index: usize| {
+                occupied_x
+                    .get(index)
+                    .is_some_and(|existing| (x_key - *existing).abs() < MIN_GRID_LINE_SPACING_PX)
+            };
+            // Everything placed is at least `MIN_GRID_LINE_SPACING_PX` apart, so
+            // only the immediate neighbours can be inside that distance.
+            if slot > 0 && too_close(slot - 1) {
                 return;
             }
-            occupied_x.push(x_key);
+            if too_close(slot) {
+                return;
+            }
+            occupied_x.insert(slot, x_key);
             lines.push(GridLine {
                 x,
                 beat: rb,
@@ -324,17 +403,20 @@ impl TimelineState {
         // denominator-beat position where a beat line already sits.
         let show_subdivisions = lod.show_subdivision_lines && power.allow_sub_grid_lines();
         if show_subdivisions {
-            let beat_unit = denominator_unit_quarter_beats(start_sig.denominator) as f32;
+            let beat_unit = denominator_unit_quarter_beats(start_denominator) as f32;
             let step = (beat_unit / lod.subdivision_per_beat.max(1) as f32).max(1.0e-4);
             let first_sub = (start_beat / step).floor() - 1.0;
             let last_sub = (end_beat / step).ceil() + 1.0;
             let mut slot = first_sub;
             while slot <= last_sub {
                 let beat = slot * step;
+                // Values, not a point: this runs once per sub-beat slot across
+                // the whole ruler, and the point form clones a `String` id to
+                // hand back a number.
                 let denom_unit = denominator_unit_quarter_beats(
                     self.time_signature_map
-                        .time_signature_at_beat(beat as f64)
-                        .denominator,
+                        .time_signature_values_at_beat(beat as f64)
+                        .1,
                 ) as f32;
                 let on_denom_grid = if denom_unit > TS_BEAT_EPSILON as f32 {
                     ((beat / denom_unit).fract()).abs() < 1e-4

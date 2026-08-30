@@ -307,6 +307,14 @@ pub(crate) fn graph_fingerprint_of(signature: &str) -> u64 {
 /// A scrub, a velocity drag, or a run of drawn notes emits dozens of commits a
 /// second, and each one would otherwise cost a full-project snapshot plus a
 /// JSON serialize of every note in the project, on the UI thread.
+/// How often the plug-in bridge is reconciled and its event queue drained.
+///
+/// Backstop bookkeeping — closing editors whose track was deleted, forwarding
+/// editor events, and picking up a transport key pressed inside an editor. It
+/// is UI-sync work, not realtime, so it is capped at ~60 Hz rather than run at
+/// the display refresh: on a 144 Hz panel that would otherwise triple it.
+const BRIDGE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
 const UI_GESTURE_SYNC_INTERVAL: Duration = Duration::from_millis(75);
 
 /// Should this request build a snapshot now, or ride the open window?
@@ -416,7 +424,7 @@ impl StudioLayout {
             Some(Ok(bridge)) => bridge
                 .loaded_instance_ids()
                 .into_iter()
-                .any(|id| bridge.audio_sink_for(&id).is_some()),
+                .any(|id| bridge.has_audio_sink(&id)),
             Some(Err(_)) => bridge_instance.is_some(),
             None => false,
         };
@@ -764,6 +772,19 @@ impl StudioLayout {
             return false;
         }
         let _s = crate::perf::PerfScope::enter("poll_native_audio");
+        // The plug-in bridge does not belong to the audio engine and must be
+        // pumped even without one. Behind this early return, a session with no
+        // device open never drained the host's event queue at all: editors sat
+        // on "Loading" forever and every transport key pressed in one piled up
+        // to fire as a burst whenever a device finally appeared.
+        let bridge_due = self.engine_sync.bridge_reconciled_at.elapsed() >= BRIDGE_POLL_INTERVAL;
+        if bridge_due {
+            self.engine_sync.bridge_reconciled_at = Instant::now();
+            self.reconcile_open_plugin_editors(cx);
+            self.poll_plugin_bridge_runtime(cx);
+            // Drive native main-owned editor shells: honor OS close + forward resizes.
+            self.drive_bridge_editors(cx);
+        }
         if self.audio_bridge.engine.is_none() {
             return false;
         }
@@ -781,22 +802,6 @@ impl StudioLayout {
 
         if self.audio_bridge.project_dirty || self.audio_bridge.media_dirty {
             self.schedule_audio_project_sync(cx, false, "engine_dirty_poll");
-        }
-
-        // Backstop: close editors whose track/insert was removed by any path
-        // (notably the track-header delete button, which mutates the Timeline
-        // entity directly and never reaches the StudioLayout delete commands).
-        //
-        // This bookkeeping is UI-sync only (not realtime) and doesn't need to
-        // run at the display refresh, so cap it to ~60 Hz. On a 60 Hz monitor
-        // the poll already ticks at ~16 ms so this runs every tick (unchanged);
-        // on a 144 Hz monitor it stops the work from tripling.
-        if self.engine_sync.bridge_reconciled_at.elapsed() >= Duration::from_millis(16) {
-            self.engine_sync.bridge_reconciled_at = Instant::now();
-            self.reconcile_open_plugin_editors(cx);
-            self.poll_plugin_bridge_runtime(cx);
-            // Drive native main-owned editor shells: honor OS close + forward resizes.
-            self.drive_bridge_editors(cx);
         }
 
         let engine = self.audio_bridge.engine.as_ref().expect("checked above");
@@ -870,30 +875,45 @@ impl StudioLayout {
                 // No threshold while playing — even sub-pixel beat motion
                 // matters for the bar:beat:tick readout in the chrome.
                 let next = interpolated.max(0.0);
-                let mut dirty = false;
+                // Two kinds of change, and only one of them is the arrangement's
+                // business. The playhead moving is a line translating over
+                // content that has not changed; everything else here moves the
+                // content itself.
+                let mut arrangement_dirty = false;
+                let mut playhead_moved = false;
                 if timeline.state.transport.playhead_beats != next {
                     timeline.state.transport.playhead_beats = next;
-                    dirty = true;
+                    playhead_moved = true;
                 }
                 // Follow Track Volume automation: refresh each track's effective
                 // volume so the mixer/track-header/inspector fader track the curve
                 // during playback. UI-only (faders read `display_volume`), so this
                 // never writes the base value or fires a user-edit command.
+                // Faders live in the track headers and the mixer, so a curve
+                // moving one is a real arrangement change.
                 if timeline
                     .state
                     .recompute_effective_volumes(next, "playback_tick")
                 {
-                    dirty = true;
+                    arrangement_dirty = true;
                 }
                 // Follow-playhead / auto-scroll. Keeps the playhead visible
                 // during playback; user-scroll temporarily disables it via
                 // `note_user_scrolled`. Cheap — no rebuild, just viewport
                 // scroll_x update.
+                // Auto-scroll moves the content under the playhead, so this one
+                // does have to repaint the arrangement. In Page mode that is a
+                // handful of frames per project; in Continuous mode it is every
+                // frame, which is the cost of that mode rather than of playback.
                 if timeline.state.update_auto_scroll_for_playhead(next) {
-                    dirty = true;
+                    arrangement_dirty = true;
                 }
-                if dirty {
+                if arrangement_dirty {
+                    // The repaint recomputes the playhead's x on its way past,
+                    // so the overlay does not need telling twice.
                     cx.notify();
+                } else if playhead_moved {
+                    timeline.publish_playhead(cx);
                 }
             });
         } else {
@@ -1446,19 +1466,32 @@ impl StudioLayout {
         );
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
-            let join = std::thread::Builder::new()
-                .name("audio-project-load".into())
-                .spawn(move || engine.load_project(snapshot));
-            let result = match join {
-                Ok(handle) => handle.join().unwrap_or_else(|_| {
-                    Err(DirectAudio::SphereAudioError::NativeError(
-                        "audio project load thread panicked".to_string(),
-                    ))
-                }),
-                Err(error) => Err(DirectAudio::SphereAudioError::NativeError(format!(
-                    "failed to spawn audio project load thread: {error}"
-                ))),
-            };
+            // On the background executor, and awaited there.
+            //
+            // This used to spawn an OS thread and immediately `join()` it. But
+            // `Context::spawn` runs its future on the *foreground* executor —
+            // the UI thread — so the join parked the interface for the whole of
+            // `load_project`: the graph rebuild, plug-in re-instantiation and
+            // media decode. Every committed MIDI note that got past the sync
+            // throttle paid that, which is what made drawing notes feel like it
+            // was waiting on the audio backend. It was.
+            //
+            // `catch_unwind` keeps the guarantee the `join()` gave: a panic in
+            // the load is reported as a failed sync rather than taking the
+            // process with it.
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        engine.load_project(snapshot)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(DirectAudio::SphereAudioError::NativeError(
+                            "audio project load panicked".to_string(),
+                        ))
+                    })
+                })
+                .await;
             let _ = owner.update(cx, |this, cx| {
                 this.complete_audio_project_sync(cx, result, signature, sync_generation);
             });
@@ -2613,6 +2646,52 @@ impl StudioLayout {
         );
     }
 
+    /// Right-click straight onto a conductor-lane item: delete it.
+    ///
+    /// Returns `true` when something was deleted, which is what tells the
+    /// caller to skip the context menu. A press on empty lane space names no
+    /// id, so it falls through and the menu opens as before — that menu is
+    /// where "add a marker here" lives and it must stay reachable.
+    ///
+    /// Routed through the same commands the menu's own Delete items use, so the
+    /// undo entry, the tempo/meter map rebuild and the engine resync are
+    /// identical however the delete was asked for.
+    pub(super) fn delete_context_target(
+        &mut self,
+        target: &ContextTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match target {
+            ContextTarget::MarkerTrack {
+                marker_id: Some(id),
+                ..
+            } => {
+                self.delete_marker_command(&id.clone(), cx);
+                true
+            }
+            ContextTarget::RegionTrack {
+                region_id: Some(id),
+                ..
+            } => {
+                self.delete_region_command(&id.clone(), cx);
+                true
+            }
+            ContextTarget::TempoTrack {
+                point_id: Some(id), ..
+            } => {
+                self.delete_tempo_point(&id.clone(), cx);
+                true
+            }
+            ContextTarget::TimeSignatureTrack {
+                point_id: Some(id), ..
+            } => {
+                self.delete_time_signature_point(&id.clone(), cx);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn delete_marker_command(&mut self, id: &str, cx: &mut Context<Self>) {
         self.edit_markers(
             "Delete Marker",
@@ -3594,6 +3673,82 @@ mod transport_repaint_tests {
         };
         assert_eq!(at(4.01), at(4.99), "same beat, no shell repaint");
         assert_ne!(at(4.99), at(5.01), "beat boundary does repaint");
+    }
+}
+
+#[cfg(test)]
+mod snapshot_volume_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{volume, TimelineState};
+
+    fn track_volume_in_snapshot(state: &TimelineState, track_id: &str) -> f32 {
+        build_engine_project_snapshot(state, 48_000, None, None)
+            .tracks
+            .into_iter()
+            .find(|track| track.id == track_id)
+            .expect("track in snapshot")
+            .volume
+    }
+
+    /// What the engine is told has to be what the fader shows. A drag holds its
+    /// value in the preview map and only writes the track on release, so a sync
+    /// landing mid-drag used to publish the value the user had already moved
+    /// away from — undoing the live param push and making the track loud again
+    /// until they let go.
+    #[test]
+    fn an_in_flight_fader_publishes_what_the_user_is_holding() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        let loud = track_volume_in_snapshot(&state, &track);
+
+        // Mid-drag: the press starts the preview at the current value, the
+        // move takes it somewhere else, and the track itself is untouched.
+        let start_norm = state.find_track(&track).expect("track").volume;
+        let quiet_norm = volume::db_to_norm(-24.0);
+        state.begin_track_volume_preview(&track, start_norm);
+        assert!(state.set_track_volume_preview(&track, quiet_norm));
+        let published = track_volume_in_snapshot(&state, &track);
+        assert!(
+            published < loud,
+            "snapshot published {published} while the fader was held at -24 dB (was {loud})"
+        );
+    }
+
+    /// And on release it stays there — the commit writes the track and the
+    /// preview goes away, so the two agree rather than swapping which one wins.
+    #[test]
+    fn the_committed_fader_publishes_the_same_value() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        let start_norm = state.find_track(&track).expect("track").volume;
+        let quiet_norm = volume::db_to_norm(-24.0);
+        state.begin_track_volume_preview(&track, start_norm);
+        assert!(state.set_track_volume_preview(&track, quiet_norm));
+        let held = track_volume_in_snapshot(&state, &track);
+
+        state
+            .commit_track_volume_preview(&track)
+            .expect("a preview was in flight");
+        let committed = track_volume_in_snapshot(&state, &track);
+        assert!(
+            (held - committed).abs() < 1.0e-6,
+            "release changed the published volume from {held} to {committed}"
+        );
+    }
+
+    /// A track nobody is touching still publishes its own volume.
+    #[test]
+    fn an_untouched_track_publishes_its_base_volume() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track = state.create_audio_track();
+        state.set_track_volume(&track, volume::db_to_norm(-6.0));
+        let published = track_volume_in_snapshot(&state, &track);
+        let expected =
+            super::super::engine_snapshot::volume_norm_to_linear(volume::db_to_norm(-6.0));
+        assert!((published - expected).abs() < 1.0e-6);
     }
 }
 
