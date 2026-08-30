@@ -151,3 +151,28 @@ pub fn marker_flag_layer(
 
     (layer, labels)
 }
+
+/// Pointer slop to the *left* of a flag's beat line, in lane pixels.
+///
+/// Only the left needs slop: the drawn body already runs to the right of the
+/// beat, so `flag_hit_index` covers that side by shape rather than by guess.
+pub const MARKER_FLAG_HIT_SLOP: f32 = 6.0;
+
+/// Index of the flag whose drawn body contains `lane_x`.
+///
+/// The conductor lanes used to resolve a hit from a symmetric beat tolerance
+/// around the marker's beat, which is not the shape that is on screen: a flag
+/// is a 26–160 px body extending *right* from its beat line, so a click on the
+/// label — the obvious place to aim — landed outside the tolerance and read as
+/// "empty lane", clearing the selection and moving the playhead instead.
+///
+/// Scanned back to front so that where two flags overlap you get the one
+/// painted on top, which is the one you can see.
+pub fn flag_hit_index(spans: &[(f32, f32)], lane_x: f32, slop: f32) -> Option<usize> {
+    spans
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, (x, w))| lane_x >= x - slop && lane_x <= x + w)
+        .map(|(index, _)| index)
+}

@@ -35,18 +35,16 @@ pub type AudioClipCutCb =
 /// painted at another until a later resize gesture reconciles them.
 fn audio_clip_timeline_duration_seconds(clip: &ClipState, state: &TimelineState) -> f32 {
     let seconds_per_beat = state.seconds_per_beat();
-    if clip.stretch.mode == StretchMode::Off {
-        let sample_rate = clip
-            .stretch
-            .original_sample_rate
-            .max(clip.stretch.project_sample_rate);
-        let trimmed_frames = clip
-            .stretch
-            .source_end_samples
-            .saturating_sub(clip.stretch.source_start_samples);
-        if sample_rate > 0 && trimmed_frames > 0 {
-            return (trimmed_frames as f32 / sample_rate as f32).max(0.001);
-        }
+    // The clip's own source window and stretch ratio are what it actually plays
+    // for; `duration_beats` is derived from exactly this by
+    // `TimelineState::reconcile_audio_clip_lengths`. Drawing from the same
+    // formula the model is derived from is what keeps the drawn clip and the
+    // grabbable clip one object across a tempo change.
+    if let Some(seconds) = clip
+        .stretch
+        .played_seconds_for_project_bpm(state.bpm.max(1.0) as f64)
+    {
+        return (seconds as f32).max(0.001);
     }
     // Pending and legacy clips may not have decoded source bounds yet.
     (clip.duration_beats * seconds_per_beat).max(0.001)
@@ -350,19 +348,37 @@ impl Render for ClipDragPreview {
     }
 }
 
-fn stretch_badge_label(clip: &ClipState, state: &TimelineState) -> Option<String> {
+/// What the clip's processing strip says about its stretch state.
+///
+/// `locked` is the tempo-follow flag, not "has a ratio": a Tempo Sync clip's
+/// bar count belongs to the project tempo, so its badge has to read differently
+/// from a Manual clip that merely happens to sit at some ratio right now. The
+/// caller paints the two on separate channels — colour *and* glyph — because
+/// "is this clip pinned to the grid?" is the question a tempo change makes you
+/// ask about every clip at once.
+struct StretchBadge {
+    label: String,
+    locked: bool,
+}
+
+fn stretch_badge(clip: &ClipState, state: &TimelineState) -> Option<StretchBadge> {
     if clip.stretch.mode == StretchMode::Off {
         return None;
     }
+    let locked = clip.stretch.follows_project_tempo();
     if let Some(source_bpm) = clip.stretch.bpm_source {
-        return Some(format!("{source_bpm:.0}->{:.0}", state.bpm));
+        return Some(StretchBadge {
+            label: format!("{source_bpm:.0}->{:.0}", state.bpm),
+            locked,
+        });
     }
     let ratio = clip.stretch.effective_time_ratio(state.bpm as f64);
-    if (ratio - 1.0).abs() > 0.001 {
-        Some(format!("x{ratio:.2}"))
+    let label = if (ratio - 1.0).abs() > 0.001 {
+        format!("x{ratio:.2}")
     } else {
-        Some("Stretch".to_string())
-    }
+        "Stretch".to_string()
+    };
+    Some(StretchBadge { label, locked })
 }
 
 pub fn audio_clip(
@@ -397,7 +413,7 @@ pub fn audio_clip(
     let selected = state.selection.selected_clip_ids.contains(&clip.id);
     let pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
-    let stretch_badge = stretch_badge_label(clip, state);
+    let stretch_badge = stretch_badge(clip, state);
     let (left, width) = audio_clip_timeline_geometry(clip, state);
     let clip_duration_seconds = audio_clip_timeline_duration_seconds(clip, state);
     let fade_in_seconds = (clip.stretch.fade_in_ms.max(0.0) / 1000.0)
@@ -616,15 +632,38 @@ pub fn audio_clip(
                         .text_color(Colors::accent_primary())
                         .child("XFADE")
                 }))
-                .children(stretch_badge.map(|label| {
-                    div()
+                .children(stretch_badge.map(|badge| {
+                    // A tempo-locked clip is marked on two channels: the
+                    // automation hue (the same one the tempo lane uses, because
+                    // that is what owns the clip's length) plus a leading glyph.
+                    // A merely-stretched clip keeps the accent and no glyph.
+                    let hue = if badge.locked {
+                        Colors::state_automation()
+                    } else {
+                        Colors::accent_primary()
+                    };
+                    let mut chip = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .flex_none()
                         .px(px(4.0))
                         .rounded(px(crate::theme::radius::CONTROL))
-                        .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
+                        .bg(Colors::with_alpha(hue, 0.14))
                         .text_size(px(8.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(Colors::accent_primary())
-                        .child(label)
+                        .text_color(hue);
+                    if badge.locked {
+                        chip = chip.child(
+                            gpui::svg()
+                                .path(crate::assets::ICON_MAGNET_PATH)
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .text_color(hue),
+                        );
+                    }
+                    chip.child(badge.label)
                 })),
             // Clip length text intentionally not rendered on the clip body — the
             // name (flex_1) fills the bar, so no gap remains. Duration stays in the
@@ -758,5 +797,119 @@ mod tests {
         clip.stretch.source_end_samples = 96_000;
         let (_, trimmed_width) = audio_clip_timeline_geometry(&clip, &state);
         assert!((trimmed_width - 150.0).abs() < 0.001);
+    }
+
+    /// Build a two-second audio clip at 48 kHz, un-stretched.
+    fn two_second_clip(id: &str) -> ClipState {
+        let mut clip = ClipState {
+            id: id.to_string(),
+            name: "Take".to_string(),
+            start_beat: 0.0,
+            duration_beats: 4.0,
+            source_duration_seconds: Some(2.0),
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: "asset".to_string(),
+                source_path: Some("take.wav".to_string()),
+            },
+            muted: false,
+            audio_import: AudioImportState::Ready,
+            stretch: AudioClipStretchState::default(),
+        };
+        clip.stretch.original_sample_rate = 48_000;
+        clip.stretch.project_sample_rate = 48_000;
+        clip.stretch.original_duration_samples = 96_000;
+        clip.stretch.source_start_samples = 0;
+        clip.stretch.source_end_samples = 96_000;
+        clip
+    }
+
+    fn state_with_clip(clip: ClipState, bpm: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.bpm = bpm;
+        let track_id = state.create_audio_track();
+        let track = state
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id)
+            .expect("track");
+        track.clips.push(clip);
+        state.reconcile_audio_clip_lengths();
+        state
+    }
+
+    /// An un-stretched clip is two seconds of audio at any tempo. Doubling the
+    /// project tempo must double its bar count, not squeeze the audio.
+    #[test]
+    fn an_unstretched_clip_keeps_its_seconds_when_the_tempo_changes() {
+        let mut state = state_with_clip(two_second_clip("clip-off"), 120.0);
+        let before = state.tracks[0].clips[0].duration_beats;
+        assert!((before - 4.0).abs() < 0.01, "2 s at 120 BPM is 4 beats");
+
+        state.bpm = 240.0;
+        assert!(state.reconcile_audio_clip_lengths());
+        let after = state.tracks[0].clips[0].duration_beats;
+        assert!(
+            (after - 8.0).abs() < 0.01,
+            "2 s at 240 BPM is 8 beats, got {after}"
+        );
+    }
+
+    /// A tempo-synced clip is *defined* in bars. Doubling the tempo must leave
+    /// its bar count alone — that is what "locked to the timeline" means.
+    #[test]
+    fn a_tempo_synced_clip_keeps_its_bars_when_the_tempo_changes() {
+        let mut clip = two_second_clip("clip-sync");
+        clip.stretch.mode = crate::components::timeline::timeline_state::StretchMode::TempoSync;
+        clip.stretch.bpm_source = Some(120.0);
+        clip.stretch.apply_tempo_sync(120.0);
+        let mut state = state_with_clip(clip, 120.0);
+        let before = state.tracks[0].clips[0].duration_beats;
+
+        state.bpm = 240.0;
+        state
+            .tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .for_each(|c| c.stretch.apply_tempo_sync(240.0));
+        state.reconcile_audio_clip_lengths();
+        let after = state.tracks[0].clips[0].duration_beats;
+        assert!(
+            (after - before).abs() < 0.05,
+            "a tempo-synced clip keeps {before} beats, got {after}"
+        );
+    }
+
+    /// The drawn width and the model's bar count describe one object: after a
+    /// tempo change the clip must be grabbable exactly where it is painted.
+    #[test]
+    fn the_drawn_width_and_the_model_agree_after_a_tempo_change() {
+        let mut state = state_with_clip(two_second_clip("clip-agree"), 120.0);
+        state.bpm = 172.0;
+        state.reconcile_audio_clip_lengths();
+
+        let clip = &state.tracks[0].clips[0];
+        let (_, drawn_w) = audio_clip_timeline_geometry(clip, &state);
+        let model_w =
+            clip.duration_beats * state.seconds_per_beat() * state.viewport.pixels_per_second;
+        assert!(
+            (drawn_w - model_w).abs() < 0.5,
+            "drawn {drawn_w} px vs model {model_w} px"
+        );
+    }
+
+    /// A clip whose source has not been decoded yet has nothing authoritative
+    /// to derive from and must be left where it is.
+    #[test]
+    fn a_pending_clip_is_left_alone() {
+        let mut clip = two_second_clip("clip-pending");
+        clip.stretch.source_end_samples = 0;
+        clip.stretch.original_duration_samples = 0;
+        clip.audio_import = AudioImportState::Pending;
+        let mut state = state_with_clip(clip, 120.0);
+        state.bpm = 240.0;
+        assert!(!state.reconcile_audio_clip_lengths());
+        assert!((state.tracks[0].clips[0].duration_beats - 4.0).abs() < 1.0e-6);
     }
 }

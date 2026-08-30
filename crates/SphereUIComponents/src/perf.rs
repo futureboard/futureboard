@@ -903,6 +903,54 @@ pub fn tick_root_frame(reason: &'static str) {
     }
 }
 
+/// Resident memory of this process, in bytes, or `None` where the platform has
+/// no cheap way to ask.
+///
+/// Cached for a second because the caller is the transport's load meter, which
+/// ticks with the audio meters: the number moves in megabytes over seconds, and
+/// asking the kernel thirty times a second would cost more than it reports.
+/// `None` surfaces as a hidden readout rather than a zero — a RAM meter reading
+/// 0 MB is a lie, an absent one is not.
+pub fn process_memory_bytes() -> Option<u64> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, Option<u64>)>>> =
+        std::sync::OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut slot) = cache.lock() else {
+        return None;
+    };
+    if let Some((at, value)) = *slot {
+        if at.elapsed() < POLL_INTERVAL {
+            return value;
+        }
+    }
+    let value = read_process_memory_bytes();
+    *slot = Some((Instant::now(), value));
+    value
+}
+
+#[cfg(windows)]
+fn read_process_memory_bytes() -> Option<u64> {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    // The working set is what Task Manager calls "Memory" for a process, which
+    // is the number a user comparing the two would expect to match.
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    ok.ok().map(|_| counters.WorkingSetSize as u64)
+}
+
+#[cfg(not(windows))]
+fn read_process_memory_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod power_mode_tests {
     use super::*;

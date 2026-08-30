@@ -258,6 +258,18 @@ impl TimelineState {
 
     /// Move one marker to `beat`. Returns `false` when it did not actually move,
     /// so a click that only selected never records an edit.
+    /// Beat a Marker lane move resolves to for a pointer at `lane_x`.
+    ///
+    /// `grab_offset_beats` is how far into the flag the marker was grabbed, so
+    /// a flag caught by its label keeps that offset instead of snapping its
+    /// beat line under the cursor. Snapping happens *after* the offset is
+    /// removed, which is what puts the marker itself on the grid rather than
+    /// the pointer.
+    pub fn marker_drag_beat(&self, lane_x: f32, grab_offset_beats: f64) -> f64 {
+        let beat = (self.x_to_beat(lane_x) - grab_offset_beats).max(0.0);
+        self.snap_beats(beat as f32).max(0.0) as f64
+    }
+
     pub fn move_marker(&mut self, id: &str, beat: f64) -> bool {
         let beat = beat.max(0.0);
         let Some(marker) = self.markers.iter_mut().find(|marker| marker.id == id) else {

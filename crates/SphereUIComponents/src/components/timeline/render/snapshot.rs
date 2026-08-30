@@ -462,6 +462,12 @@ fn build_bar_shades(state: &TimelineState, viewport: &TimelineViewport) -> Vec<B
         }
         let x0 = viewport.beat_to_x(rect.start_beat as f32);
         let x1 = viewport.beat_to_x(rect.end_beat as f32);
+        // The bar straddling the left edge starts *before* the viewport, so its
+        // unclamped x is negative — and the shade is a translucent wash, so a
+        // negative x paints it straight over the track-header column to the
+        // left. Clamp the leading edge to the viewport and take the width off
+        // the same edge, which is also what the bar visually occupies.
+        let x0 = x0.max(0.0);
         let width = x1 - x0;
         if width < 2.0 {
             continue;
@@ -577,5 +583,116 @@ mod stress_tests {
             SnapshotBuildOptions::default(),
         );
         assert_eq!(owned, shared);
+    }
+}
+
+/// The arrangement's bar shading is a translucent wash, and the track-header
+/// column sits immediately to its left. Anything the grid emits at a negative x
+/// therefore paints *over the headers* — which is what made a selected track
+/// header look like it had no background of its own.
+#[cfg(test)]
+mod bar_shade_bounds_tests {
+    use super::*;
+
+    fn scrolled_state(scroll_x: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.viewport.viewport_width = 1_200.0;
+        state.viewport.viewport_height = 500.0;
+        state.viewport.scroll_x = scroll_x;
+        state
+    }
+
+    /// Build through the real snapshot path so the test exercises the same
+    /// viewport the renderer sees, not a hand-rolled one.
+    fn shades(scroll_x: f32) -> Vec<BarShadeSnapshot> {
+        let state = scrolled_state(scroll_x);
+        TimelineRenderSnapshot::from_state(&state, SnapshotBuildOptions::default()).bar_shades
+    }
+
+    /// Scrolled to the very start there is nothing before the viewport, so this
+    /// is the baseline the scrolled cases are compared against.
+    #[test]
+    fn shades_start_inside_the_lane_at_the_song_start() {
+        for shade in shades(0.0) {
+            assert!(shade.x >= 0.0, "shade at x={} before the lane", shade.x);
+        }
+    }
+
+    /// Guards the premise of the clamp tests: this scroll offset has to land
+    /// mid-bar, or "the leading bar starts before the viewport" is not the case
+    /// being exercised at all.
+    #[test]
+    fn the_test_scroll_really_does_land_mid_bar() {
+        let state = scrolled_state(9_137.0);
+        let (visible_start, _) = state.visible_beat_range(state.viewport.viewport_width);
+        let beats_per_bar = state.beats_per_bar_at_beat(visible_start as f64) as f32;
+        let into_bar = visible_start % beats_per_bar;
+        assert!(
+            into_bar > 0.01,
+            "scroll lands on a bar line ({visible_start} beats), so nothing straddles the edge"
+        );
+    }
+
+    /// The regression: mid-song the bar under the left edge starts off-screen.
+    #[test]
+    fn no_scroll_position_puts_a_shade_left_of_the_lane() {
+        // Only even bars are shaded, so any single scroll offset has an even
+        // chance of putting an unshaded bar under the left edge and proving
+        // nothing. Sweep a bar's worth of offsets in small steps so the
+        // straddling bar is a shaded one somewhere in the range.
+        let mut checked = 0;
+        for step in 0..240 {
+            let scroll = 4_000.0 + step as f32 * 7.0;
+            let shades = shades(scroll);
+            assert!(!shades.is_empty(), "a scrolled viewport still shades bars");
+            for shade in &shades {
+                assert!(
+                    shade.x >= 0.0,
+                    "scroll {scroll}: shade at x={} paints over the track headers",
+                    shade.x
+                );
+                assert!(shade.width > 0.0, "a clamped shade keeps positive width");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the sweep must actually examine shades");
+    }
+
+    /// Clamping must not silently drop the bar it clamps — the leading bar
+    /// still has to be shaded, just from the viewport edge inward.
+    #[test]
+    fn clamping_trims_the_shade_rather_than_removing_it() {
+        let mut widest_at_start = 0.0f32;
+        let mut found_leading = false;
+        for scroll in [4_001.0, 6_337.0, 9_137.0, 12_599.0] {
+            for shade in shades(scroll) {
+                if shade.x == 0.0 {
+                    found_leading = true;
+                    widest_at_start = widest_at_start.max(shade.width);
+                }
+            }
+        }
+        assert!(
+            found_leading,
+            "some scroll position must put a shaded bar under the left edge"
+        );
+        assert!(
+            widest_at_start > 0.0,
+            "the clamped leading bar keeps a visible width"
+        );
+    }
+
+    /// Shades stay inside the viewport on the right too, so the clamp did not
+    /// trade a left-side leak for a right-side one.
+    #[test]
+    fn shades_stay_within_the_visible_width() {
+        let width = scrolled_state(9_137.0).viewport.viewport_width;
+        for shade in shades(9_137.0) {
+            assert!(
+                shade.x < width + 1.0,
+                "shade at x={} starts past the lane width {width}",
+                shade.x
+            );
+        }
     }
 }

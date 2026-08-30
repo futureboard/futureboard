@@ -9,9 +9,63 @@ use crate::layout::{RightDockTab, WorkspaceActivePanel};
 
 use super::StudioLayout;
 
+/// What a bottom-dock tab toggle (the Mixer chrome button, a menu item) does
+/// on its next press.
+///
+/// The action is derived from the same three values the button's lit/unlit
+/// state is derived from, which is the whole point of naming it: the chrome
+/// reported "Mixer visible" as *docked AND the Mixer tab is active*, while the
+/// press only flipped `docked`. Standing on the Editor tab the button was
+/// therefore drawn unlit, and pressing it — to show the mixer — hid the dock
+/// instead; pressing it again brought the dock back still on the Editor, with
+/// the button still unlit. Indicator and action now read the same state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BottomTabToggleAction {
+    /// The tab is already the one on screen — hide the whole dock.
+    CloseDock,
+    /// The dock is hidden, or showing a different tab: show it on this tab.
+    ShowTab,
+}
+
+pub(crate) fn bottom_tab_toggle_action(
+    docked: bool,
+    active_tab: BottomTab,
+    tab: BottomTab,
+) -> BottomTabToggleAction {
+    if docked && active_tab == tab {
+        BottomTabToggleAction::CloseDock
+    } else {
+        BottomTabToggleAction::ShowTab
+    }
+}
+
 impl StudioLayout {
     pub(crate) fn bottom_panel_docked(&self) -> bool {
         self.panels.mixer_docked
+    }
+
+    /// Show the bottom dock on `tab`, docking it first if it was hidden.
+    ///
+    /// The single "open the dock at X" path. Opening used to be spelled inline
+    /// at each call site as `mixer_docked = true` plus some subset of the
+    /// follow-up work, which is how the dock ended up open on a tab nobody had
+    /// asked for.
+    pub(crate) fn show_bottom_panel_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
+        self.panels.mixer_docked = true;
+        self.ensure_mixer_tree_defaults_once(cx);
+        self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
+        self.set_active_bottom_tab(tab, cx);
+        self.sync_timeline_chrome_metrics(cx);
+        self.notify_bottom_panel_shell(cx);
+        cx.notify();
+    }
+
+    /// Press the dock toggle that belongs to `tab`.
+    pub(crate) fn toggle_bottom_panel_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
+        match bottom_tab_toggle_action(self.panels.mixer_docked, self.active_bottom_tab, tab) {
+            BottomTabToggleAction::CloseDock => self.close_bottom_panel(cx),
+            BottomTabToggleAction::ShowTab => self.show_bottom_panel_tab(tab, cx),
+        }
     }
 
     pub(crate) fn active_bottom_tab(&self) -> BottomTab {
@@ -261,4 +315,39 @@ fn left_audio_signature(content: &StatusBarContent) -> u64 {
     content.left.hash(&mut hasher);
     content.audio.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The indicator says "this tab is on screen"; the press has to answer the
+    /// same question. Pressing Mixer while the dock shows the Editor must bring
+    /// the mixer up, not hide a panel the user was not looking at.
+    #[test]
+    fn pressing_a_tab_toggle_from_another_tab_shows_it() {
+        assert_eq!(
+            bottom_tab_toggle_action(true, BottomTab::Editor, BottomTab::Mixer),
+            BottomTabToggleAction::ShowTab
+        );
+    }
+
+    #[test]
+    fn pressing_the_tab_already_on_screen_closes_the_dock() {
+        assert_eq!(
+            bottom_tab_toggle_action(true, BottomTab::Mixer, BottomTab::Mixer),
+            BottomTabToggleAction::CloseDock
+        );
+    }
+
+    #[test]
+    fn pressing_a_tab_toggle_while_hidden_opens_it() {
+        for tab in [BottomTab::Mixer, BottomTab::Editor] {
+            assert_eq!(
+                bottom_tab_toggle_action(false, tab, tab),
+                BottomTabToggleAction::ShowTab,
+                "a hidden dock always opens, whatever tab it was left on"
+            );
+        }
+    }
 }

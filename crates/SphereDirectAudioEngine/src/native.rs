@@ -342,6 +342,9 @@ pub struct EngineStats {
     pub callback_max_us: u32,
     /// Per-block wall-clock budget, microseconds.
     pub callback_deadline_us: u32,
+    /// SoundFont voices sounding at the end of the last audio callback. Built-in
+    /// instrument only — see `EngineInner::active_voice_count`.
+    pub active_voices: u32,
 }
 
 /// Native Rust-facing handle to the engine.
@@ -972,6 +975,7 @@ impl AudioEngine {
             dropout_protection_mode: dropout.protection_mode.as_str().to_string(),
             dropout_count: dropout.dropout_count,
             dropout_last_reason: dropout.last_reason.as_str().to_string(),
+            active_voices: self.inner.active_voice_count(),
             callback_last_us: dropout.callback_last_us,
             callback_max_us: dropout.callback_max_us,
             callback_deadline_us: dropout.callback_deadline_us,

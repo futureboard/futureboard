@@ -2351,6 +2351,12 @@ impl StudioLayout {
         let changed = self.timeline.update(cx, |timeline, cx| {
             if (timeline.state.bpm - bpm).abs() > 0.005 {
                 timeline.state.bpm = bpm;
+                // An audio clip's bar count is a function of the tempo: a
+                // tempo-synced clip keeps its bars and moves in seconds, every
+                // other mode keeps its seconds and moves in bars. Re-deriving
+                // here is what keeps the drawn clip and the clip you can grab
+                // the same object after a tempo change.
+                timeline.state.reconcile_audio_clip_lengths();
                 cx.notify();
                 true
             } else {

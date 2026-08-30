@@ -150,6 +150,7 @@ impl Timeline {
         self.tempo_gesture_origin = None;
         self.ts_drag = None;
         self.ts_gesture_origin = None;
+        self.marker_drag = None;
         self.region_gesture_origin = None;
         self.marker_gesture_origin = None;
         self.pan_last_position = None;
@@ -163,6 +164,8 @@ impl Timeline {
         if Self::input_debug_enabled() {
             eprintln!("[selection] marquee_cancel");
         }
+        // Restores before the blanket reset drops the snapshot it needs.
+        self.cancel_marker_track_interaction(cx);
         self.reset_input_state();
         self.song_text_drag_cancelled = true;
         cx.notify();
@@ -206,6 +209,7 @@ impl Timeline {
             automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
+            marker_drag: None,
             tempo_gesture_origin: None,
             ts_drag: None,
             ts_gesture_origin: None,
@@ -265,6 +269,7 @@ impl Timeline {
             automation_hover: None,
             on_automation_control: None,
             tempo_drag: None,
+            marker_drag: None,
             tempo_gesture_origin: None,
             ts_drag: None,
             ts_gesture_origin: None,
@@ -864,11 +869,7 @@ impl Timeline {
     }
 
     pub(super) fn tempo_bpm_from_window_y(&self, window_y: f32) -> f64 {
-        use crate::components::timeline::timeline_state::y_to_bpm;
-        let lane_h = self.state.tempo_track_height();
-        let local_y = (window_y - self.state.tempo_lane_origin_y() - TEMPO_LANE_PAD).max(0.0);
-        let (min_bpm, max_bpm) = self.state.tempo_lane_bpm_range();
-        y_to_bpm(local_y, lane_h, min_bpm, max_bpm)
+        self.state.tempo_bpm_at_window_y(window_y)
     }
 
     // ── Marker lane ─────────────────────────────────────────────────────────
@@ -878,29 +879,36 @@ impl Timeline {
     /// empty lane creates a marker.
     pub(super) fn begin_marker_track_interaction(
         &mut self,
-        beat: f64,
-        marker_id: Option<String>,
-        click_count: u32,
+        down: &crate::components::timeline::marker_track::MarkerLaneDown,
         cx: &mut Context<Self>,
     ) {
-        match marker_id {
+        match down.marker_id.clone() {
             Some(id) => {
                 self.state.select_marker(&id);
                 if let Some(marker) = self.state.marker(&id) {
                     let target = marker.beat as f32;
+                    // The grab offset is captured against the marker's real
+                    // beat before the seek, so the flag keeps its position
+                    // under the cursor for the whole gesture.
+                    self.marker_drag = Some(TimelineMarkerDrag {
+                        marker_id: id.clone(),
+                        press_lane_x: down.lane_x,
+                        grab_offset_beats: down.pointer_beat - marker.beat,
+                        moved: false,
+                    });
                     self.seek_to_exact_beat(target, crate::layout::SeekReason::TimelineClick, cx);
                 }
             }
             None => {
                 self.state.clear_marker_selection();
-                if click_count >= 2 {
+                if down.click_count >= 2 {
                     let prev = self.state.markers.clone();
-                    let id = self.state.add_marker_at_beat(beat);
+                    let id = self.state.add_marker_at_beat(down.snapped_beat);
                     self.state.select_marker(&id);
                     self.record_marker_edit("Add Marker", prev, cx);
                 } else {
                     self.seek_to_exact_beat(
-                        beat as f32,
+                        down.snapped_beat as f32,
                         crate::layout::SeekReason::TimelineClick,
                         cx,
                     );
@@ -908,6 +916,67 @@ impl Timeline {
             }
         }
         cx.notify();
+    }
+
+    /// One frame of the Marker lane gesture, driven by the timeline root's
+    /// mouse-move listener.
+    ///
+    /// Returns `true` once the gesture has passed the drag threshold, so the
+    /// caller can stop treating the pointer as a plain click.
+    pub(super) fn update_marker_track_interaction(
+        &mut self,
+        window_x: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(drag) = self.marker_drag.clone() else {
+            return false;
+        };
+        let lane_x = self.state.lane_x_from_window_x(window_x);
+        if !drag.moved
+            && (lane_x - drag.press_lane_x).abs()
+                < crate::components::timeline::timeline_state::CONDUCTOR_DRAG_THRESHOLD_PX
+        {
+            return false;
+        }
+        let snapped = self.state.marker_drag_beat(lane_x, drag.grab_offset_beats);
+        if let Some(session) = self.marker_drag.as_mut() {
+            session.moved = true;
+        }
+        self.update_marker_drag(&drag.marker_id, snapped, cx);
+        true
+    }
+
+    /// Abandon the Marker lane gesture and put the marker back where it started.
+    ///
+    /// Escape during a move has to restore, not just stop: dropping the
+    /// snapshot would leave the marker at the last previewed beat with no
+    /// history entry describing how it got there.
+    pub(super) fn cancel_marker_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(_) = self.marker_drag.take() else {
+            return false;
+        };
+        if let Some(prev) = self.marker_gesture_origin.take() {
+            self.state.markers = prev;
+            self.state.sort_markers();
+        }
+        cx.notify();
+        true
+    }
+
+    /// End the Marker lane gesture, recording one undo entry for the whole move.
+    pub(super) fn finish_marker_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.marker_drag.take() else {
+            return false;
+        };
+        if drag.moved {
+            self.finish_marker_drag(cx);
+        } else {
+            // A plain click never opened a history entry, so drop the snapshot
+            // rather than writing a no-op step.
+            self.marker_gesture_origin = None;
+        }
+        cx.notify();
+        true
     }
 
     /// Add a marker at the playhead from the lane header's + button.

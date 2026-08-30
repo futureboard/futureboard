@@ -195,6 +195,13 @@ pub struct TransportChromeState {
     /// Left-click registers a tap; right-click opens the tap tempo menu.
     pub on_tap_tempo: ChromeActionCb,
     pub on_tap_tempo_menu: BpmMenuCb,
+    /// Master level strip (meter + fader), rendered as its own entity so the
+    /// meter poll repaints it alone instead of the whole shell. `None` in
+    /// surfaces that have no engine behind them.
+    pub master_meter: Option<gpui::AnyView>,
+    /// Engine load readout (CPU / RAM / voices). Its own entity for the same
+    /// reason as `master_meter`.
+    pub perf_meter: Option<gpui::AnyView>,
 }
 
 fn tap_tempo_chip(
@@ -576,7 +583,7 @@ fn lcd_divider() -> impl IntoElement {
 /// place in the shell that earns large type: position, tempo and meter are what
 /// a player reads mid-take, so they get a recessed panel, tabular figures, and
 /// captions rather than being scattered along a toolbar as bare text.
-fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
+fn transport_bar(state: TransportChromeState, viewport_width: f32, i18n: I18n) -> impl IntoElement {
     let play_color = if state.playing {
         Colors::accent_primary()
     } else {
@@ -631,6 +638,16 @@ fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
     let bpm_input_callbacks = state.bpm_input_callbacks.clone();
     let bpm_edit_focused = state.bpm_edit_focused;
     let tap_tempo_session_taps = state.tap_tempo_session_taps;
+    // The master strip is dropped rather than squeezed on a narrow window: a
+    // meter compressed until its segments alias is worse than no meter, and the
+    // mixer still carries the full one.
+    // Both gutters drop their readout at the same width. Hiding one and not
+    // the other would slide the centred transport block off the window centre,
+    // which is the one thing the three-track layout exists to hold.
+    let gutters_fit = viewport_width
+        >= crate::components::master_transport_meter::MASTER_TRANSPORT_METER_MIN_VIEWPORT;
+    let master_meter = state.master_meter.clone().filter(|_| gutters_fit);
+    let perf_meter = state.perf_meter.clone().filter(|_| gutters_fit);
     let on_tap_tempo = state.on_tap_tempo.clone();
     let on_tap_tempo_menu = state.on_tap_tempo_menu.clone();
     let ts_has_markers = state.ts_has_markers;
@@ -1028,11 +1045,20 @@ fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
         .bg(Colors::surface_base())
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
-        // Left and right tracks are empty `flex_1` gutters; the whole control
-        // block between them is centred as one object. Pinning the transport to
-        // the far left and the readout to the centre left a dead gap between
-        // two things a player uses together.
-        .child(div().flex_1().min_w(px(0.0)))
+        // Left and right tracks are `flex_1` gutters carrying the two
+        // readouts; the whole control block between them is centred as one
+        // object. Pinning the transport to the far left and the readout to the
+        // centre left a dead gap between two things a player uses together.
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_start()
+                .children(perf_meter),
+        )
         .child(
             div()
                 .flex()
@@ -1046,7 +1072,20 @@ fn transport_bar(state: TransportChromeState, i18n: I18n) -> impl IntoElement {
                 .child(div().w(px(crate::theme::space::SNUG)))
                 .child(readout),
         )
-        .child(div().flex_1().min_w(px(0.0)))
+        // The right gutter carries the master strip. It stays `flex_1` with a
+        // zero basis so the readout keeps the true window centre whenever there
+        // is room for both gutters to reach the strip's width; below that the
+        // strip is already gone.
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .children(master_meter),
+        )
 }
 
 fn panel_toggle_button(
@@ -1487,5 +1526,5 @@ pub fn app_chrome(
         .w_full()
         .flex_none()
         .child(chrome)
-        .child(transport_bar(transport, i18n))
+        .child(transport_bar(transport, viewport_width, i18n))
 }

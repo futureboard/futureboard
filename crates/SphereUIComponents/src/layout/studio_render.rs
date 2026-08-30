@@ -810,7 +810,11 @@ impl Render for StudioLayout {
                             &[
                                 ("window.show_browser", self.panels.browser),
                                 ("window.show_inspector", self.panels.inspector),
-                                ("window.show_mixer", self.panels.mixer_docked),
+                                // "Show Mixer" is checked when the mixer is on
+                                // screen, which is what the command now toggles
+                                // — not merely when the dock happens to be open
+                                // on some other tab.
+                                ("window.show_mixer", self.mixer_panel_chrome_visible()),
                                 (
                                     "view.developer.perf_metrics",
                                     perf.show_status_performance_metrics,

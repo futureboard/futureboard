@@ -1142,6 +1142,32 @@ impl AudioClipStretchState {
         )
     }
 
+    /// Wall-clock length this clip plays for at `project_bpm`, in seconds, or
+    /// `None` when the source window has not been decoded yet.
+    ///
+    /// The one place a clip's real length is computed. The timeline draws from
+    /// it and [`TimelineState::reconcile_audio_clip_lengths`] derives
+    /// `duration_beats` from it, so the picture and the model cannot disagree
+    /// about how long a clip is.
+    pub fn played_seconds_for_project_bpm(&self, project_bpm: f64) -> Option<f64> {
+        let rate = self.original_sample_rate.max(self.project_sample_rate);
+        if rate == 0 || self.source_len_samples() == 0 {
+            return None;
+        }
+        let played = self.effective_duration_samples_for_project_bpm(project_bpm);
+        if played == 0 {
+            return None;
+        }
+        Some(played as f64 / rate as f64)
+    }
+
+    /// Whether the project tempo owns this clip's *bar count* rather than its
+    /// wall-clock length. Tempo Sync and Warp are defined in beats; every other
+    /// mode is defined in seconds.
+    pub fn follows_project_tempo(&self) -> bool {
+        matches!(self.mode, StretchMode::TempoSync | StretchMode::Warp)
+    }
+
     /// Time-stretch ratio actually used for playback / clip length, resolving
     /// `TempoSync` against the project tempo. `Off` → `1.0`; `Warp` falls back to
     /// the stored manual ratio; `TempoSync` with no source BPM → `1.0`.

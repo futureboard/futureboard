@@ -31,6 +31,7 @@ pub mod inspector;
 pub mod key_recorder;
 pub mod keymap_window;
 pub mod knob;
+pub mod master_transport_meter;
 pub mod mdi;
 pub mod menu_bar;
 pub mod menu_dropdown;
@@ -84,6 +85,7 @@ pub mod stem_extractor_dialog;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+pub mod transport_perf_meter;
 pub mod update_dialog;
 pub mod video_player_window;
 pub mod virtual_keyboard;
@@ -138,6 +140,7 @@ pub use inspector::{
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;
+pub use master_transport_meter::{MasterTransportMeter, MasterTransportMeterCallbacks};
 pub use mdi::{
     mdi_workspace, MdiDocumentKind, MdiDocumentState, MdiWorkspaceCallbacks, MdiWorkspaceState,
 };
@@ -208,6 +211,7 @@ pub use stem_extractor_dialog::{
     StemSourceClip, STEM_EXTRACTOR_WINDOW_WIDTH,
 };
 pub use text_input::{text_field, TextInputAction, TextInputState};
+pub use transport_perf_meter::{TransportPerfMeter, TransportPerfSnapshot};
 pub use update_dialog::{open_update_dialog, open_update_dialog_for, UpdateDialogWindow};
 pub use video_player_window::{open_video_player_window, VideoPlayerSnapshot, VideoPlayerWindow};
 pub use virtual_keyboard::{

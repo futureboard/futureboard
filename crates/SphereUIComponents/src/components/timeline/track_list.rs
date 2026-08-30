@@ -291,6 +291,13 @@ pub fn track_list(
                 .right_0()
                 .top_0()
                 .bottom_0()
+                // Nothing painted for the arrangement may reach the track
+                // header column. The grid canvas resolves bar and beat
+                // positions from the scroll offset, so anything straddling the
+                // left edge lands at a negative x — this is the boundary that
+                // makes that a clipped pixel instead of a stray wash over the
+                // headers.
+                .overflow_hidden()
                 .child(
                     div()
                         .absolute()

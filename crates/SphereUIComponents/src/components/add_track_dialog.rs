@@ -28,14 +28,36 @@ use crate::components::text_input::{
 use crate::components::timeline::timeline_state::TrackType;
 use crate::components::title_bar::external_window_titlebar_with_icon;
 use crate::i18n::I18n;
-use crate::theme::{self, Colors};
+use crate::theme::{self, radius, size, space, typography, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
 use SpherePluginHost::{PluginFormat, RegistryPlugin};
 
 const MAX_TRACK_COUNT: u32 = 128;
+/// Measured width of the form's label column — a layout constant, not spacing.
+/// Every row's control starts on this line so the dialog reads as one form
+/// rather than a stack of independent fields.
 const FORM_LABEL_WIDTH: f32 = 86.0;
-const FORM_GAP: f32 = 10.0;
-const BODY_PAD_X: f32 = 14.0;
+/// Vertical rhythm between form rows and between the panels that hold them.
+const FORM_GAP: f32 = space::BASE;
+/// Horizontal inset shared by the header, the tab strip, the scrolling body and
+/// the footer, so every band in the dialog starts on the same line.
+const BODY_PAD_X: f32 = space::LOOSE;
+/// Footer band: one primary button plus its breathing room, top and bottom.
+const FOOTER_HEIGHT: f32 = size::PROMINENT + 2.0 * space::BASE;
+/// Numeric field wide enough for three digits plus the drag affordance.
+const COUNT_FIELD_WIDTH: f32 = 54.0;
+/// Reserved width for the count field's unit label, so the row does not reflow
+/// as it flips between "track" and "tracks".
+const COUNT_UNIT_WIDTH: f32 = 44.0;
+
+/// The two glyph sizes this dialog uses. A third would be the point at which a
+/// compact form starts looking assembled from spare parts.
+const ICON_SM: f32 = 10.0;
+const ICON_MD: f32 = 12.0;
+
+/// Colour swatch inside the Auto chip. Under `radius::MIN_SIDE`, so it takes
+/// `radius::MICRO` rather than a control radius.
+const SWATCH_SM: f32 = 11.0;
 
 /// Vertical drag sensitivity for the Count field: one track per this many
 /// pixels dragged. Dragging up increases, down decreases (DAW convention),
@@ -548,24 +570,49 @@ fn select_box(text: impl Into<String>) -> impl IntoElement {
         .items_center()
         .justify_between()
         .w_full()
-        .h(px(28.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .h(px(size::COMFORTABLE))
+        .rounded(px(radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .px(px(8.0))
-        .text_size(px(11.0))
+        .px(px(space::BASE))
+        .text_size(px(typography::UI_XS))
         .text_color(Colors::text_secondary())
         .child(text)
         .child(icon(
             assets::ICON_CHEVRON_DOWN_PATH,
-            10.0,
+            ICON_SM,
             Colors::text_faint(),
         ))
 }
 
+/// A field whose value is fixed for this track kind — an FX chain slot with no
+/// presets yet, the Soundfont Player's built-in instrument, a MIDI output that
+/// is always None.
+///
+/// It used to be `select_box` verbatim, chevron and all: a control that looks
+/// exactly like the openable selects beside it and opens nothing. Disabled has
+/// a defined look in this system — muted content, no chevron to promise a menu,
+/// no hover — so the field can still show its value without claiming to be a
+/// control.
 fn locked_select_box(text: impl Into<String>) -> impl IntoElement {
-    select_box(text).into_any_element()
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .h(px(size::COMFORTABLE))
+        .rounded(px(radius::CONTROL))
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .px(px(space::BASE))
+        .text_size(px(typography::UI_XS))
+        // `text.disabled` is the token that already encodes this state; adding
+        // an opacity on top would mute it twice and drop it under the contrast
+        // floor.
+        .text_color(Colors::text_disabled())
+        .child(text.into())
 }
 
 fn select_options(values: &[&'static str]) -> Vec<SelectOption> {
@@ -726,7 +773,7 @@ fn plugin_search_header(
     ime_target: Entity<AddTrackWindow>,
 ) -> gpui::AnyElement {
     div()
-        .mb(px(4.0))
+        .mb(px(space::TIGHT))
         .child(text_field_with_callbacks_and_ime(
             search_input,
             search_focused,
@@ -786,7 +833,7 @@ fn count_field(
 ) -> gpui::AnyElement {
     if count_focused {
         return div()
-            .w(px(54.0))
+            .w(px(COUNT_FIELD_WIDTH))
             .child(text_field_with_callbacks(
                 count_input,
                 count_focused,
@@ -800,16 +847,16 @@ fn count_field(
     let on_drag_move = callbacks.on_count_drag.clone();
     div()
         .id("add-track-count-field")
-        .w(px(54.0))
-        .h(px(28.0))
+        .w(px(COUNT_FIELD_WIDTH))
+        .h(px(size::COMFORTABLE))
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(crate::theme::radius::CONTROL))
+        .rounded(px(radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .text_size(px(12.0))
+        .text_size(px(typography::UI_SM))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_primary())
         .cursor(gpui::CursorStyle::ResizeUpDown)
@@ -857,7 +904,7 @@ fn count_stepper(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(space::SNUG))
         .child(fb_stepper_button(
             "add-track-count-minus",
             "-",
@@ -877,8 +924,8 @@ fn count_stepper(
         ))
         .child(
             div()
-                .min_w(px(44.0))
-                .text_size(px(10.0))
+                .min_w(px(COUNT_UNIT_WIDTH))
+                .text_size(px(typography::DENSE_LABEL))
                 .text_color(Colors::text_faint())
                 .child(if state.count == 1 { "track" } else { "tracks" }),
         )
@@ -888,7 +935,12 @@ fn instrument_mode_selector(
     selected: InstrumentMode,
     callbacks: &AddTrackDialogCallbacks,
 ) -> impl IntoElement {
-    let mut row = div().flex().flex_row().gap(px(4.0)).w_full().h(px(28.0));
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .gap(px(space::TIGHT))
+        .w_full()
+        .h(px(size::COMFORTABLE));
 
     for (index, mode) in [
         InstrumentMode::Vsti,
@@ -908,8 +960,8 @@ fn instrument_mode_selector(
                 .justify_center()
                 .h_full()
                 .flex_1()
-                .px(px(8.0))
-                .rounded(px(crate::theme::radius::CONTROL))
+                .px(px(space::BASE))
+                .rounded(px(radius::CONTROL))
                 .border(px(1.0))
                 .border_color(if active {
                     Colors::border_accent()
@@ -921,7 +973,7 @@ fn instrument_mode_selector(
                 } else {
                     Colors::surface_input()
                 })
-                .text_size(px(11.0))
+                .text_size(px(typography::UI_XS))
                 .font_weight(if active {
                     gpui::FontWeight::SEMIBOLD
                 } else {
@@ -954,9 +1006,9 @@ fn type_tabs(
         .flex_row()
         .items_center()
         .w_full()
-        .gap(px(3.0))
+        .gap(px(space::HAIR))
         .px(px(BODY_PAD_X))
-        .py(px(6.0));
+        .py(px(space::SNUG));
     for (i, kind) in tabs.iter().enumerate() {
         let active = state.selected_kind == *kind;
         let supported = kind_supported(*kind, state);
@@ -969,12 +1021,12 @@ fn type_tabs(
             .flex_row()
             .items_center()
             .justify_center()
-            .gap(px(4.0))
-            .h(px(27.0))
+            .gap(px(space::TIGHT))
+            .h(px(size::COMFORTABLE))
             .min_w(px(0.0))
-            .px(px(6.0))
+            .px(px(space::SNUG))
             .overflow_hidden()
-            .rounded(px(crate::theme::radius::CONTROL))
+            .rounded(px(radius::CONTROL))
             .border(px(1.0))
             .border_color(if active {
                 Colors::border_accent()
@@ -993,11 +1045,11 @@ fn type_tabs(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .w(px(14.0))
-                    .h(px(14.0))
+                    .w(px(ICON_MD))
+                    .h(px(ICON_MD))
                     .child(icon(
                         kind.icon(),
-                        12.0,
+                        ICON_MD,
                         if active {
                             Colors::accent_primary()
                         } else {
@@ -1010,7 +1062,7 @@ fn type_tabs(
                     .min_w_0()
                     .overflow_hidden()
                     .truncate()
-                    .text_size(px(10.5))
+                    .text_size(px(typography::DENSE_LABEL))
                     .font_weight(if active {
                         gpui::FontWeight::SEMIBOLD
                     } else {
@@ -1067,11 +1119,13 @@ fn color_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(5.0))
+        .gap(px(space::SNUG))
         .flex_shrink_0()
-        .h(px(22.0))
-        .px(px(7.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .h(px(size::ROW_DENSE))
+        .px(px(space::SNUG))
+        // A 22 px chip is in the small tier, like every other sub-24 control in
+        // this dialog.
+        .rounded(px(radius::CONTROL_SM))
         .border(px(1.0))
         .border_color(if auto_on {
             Colors::border_accent()
@@ -1088,16 +1142,19 @@ fn color_row(
         .on_click(move |_, w, cx| auto_cb(&true, w, cx))
         .child(
             div()
-                .w(px(11.0))
-                .h(px(11.0))
-                .rounded(px(crate::theme::radius::CONTROL))
+                .w(px(SWATCH_SM))
+                .h(px(SWATCH_SM))
+                // Under `radius::MIN_SIDE` a 6 px corner merges into a lozenge;
+                // an 11 px swatch takes the micro radius the contract reserves
+                // for exactly this.
+                .rounded(px(radius::MICRO))
                 .border(px(1.0))
                 .border_color(Colors::with_alpha(Colors::text_primary(), 0.22))
                 .bg(computed_auto),
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(if auto_on {
                     gpui::FontWeight::SEMIBOLD
                 } else {
@@ -1118,7 +1175,7 @@ fn color_row(
         .flex_row()
         .flex_wrap()
         .items_center()
-        .gap(px(5.0));
+        .gap(px(space::SNUG));
     for (i, preset) in color_ui.presets.iter().enumerate() {
         let preset = *preset;
         let on_pick = color_ui.callbacks.on_pick.clone();
@@ -1126,9 +1183,10 @@ fn color_row(
         grid = grid.child(
             div()
                 .id(("add-track-color", i))
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded(px(crate::theme::radius::CONTROL))
+                .w(px(size::MICRO))
+                .h(px(size::MICRO))
+                // Same reason as the Auto chip's swatch: below `MIN_SIDE`.
+                .rounded(px(radius::MICRO))
                 .border(px(if active { 2.0 } else { 1.0 }))
                 .border_color(if active {
                     Colors::text_primary()
@@ -1158,23 +1216,23 @@ fn color_row(
     let color_box = div()
         .flex()
         .flex_col()
-        .gap(px(8.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .gap(px(space::BASE))
+        .rounded(px(radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .p(px(8.0))
+        .p(px(space::BASE))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(space::BASE))
                 .child(auto_chip)
                 .child(
                     div()
                         .w(px(1.0))
-                        .h(px(18.0))
+                        .h(px(size::MICRO))
                         .flex_shrink_0()
                         .bg(Colors::divider()),
                 )
@@ -1186,13 +1244,13 @@ fn color_row(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(px(8.0))
-                .pt(px(7.0))
+                .gap(px(space::BASE))
+                .pt(px(space::SNUG))
                 .border_t(px(1.0))
                 .border_color(Colors::border_subtle())
                 .child(
                     div()
-                        .text_size(px(9.0))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .font_weight(gpui::FontWeight::BOLD)
                         .text_color(Colors::text_faint())
                         .child("CUSTOM"),
@@ -1209,9 +1267,9 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(px(10.0))
+        .gap(px(space::BASE))
         .px(px(BODY_PAD_X))
-        .py(px(7.0))
+        .py(px(space::SNUG))
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_panel_alt())
@@ -1220,7 +1278,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(9.0))
+                .gap(px(space::BASE))
                 .min_w_0()
                 .child(
                     div()
@@ -1231,7 +1289,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(12.0))
+                                .text_size(px(typography::UI_SM))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_primary())
                                 .child(i18n.tr(state.selected_kind.label_key())),
@@ -1239,7 +1297,7 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(10.0))
+                                .text_size(px(typography::DENSE_LABEL))
                                 .text_color(Colors::text_faint())
                                 .child(i18n.tr(state.selected_kind.description_key())),
                         ),
@@ -1248,15 +1306,17 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
         .child(
             div()
                 .flex_shrink_0()
-                .px(px(8.0))
-                .h(px(20.0))
+                .px(px(space::BASE))
+                .h(px(size::DENSE))
                 .flex()
                 .items_center()
-                .rounded(px(crate::theme::radius::CONTROL))
+                // A 20 px chip takes the small tier — at `CONTROL` it reads as a
+                // lozenge next to the 28 px controls below it.
+                .rounded(px(radius::CONTROL_SM))
                 .border(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_input())
-                .text_size(px(10.0))
+                .text_size(px(typography::DENSE_LABEL))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_secondary())
                 .child(if state.count == 1 {
@@ -1269,23 +1329,23 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
 
 fn form_panel(child: impl IntoElement) -> impl IntoElement {
     div()
-        .rounded(px(crate::theme::radius::SURFACE))
+        .rounded(px(radius::SURFACE))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel_alt())
-        .p(px(9.0))
+        .p(px(space::BASE))
         .child(child)
 }
 
 fn disabled_hint(text: &'static str) -> impl IntoElement {
     div()
-        .rounded(px(crate::theme::radius::CONTROL))
+        .rounded(px(radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .px(px(9.0))
-        .py(px(7.0))
-        .text_size(px(10.0))
+        .px(px(space::BASE))
+        .py(px(space::SNUG))
+        .text_size(px(typography::DENSE_LABEL))
         .text_color(Colors::text_faint())
         .child(text)
 }
@@ -1321,7 +1381,7 @@ fn type_fields(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(space::SNUG))
                 .child(fb_form_row(
                     "Format",
                     add_track_select(
@@ -1424,7 +1484,7 @@ fn type_fields(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(space::SNUG))
                 .child(fb_form_row(
                     "Mode",
                     instrument_mode_selector(state.instrument_mode, callbacks),
@@ -1537,7 +1597,7 @@ fn type_fields(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(space::SNUG))
                 .child(fb_form_row(
                     i18n.tr("add-track.routing.midi-in"),
                     add_track_select(
@@ -1615,7 +1675,7 @@ fn type_fields(
         AddTrackKind::Automation => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(space::SNUG))
             .child(fb_form_row("Target", locked_select_box("None".to_string())))
             .child(disabled_hint(
                 "Automation lanes on existing tracks. Dedicated automation tracks are coming soon.",
@@ -1624,10 +1684,10 @@ fn type_fields(
         AddTrackKind::Folder => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(space::SNUG))
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(typography::DENSE_LABEL))
                     .text_color(Colors::text_secondary())
                     .child(
                         "Creates an arrangement folder. Drag track headers onto it to group them.",
@@ -1637,14 +1697,14 @@ fn type_fields(
         AddTrackKind::Bus | AddTrackKind::Return => div()
             .flex()
             .flex_col()
-            .gap(px(6.0))
+            .gap(px(space::SNUG))
             .child(fb_form_row(
                 i18n.tr("add-track.routing.output"),
                 select_box("Main".to_string()),
             ))
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(typography::DENSE_LABEL))
                     .text_color(Colors::text_faint())
                     .child(if state.selected_kind == AddTrackKind::Bus {
                         i18n.tr("add-track.hint.bus-route-selected")
@@ -1654,7 +1714,7 @@ fn type_fields(
             )
             .into_any_element(),
         _ => div()
-            .text_size(px(10.0))
+            .text_size(px(typography::DENSE_LABEL))
             .text_color(Colors::text_faint())
             .child("This track type is not available in Native yet.")
             .into_any_element(),
@@ -1717,13 +1777,13 @@ pub fn add_track_dialog_body(
                 .min_h_0()
                 .overflow_y_scroll()
                 .px(px(BODY_PAD_X))
-                .pb(px(12.0))
-                .gap(px(10.0))
+                .pb(px(space::LOOSE))
+                .gap(px(FORM_GAP))
                 .child(form_panel(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.0))
+                        .gap(px(FORM_GAP))
                         .child(fb_form_row(
                             i18n.tr("add-track.field.name"),
                             text_field_with_callbacks_and_ime(
@@ -1765,26 +1825,24 @@ pub fn add_track_dialog_body(
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                .h(px(46.0))
+                // The footer is the action band, so its actions sit at the end
+                // of it. It used to also carry a half-opacity "Load Track
+                // Preset..." label on the left: not a button, not disabled, not
+                // wired to anything — a promise the dialog could not keep. It
+                // comes back when there is a preset store to open.
+                .justify_end()
+                .gap(px(space::BASE))
+                .h(px(FOOTER_HEIGHT))
                 .px(px(BODY_PAD_X))
                 .border_t(px(1.0))
                 .border_color(Colors::border_subtle())
                 .bg(Colors::surface_titlebar())
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_faint())
-                        .child("Load Track Preset...")
-                        .opacity(0.5),
-                )
-                .child(
-                    div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(space::BASE))
                         .child(fb_button(
                             "add-track-cancel",
                             i18n.tr("add-track.button.cancel"),

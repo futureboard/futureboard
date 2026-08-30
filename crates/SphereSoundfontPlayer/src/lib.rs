@@ -585,6 +585,16 @@ impl SoundfontPlayer {
         self.synthesizer.get_maximum_polyphony()
     }
 
+    /// Voices currently sounding, out of [`Self::maximum_polyphony`].
+    ///
+    /// Read on the audio thread right after a render block so the transport's
+    /// load meter reports the count the block actually produced. It is a plain
+    /// field read — no allocation, no lock — which is what makes it legal
+    /// there.
+    pub fn active_voice_count(&self) -> usize {
+        self.synthesizer.get_active_voice_count()
+    }
+
     /// The loaded SoundFont's own bank name (from its INFO chunk), e.g.
     /// "General MIDI" — control-side metadata for a UI title, not audio state.
     pub fn bank_name(&self) -> &str {

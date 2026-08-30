@@ -545,6 +545,11 @@ pub struct StudioLayout {
     mixer_tree_ui_hooks: Option<mixer_ops::MixerTreeUiHooks>,
     mixer_tree_sidebar: gpui::Entity<components::MixerTreeSidebar>,
     mixer_master_strip: gpui::Entity<components::MixerMasterStripView>,
+    /// Transport-bar master level strip. Its own entity so the meter poll
+    /// repaints it alone rather than the whole application chrome.
+    master_transport_meter: gpui::Entity<components::MasterTransportMeter>,
+    /// Transport-bar engine load readout (CPU / RAM / voices). Same isolation.
+    transport_perf_meter: gpui::Entity<components::TransportPerfMeter>,
     mixer_panel: gpui::Entity<components::MixerPanelView>,
     bottom_panel_shell: gpui::Entity<components::BottomPanelShell>,
     chord_display_panel: gpui::Entity<components::SongTextPanelView>,
@@ -706,6 +711,13 @@ impl StudioLayout {
                 mixer_callbacks,
                 mixer_split,
                 components::mixer_panel::STRIP_MIN_HEIGHT,
+            )
+        });
+        let transport_perf_meter = cx.new(|_cx| components::TransportPerfMeter::new());
+        let master_transport_meter = cx.new(|_cx| {
+            components::MasterTransportMeter::new(
+                timeline.clone(),
+                components::master_transport_meter::inert_master_volume_callbacks(),
             )
         });
         let mixer_panel = cx.new(|_cx| {
@@ -1099,6 +1111,8 @@ impl StudioLayout {
             mixer_tree_ui_hooks: None,
             mixer_tree_sidebar,
             mixer_master_strip,
+            master_transport_meter,
+            transport_perf_meter,
             chord_display_panel,
             lyric_display_panel,
             lyric_editor_panel,
@@ -2486,19 +2500,14 @@ impl StudioLayout {
 
     pub(crate) fn toggle_mixer_panel(&mut self, cx: &mut Context<Self>) {
         if self.external_windows.mixer.is_some() {
+            // An undocked mixer re-docks rather than toggling the dock: the
+            // chrome already reads as "visible", so hiding it here would take
+            // two presses to get the mixer back into the shell.
             self.close_mixer_window(cx);
-            self.panels.mixer_docked = true;
-        } else {
-            self.panels.mixer_docked = !self.panels.mixer_docked;
+            self.show_bottom_panel_tab(components::BottomTab::Mixer, cx);
+            return;
         }
-        if self.panels.mixer_docked {
-            self.ensure_mixer_tree_defaults_once(cx);
-            self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
-            self.set_active_panel(WorkspaceActivePanel::Mixer, cx);
-        }
-        self.sync_timeline_chrome_metrics(cx);
-        self.notify_bottom_panel_shell(cx);
-        cx.notify();
+        self.toggle_bottom_panel_tab(components::BottomTab::Mixer, cx);
     }
 
     pub(crate) fn toggle_status_performance_metrics(&mut self, cx: &mut Context<Self>) {
@@ -2554,10 +2563,7 @@ impl StudioLayout {
     }
 
     pub(crate) fn open_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {
-        self.panels.mixer_docked = true;
-        self.sync_timeline_chrome_metrics(cx);
-        self.set_active_bottom_tab(components::BottomTab::Editor, cx);
-        cx.notify();
+        self.show_bottom_panel_tab(components::BottomTab::Editor, cx);
     }
 
     pub(crate) fn open_midi_editor_bottom_panel(&mut self, cx: &mut Context<Self>) {

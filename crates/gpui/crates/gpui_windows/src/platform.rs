@@ -30,6 +30,56 @@ use windows::{
 use crate::*;
 use gpui::*;
 
+/// Which text stack the platform draws glyphs with.
+///
+/// DirectWrite is the default and the only one that gives subpixel
+/// antialiasing, colour emoji, and modern OpenType shaping. GDI exists because
+/// DirectWrite is also the largest single cause of a Windows install that opens
+/// this app to a blank window — a corrupted font cache, a font manager hooking
+/// `DWrite.dll`, or a locked-down enterprise image will take it down and leave
+/// no text at all. GDI needs none of that machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowsTextBackend {
+    #[default]
+    DirectWrite,
+    Gdi,
+}
+
+impl WindowsTextBackend {
+    /// Parse a stored/CLI value. Unknown strings fall back to DirectWrite
+    /// rather than failing to start.
+    pub fn from_str_or_default(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "gdi" | "gdi+" | "gdiplus" => Self::Gdi,
+            _ => Self::DirectWrite,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectWrite => "directwrite",
+            Self::Gdi => "gdi",
+        }
+    }
+
+    /// Whether this backend can produce subpixel-antialiased glyph masks.
+    /// GDI's ClearType output only exists inside a DC, so it cannot.
+    pub fn supports_subpixel_antialiasing(self) -> bool {
+        matches!(self, Self::DirectWrite)
+    }
+
+    /// `GPUI_TEXT_BACKEND=gdi|directwrite` overrides whatever the caller asked
+    /// for. Kept because the setting that normally drives this lives in the
+    /// app's settings file, which is exactly what you cannot reach when the app
+    /// will not draw text.
+    pub fn from_env_or(default: Self) -> Self {
+        match std::env::var("GPUI_TEXT_BACKEND") {
+            Ok(value) if !value.trim().is_empty() => Self::from_str_or_default(&value),
+            _ => default,
+        }
+    }
+}
+
 pub struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
     raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
@@ -40,6 +90,7 @@ pub struct WindowsPlatform {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     direct_write_text_system: Option<Arc<DirectWriteTextSystem>>,
+    text_backend: WindowsTextBackend,
     drop_target_helper: Option<IDropTargetHelper>,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
@@ -98,20 +149,58 @@ impl WindowsPlatformState {
 
 impl WindowsPlatform {
     pub fn new(headless: bool) -> Result<Self> {
+        Self::new_with_text_backend(headless, WindowsTextBackend::default())
+    }
+
+    /// The text stack actually in use, which is not always the one requested —
+    /// see [`Self::new_with_text_backend`]. Callers surface this so a silent
+    /// fallback is visible in the UI rather than only in the log.
+    pub fn text_backend(&self) -> WindowsTextBackend {
+        self.text_backend
+    }
+
+    /// Build the platform with an explicit text stack.
+    ///
+    /// The request is honoured when it can be: asking for GDI always gets GDI,
+    /// and asking for DirectWrite gets GDI anyway if DirectWrite cannot be
+    /// created. Starting with legible text beats failing to start.
+    pub fn new_with_text_backend(
+        headless: bool,
+        requested_text_backend: WindowsTextBackend,
+    ) -> Result<Self> {
         unsafe {
             OleInitialize(None).context("unable to initialize Windows OLE")?;
         }
+        let requested_text_backend = WindowsTextBackend::from_env_or(requested_text_backend);
+        let mut text_backend = requested_text_backend;
         let (directx_devices, text_system, direct_write_text_system) = if !headless {
             let devices = DirectXDevices::new().context("Creating DirectX devices")?;
-            let dw_text_system = Arc::new(
-                DirectWriteTextSystem::new(&devices)
-                    .context("Error creating DirectWriteTextSystem")?,
-            );
-            (
-                Some(devices),
-                dw_text_system.clone() as Arc<dyn PlatformTextSystem>,
-                Some(dw_text_system),
-            )
+            let dw_text_system = match requested_text_backend {
+                WindowsTextBackend::Gdi => None,
+                WindowsTextBackend::DirectWrite => match DirectWriteTextSystem::new(&devices) {
+                    Ok(system) => Some(Arc::new(system)),
+                    Err(error) => {
+                        log::error!(
+                            "DirectWrite text system unavailable ({error:#});                              falling back to GDI text rendering"
+                        );
+                        None
+                    }
+                },
+            };
+            match dw_text_system {
+                Some(dw_text_system) => (
+                    Some(devices),
+                    dw_text_system.clone() as Arc<dyn PlatformTextSystem>,
+                    Some(dw_text_system),
+                ),
+                None => {
+                    text_backend = WindowsTextBackend::Gdi;
+                    let gdi =
+                        Arc::new(GdiTextSystem::new().context("Error creating GDI text system")?);
+                    log::info!("Using the GDI text backend");
+                    (Some(devices), gdi as Arc<dyn PlatformTextSystem>, None)
+                }
+            }
         } else {
             (
                 None,
@@ -193,6 +282,7 @@ impl WindowsPlatform {
             foreground_executor,
             text_system,
             direct_write_text_system,
+            text_backend,
             disable_direct_composition,
             drop_target_helper,
             invalidate_devices: Arc::new(AtomicBool::new(false)),
@@ -1406,5 +1496,64 @@ mod tests {
         let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
         write_to_clipboard(item.clone());
         assert_eq!(read_from_clipboard(), Some(item));
+    }
+}
+
+#[cfg(test)]
+mod text_backend_tests {
+    use super::*;
+    // `use crate::*` re-exports gpui's `test` attribute; the explicit import
+    // outranks the glob so `#[test]` is the real one.
+    use core::prelude::v1::test;
+
+    /// The token is what the settings file and `GPUI_TEXT_BACKEND` both carry,
+    /// so it has to survive a round trip unchanged.
+    #[test]
+    fn tokens_round_trip() {
+        for backend in [WindowsTextBackend::DirectWrite, WindowsTextBackend::Gdi] {
+            assert_eq!(
+                WindowsTextBackend::from_str_or_default(backend.as_str()),
+                backend
+            );
+        }
+    }
+
+    /// A hand-edited settings file or a typo'd env var must not stop the app
+    /// from starting — it falls back to the default, which is the safe one.
+    #[test]
+    fn unknown_values_fall_back_to_directwrite() {
+        for value in ["", "  ", "nonsense", "DIRECTWRITE-2"] {
+            assert_eq!(
+                WindowsTextBackend::from_str_or_default(value),
+                WindowsTextBackend::DirectWrite
+            );
+        }
+    }
+
+    /// The spellings a person is likely to type when reading "GDI+" off the
+    /// settings page all have to land on the same backend.
+    #[test]
+    fn gdi_is_recognised_however_it_is_written() {
+        for value in ["gdi", "GDI", "Gdi+", "gdiplus", " gdi "] {
+            assert_eq!(
+                WindowsTextBackend::from_str_or_default(value),
+                WindowsTextBackend::Gdi,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_directwrite_claims_subpixel() {
+        assert!(WindowsTextBackend::DirectWrite.supports_subpixel_antialiasing());
+        assert!(!WindowsTextBackend::Gdi.supports_subpixel_antialiasing());
+    }
+
+    #[test]
+    fn the_default_is_directwrite() {
+        assert_eq!(
+            WindowsTextBackend::default(),
+            WindowsTextBackend::DirectWrite
+        );
     }
 }

@@ -225,12 +225,6 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_delete_track = cx.listener(|this, track_id: &String, _window, cx| {
-            if let Some(snapshot) = TrackSnapshot::capture(&this.state, track_id) {
-                this.run_edit_command(EditCommand::DeleteTrack { snapshot }, cx);
-            }
-        });
-
         let on_volume_change =
             cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
                 this.state.set_track_volume(track_id, *volume);
@@ -533,6 +527,7 @@ impl Render for Timeline {
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
                     || this.ts_drag.is_some()
+                    || this.marker_drag.is_some()
                     || this.pan_last_position.is_some())
             {
                 this.reset_input_state();
@@ -544,9 +539,12 @@ impl Render for Timeline {
                     || this.automation_curve_drag.is_some()
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
-                    || this.ts_drag.is_some())
+                    || this.ts_drag.is_some()
+                    || this.marker_drag.is_some())
             {
-                if this.tempo_drag.is_some() {
+                if this.marker_drag.is_some() {
+                    this.update_marker_track_interaction(event.position.x.into(), cx);
+                } else if this.tempo_drag.is_some() {
                     this.update_tempo_track_interaction(
                         event.position.x.into(),
                         event.position.y.into(),
@@ -653,10 +651,11 @@ impl Render for Timeline {
                 return;
             }
             this.log_input_state("mouse-up-left");
+            let finished_marker = this.finish_marker_track_interaction(cx);
             let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_tempo && !finished_ts && !finished_automation {
+            if !finished_marker && !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat_with_bypass(
                     this.beat_from_window_x(event.position.x.into()),
                     event.modifiers.shift,
@@ -679,10 +678,11 @@ impl Render for Timeline {
                 return;
             }
             this.log_input_state("mouse-up-left-out");
+            let finished_marker = this.finish_marker_track_interaction(cx);
             let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
-            if !finished_tempo && !finished_ts && !finished_automation {
+            if !finished_marker && !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat_with_bypass(
                     this.beat_from_window_x(event.position.x.into()),
                     event.modifiers.shift,
@@ -814,9 +814,6 @@ impl Render for Timeline {
         let on_toggle_automation: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_toggle_automation);
-        let on_delete_track: std::sync::Arc<
-            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
-        > = std::sync::Arc::new(on_delete_track);
         let on_volume_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_volume_change);
@@ -1193,11 +1190,14 @@ impl Render for Timeline {
             std::sync::Arc::new(on_tempo_toggle_collapsed);
 
         // ── Marker lane ─────────────────────────────────────────────────
-        let on_marker_down =
-            cx.listener(|this, payload: &(f64, Option<String>, u32), _window, cx| {
-                let (beat, marker_id, click_count) = (payload.0, payload.1.clone(), payload.2);
-                this.begin_marker_track_interaction(beat, marker_id, click_count, cx);
-            });
+        let on_marker_down = cx.listener(
+            |this,
+             down: &crate::components::timeline::marker_track::MarkerLaneDown,
+             _window,
+             cx| {
+                this.begin_marker_track_interaction(down, cx);
+            },
+        );
         let on_marker_down: crate::components::timeline::marker_track::MarkerTrackDownCallback =
             std::sync::Arc::new(on_marker_down);
 
@@ -1253,22 +1253,6 @@ impl Render for Timeline {
         });
         let on_marker_toggle_collapsed: crate::components::timeline::marker_track::GlobalLaneVoidCallback =
             std::sync::Arc::new(on_marker_toggle_collapsed);
-
-        let on_marker_drag_move = cx.listener(
-            |this, event: &gpui::DragMoveEvent<TimelineMarkerDrag>, _window, cx| {
-                let drag = event.drag(cx).clone();
-                let x: f32 = event.event.position.x.into();
-                let lane_x = this.state.lane_x_from_window_x(x) - drag.pointer_offset_x;
-                let beat = this
-                    .state
-                    .snap_beats(this.state.x_to_beat(lane_x) as f32)
-                    .max(0.0);
-                this.update_marker_drag(&drag.marker_id, beat as f64, cx);
-            },
-        );
-        let on_marker_drag_drop = cx.listener(|this, _drag: &TimelineMarkerDrag, _window, cx| {
-            this.finish_marker_drag(cx);
-        });
 
         // ── Region lane ─────────────────────────────────────────────────
         let on_region_down =
@@ -1430,7 +1414,6 @@ impl Render for Timeline {
             on_toggle_arm: on_toggle_arm.clone(),
             on_toggle_input: on_toggle_input.clone(),
             on_toggle_automation: on_toggle_automation.clone(),
-            on_delete_track: on_delete_track.clone(),
             on_volume_change: on_volume_change.clone(),
             on_volume_drag_start: on_volume_drag_start.clone(),
             on_volume_drag_preview: on_volume_drag_preview.clone(),
@@ -2100,6 +2083,7 @@ impl Render for Timeline {
                 cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
                     if event.keystroke.key.as_str() == "escape"
                         && (this.range_select_drag.is_some()
+                            || this.marker_drag.is_some()
                             || this.pen_clip_draw.is_some()
                             || this.erase_clip_drag.is_some()
                             || this.automation_drag.is_some()
@@ -2128,8 +2112,6 @@ impl Render for Timeline {
             .on_drop::<TrackHeightResizeDrag>(on_track_height_resize_drop)
             .on_drag_move::<GlobalLaneResizeDrag>(on_global_lane_resize_move)
             .on_drop::<GlobalLaneResizeDrag>(on_global_lane_resize_drop)
-            .on_drag_move::<TimelineMarkerDrag>(on_marker_drag_move)
-            .on_drop::<TimelineMarkerDrag>(on_marker_drag_drop)
             // Regions are dragged on the ruler, but the drop lands wherever the
             // pointer is released — take it at the surface, like the resize
             // gestures, so the undo entry is always recorded.

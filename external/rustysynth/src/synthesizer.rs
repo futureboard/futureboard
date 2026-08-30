@@ -506,6 +506,15 @@ impl Synthesizer {
         self.maximum_polyphony
     }
 
+    /// Gets the number of voices currently sounding.
+    ///
+    /// Added for Futureboard's transport load meter: the voice pool already
+    /// tracks this to decide which voice to steal, it just was not readable
+    /// from outside the crate.
+    pub fn get_active_voice_count(&self) -> usize {
+        self.voices.get_active_voice_count()
+    }
+
     /// Gets the value indicating whether reverb and chorus are enabled.
     pub fn get_enable_reverb_and_chorus(&self) -> bool {
         self.effects.is_some()

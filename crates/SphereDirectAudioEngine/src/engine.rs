@@ -501,6 +501,10 @@ pub struct SharedState {
     // ── Callback watchdog (audio-hang spec §12; audio → control) ──────────
     /// Duration of the most recent output callback, microseconds.
     pub last_callback_us: AtomicU32,
+    /// SoundFont voices sounding across every track at the end of the last
+    /// audio callback. Published by the callback with a single relaxed store
+    /// and read by the control thread for the transport's load meter.
+    pub active_voices: AtomicU32,
     /// Worst output-callback duration seen since stream open, microseconds.
     pub max_callback_us: AtomicU32,
     /// Blocks that exceeded the 2 ms debug threshold.
@@ -620,6 +624,7 @@ impl Default for SharedState {
                 .collect(),
             recording_preview_track_ids: Mutex::new(Vec::new()),
             last_callback_us: AtomicU32::new(0),
+            active_voices: AtomicU32::new(0),
             max_callback_us: AtomicU32::new(0),
             slow_callback_count: AtomicU64::new(0),
             dropout_protection_mode: AtomicU8::new(DropoutProtectionMode::Medium as u8),
@@ -991,6 +996,15 @@ impl EngineInner {
             callback_deadline_us: s.callback_deadline_us.load(Ordering::Relaxed),
             slow_callback_count: s.slow_callback_count.load(Ordering::Relaxed),
         }
+    }
+
+    /// SoundFont voices sounding at the end of the last audio callback.
+    ///
+    /// Counts Futureboard's built-in SoundFont instrument only — a hosted VSTi
+    /// owns its own voice pool and does not report one, so this is a floor on
+    /// the project's polyphony, not a total. The transport meter says so.
+    pub fn active_voice_count(&self) -> u32 {
+        self.shared.active_voices.load(Ordering::Relaxed)
     }
 
     /// Current transport play flag (set/cleared only by Start/StopTransport).
@@ -5107,6 +5121,14 @@ where
                     }
                 }
 
+                // Voice load for the transport meter. Summed here rather
+                // than inside the render pass because this is the one place
+                // that owns the whole runtime for the block and also holds
+                // `shared` — one relaxed store per callback, O(tracks) with no
+                // allocation.
+                let voices: u32 = runtime.tracks.iter().map(|track| track.active_voices).sum();
+                shared.active_voices.store(voices, Ordering::Relaxed);
+
                 // ── Dropout watchdog: publish timing + classify this block ────
                 shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
                 let elapsed_us = cb_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
@@ -5532,6 +5554,7 @@ mod bridge_insert_tests {
         let mut params = HashMap::new();
         params.insert("role".to_string(), serde_json::json!("effect"));
         RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
@@ -6018,6 +6041,7 @@ mod bridge_insert_tests {
         }
 
         let mut track = RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
@@ -6155,6 +6179,7 @@ mod bridge_insert_tests {
         }
 
         let mut track = RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: "track-1".to_string(),
             track_type: "audio".to_string(),
@@ -6246,6 +6271,7 @@ mod routing_tests {
     fn track(id: &str, ty: &str, sends: Vec<RuntimeSend>) -> RuntimeTrack {
         let cap = 8;
         RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: ty.to_string(),

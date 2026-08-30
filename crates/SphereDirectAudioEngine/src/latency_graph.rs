@@ -387,6 +387,7 @@ mod tests {
 
     fn track(id: &str, ty: &str, plugin_latency: u32, sends: Vec<RuntimeSend>) -> RuntimeTrack {
         RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: ty.to_string(),

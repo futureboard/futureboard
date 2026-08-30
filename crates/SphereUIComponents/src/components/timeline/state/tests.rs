@@ -2657,4 +2657,107 @@ mod lane_pointer_transform_tests {
         state.finish_global_lane_resize();
         assert!((state.tempo_lane_origin_y() - before - 50.0).abs() < 0.01);
     }
+
+    /// Where a tempo marker is *drawn* is where clicking it has to resolve its
+    /// own BPM.
+    ///
+    /// Both the lane's hit test and its drag used to subtract `TEMPO_LANE_PAD`
+    /// before calling `y_to_bpm`, which already takes the pad off itself. The
+    /// axis ended up a pad's height out: the dot sat 5 px above the pointer
+    /// that made it, and grabbing one moved it before the drag had begun.
+    #[test]
+    fn a_tempo_dot_reads_back_the_bpm_it_was_drawn_for() {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.add_tempo_point(8.0, 150.0);
+
+        for bpm in [110.0_f64, 120.0, 135.0, 150.0] {
+            let drawn_y = state.tempo_window_y_at_bpm(bpm);
+            let read_back = state.tempo_bpm_at_window_y(drawn_y);
+            assert!(
+                (read_back - bpm).abs() < 0.5,
+                "a dot drawn for {bpm} BPM at y={drawn_y} hit-tested as {read_back}"
+            );
+        }
+    }
+
+    /// The pad is real padding, not an offset: the top and bottom of the drawn
+    /// band still map to the ends of the lane's BPM range.
+    #[test]
+    fn the_tempo_axis_spans_the_lane_between_its_pads() {
+        let state = TimelineState::default();
+        let (min_bpm, max_bpm) = state.tempo_lane_bpm_range();
+        let top = state.tempo_lane_origin_y() + TEMPO_LANE_PAD;
+        let bottom = state.tempo_lane_origin_y() + state.tempo_track_height() - TEMPO_LANE_PAD;
+        assert!((state.tempo_bpm_at_window_y(top) - max_bpm).abs() < 0.5);
+        assert!((state.tempo_bpm_at_window_y(bottom) - min_bpm).abs() < 0.5);
+    }
+
+    /// A conductor flag is a body running *right* from its beat line, so the
+    /// label — the obvious place to aim — has to be part of the target. The
+    /// lanes used to hit-test a symmetric ±10 px window around the beat, which
+    /// made every click on a flag's name read as "empty lane".
+    #[test]
+    fn a_flag_is_grabbable_across_its_whole_body() {
+        use crate::components::timeline::marker_flag::{flag_hit_index, MARKER_FLAG_HIT_SLOP};
+
+        let spans = [(100.0_f32, 60.0_f32), (300.0, 40.0)];
+        assert_eq!(flag_hit_index(&spans, 100.0, MARKER_FLAG_HIT_SLOP), Some(0));
+        assert_eq!(
+            flag_hit_index(&spans, 150.0, MARKER_FLAG_HIT_SLOP),
+            Some(0),
+            "the far end of the body is still the flag"
+        );
+        assert_eq!(
+            flag_hit_index(&spans, 97.0, MARKER_FLAG_HIT_SLOP),
+            Some(0),
+            "a few pixels left of the beat line is still the flag"
+        );
+        assert_eq!(flag_hit_index(&spans, 200.0, MARKER_FLAG_HIT_SLOP), None);
+        assert_eq!(flag_hit_index(&spans, 320.0, MARKER_FLAG_HIT_SLOP), Some(1));
+    }
+
+    /// A flag grabbed by its label keeps that offset for the whole move.
+    ///
+    /// The Marker lane's move resolves the pointer against the marker's own
+    /// beat, then snaps — not the other way round. Snapping the pointer first
+    /// puts the *cursor* on the grid and leaves the marker wherever the grab
+    /// offset happened to land it.
+    #[test]
+    fn a_marker_grabbed_by_its_label_keeps_its_grab_offset() {
+        let mut state = TimelineState::default();
+        state.viewport.pixels_per_beat = 40.0;
+        state.viewport.scroll_x = 0.0;
+        state.snap_to_grid = false;
+
+        // Grabbed 1.5 beats into the flag body of a marker sitting at beat 4.
+        let grab_offset = 1.5_f64;
+        // Pointer dragged to lane x = 8.5 beats -> the marker belongs at 7.
+        let landed = state.marker_drag_beat(8.5 * 40.0, grab_offset);
+        assert!(
+            (landed - 7.0).abs() < 1.0e-6,
+            "expected the marker at beat 7, got {landed}"
+        );
+    }
+
+    /// A move cannot push a marker before the song start, however far left the
+    /// pointer goes.
+    #[test]
+    fn a_marker_move_clamps_at_the_song_start() {
+        let mut state = TimelineState::default();
+        state.viewport.pixels_per_beat = 40.0;
+        state.snap_to_grid = false;
+        assert_eq!(state.marker_drag_beat(-400.0, 2.0), 0.0);
+    }
+
+    /// Where two flags overlap you get the one painted on top, which is the
+    /// one you can actually see.
+    #[test]
+    fn overlapping_flags_resolve_to_the_one_on_top() {
+        use crate::components::timeline::marker_flag::flag_hit_index;
+
+        let spans = [(100.0_f32, 120.0_f32), (140.0, 40.0)];
+        assert_eq!(flag_hit_index(&spans, 150.0, 0.0), Some(1));
+        assert_eq!(flag_hit_index(&spans, 110.0, 0.0), Some(0));
+    }
 }

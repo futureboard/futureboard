@@ -14,24 +14,35 @@ use crate::components::timeline::global_lane_header::{
     global_lane_header, global_lane_resize_handle, GlobalLaneHeaderActions, GlobalLaneResizeArmCb,
     GlobalLaneResizeResetCb,
 };
-use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
+use crate::components::timeline::marker_flag::{
+    flag_hit_index, marker_flag_layer, MarkerFlag, MARKER_FLAG_HIT_SLOP,
+};
 use crate::components::timeline::timeline_grid::timeline_grid;
-use crate::components::timeline::timeline_state::{
-    GlobalLaneKind, TimelineMarkerDrag, TimelineState,
-};
+use crate::components::timeline::timeline_state::{GlobalLaneKind, TimelineState};
 use crate::theme::Colors;
-use gpui::{
-    div, px, AppContext, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled,
-};
+use gpui::{div, px, InteractiveElement, IntoElement, ParentElement, Styled};
 
-/// Marker lane mouse-down: `(beat, marker_id, click_count)`.
+/// One mouse-down on the Marker lane.
 ///
-/// `marker_id` is `None` when the press landed on empty lane, which is what
-/// separates "select this marker" from "seek / create here".
-pub type MarkerTrackDownCallback = std::sync::Arc<
-    dyn Fn(&(f64, Option<String>, u32), &mut gpui::Window, &mut gpui::App) + 'static,
->;
+/// Both beats are here on purpose. `snapped_beat` is where a *new* marker
+/// would be created, and `pointer_beat` is the raw grab point a move measures
+/// its offset from — resolving a move against the snapped beat would jump the
+/// flag by up to half a grid step the instant it was grabbed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkerLaneDown {
+    pub snapped_beat: f64,
+    pub pointer_beat: f64,
+    /// Lane-local pointer x, the anchor the drag threshold is measured from.
+    pub lane_x: f32,
+    /// `None` when the press landed on empty lane, which is what separates
+    /// "select this marker" from "seek / create here".
+    pub marker_id: Option<String>,
+    pub click_count: u32,
+}
+
+/// Marker lane mouse-down.
+pub type MarkerTrackDownCallback =
+    std::sync::Arc<dyn Fn(&MarkerLaneDown, &mut gpui::Window, &mut gpui::App) + 'static>;
 
 /// Marker lane right-click: `(beat, marker_id, screen_x, screen_y)`.
 pub type MarkerTrackContextCallback = std::sync::Arc<
@@ -42,10 +53,6 @@ pub type GlobalLaneVoidCallback =
     std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static>;
 pub type GlobalLaneMenuCallback =
     std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
-
-/// Pointer slop for hitting a marker flag, in pixels. Matched to the flag body
-/// so the whole visible chip is grabbable, not just its stem.
-const MARKER_HIT_SLOP_PX: f32 = 10.0;
 
 /// Global Marker lane — named cue points over the arrangement timeline.
 #[allow(clippy::too_many_arguments)]
@@ -81,42 +88,35 @@ pub fn marker_track_lane(
             })
         })
         .collect();
-    let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
-
-    // Each marker also gets an invisible drag handle over its flag. The flag
-    // layer itself is one canvas for the whole lane (cheap to paint, but not
-    // hit-testable per marker), so identity lives in these thin overlays.
-    let drag_handles: Vec<gpui::Stateful<gpui::Div>> = state
+    // The hit test runs against the *drawn* bodies, so build the spans from the
+    // same list that paints them — an id and its shape can then never disagree.
+    let hit_ids: Vec<String> = state
         .markers
         .iter()
-        .enumerate()
-        .filter_map(|(index, marker)| {
+        .filter(|marker| {
             let x = state.beats_to_x(marker.beat as f32);
-            if x < -160.0 || x > lane_w + 160.0 {
-                return None;
-            }
-            let label_w = crate::theme::menu::estimate_label_width(&marker.name);
-            let width = (label_w + 18.0).clamp(26.0, 160.0);
-            let drag = TimelineMarkerDrag {
-                marker_id: marker.id.clone(),
-                pointer_offset_x: 0.0,
-            };
-            Some(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(0.0))
-                    .bottom_0()
-                    .w(px(width))
-                    .id(("marker-lane-flag", index))
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .on_drag(drag, move |drag, offset, _window, cx| {
-                        cx.new(|_| TimelineMarkerDrag {
-                            pointer_offset_x: offset.x.into(),
-                            ..drag.clone()
-                        })
-                    }),
-            )
+            x >= -160.0 && x <= lane_w + 160.0
+        })
+        .map(|marker| marker.id.clone())
+        .collect();
+    let hit_spans: Vec<(f32, f32)> = flags.iter().map(|f| (f.x, f.width())).collect();
+    let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
+
+    // A transparent pad over each flag so the pointer says "grabbable" before
+    // the press. It carries the cursor and nothing else: the move itself is a
+    // gesture session owned by the timeline root, armed by the lane's single
+    // hit layer below, so there is no second hit test here that could disagree
+    // with it about which marker was meant.
+    let hover_pads: Vec<gpui::Div> = hit_spans
+        .iter()
+        .map(|(x, width)| {
+            div()
+                .absolute()
+                .left(px(*x - MARKER_FLAG_HIT_SLOP))
+                .top(px(0.0))
+                .h(px(lane_height))
+                .w(px(width + MARKER_FLAG_HIT_SLOP))
+                .cursor(gpui::CursorStyle::PointingHand)
         })
         .collect();
 
@@ -126,6 +126,8 @@ pub fn marker_track_lane(
     // cannot disagree about which marker was meant.
     let interaction = on_down.map(|cb| {
         let state_hit = state.clone();
+        let ids_hit = hit_ids.clone();
+        let spans_hit = hit_spans.clone();
         let mut layer = div()
             .absolute()
             .inset_0()
@@ -137,16 +139,29 @@ pub fn marker_track_lane(
                     let wx: f32 = event.position.x.into();
                     let lane_x = state_hit.lane_x_from_window_x(wx);
                     let beat = state_hit.x_to_beat(lane_x).max(0.0);
-                    let marker_id = state_hit.marker_at(beat, marker_hit_tolerance(&state_hit));
-                    // Creating and moving both snap; only the hit test reads the
-                    // raw beat, so a marker just left of a grid line is still
-                    // grabbable.
+                    let marker_id = flag_hit_index(&spans_hit, lane_x, MARKER_FLAG_HIT_SLOP)
+                        .and_then(|index| ids_hit.get(index).cloned());
+                    // Creating snaps; only the hit test and the grab offset
+                    // read the raw pointer, so a marker just left of a grid
+                    // line is still grabbable and does not jump when grabbed.
                     let snapped = state_hit.snap_beats(beat as f32).max(0.0) as f64;
-                    cb(&(snapped, marker_id, event.click_count as u32), window, cx);
+                    cb(
+                        &MarkerLaneDown {
+                            snapped_beat: snapped,
+                            pointer_beat: beat,
+                            lane_x,
+                            marker_id,
+                            click_count: event.click_count as u32,
+                        },
+                        window,
+                        cx,
+                    );
                 },
             );
         if let Some(ctx_cb) = on_context {
             let state_ctx = state.clone();
+            let ids_ctx = hit_ids.clone();
+            let spans_ctx = hit_spans.clone();
             layer = layer.on_mouse_down(
                 gpui::MouseButton::Right,
                 move |event: &gpui::MouseDownEvent, window, cx| {
@@ -156,7 +171,8 @@ pub fn marker_track_lane(
                     let sy: f32 = event.position.y.into();
                     let lane_x = state_ctx.lane_x_from_window_x(wx);
                     let beat = state_ctx.x_to_beat(lane_x).max(0.0);
-                    let marker_id = state_ctx.marker_at(beat, marker_hit_tolerance(&state_ctx));
+                    let marker_id = flag_hit_index(&spans_ctx, lane_x, MARKER_FLAG_HIT_SLOP)
+                        .and_then(|index| ids_ctx.get(index).cloned());
                     ctx_cb(&(beat, marker_id, sx, sy), window, cx);
                 },
             );
@@ -203,14 +219,8 @@ pub fn marker_track_lane(
                 .children(interaction)
                 .child(flag_layer)
                 .children(flag_labels)
-                .children(drag_handles)
+                .children(hover_pads)
                 .children(crate::perf::debug_clip_outline()),
         )
         .children(resize_handle)
-}
-
-/// Hit slop expressed in beats at the current zoom, so grabbing a marker feels
-/// the same whether one bar is 30 px or 300 px wide.
-pub fn marker_hit_tolerance(state: &TimelineState) -> f64 {
-    MARKER_HIT_SLOP_PX as f64 / state.viewport.pixels_per_beat.max(1.0) as f64
 }

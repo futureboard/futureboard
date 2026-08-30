@@ -46,7 +46,12 @@ pub fn timeline_grid(
         .into_iter()
         .filter(|rect| rect.bar % 2 == 0)
         .filter_map(|rect| {
-            let x0 = (rect.start_beat as f32 * ppb - scroll_x).round();
+            // Clamped for the same reason as the arrangement's shades: the bar
+            // under the left viewport edge starts at a negative x, and this
+            // wash would otherwise bleed out of the lane. The lane clips, but
+            // relying on the clip to hide wrong geometry is how it escapes the
+            // moment a parent stops clipping.
+            let x0 = (rect.start_beat as f32 * ppb - scroll_x).round().max(0.0);
             let x1 = (rect.end_beat as f32 * ppb - scroll_x).round();
             let w = x1 - x0;
             (w >= 2.0).then_some((x0, w))

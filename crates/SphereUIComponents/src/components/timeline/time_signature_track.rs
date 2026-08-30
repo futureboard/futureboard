@@ -2,7 +2,9 @@ use crate::components::timeline::global_lane_header::{
     global_lane_header, global_lane_resize_handle, GlobalLaneHeaderActions, GlobalLaneResizeArmCb,
     GlobalLaneResizeResetCb,
 };
-use crate::components::timeline::marker_flag::{marker_flag_layer, MarkerFlag};
+use crate::components::timeline::marker_flag::{
+    flag_hit_index, marker_flag_layer, MarkerFlag, MARKER_FLAG_HIT_SLOP,
+};
 use crate::components::timeline::timeline_grid::timeline_grid;
 use crate::components::timeline::timeline_state::{GlobalLaneKind, TimelineState};
 use crate::theme::Colors;
@@ -41,23 +43,28 @@ pub fn time_signature_track_lane(
 
     // Anchored flags, not centred pills: a signature change takes effect *at*
     // its beat, and the old centred pill put half the chip in the bar before it.
-    let flags: Vec<MarkerFlag> = points
-        .iter()
-        .filter_map(|p| {
-            let x = state.beats_to_x(p.beat as f32);
-            if x < -64.0 || x > lane_w + 64.0 {
-                return None;
-            }
-            Some(MarkerFlag {
-                x,
-                label: p.label(),
-                selected: selected.as_deref() == Some(p.id.as_str()),
-            })
-        })
-        .collect();
+    //
+    // `hit_ids` is filled in the same pass, so a span and the marker it belongs
+    // to stay index-aligned even though off-screen points are culled.
+    let mut flags: Vec<MarkerFlag> = Vec::with_capacity(points.len() + 1);
+    let mut hit_ids: Vec<String> = Vec::with_capacity(points.len());
+    for p in &points {
+        let x = state.beats_to_x(p.beat as f32);
+        if x < -64.0 || x > lane_w + 64.0 {
+            continue;
+        }
+        flags.push(MarkerFlag {
+            x,
+            label: p.label(),
+            selected: selected.as_deref() == Some(p.id.as_str()),
+        });
+        hit_ids.push(p.id.clone());
+    }
+    // Spans cover the real points only — the implicit flag added below has no
+    // marker behind it and must not be pickable as one.
+    let hit_spans: Vec<(f32, f32)> = flags.iter().map(|f| (f.x, f.width())).collect();
     // `time_signature_at_beat` already resolves an implicit 4/4 for an empty
     // map; surface that rather than leaving the lane blank.
-    let mut flags = flags;
     if points.is_empty() {
         let implicit = state.time_signature_map.time_signature_at_beat(0.0);
         flags.push(MarkerFlag {
@@ -66,12 +73,33 @@ pub fn time_signature_track_lane(
             selected: false,
         });
     }
+    // A transparent pad over each real flag, so the pointer says "grabbable"
+    // before the click. It carries no listener: the lane's single hit layer
+    // still resolves every press, and a second one here could disagree with it.
+    let hover_pads: Vec<gpui::Div> = hit_spans
+        .iter()
+        .map(|(x, width)| {
+            div()
+                .absolute()
+                .left(px(*x - MARKER_FLAG_HIT_SLOP))
+                .top(px(0.0))
+                .bottom_0()
+                .w(px(width + MARKER_FLAG_HIT_SLOP))
+                .cursor(gpui::CursorStyle::PointingHand)
+        })
+        .collect();
     let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
 
     let subtitle = state.time_signature_lane_header_subtitle();
 
+    // The hit test resolves against the drawn flag bodies rather than a beat
+    // tolerance. Snapping the pointer beat *before* looking for a marker was
+    // the bug: at high zoom the snap step is wider than the tolerance, so a
+    // marker off the grid could not be picked at all.
     let interaction = on_down.map(|cb| {
         let state_hit = state.clone();
+        let spans_hit = hit_spans.clone();
+        let ids_hit = hit_ids.clone();
         div()
             .absolute()
             .inset_0()
@@ -84,9 +112,8 @@ pub fn time_signature_track_lane(
                     let lane_x = state_hit.lane_x_from_window_x(wx);
                     let beat = state_hit.x_to_beat(lane_x).max(0.0);
                     let snapped = state_hit.snap_beats(beat as f32) as f64;
-                    let ppb = state_hit.viewport.pixels_per_beat.max(1.0) as f64;
-                    let beat_tol = 12.0 / ppb;
-                    let point_id = state_hit.time_signature_point_at(snapped, beat_tol);
+                    let point_id = flag_hit_index(&spans_hit, lane_x, MARKER_FLAG_HIT_SLOP)
+                        .and_then(|index| ids_hit.get(index).cloned());
                     cb(
                         &(snapped, point_id, false, event.click_count as u32),
                         window,
@@ -96,6 +123,8 @@ pub fn time_signature_track_lane(
             )
             .when_some(on_context, |layer, ctx_cb| {
                 let state_ctx = state.clone();
+                let spans_ctx = hit_spans.clone();
+                let ids_ctx = hit_ids.clone();
                 layer.on_mouse_down(
                     gpui::MouseButton::Right,
                     move |event: &gpui::MouseDownEvent, window, cx| {
@@ -105,8 +134,8 @@ pub fn time_signature_track_lane(
                         let sy: f32 = event.position.y.into();
                         let lane_x = state_ctx.lane_x_from_window_x(wx);
                         let beat = state_ctx.x_to_beat(lane_x).max(0.0);
-                        let ppb = state_ctx.viewport.pixels_per_beat.max(1.0) as f64;
-                        let point_id = state_ctx.time_signature_point_at(beat, 12.0 / ppb);
+                        let point_id = flag_hit_index(&spans_ctx, lane_x, MARKER_FLAG_HIT_SLOP)
+                            .and_then(|index| ids_ctx.get(index).cloned());
                         ctx_cb(&(beat, point_id, sx, sy), window, cx);
                     },
                 )
@@ -152,6 +181,7 @@ pub fn time_signature_track_lane(
                 .child(flag_layer)
                 .children(flag_labels)
                 .children(interaction)
+                .children(hover_pads)
                 // Debug: outline time_signature_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline()),
         )

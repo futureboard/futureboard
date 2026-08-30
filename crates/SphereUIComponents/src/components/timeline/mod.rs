@@ -30,6 +30,7 @@ pub mod video_clip;
 pub mod vu_meter;
 pub mod waveform_cache;
 pub mod waveform_canvas;
+pub mod waveform_detail;
 pub mod waveform_peak_file;
 
 pub use render::{

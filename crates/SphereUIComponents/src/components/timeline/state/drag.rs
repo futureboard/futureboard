@@ -50,10 +50,34 @@ pub struct GlobalLaneResizeDrag {
     pub kind: GlobalLaneKind,
 }
 
-/// In-flight arrangement-marker move on the global Marker lane. Carries the
-/// grab offset so the flag does not jump to the cursor on the first move.
-#[derive(Debug, Clone)]
+/// How far the pointer must travel, in lane pixels, before a press on a
+/// conductor-lane object becomes a move.
+///
+/// Without it every click on a flag is also a one-pixel nudge: the lanes seek
+/// the playhead on press, so the pointer is already moving when the button
+/// comes up.
+pub const CONDUCTOR_DRAG_THRESHOLD_PX: f32 = 3.0;
+
+/// In-flight arrangement-marker move on the global Marker lane.
+///
+/// This is a gesture *session* owned by the timeline root, not a GPUI
+/// drag-and-drop payload. Nothing is being transferred to a drop target — the
+/// flag follows the pointer inside its own lane — and the root's mouse-move
+/// listener is the one path every other in-place timeline gesture already
+/// shares (automation, range select, pen, tempo, meter). Markers used to be
+/// the odd one out on `on_drag`, which is also the only conductor lane whose
+/// move never worked.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimelineMarkerDrag {
     pub marker_id: String,
-    pub pointer_offset_x: f32,
+    /// Pointer x in lane pixels at mouse-down — the threshold is measured from
+    /// here, not from the previous frame, so slow drags still arm.
+    pub press_lane_x: f32,
+    /// Beats between the marker's own beat and the grab point, so the flag
+    /// keeps its offset under the cursor instead of snapping its left edge to
+    /// it on the first move.
+    pub grab_offset_beats: f64,
+    /// Set once the marker has actually moved, so a plain click never marks the
+    /// project dirty or writes an undo entry.
+    pub moved: bool,
 }

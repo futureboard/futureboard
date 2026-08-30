@@ -557,6 +557,15 @@ impl StudioLayout {
             )),
             on_mouse: bpm_mouse_callbacks.on_mouse,
         };
+        // The master strip's gesture is rebuilt here rather than inside the
+        // meter entity: this runs at the shell's render rate, while the meter
+        // repaints on every poll tick and must not allocate a callback bundle
+        // each time.
+        let master_volume = self.build_master_volume_callbacks(cx.entity().clone());
+        let _ = self
+            .master_transport_meter
+            .update(cx, |meter, _| meter.set_callbacks(master_volume));
+
         let ts_num_input_callbacks = bind_time_signature_mouse_selection(cx.entity().clone(), true);
         let ts_den_input_callbacks =
             bind_time_signature_mouse_selection(cx.entity().clone(), false);
@@ -607,6 +616,8 @@ impl StudioLayout {
             on_bpm_edit_start,
             on_tap_tempo,
             on_tap_tempo_menu,
+            master_meter: Some(self.master_transport_meter.clone().into()),
+            perf_meter: Some(self.transport_perf_meter.clone().into()),
         }
     }
 

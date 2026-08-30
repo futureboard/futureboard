@@ -631,6 +631,10 @@ pub(crate) fn tab_matches_search(
         }
         SettingsTab::Appearance => {
             is_match("Theme", &["theme"])
+                || is_match(
+                    "Text Rendering",
+                    &["text", "font", "render", "directwrite", "gdi", "blurry"],
+                )
                 || is_match("UI Scale", &["scale"])
                 || is_match("Grid", &["grid", "timeline"])
                 || is_match("Mixer", &["mixer", "meter"])

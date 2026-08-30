@@ -9,6 +9,7 @@ use gpui::{div, px, App, Div, IntoElement, ParentElement, Styled, Window};
 
 use crate::components::box_list_view::box_list_toggle;
 use crate::components::combo_box::combo_box_trigger;
+use crate::components::controls::{fb_segment, FbSegment};
 use crate::components::settings_layout::{
     settings_daw_row, settings_daw_row_with_description, settings_field_label,
     settings_section_card, settings_section_hint, settings_section_title, settings_status_badge,
@@ -93,6 +94,41 @@ pub fn settings_toggle(
     on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     box_list_toggle(id, enabled, on_toggle)
+}
+
+/// Segmented picker for a small, fixed set of choices.
+///
+/// A dropdown hides the alternatives behind a click, which is the wrong shape
+/// for a two-option troubleshooting switch: the reader needs to see both names
+/// and which one is standard without opening anything. Visuals come from the
+/// shared [`fb_segment`] control so this reads as the same widget the transport
+/// and inspector already use.
+pub fn settings_segmented<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    options: &[(T, &'static str)],
+    selected: T,
+    on_select: Arc<dyn Fn(T, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let last = options.len().saturating_sub(1);
+    let mut row = div().flex().flex_row().items_center();
+    for (index, (value, label)) in options.iter().enumerate() {
+        let value = *value;
+        let position = match (index, options.len()) {
+            (_, 1) => FbSegment::Only,
+            (0, _) => FbSegment::First,
+            (i, _) if i == last => FbSegment::Last,
+            _ => FbSegment::Middle,
+        };
+        let on_select = on_select.clone();
+        row = row.child(fb_segment(
+            (id, index),
+            *label,
+            value == selected,
+            position,
+            move |_, window, cx| on_select(value, window, cx),
+        ));
+    }
+    row
 }
 
 /// ComboBox trigger wired for Preferences form-column layout.

@@ -712,6 +712,11 @@ impl RuntimeMonitor {
 pub struct RuntimeTrack {
     pub id: String,
     pub track_type: String,
+    /// SoundFont voices this track was sounding at the end of the last rendered
+    /// block. Written by the audio thread only, summed once per callback into
+    /// the shared atomic the transport's load meter reads. A plain field, not an
+    /// atomic: nothing outside the callback ever touches it.
+    pub active_voices: u32,
     /// Pre/After-Fader Listen state for this channel. Affects the Control Room
     /// only — it never changes what this track contributes to the master mix,
     /// so engaging Listen cannot alter an export or a recording.
@@ -2393,6 +2398,7 @@ impl RuntimeProject {
                 listen: crate::monitor::ListenMode::Off,
                 id: t.id.clone(),
                 track_type: t.track_type.clone(),
+                active_voices: 0,
                 volume: init_volume,
                 pan: init_pan,
                 muted: t.muted,
@@ -5454,6 +5460,7 @@ mod midi_tests {
 
     fn bridged_instrument_track(id: &str) -> RuntimeTrack {
         RuntimeTrack {
+            active_voices: 0,
             listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: "midi".to_string(),

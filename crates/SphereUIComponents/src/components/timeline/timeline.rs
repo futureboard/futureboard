@@ -5,7 +5,7 @@ pub(crate) use render::*;
 use crate::assets;
 use crate::components::edit::{
     normalize_range, ClipSnapshot, EditCommand, EditHistory, EditImpact, TempoStateSnapshot,
-    TimeSignatureStateSnapshot, TrackSnapshot,
+    TimeSignatureStateSnapshot,
 };
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
@@ -30,7 +30,6 @@ use crate::components::timeline::timeline_state::{
     TempoPointDrag, TimeSignaturePointDrag, TimelineMarkerDrag, TimelineMarkerState,
     TimelineRangeSelection, TimelineRegionState, TimelineState, TimelineTool, TrackDragItem,
     TrackHeightResizeDrag, TrackType, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH, RULER_HEIGHT,
-    TEMPO_LANE_PAD,
 };
 use crate::components::timeline::track_list::track_list;
 use crate::theme::Colors;
@@ -223,6 +222,10 @@ pub struct Timeline {
     tempo_gesture_origin: Option<(&'static str, TempoStateSnapshot)>,
     /// In-flight time-signature marker drag on the global Time Signature lane.
     ts_drag: Option<TimeSignaturePointDrag>,
+    /// In-flight marker move on the global Marker lane. A root-driven gesture
+    /// session like `tempo_drag` and `ts_drag`, not a GPUI drag payload — see
+    /// [`TimelineMarkerDrag`].
+    marker_drag: Option<TimelineMarkerDrag>,
     /// Pre-gesture meter snapshot for the in-flight Time Signature lane drag,
     /// with its history label. Mirrors `tempo_gesture_origin`.
     ts_gesture_origin: Option<(&'static str, TimeSignatureStateSnapshot)>,
@@ -404,12 +407,6 @@ impl Render for TrackHeightResizeDrag {
 }
 
 impl Render for GlobalLaneResizeDrag {
-    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
-impl Render for TimelineMarkerDrag {
     fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
         Empty
     }

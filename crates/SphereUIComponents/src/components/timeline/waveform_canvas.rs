@@ -219,11 +219,38 @@ fn draw_chunk_waveform_locked(
     let num_cols = (visible_w.ceil() as usize).max(1);
     waveform_cache::record_timeline_render(1, num_cols, true);
 
-    let desired_spp =
-        waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate);
-    let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
     let (source_start, source_end, effective_time_ratio) =
         resolve_waveform_source_range(clip, meta.total_frames, meta.sample_rate, state.bpm as f64);
+
+    // Zoomed past the shipped peak ladder, the drawing runs out of data before
+    // it runs out of pixels and the waveform turns into 256-frame blocks. Ask
+    // for finer peaks over the source window that is actually on screen; the
+    // request is a channel push, and this frame still draws with whatever is
+    // already cached.
+    let desired_spp = match super::waveform_detail::detail_level_for_zoom(
+        pixels_per_second * effective_time_ratio.max(1.0e-6) as f32,
+        meta.sample_rate,
+    ) {
+        Some(detail_spp) => {
+            if let super::timeline_state::ClipType::Audio {
+                source_path: Some(source_path),
+                ..
+            } = &clip.clip_type
+            {
+                super::waveform_detail::note_needed(
+                    asset_key,
+                    source_path,
+                    detail_spp,
+                    source_start,
+                    source_end,
+                    meta.total_frames,
+                );
+            }
+            detail_spp
+        }
+        None => waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate),
+    };
+    let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
     let output_len = SphereAudioProcessor::stretched_duration_samples(
         source_end.saturating_sub(source_start),
         &clip.stretch.to_sphere_stretch_params(state.bpm as f64),

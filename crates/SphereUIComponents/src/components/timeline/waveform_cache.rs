@@ -406,6 +406,44 @@ pub fn install_chunk(
     }
 }
 
+/// Install an on-demand deep-zoom chunk (see [`super::waveform_detail`]).
+///
+/// Deliberately not [`install_chunk`]: that one is part of the *import*
+/// progress model and recounts `chunks_ready` against the primary LOD, so
+/// feeding it a finer level would report an import as more complete than it is.
+/// A detail chunk only adds data and bumps the revision so the geometry cache
+/// drops its now-too-coarse bars.
+pub fn install_detail_chunk(
+    path_key: &str,
+    samples_per_peak: u32,
+    chunk_index: u32,
+    peaks: Arc<Vec<WaveformPeak>>,
+) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let Some(entry) = cache.get_mut(path_key) else {
+            return;
+        };
+        entry.chunks.insert((samples_per_peak, chunk_index), peaks);
+        entry.revision = entry.revision.wrapping_add(1);
+    }
+}
+
+/// Drop one chunk. Used by the deep-zoom cache to stay inside its budget.
+pub fn remove_chunk(path_key: &str, samples_per_peak: u32, chunk_index: u32) {
+    if let Ok(mut cache) = file_cache().lock() {
+        let Some(entry) = cache.get_mut(path_key) else {
+            return;
+        };
+        if entry
+            .chunks
+            .remove(&(samples_per_peak, chunk_index))
+            .is_some()
+        {
+            entry.revision = entry.revision.wrapping_add(1);
+        }
+    }
+}
+
 pub fn finish_peak_build(path_key: &str, preview: Arc<WaveformPreview>) {
     if let Ok(mut cache) = file_cache().lock() {
         let Some(entry) = cache.get_mut(path_key) else {

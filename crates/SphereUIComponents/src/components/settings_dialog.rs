@@ -25,8 +25,9 @@ use crate::components::controls::{
     fb_button, fb_segmented_button, fb_stepper_button, FbButtonKind,
 };
 use crate::components::settings_components::{
-    settings_readout, settings_restart_footer, settings_row, settings_row_restart,
-    settings_section, settings_section_hint_text, settings_toggle,
+    settings_readout, settings_restart_footer, settings_restart_label, settings_row,
+    settings_row_restart, settings_section, settings_section_hint_text, settings_segmented,
+    settings_toggle,
 };
 use crate::components::settings_layout::{
     settings_daw_row, settings_daw_row_with_description, settings_nav_group_header,
@@ -49,7 +50,7 @@ use crate::overlay::{
 };
 use crate::settings::{
     DefaultMonitorMode, GpuDevicePreference, MidiDeviceDirection, MidiDeviceSetting, RenderMode,
-    SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema,
+    SettingsAudioLatencySnapshot, SettingsModel, SettingsSchema, TextRenderingBackend,
 };
 use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
@@ -941,6 +942,10 @@ fn build_settings_content(
     if (state.active_tab == SettingsTab::Appearance && query.is_empty())
         || (!query.is_empty()
             && (is_match("Theme", &["theme", "fleet", "dark"])
+                || is_match(
+                    "Text Rendering",
+                    &["text", "font", "render", "directwrite", "gdi", "blurry"],
+                )
                 || is_match("UI Scale", &["scale", "size"])
                 || is_match("Arrangement Grid", &["grid", "intensity", "opacity"])
                 || is_match("Piano Roll Guides", &["piano", "roll", "guides", "keys"])
@@ -968,6 +973,35 @@ fn build_settings_content(
                         callbacks.on_toggle_hardware_combo.clone(),
                     ),
                 ))
+                .child(settings_daw_row(
+                    settings_restart_label(i18n.tr("settings.field.text-rendering"), true),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(settings_segmented(
+                            "settings-text-rendering",
+                            &[
+                                (TextRenderingBackend::DirectWrite, "DirectWrite"),
+                                (TextRenderingBackend::Gdi, "GDI+"),
+                            ],
+                            schema.appearance.text_rendering,
+                            {
+                                let up = on_update.clone();
+                                Arc::new(move |backend: TextRenderingBackend, w, cx| {
+                                    up(
+                                        Arc::new(move |s| s.appearance.text_rendering = backend),
+                                        w,
+                                        cx,
+                                    );
+                                })
+                            },
+                        ))
+                        .child(settings_section_hint_text(
+                            i18n.tr("settings.hint.text-rendering"),
+                        )),
+                ))
+                .child(settings_restart_footer())
                 .child(settings_daw_row(
                     i18n.tr("settings.field.ui-scale"),
                     div()

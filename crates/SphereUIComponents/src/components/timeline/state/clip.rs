@@ -147,6 +147,10 @@ impl ClipState {
     }
 }
 
+/// Shortest an audio clip may become. Below this the two edge handles overlap
+/// and the clip stops being a usable target.
+pub const MIN_AUDIO_CLIP_BEATS: f32 = 0.25;
+
 /// Which edge of a clip an edge-resize gesture is dragging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipEdge {
@@ -183,6 +187,51 @@ pub fn next_clip_id_number(tracks: &[TrackState]) -> u32 {
 }
 
 impl TimelineState {
+    /// Re-derive every audio clip's musical length from the audio it actually
+    /// plays, at the current project tempo. Returns `true` when anything moved.
+    ///
+    /// `duration_beats` is the coordinate the whole arrangement is built on —
+    /// hit-testing, snapping, neighbour layout and the engine snapshot all read
+    /// it — while an audio clip is *drawn* from its source window in seconds.
+    /// Those two agree right after a trim and diverge the moment the tempo
+    /// moves, which is how a clip ends up drawn one length and grabbable
+    /// another.
+    ///
+    /// Deriving rather than storing also settles what a tempo change means for
+    /// each stretch mode with no branch at all:
+    /// `effective_duration_samples_for_project_bpm` already folds the mode's
+    /// ratio in, so a Tempo Sync clip keeps its bar count (its wall-clock
+    /// length moves with the tempo) while an Off / Manual / Resample clip keeps
+    /// its wall-clock length (its bar count moves). It is idempotent, so undo
+    /// restores the lengths by re-running it instead of carrying a second
+    /// snapshot alongside the tempo one.
+    ///
+    /// Clips whose source window has not been decoded yet are left alone: there
+    /// is nothing authoritative to derive from, and guessing would shrink a
+    /// pending import to the minimum length.
+    pub fn reconcile_audio_clip_lengths(&mut self) -> bool {
+        let seconds_per_beat = self.seconds_per_beat().max(1.0e-6) as f64;
+        let project_bpm = self.bpm.max(1.0) as f64;
+        let mut changed = false;
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                if !matches!(clip.clip_type, ClipType::Audio { .. }) {
+                    continue;
+                }
+                let Some(seconds) = clip.stretch.played_seconds_for_project_bpm(project_bpm) else {
+                    continue;
+                };
+                let beats = (seconds / seconds_per_beat) as f32;
+                let beats = beats.max(MIN_AUDIO_CLIP_BEATS);
+                if (clip.duration_beats - beats).abs() > 1.0e-4 {
+                    clip.duration_beats = beats;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn next_clip_id(&self) -> String {
         format!("clip-{}", next_clip_id_number(&self.tracks))
     }
@@ -670,7 +719,11 @@ impl TimelineState {
         };
 
         let is_midi = matches!(clip.clip_type, ClipType::Midi { .. });
-        let min_len = if is_midi { MIN_MIDI_CLIP_BEATS } else { 0.25 };
+        let min_len = if is_midi {
+            MIN_MIDI_CLIP_BEATS
+        } else {
+            MIN_AUDIO_CLIP_BEATS
+        };
         // Clip-local end of the furthest note — the floor for any MIDI shrink.
         let last_note_end = if let ClipType::Midi { notes, .. } = &clip.clip_type {
             notes

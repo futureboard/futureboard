@@ -485,6 +485,11 @@ impl TimelineState {
     pub fn restore_tempo_state(&mut self, points: Vec<TempoPoint>, bpm: f32) {
         self.tempo_map.restore_points(points);
         self.bpm = bpm;
+        // Audio clip lengths are derived from the tempo, so undoing the tempo
+        // has to re-derive them. They are not carried in the snapshot for the
+        // same reason: the value is a function of the source window and the
+        // tempo, and storing a second copy is how the two drift apart.
+        self.reconcile_audio_clip_lengths();
         if let Some(id) = self.selected_tempo_point_id.clone() {
             if !self.tempo_map.points.iter().any(|p| p.id == id) {
                 self.selected_tempo_point_id = None;

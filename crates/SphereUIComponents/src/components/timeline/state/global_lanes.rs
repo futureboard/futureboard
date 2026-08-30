@@ -178,6 +178,33 @@ impl TimelineState {
             + self.global_lane_top(GlobalLaneKind::Tempo)
     }
 
+    /// Window-space y -> BPM for the Tempo lane.
+    ///
+    /// The single inverse of [`bpm_to_y`] for pointer input: the lane's hit
+    /// test and the drag that follows it both go through this, so a click on a
+    /// dot and the move that grabs it cannot resolve different BPMs.
+    ///
+    /// Note there is no extra [`TEMPO_LANE_PAD`] term here. `bpm_to_y` already
+    /// puts the pad inside the mapping and `y_to_bpm` already takes it back
+    /// out; both call sites used to subtract it a second time, which pushed the
+    /// whole BPM axis a pad's height away from the pointer.
+    pub fn tempo_bpm_at_window_y(&self, window_y: f32) -> f64 {
+        let (min_bpm, max_bpm) = self.tempo_lane_bpm_range();
+        y_to_bpm(
+            window_y - self.tempo_lane_origin_y(),
+            self.tempo_track_height(),
+            min_bpm,
+            max_bpm,
+        )
+    }
+
+    /// Inverse of [`Self::tempo_bpm_at_window_y`]: the window-space y a marker
+    /// at `bpm` is drawn at.
+    pub fn tempo_window_y_at_bpm(&self, bpm: f64) -> f32 {
+        let (min_bpm, max_bpm) = self.tempo_lane_bpm_range();
+        self.tempo_lane_origin_y() + bpm_to_y(bpm, self.tempo_track_height(), min_bpm, max_bpm)
+    }
+
     /// Arm a lane resize at pointer-down. Promoted to a live session on the
     /// first drag-move, so a plain click on the handle never resizes.
     pub fn arm_global_lane_resize(&mut self, kind: GlobalLaneKind, start_mouse_y: f32) {

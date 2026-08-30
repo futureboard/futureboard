@@ -28,6 +28,24 @@ pub type GlobalLaneVoidCallback =
 pub type GlobalLaneMenuCallback =
     std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
+/// Pointer slop around a tempo marker, in lane pixels, on both axes.
+///
+/// The dot is 7-9 px across; without a pad this size it is a smaller target
+/// than the pointer that has to hit it.
+const TEMPO_POINT_HIT_PX: f32 = 12.0;
+
+/// [`TEMPO_POINT_HIT_PX`] expressed in the units `tempo_point_at` compares:
+/// beats along the x axis, BPM along the y axis, both at the current zoom and
+/// the lane's current auto-fitted BPM range.
+fn tempo_hit_tolerances(state: &TimelineState, lane_h: f32, min: f64, max: f64) -> (f64, f64) {
+    let ppb = state.viewport.pixels_per_beat.max(1.0) as f64;
+    let usable = (lane_h - 2.0 * TEMPO_LANE_PAD).max(1.0) as f64;
+    (
+        TEMPO_POINT_HIT_PX as f64 / ppb,
+        (max - min) * TEMPO_POINT_HIT_PX as f64 / usable,
+    )
+}
+
 /// Global Tempo Track lane — header + automation curve over the project TempoMap.
 pub fn tempo_track_lane(
     state: &TimelineState,
@@ -135,11 +153,21 @@ pub fn tempo_track_lane(
             )
         };
 
+        // A 7 px dot is smaller than the pointer that has to land on it, so the
+        // dot sits inside a transparent pad the size of the lane's hit slop.
+        // The pad carries the cursor only — the lane's single hit layer still
+        // resolves every press, so the two can never disagree about which
+        // marker was meant.
         markers.push(
             div()
                 .absolute()
-                .left(px(x - size_px / 2.0))
-                .top(px(y - size_px / 2.0))
+                .left(px(x - TEMPO_POINT_HIT_PX))
+                .top(px(y - TEMPO_POINT_HIT_PX))
+                .w(px(TEMPO_POINT_HIT_PX * 2.0))
+                .h(px(TEMPO_POINT_HIT_PX * 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
                 .cursor(gpui::CursorStyle::PointingHand)
                 .child(
                     div()
@@ -175,9 +203,6 @@ pub fn tempo_track_lane(
     let (flag_layer, flag_labels) = marker_flag_layer(flags, lane_w, lane_height);
 
     let subtitle = state.tempo_lane_header_subtitle();
-    // Shared with `Timeline::tempo_bpm_from_window_y` so the click and the drag
-    // resolve a BPM through one transform.
-    let content_top = state.tempo_lane_origin_y();
 
     let interaction = on_down.map(|cb| {
         let state_left = state.clone();
@@ -197,15 +222,12 @@ pub fn tempo_track_lane(
                     let lane_x = state_left.lane_x_from_window_x(wx);
                     let beat = state_left.x_to_beat(lane_x).max(0.0);
                     let snapped = state_left.snap_beats(beat as f32) as f64;
-                    let local_y = wy - content_top - TEMPO_LANE_PAD;
-                    let bpm = crate::components::timeline::timeline_state::y_to_bpm(
-                        local_y, lane_h, min, max,
-                    );
-                    let ppb = state_left.viewport.pixels_per_beat.max(1.0) as f64;
-                    let beat_tol = 10.0 / ppb;
-                    let usable = (lane_h - 2.0 * TEMPO_LANE_PAD).max(1.0);
-                    let bpm_tol = (max - min) * 10.0 / usable as f64;
-                    let point_id = state_left.tempo_point_at(snapped, bpm, beat_tol, bpm_tol);
+                    let bpm = state_left.tempo_bpm_at_window_y(wy);
+                    let (beat_tol, bpm_tol) = tempo_hit_tolerances(&state_left, lane_h, min, max);
+                    // The *raw* beat, not the snapped one: at high zoom the snap
+                    // step is wider than the tolerance, so snapping first made a
+                    // marker sitting off the grid impossible to grab.
+                    let point_id = state_left.tempo_point_at(beat, bpm, beat_tol, bpm_tol);
                     let additive = event.modifiers.shift || event.modifiers.control;
                     cb(
                         &(snapped, bpm, point_id, additive, event.click_count as u32),
@@ -226,14 +248,8 @@ pub fn tempo_track_lane(
                     let sy: f32 = event.position.y.into();
                     let lane_x = state_right.lane_x_from_window_x(wx);
                     let beat = state_right.x_to_beat(lane_x).max(0.0);
-                    let local_y = wy - content_top - TEMPO_LANE_PAD;
-                    let bpm = crate::components::timeline::timeline_state::y_to_bpm(
-                        local_y, lane_h, min, max,
-                    );
-                    let ppb = state_right.viewport.pixels_per_beat.max(1.0) as f64;
-                    let beat_tol = 10.0 / ppb;
-                    let usable = (lane_h - 2.0 * TEMPO_LANE_PAD).max(1.0);
-                    let bpm_tol = (max - min) * 10.0 / usable as f64;
+                    let bpm = state_right.tempo_bpm_at_window_y(wy);
+                    let (beat_tol, bpm_tol) = tempo_hit_tolerances(&state_right, lane_h, min, max);
                     let point_id = state_right.tempo_point_at(beat, bpm, beat_tol, bpm_tol);
                     ctx_cb(&(beat, bpm, point_id, sx, sy), window, cx);
                 },
@@ -284,8 +300,8 @@ pub fn tempo_track_lane(
                 .child(curve)
                 .child(flag_layer)
                 .children(flag_labels)
-                .children(markers)
                 .children(interaction)
+                .children(markers)
                 // Debug: outline tempo_lane_content_rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline()),
         )

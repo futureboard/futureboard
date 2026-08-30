@@ -177,6 +177,22 @@ fn handle_cef_process_setup_failure(error: &sphere_webview::runtime::CefRuntimeE
     }
 }
 
+/// Text backend to build the Windows platform with.
+///
+/// The text system is created before the app — and therefore before the
+/// settings model — exists, so the preference is read straight off disk here.
+/// `SettingsSchema::load_from_disk` falls back to defaults on any read or parse
+/// error, so a damaged settings file cannot stop the app from starting.
+#[cfg(target_os = "windows")]
+fn windows_text_backend() -> gpui_windows::WindowsTextBackend {
+    use sphere_ui_components::settings::{SettingsSchema, TextRenderingBackend};
+
+    match SettingsSchema::load_from_disk().appearance.text_rendering {
+        TextRenderingBackend::DirectWrite => gpui_windows::WindowsTextBackend::DirectWrite,
+        TextRenderingBackend::Gdi => gpui_windows::WindowsTextBackend::Gdi,
+    }
+}
+
 /// Builds a GPUI [`Application`] with the correct OS platform backend.
 ///
 /// The vendored standalone gpui removed `Application::new()`; the platform must
@@ -188,7 +204,8 @@ fn handle_cef_process_setup_failure(error: &sphere_webview::runtime::CefRuntimeE
 fn application() -> gpui::Application {
     #[cfg(target_os = "windows")]
     let platform: std::rc::Rc<dyn gpui::Platform> = std::rc::Rc::new(
-        gpui_windows::WindowsPlatform::new(false).expect("failed to initialize Windows platform"),
+        gpui_windows::WindowsPlatform::new_with_text_backend(false, windows_text_backend())
+            .expect("failed to initialize Windows platform"),
     );
 
     #[cfg(target_os = "macos")]

@@ -297,3 +297,120 @@ fn vu_meter_sized(
         .child(draw_bar(level_l))
         .child(draw_bar(level_r))
 }
+
+/// Horizontal twin of [`meter_surface`], filling left→right.
+///
+/// Same thresholds, same tokens, same single-canvas strategy — only the axis
+/// changes. Used by the transport bar's master meter, where the shell has
+/// width to spare and no height at all.
+pub fn meter_surface_horizontal(
+    level_l: f32,
+    level_r: f32,
+    hold_l: f32,
+    hold_r: f32,
+    clip: bool,
+    bar_h: f32,
+    gap: f32,
+) -> impl IntoElement {
+    let total_h = bar_h * 2.0 + gap;
+    div().h(px(total_h)).w_full().child(
+        canvas(
+            |_bounds, _window, _cx| (),
+            move |bounds, _state, window, _cx| {
+                paint_meter_bar_horizontal(bounds, 0.0, bar_h, level_l, hold_l, window);
+                paint_meter_bar_horizontal(bounds, bar_h + gap, bar_h, level_r, hold_r, window);
+                if clip {
+                    paint_clip_cap_horizontal(bounds, total_h, window);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// Clip indicator for the horizontal meter: a cap on the *right* edge, which is
+/// where full scale is on this axis.
+fn paint_clip_cap_horizontal(
+    canvas_bounds: Bounds<Pixels>,
+    height: f32,
+    window: &mut gpui::Window,
+) {
+    let cap_w = 3.0_f32;
+    let right = f32::from(canvas_bounds.origin.x) + f32::from(canvas_bounds.size.width);
+    let rect = Bounds {
+        origin: Point {
+            x: px(right - cap_w),
+            y: canvas_bounds.origin.y,
+        },
+        size: Size {
+            width: px(cap_w),
+            height: px(height),
+        },
+    };
+    window.paint_quad(fill(rect, Colors::status_error()));
+}
+
+fn paint_meter_bar_horizontal(
+    canvas_bounds: Bounds<Pixels>,
+    y_offset: f32,
+    height: f32,
+    level: f32,
+    hold: f32,
+    window: &mut gpui::Window,
+) {
+    let origin_x = f32::from(canvas_bounds.origin.x);
+    let origin_y = f32::from(canvas_bounds.origin.y) + y_offset;
+    let w = f32::from(canvas_bounds.size.width).max(0.0);
+    if w <= 0.0 {
+        return;
+    }
+
+    let rect = |x: f32, width: f32| Bounds {
+        origin: Point {
+            x: px(x),
+            y: px(origin_y),
+        },
+        size: Size {
+            width: px(width.max(0.0)),
+            height: px(height),
+        },
+    };
+
+    window.paint_quad(fill(rect(origin_x, w), Colors::meter_rail()));
+
+    let level_n = level.clamp(0.0, 1.0);
+    let green_n = level_n.min(METER_GREEN_TOP);
+    let yellow_n = if level_n > green_n {
+        (level_n - green_n).min(METER_YELLOW_TOP - METER_GREEN_TOP)
+    } else {
+        0.0
+    };
+    let red_n = (level_n - green_n - yellow_n).max(0.0);
+
+    let green_w = green_n * w;
+    let yellow_w = yellow_n * w;
+    let red_w = red_n * w;
+
+    if green_w > 0.0 {
+        window.paint_quad(fill(rect(origin_x, green_w), Colors::meter_low()));
+    }
+    if yellow_w > 0.0 {
+        window.paint_quad(fill(
+            rect(origin_x + green_w, yellow_w),
+            Colors::meter_mid(),
+        ));
+    }
+    if red_w > 0.0 {
+        window.paint_quad(fill(
+            rect(origin_x + green_w + yellow_w, red_w),
+            Colors::meter_high(),
+        ));
+    }
+
+    let hold_n = hold.clamp(0.0, 1.0);
+    if hold_n > 0.0 {
+        let tick_w = 2.0_f32;
+        let tick_x = (origin_x + hold_n * w - tick_w * 0.5).clamp(origin_x, origin_x + w - tick_w);
+        window.paint_quad(fill(rect(tick_x, tick_w), Colors::text_primary()));
+    }
+}

@@ -87,6 +87,12 @@ impl VoiceCollection {
         }
     }
 
+    /// Voices currently sounding. Read-only, so unlike
+    /// [`Self::get_active_voices`] it does not need `&mut self`.
+    pub(crate) fn get_active_voice_count(&self) -> usize {
+        self.active_voice_count
+    }
+
     pub(crate) fn get_active_voices(&mut self) -> &mut [Voice] {
         &mut self.voices[0..self.active_voice_count]
     }

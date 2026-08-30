@@ -29,9 +29,9 @@ use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks_and_ime, TextInputAction, TextInputCallbacks,
     TextInputState,
 };
-use crate::components::title_bar::external_window_titlebar;
+use crate::components::title_bar::{chrome_cluster, external_window_titlebar};
 use crate::i18n::I18n;
-use crate::theme::{self, Colors};
+use crate::theme::{self, radius, size, space, typography, Colors};
 
 pub const PLUGIN_MANAGER_WINDOW_WIDTH: f32 = 980.0;
 pub const PLUGIN_MANAGER_WINDOW_HEIGHT: f32 = 640.0;
@@ -42,6 +42,28 @@ type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type StrCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 
 const SIDEBAR_WIDTH: f32 = 196.0;
+
+/// Plug-in list column widths, read by both the header row and the data rows.
+///
+/// They used to be independent literals in the two places *and* the header row
+/// was missing the `gap` the data rows carried, so every header label sat one
+/// accumulated gap-width to the left of the column it named — by the Format
+/// column, three gaps out. One set of numbers, one gap, one padding.
+const COL_VENDOR_W: f32 = 110.0;
+const COL_CATEGORY_W: f32 = 100.0;
+const COL_FORMAT_W: f32 = 72.0;
+const COL_STATUS_W: f32 = 88.0;
+const COL_GAP: f32 = space::BASE;
+const LIST_PAD_X: f32 = space::LOOSE;
+/// Toolbar band above the list: one 32 px button plus its breathing room.
+const TOOLBAR_HEIGHT: f32 = size::PROMINENT + space::BASE;
+/// Plug-in list row: tall enough for a status badge plus its padding.
+const LIST_ROW_HEIGHT: f32 = 40.0;
+/// Empty-state block inside the list.
+const LIST_EMPTY_HEIGHT: f32 = 120.0;
+/// Truncation width for the database path in the footer, so a deep install
+/// directory cannot push the scan counters off the end of the window.
+const DB_PATH_MAX_W: f32 = 360.0;
 const DETAILS_WIDTH: f32 = 248.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,9 +486,9 @@ fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoE
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .px(px(12.0))
-        .py(px(8.0))
+        .gap(px(space::TIGHT))
+        .px(px(space::LOOSE))
+        .py(px(space::BASE))
         .border_b(px(1.0))
         .border_color(Colors::divider())
         .bg(Colors::surface_input())
@@ -476,17 +498,17 @@ fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoE
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(px(8.0))
+                .gap(px(space::BASE))
                 .child(
                     div()
-                        .text_size(px(theme::typography::UI_XS))
+                        .text_size(px(typography::UI_XS))
                         .text_color(Colors::text_secondary())
                         .truncate()
                         .child(label),
                 )
                 .child(
                     div()
-                        .text_size(px(theme::typography::UI_XS))
+                        .text_size(px(typography::UI_XS))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::accent_primary())
                         .child(format!("{pct}%")),
@@ -494,8 +516,10 @@ fn scan_progress_bar(state: &PluginManagerDialogState, i18n: I18n) -> impl IntoE
         )
         .child(
             div()
-                .h(px(4.0))
-                .rounded(px(crate::theme::radius::CONTROL))
+                .h(px(space::TIGHT))
+                // Under `radius::MIN_SIDE`: a 6 px corner on a 4 px rail merges
+                // into a lozenge and the fill stops reading as a level.
+                .rounded(px(radius::MICRO))
                 .bg(Colors::surface_panel_alt())
                 .overflow_hidden()
                 .child(
@@ -519,14 +543,14 @@ fn status_badge(label: impl Into<String>, ready: bool) -> impl IntoElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .min_w(px(72.0))
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .min_w(px(COL_FORMAT_W))
+        .px(px(space::BASE))
+        .py(px(space::HAIR))
+        .rounded(px(radius::CONTROL))
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(bg)
-        .text_size(px(theme::typography::UI_XS))
+        .text_size(px(typography::UI_XS))
         .font_weight(if ready {
             gpui::FontWeight::SEMIBOLD
         } else {
@@ -566,18 +590,18 @@ fn rgba_warning_soft() -> gpui::Rgba {
 fn sidebar_section(label: impl Into<String>, children: Vec<impl IntoElement>) -> impl IntoElement {
     let label = label.into();
     div()
-        .mb(px(4.0))
+        .mb(px(space::TIGHT))
         .child(
             div()
-                .px(px(12.0))
-                .pt(px(8.0))
-                .pb(px(2.0))
-                .text_size(px(theme::typography::DENSE_CAPTION))
+                .px(px(space::LOOSE))
+                .pt(px(space::BASE))
+                .pb(px(space::HAIR))
+                .text_size(px(typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_faint())
                 .child(label),
         )
-        .child(div().px(px(4.0)).children(children))
+        .child(div().px(px(space::TIGHT)).children(children))
 }
 
 fn sidebar_item(
@@ -594,11 +618,11 @@ fn sidebar_item(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(space::BASE))
         .w_full()
-        .px(px(8.0))
-        .py(px(5.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .px(px(space::BASE))
+        .py(px(space::SNUG))
+        .rounded(px(radius::CONTROL))
         .when(active, |el| el.bg(Colors::accent_muted()))
         .when(!disabled, |el| {
             el.cursor(gpui::CursorStyle::PointingHand)
@@ -610,7 +634,7 @@ fn sidebar_item(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(11.0))
+                .text_size(px(typography::UI_XS))
                 .text_color(if active {
                     Colors::accent_primary()
                 } else {
@@ -620,7 +644,7 @@ fn sidebar_item(
         )
         .child(
             div()
-                .text_size(px(theme::typography::UI_XS))
+                .text_size(px(typography::UI_XS))
                 .text_color(if active {
                     Colors::accent_primary()
                 } else {
@@ -645,10 +669,10 @@ fn col_header(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(space::TIGHT))
         .cursor(gpui::CursorStyle::PointingHand)
         .on_click(move |_, window, cx| on_sort(&key, window, cx))
-        .text_size(px(theme::typography::UI_XS))
+        .text_size(px(typography::UI_XS))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(if active {
             Colors::accent_primary()
@@ -658,7 +682,7 @@ fn col_header(
         .child(label)
         .child(
             div()
-                .text_size(px(theme::typography::DENSE_CAPTION))
+                .text_size(px(typography::DENSE_CAPTION))
                 .child(if active {
                     match state.sort_dir {
                         SortDir::Asc => "▲",
@@ -711,11 +735,11 @@ fn details_panel(
         .bg(Colors::surface_panel_alt())
         .child(
             div()
-                .px(px(12.0))
-                .py(px(10.0))
+                .px(px(space::LOOSE))
+                .py(px(space::BASE))
                 .border_b(px(1.0))
                 .border_color(Colors::divider())
-                .text_size(px(11.0))
+                .text_size(px(typography::UI_XS))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
                 .child(i18n.tr("plugin-manager.details.title")),
@@ -726,11 +750,11 @@ fn details_panel(
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .px(px(12.0))
-                .py(px(10.0))
+                .px(px(space::LOOSE))
+                .py(px(space::BASE))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(space::BASE))
                 .child(detail_row(
                     i18n.tr("plugin-manager.field.name"),
                     &plugin.name,
@@ -780,9 +804,9 @@ fn details_panel(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .px(px(12.0))
-                .py(px(10.0))
+                .gap(px(space::SNUG))
+                .px(px(space::LOOSE))
+                .py(px(space::BASE))
                 .border_t(px(1.0))
                 .border_color(Colors::divider())
                 .child(fb_button(
@@ -816,7 +840,7 @@ fn details_panel(
                 .when(!editor_enabled, |this| {
                     this.child(
                         div()
-                            .text_size(px(theme::typography::DENSE_LABEL))
+                            .text_size(px(typography::DENSE_LABEL))
                             .text_color(Colors::text_faint())
                             .child(i18n.tr("plugin-manager.editor.hint")),
                     )
@@ -829,17 +853,17 @@ fn detail_row(label: impl Into<String>, value: &str) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .gap(px(2.0))
+        .gap(px(space::HAIR))
         .child(
             div()
-                .text_size(px(theme::typography::DENSE_CAPTION))
+                .text_size(px(typography::DENSE_CAPTION))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_faint())
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(10.5))
+                .text_size(px(typography::DENSE_LABEL))
                 .text_color(Colors::text_secondary())
                 .child(value.to_string()),
         )
@@ -923,8 +947,8 @@ pub fn plugin_manager_panel(
                 .flex()
                 .items_center()
                 .justify_center()
-                .h(px(120.0))
-                .text_size(px(11.0))
+                .h(px(LIST_EMPTY_HEIGHT))
+                .text_size(px(typography::UI_XS))
                 .text_color(Colors::text_faint())
                 .child(if state.scanning {
                     i18n.tr("plugin-manager.list.scanning")
@@ -962,10 +986,10 @@ pub fn plugin_manager_panel(
                     .flex()
                     .flex_row()
                     .items_center()
-                    .min_h(px(40.0))
-                    .py(px(4.0))
-                    .px(px(12.0))
-                    .gap(px(8.0))
+                    .min_h(px(LIST_ROW_HEIGHT))
+                    .py(px(space::TIGHT))
+                    .px(px(LIST_PAD_X))
+                    .gap(px(COL_GAP))
                     .border_b(px(1.0))
                     .border_color(Colors::divider())
                     .when(selected_row, |el| el.bg(Colors::accent_muted()))
@@ -983,13 +1007,13 @@ pub fn plugin_manager_panel(
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(px(8.0))
+                            .gap(px(space::BASE))
                             .min_w_0()
                             .flex_1()
                             .child(icon(kind_icon, 12.0, kind_color))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(px(typography::UI_XS))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(Colors::text_primary())
                                     .truncate()
@@ -998,23 +1022,23 @@ pub fn plugin_manager_panel(
                     )
                     .child(
                         div()
-                            .w(px(110.0))
-                            .text_size(px(11.0))
+                            .w(px(COL_VENDOR_W))
+                            .text_size(px(typography::UI_XS))
                             .text_color(Colors::text_dim())
                             .truncate()
                             .child(plugin.vendor.clone()),
                     )
                     .child(
                         div()
-                            .w(px(100.0))
-                            .text_size(px(11.0))
+                            .w(px(COL_CATEGORY_W))
+                            .text_size(px(typography::UI_XS))
                             .text_color(Colors::text_dim())
                             .truncate()
                             .child(plugin.display_category()),
                     )
                     .child(
                         div()
-                            .w(px(72.0))
+                            .w(px(COL_FORMAT_W))
                             .flex()
                             .items_center()
                             .child(plugin_format_badge(plugin.format)),
@@ -1022,7 +1046,7 @@ pub fn plugin_manager_panel(
                     .child(
                         div()
                             .id(("plugin-status", row_index))
-                            .w(px(88.0))
+                            .w(px(COL_STATUS_W))
                             .flex()
                             .items_center()
                             .cursor(gpui::CursorStyle::PointingHand)
@@ -1055,9 +1079,9 @@ pub fn plugin_manager_panel(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(8.0))
-                        .h(px(40.0))
-                        .px(px(12.0))
+                        .gap(px(space::BASE))
+                        .h(px(TOOLBAR_HEIGHT))
+                        .px(px(space::LOOSE))
                         .border_b(px(1.0))
                         .border_color(Colors::divider())
                         .child(
@@ -1073,13 +1097,16 @@ pub fn plugin_manager_panel(
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(px(typography::UI_XS))
                                 .text_color(Colors::text_faint())
                                 .child(format!(
                                     "{visible_len} plug-in{}",
                                     if visible_len == 1 { "" } else { "s" }
                                 )),
                         )
+                        // Scan is the toolbar's one primary action and stands
+                        // alone; everything else is registry maintenance and
+                        // sits in its own plate.
                         .child(fb_button(
                             "plugin-manager-scan-now",
                             if state.scanning {
@@ -1091,40 +1118,48 @@ pub fn plugin_manager_panel(
                             !state.scanning,
                             move |_, window, cx| rescan(&(), window, cx),
                         ))
-                        .child(fb_button(
-                            "plugin-manager-full-rescan",
-                            i18n.tr("plugin-manager.rescan-all"),
-                            FbButtonKind::Default,
-                            !state.scanning,
-                            move |_, window, cx| rescan_all(&(), window, cx),
-                        ))
-                        .when(state.au_scan_available, |row| {
-                            row.child(fb_button(
-                                "plugin-manager-retry-au",
-                                if state.au_auto_scan_disabled {
-                                    "Retry AudioUnit Scan"
-                                } else {
-                                    "Scan AudioUnit"
-                                },
-                                FbButtonKind::Default,
-                                !state.scanning,
-                                move |_, window, cx| rescan_au(&(), window, cx),
-                            ))
-                        })
-                        .child(fb_button(
-                            "plugin-manager-clear-cache",
-                            "Clear Database",
-                            FbButtonKind::Default,
-                            !state.scanning && !state.plugins.is_empty(),
-                            move |_, window, cx| clear_cache(&(), window, cx),
-                        ))
-                        .child(fb_button(
-                            "plugin-manager-open-db-folder",
-                            "Open DB Folder",
-                            FbButtonKind::Default,
-                            !state.scanning,
-                            move |_, window, cx| open_db_folder(&(), window, cx),
-                        )),
+                        .child(
+                            chrome_cluster()
+                                .bg(Colors::surface_panel_alt())
+                                .child(fb_button(
+                                    "plugin-manager-full-rescan",
+                                    i18n.tr("plugin-manager.rescan-all"),
+                                    FbButtonKind::Ghost,
+                                    !state.scanning,
+                                    move |_, window, cx| rescan_all(&(), window, cx),
+                                ))
+                                .when(state.au_scan_available, |row| {
+                                    row.child(fb_button(
+                                        "plugin-manager-retry-au",
+                                        if state.au_auto_scan_disabled {
+                                            i18n.tr("plugin-manager.scan-au.retry")
+                                        } else {
+                                            i18n.tr("plugin-manager.scan-au")
+                                        },
+                                        FbButtonKind::Ghost,
+                                        !state.scanning,
+                                        move |_, window, cx| rescan_au(&(), window, cx),
+                                    ))
+                                })
+                                .child(fb_button(
+                                    "plugin-manager-open-db-folder",
+                                    i18n.tr("plugin-manager.open-db-folder"),
+                                    FbButtonKind::Ghost,
+                                    !state.scanning,
+                                    move |_, window, cx| open_db_folder(&(), window, cx),
+                                ))
+                                // Deleting the registry is not recoverable, so
+                                // it takes the destructive fill the contract
+                                // reserves for exactly that — it used to be a
+                                // plain button beside "Open DB Folder".
+                                .child(fb_button(
+                                    "plugin-manager-clear-cache",
+                                    i18n.tr("plugin-manager.clear-database"),
+                                    FbButtonKind::Danger,
+                                    !state.scanning && !state.plugins.is_empty(),
+                                    move |_, window, cx| clear_cache(&(), window, cx),
+                                )),
+                        ),
                 )
                 .when(state.scanning, |panel| {
                     panel.child(scan_progress_bar(state, i18n))
@@ -1132,16 +1167,14 @@ pub fn plugin_manager_panel(
                 .when(state.au_auto_scan_disabled && state.au_scan_available, |panel| {
                     panel.child(
                         div()
-                            .px(px(12.0))
-                            .py(px(6.0))
+                            .px(px(space::LOOSE))
+                            .py(px(space::SNUG))
                             .border_b(px(1.0))
                             .border_color(Colors::divider())
                             .bg(rgba_warning_soft())
-                            .text_size(px(10.5))
+                            .text_size(px(typography::DENSE_LABEL))
                             .text_color(Colors::status_warning())
-                            .child(
-                                "AudioUnit auto-scan disabled after repeated crashes. Use Retry AudioUnit Scan.",
-                            ),
+                            .child(i18n.tr("plugin-manager.scan-au.disabled")),
                     )
                 })
                 .when(
@@ -1150,12 +1183,12 @@ pub fn plugin_manager_panel(
                         let message = state.au_scan_error.clone().unwrap_or_default();
                         panel.child(
                             div()
-                                .px(px(12.0))
-                                .py(px(6.0))
+                                .px(px(space::LOOSE))
+                                .py(px(space::SNUG))
                                 .border_b(px(1.0))
                                 .border_color(Colors::divider())
                                 .bg(Colors::surface_input())
-                                .text_size(px(10.5))
+                                .text_size(px(typography::DENSE_LABEL))
                                 .text_color(Colors::status_warning())
                                 .child(message),
                         )
@@ -1190,7 +1223,7 @@ pub fn plugin_manager_panel(
                                                 .track_scroll(sidebar_scroll)
                                                 .child(
                                                     div()
-                                                        .py(px(4.0))
+                                                        .py(px(space::TIGHT))
                                                         .child(sidebar_section(
                                                     i18n.tr("plugin-manager.filter.library"),
                                                     vec![
@@ -1329,9 +1362,9 @@ pub fn plugin_manager_panel(
                                                                 i18n.tr("plugin-manager.scan-locations"),
                                                                 if state.scan_paths.is_empty() {
                                                                     vec![div()
-                                                                        .px(px(10.0))
-                                                                        .py(px(4.0))
-                                                                        .text_size(px(theme::typography::UI_XS))
+                                                                        .px(px(space::BASE))
+                                                                        .py(px(space::TIGHT))
+                                                                        .text_size(px(typography::UI_XS))
                                                                         .text_color(Colors::text_faint())
                                                                         .child(i18n.tr("plugin-manager.scan-locations.empty"))
                                                                         .into_any_element()]
@@ -1345,9 +1378,9 @@ pub fn plugin_manager_panel(
                                                                                 .flex()
                                                                                 .flex_row()
                                                                                 .items_center()
-                                                                                .gap(px(6.0))
-                                                                                .px(px(10.0))
-                                                                                .py(px(4.0))
+                                                                                .gap(px(space::SNUG))
+                                                                                .px(px(space::BASE))
+                                                                                .py(px(space::TIGHT))
                                                                                 .id(("scan-path", i))
                                                                                 .child(icon(
                                                                                     assets::ICON_FOLDER_PATH,
@@ -1356,7 +1389,7 @@ pub fn plugin_manager_panel(
                                                                                 ))
                                                                                 .child(
                                                                                     div()
-                                                                                        .text_size(px(theme::typography::UI_XS))
+                                                                                        .text_size(px(typography::UI_XS))
                                                                                         .text_color(Colors::text_faint())
                                                                                         .truncate()
                                                                                         .child(path.display().to_string()),
@@ -1369,8 +1402,8 @@ pub fn plugin_manager_panel(
                                                         )
                                                         .child(
                                                             div()
-                                                                .px(px(8.0))
-                                                                .pb(px(8.0))
+                                                                .px(px(space::BASE))
+                                                                .pb(px(space::BASE))
                                                                 .child(
                                                                     fb_button(
                                                                         "pm-add-location",
@@ -1398,13 +1431,14 @@ pub fn plugin_manager_panel(
                                         .flex()
                                         .flex_row()
                                         .items_center()
-                                        .h(px(32.0))
-                                        .px(px(12.0))
+                                        .h(px(size::PROMINENT))
+                                        .px(px(LIST_PAD_X))
+                                        .gap(px(COL_GAP))
                                         .border_b(px(1.0))
                                         .border_color(Colors::divider())
                                         .bg(Colors::surface_input())
                                         .child(
-                                            div().flex_1().child(col_header(
+                                            div().flex_1().min_w_0().child(col_header(
                                                 "pm-sort-name",
                                                 i18n.tr("plugin-manager.sort.name"),
                                                 SortKey::Name,
@@ -1413,7 +1447,7 @@ pub fn plugin_manager_panel(
                                             )),
                                         )
                                         .child(
-                                            div().w(px(110.0)).child(col_header(
+                                            div().w(px(COL_VENDOR_W)).child(col_header(
                                                 "pm-sort-vendor",
                                                 i18n.tr("plugin-manager.sort.vendor"),
                                                 SortKey::Vendor,
@@ -1422,7 +1456,7 @@ pub fn plugin_manager_panel(
                                             )),
                                         )
                                         .child(
-                                            div().w(px(100.0)).child(col_header(
+                                            div().w(px(COL_CATEGORY_W)).child(col_header(
                                                 "pm-sort-cat",
                                                 i18n.tr("plugin-manager.sort.category"),
                                                 SortKey::Category,
@@ -1431,7 +1465,7 @@ pub fn plugin_manager_panel(
                                             )),
                                         )
                                         .child(
-                                            div().w(px(72.0)).child(col_header(
+                                            div().w(px(COL_FORMAT_W)).child(col_header(
                                                 "pm-sort-fmt",
                                                 i18n.tr("plugin-manager.sort.format"),
                                                 SortKey::Format,
@@ -1441,8 +1475,8 @@ pub fn plugin_manager_panel(
                                         )
                                         .child(
                                             div()
-                                                .w(px(88.0))
-                                                .text_size(px(theme::typography::UI_XS))
+                                                .w(px(COL_STATUS_W))
+                                                .text_size(px(typography::UI_XS))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .text_color(Colors::text_faint())
                                                 .child(i18n.tr("plugin-manager.column.status")),
@@ -1474,8 +1508,8 @@ pub fn plugin_manager_panel(
                         .flex_row()
                         .items_center()
                         .justify_between()
-                        .h(px(32.0))
-                        .px(px(12.0))
+                        .h(px(size::PROMINENT))
+                        .px(px(space::LOOSE))
                         .border_t(px(1.0))
                         .border_color(Colors::divider())
                         .bg(Colors::surface_input())
@@ -1484,8 +1518,8 @@ pub fn plugin_manager_panel(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(theme::typography::UI_XS))
+                                .gap(px(space::BASE))
+                                .text_size(px(typography::UI_XS))
                                 .text_color(Colors::text_faint())
                                 .child(state.status_text.clone())
                                 .when(state.failed_count > 0, |el| {
@@ -1511,29 +1545,35 @@ pub fn plugin_manager_panel(
                                 .flex()
                                 .flex_row()
                                 .items_center()
-                                .gap(px(10.0))
-                                .text_size(px(theme::typography::UI_XS))
+                                .gap(px(space::BASE))
+                                .text_size(px(typography::UI_XS))
                                 .text_color(Colors::text_faint())
                                 .child(
                                     div()
                                         .truncate()
-                                        .max_w(px(360.0))
+                                        .max_w(px(DB_PATH_MAX_W))
                                         .child(SpherePluginHost::database_path()
                                             .display()
                                             .to_string()),
                                 )
                                 .when(state.last_scan_at_ms > 0, |el| {
-                                    el.child(div().child(format!(
-                                        "Last scan: {}",
-                                        format_relative_time(state.last_scan_at_ms)
+                                    el.child(div().child(i18n.tr_vars(
+                                        "plugin-manager.footer.last-scan",
+                                        &[("when", format_relative_time(state.last_scan_at_ms))],
                                     )))
                                 })
-                                .child(div().child(format!("{} cached", state.plugins.len())))
+                                .child(div().child(i18n.tr_vars(
+                                    "plugin-manager.footer.cached",
+                                    &[("count", state.plugins.len().to_string())],
+                                )))
                                 .when(state.failed_count > 0, |el| {
                                     el.child(
-                                        div()
-                                            .text_color(Colors::status_warning())
-                                            .child(format!("{} missing", state.failed_count)),
+                                        div().text_color(Colors::status_warning()).child(
+                                            i18n.tr_vars(
+                                                "plugin-manager.footer.missing",
+                                                &[("count", state.failed_count.to_string())],
+                                            ),
+                                        ),
                                     )
                                 }),
                         ),

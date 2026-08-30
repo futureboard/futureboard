@@ -419,6 +419,10 @@ pub struct AppearanceSettings {
     pub theme: String,
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Which OS text stack draws glyphs. Read once at startup — see
+    /// [`TextRenderingBackend`].
+    #[serde(default)]
+    pub text_rendering: TextRenderingBackend,
     #[serde(default)]
     pub arrangement: ArrangementAppearanceSettings,
     #[serde(default)]
@@ -432,9 +436,52 @@ impl Default for AppearanceSettings {
         Self {
             theme: default_theme(),
             ui_scale: default_ui_scale(),
+            text_rendering: TextRenderingBackend::default(),
             arrangement: ArrangementAppearanceSettings::default(),
             piano_roll: PianoRollAppearanceSettings::default(),
             mixer: MixerAppearanceSettings::default(),
+        }
+    }
+}
+
+/// Text rasterization backend.
+///
+/// DirectWrite is the default and the only one with subpixel antialiasing,
+/// colour emoji, and full OpenType shaping. GDI+ is a fallback for machines
+/// where DirectWrite fails — a corrupted Windows font cache, a font manager
+/// that hooks `DWrite.dll`, or a locked-down image — which otherwise leaves the
+/// app running with no visible text at all.
+///
+/// The text system is built before the settings file is loaded, so this is read
+/// straight from disk at startup and a change only takes effect on the next
+/// launch. It is deliberately not live-switchable: swapping the text system
+/// would invalidate every cached glyph, line layout, and atlas page mid-frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextRenderingBackend {
+    #[default]
+    DirectWrite,
+    Gdi,
+}
+
+impl TextRenderingBackend {
+    pub const ALL: [Self; 2] = [Self::DirectWrite, Self::Gdi];
+
+    /// Display name. The default is marked as such because choosing the other
+    /// one is a troubleshooting step, not a preference.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DirectWrite => "DirectWrite",
+            Self::Gdi => "GDI+",
+        }
+    }
+
+    /// Stable token shared with the platform layer and the `GPUI_TEXT_BACKEND`
+    /// escape hatch.
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::DirectWrite => "directwrite",
+            Self::Gdi => "gdi",
         }
     }
 }
@@ -1357,5 +1404,72 @@ mod tests {
         // Clean up
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&backup_path);
+    }
+}
+
+/// The text backend is read off disk before the app exists, so its defaulting
+/// and its serialized spelling are the contract that keeps an old settings file
+/// — or a hand-edited one — from changing how the app draws.
+#[cfg(test)]
+mod text_rendering_settings_tests {
+    use super::*;
+
+    #[test]
+    fn directwrite_is_the_default() {
+        assert_eq!(
+            AppearanceSettings::default().text_rendering,
+            TextRenderingBackend::DirectWrite
+        );
+        assert_eq!(
+            SettingsSchema::default().appearance.text_rendering,
+            TextRenderingBackend::DirectWrite
+        );
+    }
+
+    /// Every settings file written before this option existed has no such key.
+    #[test]
+    fn a_settings_file_without_the_key_still_loads() {
+        let schema: SettingsSchema =
+            serde_json::from_str(r#"{"appearance":{"theme":"futureboard.default"}}"#)
+                .expect("a partial settings file must still parse");
+        assert_eq!(
+            schema.appearance.text_rendering,
+            TextRenderingBackend::DirectWrite
+        );
+    }
+
+    #[test]
+    fn it_round_trips_through_the_settings_file() {
+        for backend in TextRenderingBackend::ALL {
+            let mut schema = SettingsSchema::default();
+            schema.appearance.text_rendering = backend;
+            let json = serde_json::to_string(&schema).expect("serialize");
+            let parsed: SettingsSchema = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed.appearance.text_rendering, backend);
+        }
+    }
+
+    /// The on-disk spelling is part of the contract with the platform layer and
+    /// with anyone editing the file by hand to recover a blank-text install.
+    #[test]
+    fn the_serialized_names_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&TextRenderingBackend::DirectWrite).unwrap(),
+            "\"direct-write\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TextRenderingBackend::Gdi).unwrap(),
+            "\"gdi\""
+        );
+    }
+
+    #[test]
+    fn every_backend_has_a_label_and_a_token() {
+        for backend in TextRenderingBackend::ALL {
+            assert!(!backend.label().is_empty());
+            assert!(!backend.as_token().is_empty());
+        }
+        assert_eq!(TextRenderingBackend::Gdi.label(), "GDI+");
+        assert_eq!(TextRenderingBackend::DirectWrite.as_token(), "directwrite");
     }
 }

@@ -1536,6 +1536,9 @@ fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
             .and_then(|soundfont| soundfont.player.as_ref())
             .is_none()
     {
+        // A track with no player sounds nothing; leaving a stale count here
+        // would keep the meter lit after the instrument was removed.
+        track.active_voices = 0;
         return;
     }
 
@@ -1579,6 +1582,14 @@ fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
     if cursor < frames {
         render_soundfont_segment(track, cursor, frames);
     }
+    // Read after the last segment so the count describes the block that was
+    // just produced. One field read on the synth — no allocation, no lock.
+    track.active_voices = track
+        .soundfont_player
+        .as_ref()
+        .and_then(|soundfont| soundfont.player.as_ref())
+        .map(|player| player.active_voice_count() as u32)
+        .unwrap_or(0);
 }
 
 fn render_soundfont_segment(track: &mut RuntimeTrack, start: usize, end: usize) {

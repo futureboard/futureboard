@@ -90,8 +90,21 @@ pub fn dispatch_account_action(action: AccountAction, window: &mut Window, cx: &
 mod tests {
     use super::*;
 
+    /// The provider slot is process-global and installed once, so these two
+    /// tests cannot run concurrently: reading "is the slot empty?" and then
+    /// asserting on it is a check-then-act that the installing test can land
+    /// between. Holding this for the whole body makes the pair atomic; the
+    /// empty-slot test still skips itself if the installer got there first,
+    /// which is the only ordering the slot allows.
+    static SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        SLOT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn no_provider_reports_no_account() {
+        let _guard = lock();
         if provider_slot().read().map(|g| g.is_some()).unwrap_or(false) {
             return;
         }
@@ -100,6 +113,7 @@ mod tests {
 
     #[test]
     fn an_installed_provider_is_read_back() {
+        let _guard = lock();
         set_account_provider(Arc::new(|| AccountSnapshot {
             signed_in: true,
             username: Some("Jane".to_string()),
