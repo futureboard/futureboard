@@ -358,6 +358,7 @@ menu.midi-transpose_down = 向下移调
 menu.midi-transpose_octave_down = 向下移调一个八度
 menu.midi-transpose_octave_up = 向上移调一个八度
 menu.midi-transpose_up = 向上移调
+menu.more = 更多
 menu.project = 项目
 menu.project-add_audio_track = 添加音频轨道
 menu.project-add_bus_track = 添加总线轨道
@@ -491,6 +492,7 @@ mixer.track-type.video = VID
 panel.browser = 浏览器
 panel.inspector = 检查器
 panel.mixer = 混音器
+panel.bottom = 底部面板
 
 ## Plugins
 
