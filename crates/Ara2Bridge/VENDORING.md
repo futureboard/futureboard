@@ -56,7 +56,16 @@ cannot be written at all.
    would fail outright in a vendored tree with no `.git`. Environment overrides
    are still honoured.
 
-4. **Manifests** — `version`/`edition`/`license`/`repository` are spelled out
+4. **`ara2-bridge-host/src/document/edit.rs`** — added `audio_source_ref()`,
+   `audio_modification_ref()` and `playback_region_ref()` to the edit scope,
+   alongside the `musical_context_ref()` and `region_sequence_ref()` upstream
+   already exposes there. A plug-in may call back into the host synchronously
+   from inside a create call — Melodyne asks for an audio reader from within
+   `createAudioSource` — so a host that can only resolve object identities after
+   `endEditing()` refuses the plug-in's first request and, since plug-ins do not
+   retry, never delivers any audio at all.
+
+5. **Manifests** — `version`/`edition`/`license`/`repository` are spelled out
    instead of inheriting from upstream's `[workspace.package]`, since these crates
    are now members of the Futureboard workspace (which is edition 2024 while these
    are edition 2021). Third-party dependency versions come from Futureboard's

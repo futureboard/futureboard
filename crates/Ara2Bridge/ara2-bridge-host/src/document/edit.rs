@@ -9,10 +9,10 @@ use super::{
     PlaybackRegionHandle, RegionSequenceHandle,
 };
 use ara2_bridge_core::{
-    ApiGeneration, AraBool, AraError, AudioModificationProperties, AudioSourceProperties,
-    ContentTimeRange, ContentUpdateScopes, DocumentProperties, ModelRef, MusicalContextKind,
-    MusicalContextProperties, PlaybackRegionProperties, RegionSequenceKind,
-    RegionSequenceProperties, RestoreFilter,
+    ApiGeneration, AraBool, AraError, AudioModificationKind, AudioModificationProperties,
+    AudioSourceKind, AudioSourceProperties, ContentTimeRange, ContentUpdateScopes,
+    DocumentProperties, ModelRef, MusicalContextKind, MusicalContextProperties, PlaybackRegionKind,
+    PlaybackRegionProperties, RegionSequenceKind, RegionSequenceProperties, RestoreFilter,
 };
 use ara2_bridge_sys::{
     ARAArchiveReaderHostRef, ARAAudioModificationHostRef, ARAAudioModificationRef,
@@ -287,6 +287,36 @@ impl<'session, 'factory, 'services> EditSession<'session, 'factory, 'services> {
         handle: RegionSequenceHandle,
     ) -> Result<ModelRef<RegionSequenceKind>, AraError> {
         self.session.region_sequences.model_ref(handle)
+    }
+
+    /// Returns a checked audio-source reference while this edit holds the session borrow.
+    ///
+    /// A plug-in may call back into the host — `createAudioReaderForSource` in
+    /// particular — synchronously from inside `createAudioSource`, before the
+    /// edit is finished. A host that can only resolve object identities after
+    /// `endEditing()` therefore rejects the plug-in's very first request, so
+    /// these accessors exist to let it register identities as it creates them.
+    pub fn audio_source_ref(
+        &self,
+        handle: AudioSourceHandle,
+    ) -> Result<ModelRef<AudioSourceKind>, AraError> {
+        self.session.audio_sources.model_ref(handle)
+    }
+
+    /// Returns a checked audio-modification reference while this edit holds the session borrow.
+    pub fn audio_modification_ref(
+        &self,
+        handle: AudioModificationHandle,
+    ) -> Result<ModelRef<AudioModificationKind>, AraError> {
+        self.session.audio_modifications.model_ref(handle)
+    }
+
+    /// Returns a checked playback-region reference while this edit holds the session borrow.
+    pub fn playback_region_ref(
+        &self,
+        handle: PlaybackRegionHandle,
+    ) -> Result<ModelRef<PlaybackRegionKind>, AraError> {
+        self.session.playback_regions.model_ref(handle)
     }
 
     /// Provisionally registers and creates an ARA 2 region sequence.

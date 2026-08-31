@@ -14,8 +14,8 @@ use ara2_bridge_companion::CompanionRoles;
 use ara2_bridge_companion::vst3::Vst3HostPlugin;
 use ara2_bridge_core::{
     ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, Color,
-    ContentUpdateScopes, DocumentProperties, MusicalContextProperties, PlaybackRegionProperties,
-    PlaybackTransformationFlags, RegionSequenceProperties,
+    ContentUpdateScopes, DocumentProperties, MusicalContextProperties, Notes,
+    PlaybackRegionProperties, PlaybackTransformationFlags, RegionSequenceProperties,
 };
 use ara2_bridge_host::{
     AudioModificationHandle, AudioSourceHandle, DocumentSession, ExtensionController,
@@ -33,7 +33,7 @@ use crate::model::{
 
 use services::{
     ArchiveService, ArchiveSlot, ArchiveStore, AudioService, ContentService, GraphIndex,
-    ModelService, SharedContent, TransportService,
+    ModelService, SharedContent, TransportService, trace,
 };
 
 /// Generations tried when initializing a factory, best first.
@@ -560,16 +560,31 @@ impl Session {
                 }
                 None => {
                     let handle = edit.create_audio_source(properties).map_err(map_error)?;
+                    // Index before anything else runs: the plug-in calls
+                    // `createAudioReaderForSource` synchronously from inside
+                    // `createAudioSource`, so an identity registered after the
+                    // edit closes arrives too late and the plug-in's first --
+                    // often only -- request to read the audio is refused.
+                    let address =
+                        edit.audio_source_ref(handle).map_err(map_error)?.as_raw() as usize;
+                    index.insert_source(address, desc.key.clone());
                     // The plug-in may only read samples once access is enabled;
                     // without this every analysis request comes back empty.
                     edit.set_audio_source_samples_access(handle, true)
                         .map_err(map_error)?;
+                    trace(&format!(
+                        "created audio source '{}' frames={} rate={} channels={} (access enabled)",
+                        desc.key.as_str(),
+                        desc.frame_count,
+                        desc.sample_rate,
+                        desc.channel_count
+                    ));
                     new_sources.push((desc.key.clone(), handle));
                     sources.insert(
                         desc.key.clone(),
                         SourceEntry {
                             handle,
-                            address: 0,
+                            address,
                             desc: desc.clone(),
                         },
                     );
@@ -619,17 +634,27 @@ impl Session {
                     let modification = edit
                         .create_audio_modification(source, modification_properties)
                         .map_err(map_error)?;
+                    let modification_address = edit
+                        .audio_modification_ref(modification)
+                        .map_err(map_error)?
+                        .as_raw() as usize;
+                    index.insert_modification(modification_address, desc.key.clone());
                     let region = edit
                         .create_playback_region(modification, region_properties)
                         .map_err(map_error)?;
+                    let region_address = edit
+                        .playback_region_ref(region)
+                        .map_err(map_error)?
+                        .as_raw() as usize;
+                    index.insert_region(region_address, desc.key.clone());
                     new_clips.push(desc.key.clone());
                     clips.insert(
                         desc.key.clone(),
                         ClipEntry {
                             modification,
-                            modification_address: 0,
+                            modification_address,
                             region,
-                            region_address: 0,
+                            region_address,
                             desc: desc.clone(),
                         },
                     );
@@ -639,34 +664,22 @@ impl Session {
 
         edit.finish().map_err(map_error)?;
 
-        // Object addresses are only readable once the edit scope has closed and
-        // the plug-in has accepted every object.
-        for (key, handle) in new_sources {
-            let address = document
-                .audio_source_ref(handle)
-                .map_err(map_error)?
-                .as_raw() as usize;
-            if let Some(entry) = sources.get_mut(&key) {
-                entry.address = address;
+        // Identities are indexed as they are created -- they have to be, because
+        // the plug-in calls back during the edit. What is left here is the work
+        // that is only legal once the edit has closed.
+        let _ = new_clips;
+        for (_, handle) in new_sources {
+            // Ask for note analysis on every source the host just published.
+            // A plug-in is entitled to wait for the host to ask before spending
+            // the CPU, and one that does shows an empty editor until then.
+            // `Unsupported` only means this plug-in does not analyse notes.
+            match document.request_audio_source_content_analysis::<Notes>(handle) {
+                Ok(()) => trace("requested note analysis for a new audio source"),
+                Err(AraError::Unsupported(_)) => {
+                    trace("plug-in does not analyse notes; skipping the request")
+                }
+                Err(error) => trace(&format!("note analysis request failed: {error}")),
             }
-            index.insert_source(address, key);
-        }
-        for key in new_clips {
-            let Some(entry) = clips.get_mut(&key) else {
-                continue;
-            };
-            let modification_address = document
-                .audio_modification_ref(entry.modification)
-                .map_err(map_error)?
-                .as_raw() as usize;
-            let region_address = document
-                .playback_region_ref(entry.region)
-                .map_err(map_error)?
-                .as_raw() as usize;
-            entry.modification_address = modification_address;
-            entry.region_address = region_address;
-            index.insert_modification(modification_address, key.clone());
-            index.insert_region(region_address, key);
         }
 
         Ok(())

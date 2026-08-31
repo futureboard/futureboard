@@ -42,7 +42,24 @@ pub(crate) struct GraphIndex {
 
 impl GraphIndex {
     pub(crate) fn insert_source(&self, address: usize, key: AraSourceKey) {
+        trace(&format!(
+            "indexed audio source '{}' at 0x{address:x}",
+            key.as_str()
+        ));
         let _ = self.sources.lock().map(|mut map| map.insert(address, key));
+    }
+
+    /// Comma-separated list of the addresses currently indexed, for diagnostics.
+    pub(crate) fn known_sources(&self) -> String {
+        self.sources
+            .lock()
+            .map(|map| {
+                map.keys()
+                    .map(|address| format!("0x{address:x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|_| "<poisoned>".to_string())
     }
 
     pub(crate) fn remove_source(&self, address: usize) {
@@ -108,6 +125,16 @@ impl GraphIndex {
 }
 
 /// Serves random-access reads for every ARA audio source.
+/// Gated diagnostic for the ARA host path.
+///
+/// ARA failures are silent by construction — a plug-in with an empty document
+/// simply shows an empty editor — so the host has to say what it published.
+pub(crate) fn trace(line: &str) {
+    if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
+        eprintln!("[ara-host] {line}");
+    }
+}
+
 pub(crate) struct AudioService {
     access: Arc<dyn AraAudioAccess>,
     index: Arc<GraphIndex>,
@@ -125,15 +152,34 @@ impl AudioAccessProvider for AudioService {
         source: AudioSourceId,
         use_64_bit_samples: bool,
     ) -> Result<Box<dyn HostAudioReader>, AraError> {
-        let key = self
-            .index
-            .source_key(source)
-            .ok_or(AraError::Peer("ARA audio source is not known to the host"))?;
-        let reader = self
-            .access
-            .open_reader(&key)
-            .map_err(|_| AraError::Peer("host could not open the ARA audio source"))?;
+        // Traced before the lookup: an unresolved id used to return here with no
+        // record at all, which made "the plug-in never asked" and "the host could
+        // not answer" look identical in the log.
+        trace(&format!(
+            "plug-in asked for a reader: source=0x{:x} 64bit={use_64_bit_samples}",
+            source.as_usize()
+        ));
+        let Some(key) = self.index.source_key(source) else {
+            trace(&format!(
+                "no host key for source=0x{:x}; known={}",
+                source.as_usize(),
+                self.index.known_sources()
+            ));
+            return Err(AraError::Peer("ARA audio source is not known to the host"));
+        };
+        let reader = self.access.open_reader(&key).map_err(|error| {
+            trace(&format!(
+                "open_reader failed for '{}': {error}",
+                key.as_str()
+            ));
+            AraError::Peer("host could not open the ARA audio source")
+        })?;
         let channels = reader.channel_count();
+        trace(&format!(
+            "plug-in opened a reader for '{}' channels={channels} frames={}",
+            key.as_str(),
+            reader.frame_count()
+        ));
         Ok(Box::new(SampleReaderAdapter {
             reader,
             channels,
@@ -344,6 +390,13 @@ impl ModelUpdateProvider for ModelService {
         state: i32,
         value: f32,
     ) -> Result<(), AraError> {
+        // Progress without reads means the plug-in is analysing something other
+        // than our samples; reads without progress means it is reading for
+        // playback rather than analysis. Both are worth telling apart.
+        trace(&format!(
+            "analysis progress: source=0x{:x} state={state} value={value:.3}",
+            source.as_usize()
+        ));
         self.observer.notify(AraModelUpdate::AnalysisProgress {
             source: self.index.source_key(source),
             state,
