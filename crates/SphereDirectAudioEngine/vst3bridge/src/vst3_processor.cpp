@@ -2571,6 +2571,24 @@ extern "C" int sphere_daux_vst3_activate(SphereDauxVst3Processor *processor) {
   return 1;
 }
 
+extern "C" void
+sphere_daux_vst3_stop_processing(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
+  if (processor->processor && processor->processing) {
+    processor->processor->setProcessing(false);
+  }
+  processor->processing = false;
+  // `setActive(false)` releases the plug-in's render resources. Not guarded on
+  // `activated`: an instance can be active without this host having run the
+  // deferred activation, and the call is a no-op on one that is not.
+  if (processor->component) {
+    processor->component->setActive(false);
+  }
+  std::fprintf(stderr,
+               "[SphereVST3] processing stopped (instance kept alive)\n");
+}
+
 extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor *processor) {
   if (!processor)
     return;

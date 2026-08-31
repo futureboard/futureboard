@@ -54,6 +54,17 @@ const INBOX_CAPACITY: usize = 512;
 /// simply gives up, and nothing is processing in that case anyway.
 const RENDERER_BARRIER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Gated diagnostic for session lifecycle, sharing the plug-in view debug gate.
+///
+/// Teardown is a sequence of calls into a plug-in, any one of which can block
+/// the main thread; without a line per step a hang says nothing about where it
+/// stopped.
+fn trace(line: &str) {
+    if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
+        eprintln!("[ara-ops] {line}");
+    }
+}
+
 /// Bounded drop-oldest queue shared with plug-in threads.
 struct Inbox<T> {
     items: Mutex<std::collections::VecDeque<T>>,
@@ -573,25 +584,41 @@ impl AraState {
             return;
         };
         let plugin_name = session.plugin_name.clone();
-        // Order matters: stop the engine calling the instance, then release the
-        // ARA graph, then let the processor drop. The removal is only *queued*,
-        // so the barrier is part of "stop the engine calling it" — the region
-        // assignments dropped by `session.close()` call into a plug-in the
-        // callback would otherwise still be rendering.
+        // Teardown order, and every step of it matters. Each is traced because
+        // the failure mode when one is missing is a hung main thread with
+        // nothing in the log to say which call never returned.
+        //
+        // 1. Take the instance out of the audio graph. The removal is only
+        //    *queued*, so the barrier is part of this step: the region
+        //    assignments dropped in step 4 call into a plug-in the callback
+        //    would otherwise still be rendering.
         Self::install_renderers(engine, &self.sessions, &key.track_id);
-        let _ = engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT);
+        let confirmed = engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT);
+        trace(&format!(
+            "close '{plugin_name}': renderers removed, callback barrier confirmed={confirmed}"
+        ));
         let AraTrackSession {
             session, processor, ..
         } = session;
-        // Last line of defence for a view that has not come down yet — a
-        // project closing out from under a docked editor, say. The plug-in's
-        // editor reads the document about to be destroyed, so it is released
-        // here; whoever owned the view detaches again later and finds nothing
-        // left to release.
+        // 2. Leave the processing state. A plug-in whose renderer is still
+        //    active is entitled to hold its render lock, and step 4 then waits
+        //    on it from the main thread — which is the hang, not a crash.
+        processor.stop_processing();
+        trace("close: instance left the processing state");
+        // 3. Release the plug-in's editor view. Last line of defence for a view
+        //    that has not come down yet — a project closing out from under a
+        //    docked editor, say. The view reads the document about to be
+        //    destroyed; whoever owned it detaches again later and finds nothing
+        //    left to release.
         processor.embed_detach();
+        trace("close: editor view released");
+        // 4. Destroy the ARA binding and the document controller.
         if let Err(error) = session.close() {
             self.last_error = Some(format!("{plugin_name} reported errors on close: {error}"));
         }
+        trace("close: ARA document closed");
+        // 5. The processor drops with the last handle, which terminates the
+        //    companion instance.
         processor.set_destroy_reason("ara-unbound");
         self.pending_archives.remove(key);
     }

@@ -787,6 +787,17 @@ impl StudioLayout {
             // ARA plug-ins post transport requests and model updates from their
             // own threads; this is where those land on the UI thread.
             self.poll_ara(cx);
+            // Space pressed inside an embedded plug-in editor. The plug-in's
+            // native child owns every key that reaches it, so the press was
+            // claimed before its window procedure ran and is replayed here as
+            // the transport command it was meant to be. One press, one toggle —
+            // the same coalescing rule the editor shells follow.
+            if crate::components::plugin_content_host::take_transport_toggles() > 0 {
+                eprintln!(
+                    "[PluginEditorInput] transport toggle from embedded editor -> transport:play-pause"
+                );
+                self.dispatch_command_id("transport:play-pause", cx);
+            }
         }
         if self.audio_bridge.engine.is_none() {
             return false;

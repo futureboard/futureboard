@@ -194,6 +194,20 @@ sphere_daux_vst3_create_for_ara(const char *plugin_path, const char *class_id,
 SPHERE_DAUX_VST3_API int
 sphere_daux_vst3_activate(SphereDauxVst3Processor *processor);
 
+/// Takes the instance out of the processing state without destroying it:
+/// `setProcessing(false)` then `setActive(false)`.
+///
+/// This is the step an ARA teardown needs between "the host stopped calling
+/// `process()`" and "the ARA binding is destroyed". A plug-in whose renderer is
+/// still active is entitled to hold its render lock, and tearing the document
+/// down from the main thread then waits on it forever. `sphere_daux_vst3_destroy`
+/// does the same work, but only once the last handle is gone — far too late.
+///
+/// The caller must have stopped calling `process()` first; this makes no attempt
+/// to interrupt a block already in flight. Idempotent.
+SPHERE_DAUX_VST3_API void
+sphere_daux_vst3_stop_processing(SphereDauxVst3Processor *processor);
+
 /// 1 when the loaded module registers an ARA main-factory class matching this
 /// instance's audio-module class, 0 otherwise. Cheap: reads factory class info
 /// that is already loaded, and instantiates nothing.

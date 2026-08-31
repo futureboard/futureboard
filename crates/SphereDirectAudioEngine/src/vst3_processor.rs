@@ -255,6 +255,7 @@ pub(crate) mod ffi {
             sample_rate: c_double,
         ) -> *mut SphereDauxVst3Processor;
         pub(crate) fn sphere_daux_vst3_activate(processor: *mut SphereDauxVst3Processor) -> i32;
+        pub(crate) fn sphere_daux_vst3_stop_processing(processor: *mut SphereDauxVst3Processor);
         pub(crate) fn sphere_daux_vst3_ara_is_supported(
             processor: *mut SphereDauxVst3Processor,
         ) -> i32;
@@ -1097,6 +1098,21 @@ impl Vst3RuntimeProcessor {
         }
         // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
         unsafe { ffi::sphere_daux_vst3_activate(self.inner.raw) != 0 }
+    }
+
+    /// Takes the instance out of the processing state, keeping it alive.
+    ///
+    /// The step an ARA teardown needs between "the engine stopped calling
+    /// `process()`" and "the ARA binding is destroyed": a plug-in whose renderer
+    /// is still active holds its render lock, and destroying the document from
+    /// the main thread then waits on it. The caller must already have taken the
+    /// instance out of the audio graph — this interrupts nothing in flight.
+    pub fn stop_processing(&self) {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_stop_processing(self.inner.raw) };
     }
 
     /// Whether this instance's module registers an ARA main factory for the

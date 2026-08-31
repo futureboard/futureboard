@@ -37,8 +37,8 @@ fn debug_enabled() -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+    use std::sync::{Mutex, Once};
 
     use super::{debug_enabled, ContentRect};
     use windows::core::{w, PCWSTR};
@@ -47,14 +47,179 @@ mod imp {
     use windows::Win32::Graphics::Gdi::{
         CreateSolidBrush, FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetWindow,
-        GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow, RegisterClassW, SetWindowPos,
-        GWL_STYLE, GW_CHILD, HMENU, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_ERASEBKGND,
-        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS,
-        WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW,
+        GetClientRect, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow,
+        RegisterClassW, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE, GW_CHILD,
+        HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE,
+        WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL,
+        WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW,
+        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
+
+    /// Space presses claimed from an embedded plug-in view, waiting for the UI
+    /// to turn them into one transport toggle each.
+    static TRANSPORT_TOGGLES: AtomicU32 = AtomicU32::new(0);
+
+    /// Every live content host, so the hook can tell a key aimed at an embedded
+    /// plug-in view from one aimed at the app's own UI.
+    static HOSTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+    /// The installed `WH_GETMESSAGE` hook as a raw `HHOOK`, or 0 for none.
+    static HOOK: AtomicIsize = AtomicIsize::new(0);
+
+    /// Drains the Space presses claimed since the last call.
+    pub fn take_transport_toggles() -> u32 {
+        TRANSPORT_TOGGLES.swap(0, Ordering::Relaxed)
+    }
+
+    /// Whether this message is a bare Space aimed at an embedded plug-in view.
+    ///
+    /// The same rule the editor shells apply
+    /// (`native_editor_shell::claim_transport_key`): a fresh, unmodified Space
+    /// only, and never one aimed at a text caret.
+    ///
+    /// # Safety
+    ///
+    /// `msg` must be a message the hook was handed for this thread's queue.
+    unsafe fn claims_transport(msg: &MSG) -> bool {
+        const VK_SPACE_W: usize = 0x20;
+        const KEY_REPEAT_BIT: isize = 1 << 30;
+        if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+            return false;
+        }
+        if msg.wParam.0 != VK_SPACE_W || msg.lParam.0 & KEY_REPEAT_BIT != 0 {
+            return false;
+        }
+        unsafe {
+            let held = |vk: i32| GetKeyState(vk) < 0;
+            // VK_CONTROL / VK_MENU / VK_LWIN / VK_RWIN.
+            if held(0x11) || held(0x12) || held(0x5B) || held(0x5C) {
+                return false;
+            }
+            // Only keys headed into an embedded plug-in view. Everywhere else in
+            // the app GPUI already routes Space through the key bindings, and
+            // claiming it here as well would toggle the transport twice.
+            let target = msg.hwnd;
+            let inside = HOSTS
+                .lock()
+                .map(|hosts| {
+                    hosts.iter().any(|&host| {
+                        let host = hwnd_from(host);
+                        target == host || IsChild(host, target).as_bool()
+                    })
+                })
+                .unwrap_or(false);
+            if !inside {
+                return false;
+            }
+            // A caret owns Space — typing a note name must not start playback.
+            let focus = GetFocus();
+            if !focus.0.is_null() {
+                let mut class = [0u16; 128];
+                let len = GetClassNameW(focus, &mut class);
+                if len > 0 {
+                    let name =
+                        String::from_utf16_lossy(&class[..len as usize]).to_ascii_lowercase();
+                    if name == "edit"
+                        || name == "combobox"
+                        || name.starts_with("richedit")
+                        || name.contains("textbox")
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    /// Claims the transport key before the plug-in's own window procedure runs.
+    ///
+    /// A native child owns every key that reaches it: `WM_KEYDOWN` does not
+    /// bubble to a parent, and this host deliberately routes focus *into* the
+    /// plug-in so its text fields work. Without this, Space is Melodyne's and
+    /// the DAW transport is unreachable while its editor is up.
+    unsafe extern "system" fn transport_key_hook(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if code == HC_ACTION as i32 && wparam.0 as u32 == PM_REMOVE.0 {
+            let msg = lparam.0 as *mut MSG;
+            if !msg.is_null() {
+                // SAFETY: for `HC_ACTION` the hook is handed a live `MSG` it is
+                // explicitly allowed to modify.
+                let msg = unsafe { &mut *msg };
+                if unsafe { claims_transport(msg) } {
+                    TRANSPORT_TOGGLES.fetch_add(1, Ordering::Relaxed);
+                    // Swallowed rather than passed on: one press, one toggle.
+                    msg.message = WM_NULL;
+                    msg.wParam = WPARAM(0);
+                    msg.lParam = LPARAM(0);
+                }
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    /// Starts watching this thread's messages once the first host exists.
+    ///
+    /// `WH_GETMESSAGE` is thread-local, so it sees only the UI thread's own
+    /// queue — the thread the plug-in's window lives on. That is the difference
+    /// from the system-wide low-level hook the out-of-process plug-in host
+    /// needs: this one cannot stall typing anywhere else on the machine.
+    fn register_host(hwnd: u64) {
+        let Ok(mut hosts) = HOSTS.lock() else {
+            return;
+        };
+        hosts.push(hwnd);
+        if HOOK.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        // SAFETY: a thread-local hook on the calling thread, unhooked in
+        // `unregister_host` once the last content host is gone.
+        let installed = unsafe {
+            SetWindowsHookExW(
+                WH_GETMESSAGE,
+                Some(transport_key_hook),
+                None,
+                GetCurrentThreadId(),
+            )
+        };
+        match installed {
+            Ok(hook) if !hook.is_invalid() => {
+                HOOK.store(hook.0 as isize, Ordering::Release);
+                if debug_enabled() {
+                    eprintln!("[plugin-content-hwnd] transport key hook installed");
+                }
+            }
+            _ => eprintln!(
+                "[plugin-content-hwnd] WARNING could not install the transport key hook; \
+                 Space will not reach the transport from an embedded editor"
+            ),
+        }
+    }
+
+    fn unregister_host(hwnd: u64) {
+        let Ok(mut hosts) = HOSTS.lock() else {
+            return;
+        };
+        if let Some(index) = hosts.iter().position(|&entry| entry == hwnd) {
+            hosts.remove(index);
+        }
+        if !hosts.is_empty() {
+            return;
+        }
+        let raw = HOOK.swap(0, Ordering::AcqRel);
+        if raw != 0 {
+            // SAFETY: the handle came from the `SetWindowsHookExW` above and is
+            // released exactly once.
+            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut core::ffi::c_void)) };
+        }
+    }
 
     fn hwnd_from(handle: u64) -> HWND {
         HWND(handle as *mut core::ffi::c_void)
@@ -283,6 +448,7 @@ mod imp {
                     top_hwnd,
                     content_hwnd: content_u64,
                 };
+                register_host(content_u64);
                 if debug_enabled() {
                     eprintln!("[PluginEditorWindow] content_hwnd != top_hwnd");
                 }
@@ -331,6 +497,7 @@ mod imp {
 
     impl Drop for ContentChildHwnd {
         fn drop(&mut self) {
+            unregister_host(self.content_hwnd);
             unsafe {
                 if self.content_hwnd != 0 && IsWindow(Some(hwnd_from(self.content_hwnd))).as_bool()
                 {
@@ -366,6 +533,21 @@ mod imp {
             false
         }
     }
+
+    /// No embedded views here, so nothing is ever claimed.
+    pub fn take_transport_toggles() -> u32 {
+        0
+    }
 }
 
 pub use imp::ContentChildHwnd;
+
+/// Space presses claimed from an embedded plug-in view since the last drain.
+///
+/// A native child owns the keys that reach it, and this host routes focus into
+/// the plug-in on purpose so its own text fields work. Space is the exception:
+/// the DAW transport has to stay reachable while a plug-in editor is up, so it
+/// is intercepted here and handed to the transport by whoever drains this.
+pub fn take_transport_toggles() -> u32 {
+    imp::take_transport_toggles()
+}
