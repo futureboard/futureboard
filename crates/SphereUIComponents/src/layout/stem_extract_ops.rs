@@ -248,7 +248,6 @@ mod tests {
                 muted: false,
                 audio_import: Default::default(),
                 stretch: Default::default(),
-                ara: None,
             });
             let existing = std::env::temp_dir().join("fb-stem-source-test.wav");
             std::fs::write(&existing, b"RIFF").unwrap();
@@ -267,7 +266,6 @@ mod tests {
                 muted: false,
                 audio_import: Default::default(),
                 stretch: Default::default(),
-                ara: None,
             });
         }
 

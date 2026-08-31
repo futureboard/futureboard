@@ -202,6 +202,21 @@ impl AraSession {
         self.inner.set_renderer_regions(renderer, clips)
     }
 
+    /// Publishes the editor-view selection for one bound instance.
+    ///
+    /// Renderer assignments decide what a plug-in *processes*; this decides
+    /// what its editor *shows*. A plug-in that never receives a selection opens
+    /// on an empty canvas, so call this whenever the graph or the user's
+    /// selection changes.
+    pub fn notify_editor_selection(
+        &mut self,
+        renderer: AraRendererId,
+        clips: &[AraClipKey],
+        tracks: &[AraTrackKey],
+    ) -> AraResult<()> {
+        self.inner.notify_editor_selection(renderer, clips, tracks)
+    }
+
     /// Enables or disables rendering for one bound instance.
     ///
     /// Disable before a graph change that removes its regions, and re-enable

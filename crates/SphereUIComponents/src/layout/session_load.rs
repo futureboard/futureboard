@@ -728,6 +728,11 @@ impl StudioLayout {
             cx.notify();
             (persisted_track_count(&timeline.state.tracks), warnings)
         });
+        // Reopen the ARA sessions this project's clips are bound to, and hand
+        // each plug-in its saved document. Runs after the timeline is populated
+        // so the graph the plug-in sees matches the restored arrangement.
+        self.restore_ara_archives(project, cx);
+
         // Aggregated onto the one project surface. A project whose interface is
         // unplugged reports a single line, not one dialog per track.
         let classified = load_warnings

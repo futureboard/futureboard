@@ -2348,9 +2348,14 @@ extern "C" const char *sphere_daux_vst3_last_error(void) {
   return g_last_error.c_str();
 }
 
-extern "C" SphereDauxVst3Processor *
-sphere_daux_vst3_create(const char *plugin_path, const char *class_id,
-                        double sample_rate) {
+/// Creates and initializes an instance, optionally stopping short of activation.
+///
+/// `activate_now == false` is the ARA path: `ARAVST3.h` requires the document
+/// controller binding to happen before the first `setActive()`, so the caller
+/// binds first and then calls `sphere_daux_vst3_activate`.
+static SphereDauxVst3Processor *
+daux_vst3_create_impl(const char *plugin_path, const char *class_id,
+                      double sample_rate, bool activate_now) {
   set_last_error("");
   if (!plugin_path || !*plugin_path) {
     set_last_error("empty plugin_path");
@@ -2520,16 +2525,50 @@ sphere_daux_vst3_create(const char *plugin_path, const char *class_id,
 
   instance->plugin_path = plugin_path ? plugin_path : "";
 
-  if (!instance->setup(sample_rate)) {
-    set_last_error(g_last_error + "; setup failed");
-    instance->shutdown();
-    return nullptr;
+  instance->deferred_sample_rate = sample_rate;
+  if (activate_now) {
+    if (!instance->setup(sample_rate)) {
+      set_last_error(g_last_error + "; setup failed");
+      instance->shutdown();
+      return nullptr;
+    }
+    instance->activated = true;
+  } else {
+    std::fprintf(stderr,
+                 "[DAUx VST3] created unactivated for ARA binding: %s\n",
+                 plugin_path ? plugin_path : "");
   }
 
   set_last_error("");
   std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
                plugin_path, static_cast<void *>(instance.get()));
   return instance.release();
+}
+
+extern "C" SphereDauxVst3Processor *
+sphere_daux_vst3_create(const char *plugin_path, const char *class_id,
+                        double sample_rate) {
+  return daux_vst3_create_impl(plugin_path, class_id, sample_rate, true);
+}
+
+extern "C" SphereDauxVst3Processor *
+sphere_daux_vst3_create_for_ara(const char *plugin_path, const char *class_id,
+                                double sample_rate) {
+  return daux_vst3_create_impl(plugin_path, class_id, sample_rate, false);
+}
+
+extern "C" int sphere_daux_vst3_activate(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
+  if (processor->activated)
+    return 1;
+  if (!processor->setup(processor->deferred_sample_rate)) {
+    set_last_error(g_last_error + "; deferred setup failed");
+    return 0;
+  }
+  processor->activated = true;
+  std::fprintf(stderr, "[DAUx VST3] deferred activation ok\n");
+  return 1;
 }
 
 extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor *processor) {
@@ -4547,15 +4586,32 @@ namespace {
 /// The ARA main-factory class matching `processor`'s audio-module class, if any.
 VST3::Optional<VST3::UID>
 daux_ara_main_factory_uid(SphereDauxVst3Processor *processor) {
-  if (!processor || !processor->module || processor->class_name.empty())
+  if (!processor || !processor->module)
     return {};
   const auto factory = processor->module->getFactory();
+
+  // Same pairing rule the scanner applies (`vst3_scanner.cpp`), and for the same
+  // reason: `ARAVST3.h` requires equal class names only for shell binaries that
+  // host several plug-ins, and calls the single-plug-in case trivial. Vendors do
+  // rename the ARA class — Synchro Arts ships "RePitch VST" beside
+  // "RePitch VSTAra" — so a name-only match here would advertise a plug-in in the
+  // menu that then refuses to open.
+  VST3::Optional<VST3::UID> only_ara;
+  int ara_count = 0;
+  int audio_count = 0;
   for (const auto &info : factory.classInfos()) {
-    if (info.category() == kARAMainFactoryClass &&
-        info.name() == processor->class_name) {
-      return VST3::Optional<VST3::UID>(info.ID());
+    if (info.category() == kARAMainFactoryClass) {
+      ++ara_count;
+      if (ara_count == 1)
+        only_ara = VST3::Optional<VST3::UID>(info.ID());
+      if (!processor->class_name.empty() && info.name() == processor->class_name)
+        return VST3::Optional<VST3::UID>(info.ID());
+    } else if (info.category() == kVstAudioEffectClass) {
+      ++audio_count;
     }
   }
+  if (audio_count == 1 && ara_count == 1)
+    return only_ara;
   return {};
 }
 

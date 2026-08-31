@@ -81,7 +81,6 @@ impl TimelineState {
             muted: false,
             audio_import: AudioImportState::Pending,
             stretch: AudioClipStretchState::default(),
-            ara: None,
         };
 
         if let ClipType::Audio {

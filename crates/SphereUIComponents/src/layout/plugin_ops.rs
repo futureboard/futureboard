@@ -2030,6 +2030,8 @@ impl StudioLayout {
             display_name,
             Some(processor),
             None,
+            // Ordinary inserts always go through the mandatory external bridge.
+            false,
             cx,
         ) {
             Ok(handle) => {

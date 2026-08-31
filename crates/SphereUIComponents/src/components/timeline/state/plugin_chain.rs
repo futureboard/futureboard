@@ -1242,6 +1242,7 @@ impl TimelineState {
                     id: child_id,
                     name,
                     track_type: TrackType::Bus,
+                    ara: None,
                     parent_group_id: None,
                     group_collapsed: false,
                     color: parent_color,

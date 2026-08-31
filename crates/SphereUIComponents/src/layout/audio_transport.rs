@@ -784,6 +784,9 @@ impl StudioLayout {
             self.poll_plugin_bridge_runtime(cx);
             // Drive native main-owned editor shells: honor OS close + forward resizes.
             self.drive_bridge_editors(cx);
+            // ARA plug-ins post transport requests and model updates from their
+            // own threads; this is where those land on the UI thread.
+            self.poll_ara(cx);
         }
         if self.audio_bridge.engine.is_none() {
             return false;
@@ -1312,6 +1315,11 @@ impl StudioLayout {
                 preferred_output_device
             );
         }
+        // The ARA document has to track the arrangement it renders: a bound clip
+        // that moved or was retimed must reach the plug-in before the engine
+        // starts asking it for audio at the new position.
+        self.refresh_ara_sessions(cx);
+
         let snapshot = {
             let timeline = self.timeline.read(cx);
             build_engine_project_snapshot(

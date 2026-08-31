@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use crate::AraSessionConfig;
 use crate::error::{AraHostError, AraResult};
 use crate::info::{AraFactoryInfo, AraRendererId, AraRoles};
-use crate::model::{AraClipKey, AraGraph, AraMusicalTimeline};
+use crate::model::{AraClipKey, AraGraph, AraMusicalTimeline, AraTrackKey};
 
 fn unsupported<T>() -> AraResult<T> {
     Err(AraHostError::unsupported(
@@ -86,6 +86,15 @@ impl Session {
         &mut self,
         _renderer: AraRendererId,
         _clips: &[AraClipKey],
+    ) -> AraResult<()> {
+        unsupported()
+    }
+
+    pub(crate) fn notify_editor_selection(
+        &mut self,
+        _renderer: AraRendererId,
+        _clips: &[AraClipKey],
+        _tracks: &[AraTrackKey],
     ) -> AraResult<()> {
         unsupported()
     }

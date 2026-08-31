@@ -419,6 +419,15 @@ struct SphereDauxVst3Processor {
   /// factory with its audio module by exact class name, so this is what the ARA
   /// entry points match on.
   std::string class_name;
+  /// Rate `setup()` should run at, kept so activation can be deferred.
+  ///
+  /// `ARAVST3.h` requires `bindToDocumentControllerWithRoles` to happen "before
+  /// the first call to setActive () or setState () or
+  /// getProcessContextRequirements () or the creation of the GUI", so an ARA
+  /// instance is created unactivated, bound, and only then activated.
+  double deferred_sample_rate{0.0};
+  /// Whether `setup()` has run.
+  bool activated{false};
 
 #if defined(_WIN32)
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;

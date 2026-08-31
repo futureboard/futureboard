@@ -53,7 +53,21 @@ HWND create_content(HWND top, int w, int h, int y) {
 }
 
 HWND create_top(const DauxEditorWindowConfig &cfg, Context *ctx) {
-  HWND parent = normalize_owner_hwnd(hwnd(cfg.owner_hwnd));
+  // `ChildHwndEmbed` makes the shell a `WS_CHILD`, so the HWND the host passed
+  // is its *parent* and has to be used exactly as given: a docked editor hands
+  // us a child window already positioned over its panel, and walking up to the
+  // root would reparent the plug-in onto the whole application window at (0,0),
+  // where the host's own renderer paints over it.
+  //
+  // The popup kinds still normalize: Win32 resolves a popup's owner to that
+  // window's root anyway, so passing a child there is what needs correcting.
+  HWND raw_owner = hwnd(cfg.owner_hwnd);
+  const bool child_shell =
+      cfg.host_kind != static_cast<int>(DauxEditorKind::OwnedToolWindow) &&
+      cfg.host_kind != static_cast<int>(DauxEditorKind::DetachedNativeWindow);
+  HWND parent = child_shell
+                    ? ((raw_owner && IsWindow(raw_owner)) ? raw_owner : nullptr)
+                    : normalize_owner_hwnd(raw_owner);
   DWORD style = WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
   DWORD ex_style = WS_EX_NOPARENTNOTIFY;
   HWND owner = nullptr;

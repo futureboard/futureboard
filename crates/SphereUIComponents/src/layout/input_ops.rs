@@ -1185,6 +1185,7 @@ impl StudioLayout {
                         "browser:reveal",
                         reveal_enabled,
                     ));
+                    entries.extend(self.ara_clip_menu_entries(clip_id, exists, cx));
                 }
                 if is_midi {
                     entries.push(menu_item_enabled(
@@ -1224,7 +1225,7 @@ impl StudioLayout {
             ContextTarget::Track(track_id) => {
                 let track = self.timeline.read(cx).state.find_track(track_id).cloned();
                 let exists = track.is_some();
-                let entries = vec![
+                let mut entries = vec![
                     menu_item_enabled(i18n.tr("context.track.rename"), "track:rename", exists),
                     menu_item_enabled(i18n.tr("context.track.duplicate"), "track:duplicate", false),
                     danger_menu_item_enabled(
@@ -1243,6 +1244,9 @@ impl StudioLayout {
                     menu_item_enabled("Huge", "track:height-huge", exists),
                     menu_item_enabled("Reset Track Height", "track:height-reset", exists),
                     menu_item_enabled("Reset All Track Heights", "track:height-reset-all", exists),
+                ];
+                entries.extend(self.ara_track_menu_entries(track_id, exists, cx));
+                entries.extend([
                     ContextMenuEntry::Separator,
                     ContextMenuEntry::item(
                         i18n.tr("context.timeline.add-audio"),
@@ -1250,7 +1254,7 @@ impl StudioLayout {
                     ),
                     ContextMenuEntry::item(i18n.tr("context.timeline.add-midi"), "track:add-midi"),
                     ContextMenuEntry::item(i18n.tr("menu.project-add_bus_track"), "track:add-bus"),
-                ];
+                ]);
                 entries
             }
             ContextTarget::TimelineMarker { marker_id, beat } => {

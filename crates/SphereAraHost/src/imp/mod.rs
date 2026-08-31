@@ -226,8 +226,16 @@ struct Renderer {
     _plugin: Vst3HostPlugin<'static>,
     extension: ExtensionController<'static>,
     roles: AraRoles,
-    /// RAII assignments — dropping one removes the region from the plug-in.
+    /// RAII assignments for the playback-renderer role — dropping one removes
+    /// the region from the plug-in.
     assignments: HashMap<AraClipKey, PlaybackRegionAssignment>,
+    /// The same regions again for the editor-renderer role.
+    ///
+    /// ARA treats the two renderer roles as separate consumers: a region handed
+    /// only to the playback renderer is audible but is not something the
+    /// plug-in's own editor is working on, which is why an editor opened on it
+    /// comes up empty.
+    editor_assignments: HashMap<AraClipKey, PlaybackRegionAssignment>,
 }
 
 /// Token whose address identifies one archive transfer to the plug-in.
@@ -323,7 +331,7 @@ impl Session {
             index,
             archives,
             content,
-            document_name: config.document_name.clone(),
+            document_name: config.document_name,
             musical_context: None,
             sources: HashMap::new(),
             sequences: HashMap::new(),
@@ -729,6 +737,7 @@ impl Session {
                 extension,
                 roles,
                 assignments: HashMap::new(),
+                editor_assignments: HashMap::new(),
             },
         );
         Ok(id)
@@ -759,34 +768,98 @@ impl Session {
         let Some(entry) = renderers.get_mut(&renderer) else {
             return Err(AraHostError::invalid("unknown ARA renderer"));
         };
-        let role = if entry.roles.playback_renderer {
-            RendererRole::Playback
-        } else if entry.roles.editor_renderer {
-            RendererRole::Editor
-        } else {
+        if !entry.roles.playback_renderer && !entry.roles.editor_renderer {
             return Err(AraHostError::invalid(
                 "this ARA instance holds no renderer role",
             ));
-        };
+        }
 
         // Dropping an assignment removes the region from the plug-in.
         entry.assignments.retain(|key, _| wanted.contains(key));
+        entry
+            .editor_assignments
+            .retain(|key, _| wanted.contains(key));
 
-        for key in clips {
-            if entry.assignments.contains_key(key) {
+        // Every role the instance holds gets the same region set. Assigning only
+        // the playback renderer leaves the plug-in's editor with nothing to
+        // work on even though the audio is already routed through it.
+        let roles: [(bool, RendererRole); 2] = [
+            (entry.roles.playback_renderer, RendererRole::Playback),
+            (entry.roles.editor_renderer, RendererRole::Editor),
+        ];
+        for (held, role) in roles {
+            if !held {
                 continue;
             }
-            let region = graph_clips
-                .get(key)
-                .ok_or_else(|| AraHostError::invalid("clip is not in the ARA graph"))?
-                .region;
-            let assignment = entry
-                .extension
-                .assign_playback_region(document, role, region)
-                .map_err(map_error)?;
-            entry.assignments.insert(key.clone(), assignment);
+            for key in clips {
+                let existing = match role {
+                    RendererRole::Playback => &entry.assignments,
+                    RendererRole::Editor => &entry.editor_assignments,
+                };
+                if existing.contains_key(key) {
+                    continue;
+                }
+                let region = graph_clips
+                    .get(key)
+                    .ok_or_else(|| AraHostError::invalid("clip is not in the ARA graph"))?
+                    .region;
+                let assignment = entry
+                    .extension
+                    .assign_playback_region(document, role, region)
+                    .map_err(map_error)?;
+                match role {
+                    RendererRole::Playback => entry.assignments.insert(key.clone(), assignment),
+                    RendererRole::Editor => {
+                        entry.editor_assignments.insert(key.clone(), assignment)
+                    }
+                };
+            }
         }
         Ok(())
+    }
+
+    /// Tells a bound instance which regions its editor is looking at.
+    ///
+    /// ARA 2 splits "the plug-in renders this region" from "the user is editing
+    /// this region": the first is a renderer assignment, the second is an
+    /// editor-view selection. A plug-in that was never told the second opens an
+    /// editor on an empty canvas even though the document is fully built, so
+    /// this is published every time the graph is rebuilt.
+    pub(crate) fn notify_editor_selection(
+        &mut self,
+        renderer: AraRendererId,
+        clips: &[AraClipKey],
+        tracks: &[AraTrackKey],
+    ) -> AraResult<()> {
+        let Self {
+            document,
+            clips: graph_clips,
+            sequences,
+            renderers,
+            ..
+        } = self;
+        let document = document
+            .as_ref()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        let entry = renderers
+            .get(&renderer)
+            .ok_or_else(|| AraHostError::invalid("unknown ARA renderer"))?;
+        if !entry.roles.editor_view {
+            // Nothing to publish to: the instance was bound without the role.
+            return Ok(());
+        }
+        let regions: Vec<_> = clips
+            .iter()
+            .filter_map(|key| graph_clips.get(key).map(|clip| clip.region))
+            .collect();
+        let sequence_handles: Vec<_> = tracks
+            .iter()
+            .filter_map(|key| sequences.get(key).map(|entry| entry.handle))
+            .collect();
+        entry
+            .extension
+            .notify_selection(document, &regions, &sequence_handles, None)
+            .map_err(map_error)
     }
 
     pub(crate) fn set_rendering(

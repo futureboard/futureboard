@@ -774,7 +774,10 @@ impl StudioLayout {
                 if let Some(handle) = result {
                     let path = handle.path().to_path_buf();
                     let mut project = FutureboardProject::from(&tl_state);
-                    let _ = entity.update(cx, |_this, _cx| {
+                    let _ = entity.update(cx, |this, _cx| {
+                        // A copy carries the ARA edits too; without this the
+                        // copy would silently lose them.
+                        this.attach_ara_archives(&mut project);
                         if let Err(e) = save_project(&mut project, &path) {
                             eprintln!("[Project] save copy failed: {e}");
                         }
@@ -887,13 +890,16 @@ impl StudioLayout {
         .detach();
     }
 
-    pub(super) fn project_snapshot(&self, cx: &mut Context<Self>) -> FutureboardProject {
+    pub(super) fn project_snapshot(&mut self, cx: &mut Context<Self>) -> FutureboardProject {
         let tl_state = self.timeline.read(cx).state.clone();
         let mut project = FutureboardProject::from(&tl_state);
         project.id = self.project_session.id.clone();
         project.name = self.project_session.name.clone();
         project.created_at = self.project_session.created_at;
         project.modified_at = self.project_session.modified_at;
+        // Ask every live ARA plug-in for its document now: its edits exist only
+        // inside the plug-in until it is asked to serialise them.
+        self.attach_ara_archives(&mut project);
         project
     }
 

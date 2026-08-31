@@ -249,6 +249,12 @@ pub(crate) mod ffi {
         // ARA 2 entry points. VST3 only — the CLAP and VST2 bridges expose no
         // equivalent, so `Vst3RuntimeProcessor` gates these on the format
         // instead of routing them through `plugin_backend::backend`.
+        pub(crate) fn sphere_daux_vst3_create_for_ara(
+            plugin_path: *const c_char,
+            class_id: *const c_char,
+            sample_rate: c_double,
+        ) -> *mut SphereDauxVst3Processor;
+        pub(crate) fn sphere_daux_vst3_activate(processor: *mut SphereDauxVst3Processor) -> i32;
         pub(crate) fn sphere_daux_vst3_ara_is_supported(
             processor: *mut SphereDauxVst3Processor,
         ) -> i32;
@@ -709,6 +715,78 @@ impl Vst3RuntimeProcessor {
         })
     }
 
+    /// Creates a VST3 instance for ARA, stopping before activation.
+    ///
+    /// `ARAVST3.h`: `bindToDocumentControllerWithRoles` may be called "only once
+    /// during the lifetime of the IAudioProcessor component, before the first
+    /// call to setActive () or setState () or getProcessContextRequirements ()
+    /// or the creation of the GUI". The ordinary constructor activates as part
+    /// of creation, so a plug-in built that way rejects the binding — Melodyne
+    /// answers `bindToDocumentControllerWithRoles` with null. The caller binds
+    /// the returned instance and then calls [`Self::activate`].
+    ///
+    /// VST3 only; ARA hosting has no CLAP or VST2 path here.
+    pub fn new_for_ara(plugin_path: &str, class_id: &str, sample_rate: u32) -> Option<Self> {
+        let path = CString::new(plugin_path).ok()?;
+        let class_id_c = CString::new(class_id).ok()?;
+        // SAFETY: both strings stay alive across the call, and the bridge copies
+        // whatever it keeps.
+        let raw = unsafe {
+            ffi::sphere_daux_vst3_create_for_ara(
+                path.as_ptr(),
+                class_id_c.as_ptr(),
+                sample_rate.max(1) as c_double,
+            )
+        };
+        if raw.is_null() {
+            // SAFETY: the bridge always leaves a NUL-terminated last error.
+            let reason = unsafe {
+                let ptr = ffi::sphere_daux_vst3_last_error();
+                if ptr.is_null() {
+                    String::new()
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                }
+            };
+            eprintln!(
+                "[SphereVST3-ARA] create failed path='{plugin_path}' classId='{class_id}' reason={reason}"
+            );
+            return None;
+        }
+        let format = PluginModuleFormat::Vst3;
+        // SAFETY: `raw` is the instance just created above.
+        let (
+            event_input_bus_count,
+            audio_input_bus_count,
+            audio_output_bus_count,
+            main_audio_input_channel_count,
+            main_audio_output_channel_count,
+        ) = unsafe {
+            (
+                backend::event_input_bus_count(format, raw),
+                backend::audio_input_bus_count(format, raw),
+                backend::audio_output_bus_count(format, raw),
+                backend::main_audio_input_channel_count(format, raw),
+                backend::main_audio_output_channel_count(format, raw),
+            )
+        };
+        Some(Self {
+            inner: Arc::new(Vst3RuntimeProcessorInner {
+                raw,
+                format,
+                plugin_path: plugin_path.to_string(),
+                class_id: class_id.to_string(),
+                sample_rate: sample_rate.max(1),
+                event_input_bus_count,
+                audio_input_bus_count,
+                audio_output_bus_count,
+                main_audio_input_channel_count,
+                main_audio_output_channel_count,
+                destroy_reason: std::sync::Mutex::new(None),
+            }),
+        })
+    }
+
     #[inline]
     pub fn process_stereo_sample(&mut self, l: f32, r: f32) -> Option<(f32, f32)> {
         if self.inner.raw.is_null() {
@@ -1006,6 +1084,19 @@ impl Vst3RuntimeProcessor {
             return 0;
         }
         unsafe { backend::get_latency_samples(self.inner.format, self.inner.raw) }
+    }
+
+    /// Runs the activation that [`Self::new_for_ara`] deferred.
+    ///
+    /// ARA binding has to happen before the first `setActive()`, so an ARA
+    /// instance is created inert and activated here once it is bound. Returns
+    /// `false` when the plug-in refused to prepare for processing.
+    pub fn activate(&self) -> bool {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return false;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_activate(self.inner.raw) != 0 }
     }
 
     /// Whether this instance's module registers an ARA main factory for the

@@ -778,6 +778,7 @@ mod tests {
             id: "track-1".to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#56C7C9".to_string(),
@@ -803,7 +804,6 @@ mod tests {
                     source_path: Some(source.clone()),
                 },
                 stretch: AudioClipStretchState::default(),
-                ara: None,
             }],
             row_height_px: None,
             soundfont: None,
@@ -844,7 +844,6 @@ mod tests {
                 source_path: Some(source.to_path_buf()),
             },
             stretch: AudioClipStretchState::default(),
-            ara: None,
         }
     }
 
@@ -853,6 +852,7 @@ mod tests {
             id: id.to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#56C7C9".to_string(),

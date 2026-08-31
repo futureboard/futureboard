@@ -133,6 +133,12 @@ pub struct TrackState {
     pub id: String,
     pub name: String,
     pub track_type: TrackType,
+    /// ARA plug-in processing this track, if any.
+    ///
+    /// Set means every audio clip on the track is rendered by the plug-in
+    /// instead of read from its source file, so this and the ARA session must
+    /// be changed together — see `layout::ara_ops`.
+    pub ara: Option<crate::components::timeline::state::clip::AraTrackBinding>,
     /// Parent arrangement group, if any. Only `TrackType::Group` ids are valid.
     pub parent_group_id: Option<String>,
     /// Folder presentation state. Meaningful only for `TrackType::Group`.
@@ -437,6 +443,7 @@ impl TimelineState {
             id: id.clone(),
             name: options.name,
             track_type,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color: options.color,

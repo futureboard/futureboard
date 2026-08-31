@@ -179,6 +179,21 @@ sphere_daux_vst3_embed_content_size(SphereDauxVst3Processor *processor,
 // from a VST3 module, so the ARA COM work stays in the audited shim inside
 // `ara2-bridge-companion` and never gets hand-rolled here.
 
+/// Creates an instance and stops before activation.
+///
+/// `ARAVST3.h` requires `bindToDocumentControllerWithRoles` to be called "before
+/// the first call to setActive () or setState () or
+/// getProcessContextRequirements () or the creation of the GUI", so an ARA
+/// instance cannot be activated at creation the way an insert is. Bind it, then
+/// call `sphere_daux_vst3_activate`.
+SPHERE_DAUX_VST3_API SphereDauxVst3Processor *
+sphere_daux_vst3_create_for_ara(const char *plugin_path, const char *class_id,
+                                double sample_rate);
+
+/// Runs the deferred activation. Returns 1 on success, or if already active.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_activate(SphereDauxVst3Processor *processor);
+
 /// 1 when the loaded module registers an ARA main-factory class matching this
 /// instance's audio-module class, 0 otherwise. Cheap: reads factory class info
 /// that is already loaded, and instantiates nothing.

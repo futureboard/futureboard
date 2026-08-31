@@ -96,6 +96,23 @@ impl Render for BottomPanelShell {
                 });
             });
 
+        // ARA is the only editor whose body is a native plug-in window, so it is
+        // the only one that can be moved out of the dock into a window of its own.
+        let ara_popped_out = owner.ara_editor_is_popped_out();
+        let show_ara_pop = matches!(active_tab, BottomTab::Editor)
+            && (ara_popped_out || owner.ara_editor_panel_active(cx));
+        let pop_owner = owner_entity.clone();
+        let on_toggle_ara_pop: Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static> =
+            Arc::new(move |_event, _window, cx| {
+                let _ = pop_owner.update(cx, |layout, cx| {
+                    if layout.ara_editor_is_popped_out() {
+                        layout.pop_in_ara_editor(cx);
+                    } else {
+                        layout.pop_out_ara_editor(cx);
+                    }
+                });
+            });
+
         let owner_resize = self.owner.clone();
         let on_resize_start: Arc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static> =
             Arc::new(move |event, window, cx| {
@@ -155,6 +172,7 @@ impl Render for BottomPanelShell {
                 active_panel,
                 on_tab_click,
                 on_close_panel,
+                show_ara_pop.then_some((ara_popped_out, on_toggle_ara_pop)),
                 I18n::from_app(cx),
             ))
             .child(
@@ -232,11 +250,18 @@ fn render_resize_handle(
         })
 }
 
+/// `ara_pop` is `Some((popped_out, on_toggle))` only while the Editor tab has an
+/// ARA plug-in to show, so the control never appears for editors that have no
+/// window of their own to move to.
 fn render_tab_bar(
     active_tab: BottomTab,
     active_panel: WorkspaceActivePanel,
     on_tab_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
     on_close_panel: Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
+    ara_pop: Option<(
+        bool,
+        Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
+    )>,
     i18n: I18n,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("BottomPanelTabBar");
@@ -275,6 +300,33 @@ fn render_tab_bar(
             on_tab_click.clone(),
         ))
         .child(div().flex_1())
+        .children(ara_pop.map(|(popped_out, on_toggle)| {
+            let label = if popped_out {
+                "Dock plug-in editor"
+            } else {
+                "Pop out plug-in editor"
+            };
+            icon_button(
+                Some(assets::ICON_MAXIMIZE_PATH),
+                label,
+                px(20.0),
+                px(20.0),
+                px(12.0),
+                if popped_out {
+                    Colors::accent_primary()
+                } else {
+                    Colors::text_muted()
+                },
+            )
+            .id("bottom-panel-ara-pop")
+            .role(Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_stop(true)
+            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_click(move |event, window, cx| on_toggle(event, window, cx))
+        }))
         .child(
             icon_button(
                 Some(assets::ICON_MINUS_PATH),

@@ -263,6 +263,16 @@ impl AraState {
         self.sessions.keys()
     }
 
+    /// The live plug-in instance for one session.
+    ///
+    /// The editor must attach to this exact instance — the one the engine
+    /// renders and the one bound to the ARA document — never to a fresh one.
+    pub fn processor(&self, key: &AraSessionKey) -> Option<DirectAudio::Vst3RuntimeProcessor> {
+        self.sessions
+            .get(key)
+            .map(|session| session.processor.clone())
+    }
+
     /// Parks archives restored from a project until their sessions open.
     pub fn load_archives(
         &mut self,
@@ -361,6 +371,14 @@ impl AraState {
         // and outlives every use of the binding.
         let renderer =
             unsafe { session.bind_renderer(processor.ara_component_unknown(), AraRoles::ALL) }?;
+
+        // Only now may the plug-in be prepared for processing: ARA forbids
+        // `setActive()` before the binding, so the instance was created inert.
+        if !processor.activate() {
+            return Err(AraHostError::Plugin(format!(
+                "{plugin_name} could not be prepared for processing after ARA binding"
+            )));
+        }
         let archive_id = session.factory().document_archive_id.clone();
 
         self.sessions.insert(
@@ -438,6 +456,22 @@ impl AraState {
         session
             .session
             .set_renderer_regions(session.renderer, &session.clips)?;
+        // What the plug-in renders and what its editor shows are separate in
+        // ARA 2; without this the docked editor opens on an empty canvas.
+        let tracks: Vec<sphere_ara_host::AraTrackKey> = graph
+            .sequences
+            .iter()
+            .map(|sequence| sequence.key.clone())
+            .collect();
+        if let Err(error) =
+            session
+                .session
+                .notify_editor_selection(session.renderer, &session.clips, &tracks)
+        {
+            // A plug-in without the editor-view role is not an error worth
+            // failing the whole apply over; it just has no view to tell.
+            eprintln!("[ARA] editor selection not published: {error}");
+        }
         session.session.set_rendering(session.renderer, true)?;
 
         Self::install_renderers(engine, &self.sessions, &key.track_id);
@@ -493,5 +527,95 @@ impl AraState {
             self.close(engine, &key);
         }
         self.pending_archives.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbox_drops_the_oldest_rather_than_growing() {
+        let inbox: Inbox<u32> = Inbox::default();
+        for value in 0..(INBOX_CAPACITY as u32 + 10) {
+            inbox.push(value);
+        }
+        let drained = inbox.drain();
+        assert_eq!(drained.len(), INBOX_CAPACITY);
+        // The newest values survive: analysis progress is only useful at its
+        // latest value, and an unbounded queue is not an option on a callback.
+        assert_eq!(*drained.last().unwrap(), INBOX_CAPACITY as u32 + 9);
+        assert_eq!(drained[0], 10);
+        assert!(inbox.drain().is_empty(), "drain must consume");
+    }
+
+    #[test]
+    fn parked_archives_survive_a_save_when_their_plugin_never_opened() {
+        // A project can be saved without its ARA plug-ins ever being
+        // instantiated (missing plug-in, engine not started). Those archives
+        // must be written back untouched instead of being dropped.
+        let mut state = AraState::default();
+        let key = AraSessionKey {
+            plugin_id: "vst3:melodyne".to_string(),
+            track_id: "track-1".to_string(),
+        };
+        state.load_archives([(
+            key.clone(),
+            "com.celemony.ara.v5".to_string(),
+            vec![1, 2, 3],
+        )]);
+
+        let stored = state.store_archives();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0, key);
+        assert_eq!(stored[0].1, "com.celemony.ara.v5");
+        assert_eq!(stored[0].2, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn loading_archives_replaces_the_previous_set() {
+        let mut state = AraState::default();
+        let first = AraSessionKey {
+            plugin_id: "a".to_string(),
+            track_id: "t".to_string(),
+        };
+        let second = AraSessionKey {
+            plugin_id: "b".to_string(),
+            track_id: "t".to_string(),
+        };
+        state.load_archives([(first, "id-a".to_string(), vec![0])]);
+        state.load_archives([(second.clone(), "id-b".to_string(), vec![1])]);
+
+        let stored = state.store_archives();
+        assert_eq!(
+            stored.len(),
+            1,
+            "opening a new project must not keep the old archives"
+        );
+        assert_eq!(stored[0].0, second);
+    }
+
+    #[test]
+    fn a_reader_past_the_end_of_the_source_returns_silence() {
+        // ARA is allowed to read beyond a source; the contract is silence, not
+        // an error, and a plug-in that gets an error there stops analysing.
+        let buffer = Arc::new(DirectAudio::AudioFileBuffer {
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 2,
+            samples: vec![0.5, -0.5, 0.25, -0.25],
+        });
+        let mut reader = BufferReader { buffer };
+        assert_eq!(reader.channel_count(), 2);
+        assert_eq!(reader.frame_count(), 2);
+
+        let mut left = [9.0f32; 4];
+        let mut right = [9.0f32; 4];
+        let mut planes: Vec<&mut [f32]> = vec![&mut left, &mut right];
+        reader.read_planar_f32(-1, &mut planes).unwrap();
+
+        // frame -1 (before), frames 0..1 (real), frame 2 (past the end)
+        assert_eq!(left, [0.0, 0.5, 0.25, 0.0]);
+        assert_eq!(right, [0.0, -0.5, -0.25, 0.0]);
     }
 }

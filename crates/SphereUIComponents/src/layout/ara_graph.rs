@@ -161,13 +161,25 @@ pub fn project_view(
         color: None,
     });
 
-    for clip in &track.clips {
-        let Some(binding) = clip.ara.as_ref() else {
-            continue;
+    // ARA is a track processor, so the plug-in gets every audio clip on the
+    // track — not a hand-picked subset. A track bound to a different plug-in
+    // contributes nothing to this session.
+    if track
+        .ara
+        .as_ref()
+        .is_none_or(|binding| binding.plugin_id != key.plugin_id)
+    {
+        return AraProjectView {
+            graph: AraGraph {
+                name: Some(track.name.clone()),
+                sequences,
+                ..AraGraph::default()
+            },
+            media_paths,
         };
-        if binding.plugin_id != key.plugin_id {
-            continue;
-        }
+    }
+
+    for clip in &track.clips {
         let Some((file_id, source_path)) = clip_source(clip) else {
             continue;
         };
@@ -232,9 +244,9 @@ pub fn project_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::timeline::timeline_state::ClipAraBinding;
+    use crate::components::timeline::timeline_state::AraTrackBinding;
 
-    fn timeline_with_ara_clip() -> TimelineState {
+    fn timeline_with_ara_track() -> TimelineState {
         let mut state = TimelineState::default();
         state.bpm = 120.0;
         let track_id = state.create_audio_track();
@@ -244,7 +256,12 @@ mod tests {
             .find(|track| track.id == track_id)
             .expect("just created");
         track.name = "Vocals".to_string();
-        let mut clip = ClipState {
+        track.ara = Some(AraTrackBinding {
+            plugin_id: "vst3:melodyne".to_string(),
+            plugin_path: "C:/Melodyne.vst3".to_string(),
+            class_id: "ABCD".to_string(),
+        });
+        let clip = ClipState {
             id: "clip-1".to_string(),
             name: "Take 1".to_string(),
             start_beat: 4.0,
@@ -259,13 +276,7 @@ mod tests {
             muted: false,
             audio_import: Default::default(),
             stretch: Default::default(),
-            ara: None,
         };
-        clip.ara = Some(ClipAraBinding {
-            plugin_id: "vst3:melodyne".to_string(),
-            plugin_path: "C:/Melodyne.vst3".to_string(),
-            class_id: "ABCD".to_string(),
-        });
         state.tracks[0].clips = vec![clip];
         state
     }
@@ -278,8 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn bound_clip_becomes_a_playback_region_at_its_timeline_position() {
-        let state = timeline_with_ara_clip();
+    fn every_audio_clip_on_an_ara_track_becomes_a_playback_region() {
+        let state = timeline_with_ara_track();
         let mut shape = |_: &str| Some((48_000.0, 192_000, 2));
         let view = project_view(&state, &key(&state), &mut shape);
 
@@ -298,9 +309,9 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_bound_to_another_plugin_is_not_included() {
-        let mut state = timeline_with_ara_clip();
-        state.tracks[0].clips[0].ara.as_mut().unwrap().plugin_id = "vst3:other".to_string();
+    fn a_track_bound_to_another_plugin_contributes_nothing() {
+        let mut state = timeline_with_ara_track();
+        state.tracks[0].ara.as_mut().unwrap().plugin_id = "vst3:other".to_string();
         let mut shape = |_: &str| Some((48_000.0, 192_000, 2));
         let view = project_view(&state, &key(&state), &mut shape);
         assert!(view.graph.regions.is_empty());
@@ -310,7 +321,7 @@ mod tests {
 
     #[test]
     fn an_unprobeable_source_is_skipped_rather_than_guessed() {
-        let state = timeline_with_ara_clip();
+        let state = timeline_with_ara_track();
         let mut shape = |_: &str| None;
         let view = project_view(&state, &key(&state), &mut shape);
         assert!(view.graph.regions.is_empty());
@@ -319,7 +330,7 @@ mod tests {
 
     #[test]
     fn a_flat_project_still_yields_a_valid_two_point_tempo_map() {
-        let state = timeline_with_ara_clip();
+        let state = timeline_with_ara_track();
         let timeline = musical_timeline(&state);
         assert!(
             timeline.validate().is_ok(),

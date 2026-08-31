@@ -499,6 +499,20 @@ impl WindowsWindow {
         } else {
             let mut dwstyle = WS_SYSMENU;
 
+            if disable_direct_composition {
+                // Hosting mode: the embedder turns DirectComposition off
+                // precisely so it can park native child HWNDs (plug-in editors,
+                // web views) over the window. `WS_CLIPCHILDREN` is what keeps
+                // this window's own painting out of those children's rectangles;
+                // without it the parent repaints straight over a child on every
+                // frame and the child is only ever visible between presents.
+                //
+                // Restricted to that mode so the default compositing path — where
+                // there are no child HWNDs and clipping only costs work — is
+                // untouched.
+                dwstyle |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+            }
+
             if params.is_resizable {
                 dwstyle |= WS_THICKFRAME | WS_MAXIMIZEBOX;
             }

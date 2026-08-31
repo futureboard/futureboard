@@ -370,6 +370,14 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "plugins", "is_ara")? {
         conn.execute_batch("ALTER TABLE plugins ADD COLUMN is_ara INTEGER NOT NULL DEFAULT 0")?;
+        // Unlike the other additive columns, this one cannot be defaulted
+        // truthfully: whether a plug-in is ARA-capable is only knowable by
+        // reading its module, and every existing row was scanned before the
+        // scanner could report it. Defaulting to 0 would therefore assert
+        // "not ARA" about plug-ins that are. Clearing the cached file
+        // signature marks every row stale so an incremental scan re-reads it
+        // instead of serving the placeholder forever.
+        conn.execute_batch("UPDATE plugins SET file_modified_at = NULL, file_size = NULL")?;
     }
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?1)",

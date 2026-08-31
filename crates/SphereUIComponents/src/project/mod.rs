@@ -477,9 +477,6 @@ pub struct ProjectClip {
     /// as [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
     /// preserve_pitch false) for older projects.
     pub stretch: AudioClipStretchState,
-    /// ARA plug-in bound to this clip (persisted v41+). `None` for older
-    /// projects and for clips no plug-in owns.
-    pub ara: Option<ClipAraBinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +484,9 @@ pub struct ProjectTrack {
     pub id: String,
     pub name: String,
     pub track_type: ProjectTrackType,
+    /// ARA plug-in processing this track (v42+). `None` for older projects and
+    /// for tracks no plug-in owns.
+    pub ara: Option<AraTrackBinding>,
     /// Arrangement group membership (v30+). Independent from audio routing.
     pub parent_group_id: Option<String>,
     /// Arrangement folder collapse state (v31+).
@@ -923,7 +923,7 @@ pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
 
 // ── From TimelineState ────────────────────────────────────────────────────────
 
-pub use crate::components::timeline::timeline_state::ClipAraBinding;
+pub use crate::components::timeline::timeline_state::AraTrackBinding;
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, ClipType, InsertSlotState, TimelineMarkerState, TimelineRegionState,
     TimelineState, TrackType as TlTrackType,
@@ -1226,7 +1226,6 @@ impl From<&TimelineState> for FutureboardProject {
                             muted: c.muted,
                             source,
                             stretch: c.stretch.clone(),
-                            ara: c.ara.clone(),
                         }
                     })
                     .collect();
@@ -1255,6 +1254,7 @@ impl From<&TimelineState> for FutureboardProject {
                     id: t.id.clone(),
                     name: t.name.clone(),
                     track_type,
+                    ara: t.ara.clone(),
                     parent_group_id: t.parent_group_id.clone(),
                     group_collapsed: t.group_collapsed,
                     color_hex: rgba_to_hex(t.color),
@@ -1882,7 +1882,6 @@ pub fn apply_to_timeline(
                         muted: pc.muted,
                         audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
                         stretch: pc.stretch.clone(),
-                        ara: pc.ara.clone(),
                     }
                 })
                 .collect();
@@ -1959,6 +1958,7 @@ pub fn apply_to_timeline(
                 id: pt.id.clone(),
                 name: pt.name.clone(),
                 track_type,
+                ara: pt.ara.clone(),
                 parent_group_id: pt.parent_group_id.clone(),
                 group_collapsed: pt.group_collapsed,
                 color: hex_to_rgba(&pt.color_hex),
@@ -2877,10 +2877,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v41"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v42"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 41);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 41);
+        assert_eq!(version, 42);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 42);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────

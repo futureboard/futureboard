@@ -1,5 +1,5 @@
 use super::{
-    AutomationLane, AutomationPoint, AutomationTargetDesc, ClipAraBinding, ClipSource,
+    AraTrackBinding, AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource,
     FutureboardProject, InputMonitorMode, MidiAccent, MidiArticulation, MidiControllerKind,
     MidiControllerLane, MidiControllerPoint, MidiNote, MidiPitchPoint, MidiSysExEvent,
     MidiSysExKind, PluginFormat, PluginStateBlob, ProjectAraDocument, ProjectAsset,
@@ -92,11 +92,16 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// dragged heights — after the output routing. A v39 file loads with every lane
 /// expanded at its default height, which is the state it was saved in, since
 /// that is what v39 always restored.
-/// v41 appends each clip's ARA binding after its stretch block, and the ARA
-/// document archives after the conductor lanes. A v40 file loads with no clip
-/// bound to an ARA plug-in and no archives — the state it was saved in, since
-/// v40 could not express an ARA binding at all.
-pub const PROJECT_VERSION: u32 = 41;
+/// v41 appended each clip's ARA binding after its stretch block, and the ARA
+/// document archives after the conductor lanes. A v40 file loads with no ARA at
+/// all — the state it was saved in, since v40 could not express a binding.
+/// v42 moves the binding from the clip to the track, where it belongs: ARA is a
+/// track processor like an insert, and every audio clip on the track becomes one
+/// of its playback regions. The v41 per-clip byte is still read and discarded so
+/// those files keep loading; their tracks come back without ARA, which is the
+/// closest honest answer, since a v41 file could bind individual clips to
+/// different plug-ins and a track can only carry one.
+pub const PROJECT_VERSION: u32 = 42;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -734,17 +739,6 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
     }
     // v16: stretch/pitch block trails the source for every clip.
     encode_stretch(w, &c.stretch);
-    // v41: ARA binding trails the stretch block. Identity only — the plug-in's
-    // edits live in the document archive at project level, keyed by plug-in.
-    match &c.ara {
-        Some(ara) => {
-            w.write_u8(1);
-            w.write_str(&ara.plugin_id);
-            w.write_str(&ara.plugin_path);
-            w.write_str(&ara.class_id);
-        }
-        None => w.write_u8(0),
-    }
 }
 
 fn encode_input_monitor(w: &mut FbWriter, m: InputMonitorMode) {
@@ -893,6 +887,17 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     encode_soundfont_player(w, t.soundfont.as_ref()); // v28
     w.write_bool(t.volume_automation_read); // v32
     encode_solfege_engine(w, t.solfege.as_ref()); // v37
+                                                  // v42: the track's ARA plug-in. Identity only — its edits live in the
+                                                  // project-level document archive keyed by (plug-in, track).
+    match &t.ara {
+        Some(ara) => {
+            w.write_u8(1);
+            w.write_str(&ara.plugin_id);
+            w.write_str(&ara.plugin_path);
+            w.write_str(&ara.class_id);
+        }
+        None => w.write_u8(0),
+    }
 }
 
 /// v28: built-in Soundfont Player instrument state. A leading flag keeps the
@@ -1884,16 +1889,13 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
     } else {
         AudioClipStretchState::default()
     };
-    // v41: ARA binding trails the stretch block.
-    let ara = if version >= 41 && r.read_u8()? == 1 {
-        Some(ClipAraBinding {
-            plugin_id: r.read_str()?,
-            plugin_path: r.read_str()?,
-            class_id: r.read_str()?,
-        })
-    } else {
-        None
-    };
+    // v41 stored an ARA binding per clip; v42 moved it to the track. The bytes
+    // are still consumed so a v41 body stays positionally aligned.
+    if version == 41 && r.read_u8()? == 1 {
+        let _plugin_id = r.read_str()?;
+        let _plugin_path = r.read_str()?;
+        let _class_id = r.read_str()?;
+    }
     Ok(ProjectClip {
         id,
         name,
@@ -1904,7 +1906,6 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
         muted,
         source,
         stretch,
-        ara,
     })
 }
 
@@ -2130,11 +2131,22 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     } else {
         None
     };
+    // v42: the track's ARA plug-in, at the tail of the track block.
+    let ara = if version >= 42 && r.read_u8()? == 1 {
+        Some(AraTrackBinding {
+            plugin_id: r.read_str()?,
+            plugin_path: r.read_str()?,
+            class_id: r.read_str()?,
+        })
+    } else {
+        None
+    };
 
     Ok(ProjectTrack {
         id,
         name,
         track_type,
+        ara,
         parent_group_id,
         group_collapsed,
         color_hex,
@@ -2865,7 +2877,6 @@ mod tests {
                 ],
             },
             stretch: AudioClipStretchState::default(),
-            ara: None,
         };
         let mut w = FbWriter::new();
         encode_clip(&mut w, &clip);
@@ -3405,7 +3416,6 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch,
-            ara: None,
         }
     }
 
@@ -3421,37 +3431,52 @@ mod tests {
     }
 
     #[test]
-    fn ara_binding_roundtrips_v41() {
-        let mut clip = empty_clip_with_stretch(sample_stretch());
-        clip.ara = Some(ClipAraBinding {
+    fn ara_binding_roundtrips_on_the_track_v42() {
+        let mut project = FutureboardProject::new("ara");
+        let binding = AraTrackBinding {
             plugin_id: "vst3:celemony.melodyne".to_string(),
             plugin_path: "C:/Program Files/Common Files/VST3/Melodyne.vst3".to_string(),
             class_id: "1234ABCD".to_string(),
-        });
-        let mut w = FbWriter::new();
-        encode_clip(&mut w, &clip);
-        let bytes = w.into_bytes();
-        let mut r = FbReader::new(&bytes);
-        let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
-        assert_eq!(decoded.ara, clip.ara);
-        // The stretch block still decodes: the binding is appended after it, not
-        // spliced into the positional body.
-        assert_eq!(decoded.stretch, clip.stretch);
+        };
+        let mut track = track_with_clip(empty_clip_with_stretch(sample_stretch()));
+        track.ara = Some(binding.clone());
+        project.tracks.push(track);
+
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).unwrap();
+        assert_eq!(decoded.tracks[0].ara, Some(binding));
+        // The clip block still decodes around it: the binding lives at the tail
+        // of the track, not spliced into the positional clip body.
+        assert_eq!(decoded.tracks[0].clips.len(), 1);
+        assert_eq!(
+            decoded.tracks[0].clips[0].stretch,
+            sample_stretch(),
+            "the clip's own state must survive the track-level binding"
+        );
     }
 
     #[test]
-    fn v40_clip_loads_without_an_ara_binding() {
-        // A v40 writer stops after the stretch block. Reading those exact bytes
-        // as v40 must not consume the (absent) ARA presence byte.
+    fn a_v41_clip_binding_is_consumed_and_the_body_stays_aligned() {
+        // v41 wrote an ARA presence byte per clip. v42 no longer writes it, but
+        // the reader must still consume it or every field after the clip in a
+        // v41 body would be read at the wrong offset.
         let clip = empty_clip_with_stretch(sample_stretch());
         let mut w = FbWriter::new();
         encode_clip(&mut w, &clip);
-        let mut bytes = w.into_bytes();
-        assert_eq!(bytes.pop(), Some(0), "v41 writes a zero ARA presence byte");
-        let mut r = FbReader::new(&bytes);
-        let decoded = decode_clip(&mut r, 40).unwrap();
-        assert_eq!(decoded.ara, None);
+        // Re-create a v41 clip body: the v42 encoding plus the old trailing byte.
+        let mut v41 = w.into_bytes();
+        v41.push(0);
+        // A sentinel standing in for whatever followed the clip in a real body.
+        v41.extend_from_slice(&7u32.to_le_bytes());
+
+        let mut r = FbReader::new(&v41);
+        let decoded = decode_clip(&mut r, 41).unwrap();
         assert_eq!(decoded.stretch, clip.stretch);
+        assert_eq!(
+            r.read_u32().unwrap(),
+            7,
+            "the reader must land exactly after the v41 clip block"
+        );
     }
 
     #[test]
@@ -3526,7 +3551,6 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch: AudioClipStretchState::default(),
-            ara: None,
         });
         track.soundfont = Some(ProjectSoundfontPlayer {
             path: Some(PathBuf::from("/home/user/SoundFonts/GeneralUser-GS.sf2")),
@@ -3608,7 +3632,6 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch: AudioClipStretchState::default(),
-            ara: None,
         });
         let mut project = FutureboardProject::new("Plain");
         project.tracks.push(track);
@@ -3663,6 +3686,7 @@ mod tests {
             id: "t1".to_string(),
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#56C7C9".to_string(),

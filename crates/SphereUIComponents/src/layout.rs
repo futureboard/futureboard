@@ -38,7 +38,9 @@ use crate::theme::{self, Colors};
 use SpherePluginHost::load_au_cache_state;
 
 mod ara_graph;
-mod ara_ops;
+mod ara_menu;
+pub(crate) mod ara_ops;
+mod ara_studio;
 mod audio_transport;
 mod bottom_panel_ops;
 mod browser_ops;
@@ -483,6 +485,13 @@ pub struct StudioLayout {
     /// opens deferred while an insert runtime was loading. Grouped into
     /// [`plugin_ops::PluginEditorWindows`] (decomposition slice).
     plugin_editors: plugin_ops::PluginEditorWindows,
+    /// Live ARA sessions — one per (plug-in, track) — plus the queues their
+    /// plug-ins post into. Grouped into [`ara_ops::AraState`].
+    ara: ara_ops::AraState,
+    /// Hosts the bound ARA plug-in's own view inside the docked Editor panel.
+    ara_editor: Entity<components::AraEditorHost>,
+    /// Set while that view lives in its own window instead of the dock.
+    ara_editor_popped_out: bool,
     panels: StudioPanelVisibility,
     settings: gpui::Entity<SettingsModel>,
 
@@ -688,12 +697,17 @@ impl StudioLayout {
             let timeline = timeline.clone();
             cx.new(|cx| components::AudioEditorHost::new(timeline, cx))
         };
+        let ara_editor = {
+            let owner = cx.entity();
+            cx.new(|cx| components::AraEditorHost::new(owner, cx))
+        };
         let clip_editor_panel = cx.new(|_| {
             components::ClipEditorPanel::new(
                 timeline.clone(),
                 piano_roll.clone(),
                 solfege_editor.clone(),
                 audio_editor.clone(),
+                ara_editor.clone(),
             )
         });
         let studio_entity = cx.entity();
@@ -1099,6 +1113,9 @@ impl StudioLayout {
             external_windows: window_ops::ExternalWindows::default(),
             plugin_catalog: plugin_ops::PluginCatalogState::default(),
             plugin_editors: plugin_ops::PluginEditorWindows::default(),
+            ara: ara_ops::AraState::default(),
+            ara_editor,
+            ara_editor_popped_out: false,
             panels: StudioPanelVisibility::default(),
             settings,
 
@@ -1661,6 +1678,12 @@ impl StudioLayout {
         }
         if command_id == "mixer:create-bus" {
             self.create_bus_track_immediate(cx);
+            return;
+        }
+
+        // ARA commands embed a plug-in id (`ara:bind:<id>`), so they cannot be
+        // literals in the match below.
+        if self.dispatch_ara_command(command_id, cx) {
             return;
         }
 

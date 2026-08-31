@@ -155,6 +155,7 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
             id: new_id(),
             name: track_name,
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: crate::project::rgba_to_hex(crate::color::auto_color_for_index(index)),
@@ -588,7 +589,6 @@ fn audio_clip(
         muted: false,
         source,
         stretch: AudioClipStretchState::default(),
-        ara: None,
     })
 }
 

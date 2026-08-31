@@ -1300,6 +1300,10 @@ impl Render for StudioLayout {
         let panel_chrome = self.panel_chrome_state(cx);
         let show_browser = self.panels.browser;
         let show_inspector = self.panels.inspector;
+        // A plug-in view is a native child window, outside the GPUI tree, so
+        // nothing here would take it off screen when the dock closes or another
+        // tab is selected — it would keep floating over whatever is drawn next.
+        self.sync_ara_editor_visibility(cx);
         let show_bottom_docked = self.panels.bottom_docked;
         let active_panel = self.active_panel;
 

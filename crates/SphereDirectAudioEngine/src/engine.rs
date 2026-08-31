@@ -2245,11 +2245,12 @@ impl EngineInner {
         class_id: &str,
     ) -> Option<crate::vst3_processor::Vst3RuntimeProcessor> {
         let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
-        let processor = crate::vst3_processor::Vst3RuntimeProcessor::new_with_format(
+        // Deliberately unactivated: ARA binding has to precede the first
+        // `setActive()`, so the caller binds and then calls `activate()`.
+        let processor = crate::vst3_processor::Vst3RuntimeProcessor::new_for_ara(
             plugin_path,
             class_id,
             sample_rate,
-            crate::plugin_backend::PluginModuleFormat::Vst3,
         )?;
         if !processor.supports_ara() {
             processor.set_destroy_reason("not-ara-capable");

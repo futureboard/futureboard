@@ -1,6 +1,7 @@
 pub mod about_window;
 pub mod add_track_dialog;
 pub(crate) mod app_chrome;
+mod ara_editor_host;
 pub mod audio_connections_panel;
 pub mod audio_connections_window;
 mod audio_editor_adapter;
@@ -100,6 +101,7 @@ pub use app_chrome::{
     BpmMenuCb, ChromeActionCb, PanelChromeState, ProjectChromeState, TransportChromeState,
     BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
 };
+pub use ara_editor_host::AraEditorHost;
 pub use audio_editor_host::AudioEditorHost;
 pub use background_tasks::{
     background_task_button, background_task_panel, BackgroundTaskCancelCb, BackgroundTaskKind,

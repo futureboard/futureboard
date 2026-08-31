@@ -593,7 +593,6 @@ mod audio_asset_key_tests {
             muted: false,
             audio_import: AudioImportState::Pending,
             stretch: AudioClipStretchState::default(),
-            ara: None,
         }
     }
 
@@ -1867,7 +1866,6 @@ mod audio_clip_split_tests {
             muted: false,
             audio_import: AudioImportState::Pending,
             stretch: AudioClipStretchState::default(),
-            ara: None,
         }
     }
 

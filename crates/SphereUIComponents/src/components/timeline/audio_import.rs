@@ -833,7 +833,6 @@ mod tests {
                 source_path: source,
             },
             stretch: Default::default(),
-            ara: None,
         }
     }
 
@@ -851,6 +850,7 @@ mod tests {
             id: "t1".into(),
             name: "KICK".into(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#000000".into(),
@@ -888,6 +888,7 @@ mod tests {
             id: "t1".into(),
             name: "KICK".into(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#000000".into(),
@@ -925,6 +926,7 @@ mod tests {
             id: "t1".into(),
             name: "KICK".into(),
             track_type: ProjectTrackType::Audio,
+            ara: None,
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#000000".into(),

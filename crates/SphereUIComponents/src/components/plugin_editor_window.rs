@@ -246,6 +246,7 @@ impl PluginEditorWindow {
         display_name: String,
         processor: Option<DirectAudio::Vst3RuntimeProcessor>,
         shared_bridge: Option<SharedPluginBridgeRuntime>,
+        in_process: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let quirk = processor
@@ -269,7 +270,11 @@ impl PluginEditorWindow {
                 quirk.plugin_webview_based,
             );
         }
-        let bridge_required = plugin_host_bridge_enabled();
+        // ARA instances live in this process by construction: their host
+        // callbacks read project state directly, so they cannot be hosted behind
+        // the bridge. For those the in-process editor is the only path, and it is
+        // opened deliberately rather than through the legacy escape hatch.
+        let bridge_required = plugin_host_bridge_enabled() && !in_process;
         let host = if bridge_required {
             build_host_backend(processor.as_ref(), &display_name, shared_bridge)
         } else {
@@ -1553,6 +1558,12 @@ impl Render for PluginEditorWindow {
 /// (StudioLayout) keeps the returned handle to dedupe/close. Drop of the entity
 /// detaches the native view.
 #[allow(clippy::too_many_arguments)]
+/// Opens an editor window for one plug-in instance.
+///
+/// `in_process` forces the in-process embed path regardless of the bridge
+/// setting. It exists for ARA, whose instances are always hosted here; every
+/// other caller passes `false` and gets the mandatory external bridge.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn open_plugin_editor_window(
     owner_bounds: Bounds<gpui::Pixels>,
     track_id: String,
@@ -1560,9 +1571,14 @@ pub(crate) fn open_plugin_editor_window(
     display_name: String,
     processor: Option<DirectAudio::Vst3RuntimeProcessor>,
     shared_bridge: Option<SharedPluginBridgeRuntime>,
+    in_process: bool,
     cx: &mut App,
 ) -> Result<WindowHandle<PluginEditorWindow>, String> {
-    if plugin_host_bridge_enabled() {
+    if in_process {
+        eprintln!(
+            "[plugin-view] editor_backend=in_process reason=ara instance={track_id}::{insert_id}"
+        );
+    } else if plugin_host_bridge_enabled() {
         eprintln!(
             "[plugin-view] editor_backend=external_bridge reason=forced_default \
              instance={track_id}::{insert_id}"
@@ -1616,6 +1632,7 @@ pub(crate) fn open_plugin_editor_window(
                 display_name,
                 processor,
                 shared_bridge,
+                in_process,
                 cx,
             )
         })

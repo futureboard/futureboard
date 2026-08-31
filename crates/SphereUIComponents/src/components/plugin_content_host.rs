@@ -42,8 +42,11 @@ mod imp {
 
     use super::{debug_enabled, ContentRect};
     use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC};
+    use windows::Win32::Graphics::Gdi::{
+        CreateSolidBrush, FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetWindow,
@@ -76,6 +79,27 @@ mod imp {
             };
             unsafe { RegisterClassW(&wc) };
         });
+    }
+
+    /// Fill colour for the host's uncovered area.
+    ///
+    /// Black in normal use so an editor never flashes light. Under the view
+    /// trace it is magenta instead: "the panel is dark" cannot distinguish a
+    /// host window that is composited but empty from one the parent painted
+    /// straight over, and that distinction is the whole question when a native
+    /// child does not appear.
+    fn host_fill_brush() -> HBRUSH {
+        if debug_enabled() {
+            static MAGENTA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            let handle = *MAGENTA.get_or_init(|| {
+                let brush = unsafe { CreateSolidBrush(COLORREF(0x00FF00FF)) };
+                brush.0 as usize
+            });
+            if handle != 0 {
+                return HBRUSH(handle as *mut core::ffi::c_void);
+            }
+        }
+        HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0)
     }
 
     /// Route Win32 keyboard focus to the embedded child view (the CEF browser
@@ -137,11 +161,14 @@ mod imp {
             let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
             let mut rc = RECT::default();
             let _ = unsafe { GetClientRect(hwnd, &mut rc) };
-            let brush = HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0);
+            let brush = host_fill_brush();
             unsafe { FillRect(hdc, &rc, brush) };
             static LOGGED: AtomicBool = AtomicBool::new(false);
             if !LOGGED.swap(true, Ordering::Relaxed) {
-                eprintln!("[plugin-content-hwnd] WM_ERASEBKGND suppressed=true");
+                eprintln!(
+                    "[plugin-content-hwnd] WM_ERASEBKGND suppressed=true fill={}",
+                    if debug_enabled() { "magenta" } else { "black" }
+                );
             }
             return LRESULT(1);
         }
@@ -156,8 +183,20 @@ mod imp {
         content_hwnd: u64,
     }
 
+    /// Whether the native-child geometry trace is enabled.
+    ///
+    /// The docked ARA editor resizes with the panel drag, so this path runs
+    /// per frame rather than once per window resize; `DESIGN.md` requires
+    /// high-rate logs to be environment-gated.
+    fn view_debug() -> bool {
+        std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    }
+
     impl ContentChildHwnd {
         fn log_diagnostics(&self, rect: ContentRect) {
+            if !view_debug() {
+                return;
+            }
             unsafe {
                 let top = hwnd_from(self.top_hwnd);
                 let content = hwnd_from(self.content_hwnd);
@@ -275,10 +314,12 @@ mod imp {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            eprintln!(
-                "[plugin-editor-window] resize content_hwnd=0x{:x} rect=({},{},{}x{})",
-                self.content_hwnd, rect.x, rect.y, rect.width, rect.height
-            );
+            if view_debug() {
+                eprintln!(
+                    "[plugin-editor-window] resize content_hwnd=0x{:x} rect=({},{},{}x{})",
+                    self.content_hwnd, rect.x, rect.y, rect.width, rect.height
+                );
+            }
             self.log_diagnostics(rect);
         }
 

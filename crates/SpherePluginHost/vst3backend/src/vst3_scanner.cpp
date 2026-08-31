@@ -5,8 +5,8 @@
 #include "public.sdk/source/vst/utility/stringconvert.h"
 
 // Only for `kARAMainFactoryClass`. An ARA-capable VST3 registers a second
-// factory class in this category whose name matches its audio-module class, so
-// ARA capability is visible from `getClassInfo` alone — no instantiation, and
+// factory class in this category alongside its audio-module class, so ARA
+// capability is visible from `getClassInfo` alone — no instantiation, and
 // therefore no change to this scanner's crash-isolation model.
 #include "ARAVST3.h"
 
@@ -105,8 +105,9 @@ struct ClassEntry {
   std::string class_id;
   std::string version;
   std::string sdk_version;
-  /// This module also registers an ARA main-factory class with the same name,
-  /// so the plug-in can be driven through ARA (see `ARAVST3.h`).
+  /// This module also registers an ARA main-factory class paired with this
+  /// audio-module class, so the plug-in can be driven through ARA. See the
+  /// pairing rules in `ARAVST3.h`.
   bool is_ara = false;
 };
 
@@ -723,14 +724,24 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
           {name, vendor, category, sub_categories, class_id, version, sdk_version});
     }
 
-    // ARA binds a main factory to its audio module by exact class name, so an
-    // ARA main factory with no matching audio class is ignored rather than
-    // guessed at.
-    for (auto& entry : audio_classes) {
-      for (const auto& ara_name : ara_factory_names) {
-        if (ara_name == entry.name) {
-          entry.is_ara = true;
-          break;
+    // `ARAVST3.h` (IMainFactory docs): pairing an ARA main factory with its
+    // audio module "is usually trivial because there typically is only one such
+    // class in the binary". Equal class names are required only for shell
+    // binaries hosting several plug-ins, where the host would otherwise have to
+    // instantiate every processor to tell them apart.
+    //
+    // So the unambiguous single-plug-in case pairs regardless of naming —
+    // vendors do rename it (Synchro Arts ships "RePitch VST" beside
+    // "RePitch VSTAra") — and only a shell falls back to the name rule.
+    if (audio_classes.size() == 1 && ara_factory_names.size() == 1) {
+      audio_classes[0].is_ara = true;
+    } else {
+      for (auto& entry : audio_classes) {
+        for (const auto& ara_name : ara_factory_names) {
+          if (ara_name == entry.name) {
+            entry.is_ara = true;
+            break;
+          }
         }
       }
     }

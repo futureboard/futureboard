@@ -100,6 +100,13 @@ impl StudioLayout {
             context_menu_log("invalid target ignored");
             return;
         }
+        // Track and clip menus list the ARA-capable plug-ins, which come from
+        // the scanned catalog. That catalog is loaded lazily and used to be
+        // armed only by the plug-in picker, so a context menu opened before the
+        // picker had ever run reported "no ARA plug-ins" no matter what was
+        // installed. Arming it here is a no-op once it is loaded.
+        self.arm_catalog_load(cx);
+
         self.menu_bar.open_menu_id = None;
         self.menu_bar.submenu_path.clear();
         self.project_switcher.is_open = false;
