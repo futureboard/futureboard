@@ -96,6 +96,14 @@ pub struct AraEditorHost {
     /// has to work even when the owner is mid-update or the session has already
     /// been closed, and releasing the view is not optional.
     attached: Option<(AraSessionKey, DirectAudio::Vst3RuntimeProcessor)>,
+    /// A size the plug-in asked for, taken off the bridge and waiting for the
+    /// deferred tick to answer it.
+    ///
+    /// The panel cannot grow for a plug-in — its size is the dock's — so the
+    /// answer is always "here is what you actually have". Recording it rather
+    /// than replying from `render` keeps every plug-in call on the deferred
+    /// tick, which is the rule the whole native side of this view follows.
+    pending_view_resize: Option<(i32, i32)>,
     focus: FocusHandle,
 }
 
@@ -113,6 +121,7 @@ impl AraEditorHost {
             traced: None,
             status: AraPanelStatus::Measuring,
             attached: None,
+            pending_view_resize: None,
             focus: cx.focus_handle(),
         }
     }
@@ -134,10 +143,11 @@ impl AraEditorHost {
     /// exactly what `DESIGN.md` forbids.
     pub fn detach(&mut self) {
         if let Some((_, processor)) = self.attached.take() {
-            processor.embed_detach();
+            processor.view_detach();
         }
         self.content = None;
         self.last_rect = None;
+        self.pending_view_resize = None;
         self.status = AraPanelStatus::Measuring;
     }
 
@@ -286,24 +296,24 @@ impl AraEditorHost {
                 cx.notify();
                 return;
             };
-            // The plug-in fills the child completely, so its own origin is zero;
-            // the child is what moves with the panel.
-            if processor
-                .embed_editor(content.hwnd(), 0, 0, rect.width, rect.height)
-                .is_none()
-            {
+            // GPUI owns the window from here on. The bridge only creates the
+            // plug-in's view and attaches it to the child above — it does not
+            // create a shell, a titlebar, or a window procedure of its own, so
+            // this panel is the single owner of the editor's geometry.
+            let Some(preferred) = processor.view_attach(content.hwnd(), (rect.width, rect.height))
+            else {
                 self.fail("the plug-in did not open its editor");
                 cx.notify();
                 return;
-            }
-            // The bridge sizes a freshly attached shell to the plug-in's own
-            // preferred rect (Melodyne asks for 812x600), which in a docked
-            // panel leaves the view clipped with dead space beside it. The
-            // panel owns this geometry, so push it once the view exists.
-            processor.embed_set_bounds(0, 0, rect.width, rect.height);
-            Self::trace_event("perform_sync: embed ok");
+            };
+            let granted = Self::grant_size(&processor, rect);
+            Self::trace_event(&format!(
+                "perform_sync: view attached preferred={}x{} granted={}x{}",
+                preferred.0, preferred.1, granted.0, granted.1
+            ));
             self.content = Some(content);
             self.last_rect = Some(rect);
+            self.pending_view_resize = None;
             self.attached = Some((key, processor));
             self.status = AraPanelStatus::Attached;
             cx.notify();
@@ -314,15 +324,34 @@ impl AraEditorHost {
             if let Some(content) = self.content.as_ref() {
                 content.set_bounds(rect);
             }
-            processor.embed_set_bounds(0, 0, rect.width, rect.height);
+            Self::grant_size(&processor, rect);
             self.last_rect = Some(rect);
+            self.pending_view_resize = None;
+        } else if let Some((request_w, request_h)) = self.pending_view_resize.take() {
+            // The plug-in asked to change size. A docked panel has no size of
+            // its own to give, so it is answered with the region it already
+            // has: the view relays out inside it instead of the window moving.
+            let granted = Self::grant_size(&processor, rect);
+            Self::trace_event(&format!(
+                "perform_sync: resize request {request_w}x{request_h} answered with {}x{}",
+                granted.0, granted.1
+            ));
         }
-        // Cheap poll: tracks the studio window moving on screen.
-        processor.embed_refresh();
         if self.status != AraPanelStatus::Attached {
             self.status = AraPanelStatus::Attached;
             cx.notify();
         }
+    }
+
+    /// Tells the view the size the panel is actually giving it.
+    ///
+    /// Run through the VST3 size contract first: a resizable view takes the
+    /// region as-is, a fixed one keeps its own size and is simply clipped by
+    /// the panel rather than being told a size it cannot honour.
+    fn grant_size(processor: &DirectAudio::Vst3RuntimeProcessor, rect: ContentRect) -> (i32, i32) {
+        let (width, height) = processor.view_constrain(rect.width, rect.height);
+        processor.view_set_size(width, height);
+        (width, height)
     }
 }
 
@@ -374,8 +403,17 @@ impl Render for AraEditorHost {
             self.attached.is_some(),
             self.status
         ));
+        // A plug-in can ask to resize at any moment. Taking the request here is
+        // one atomic exchange on the bridge — no plug-in call, no window work —
+        // and the answer goes out on the deferred tick with everything else.
+        if self.pending_view_resize.is_none() {
+            if let Some((_, processor)) = self.attached.as_ref() {
+                self.pending_view_resize = processor.view_take_resize_request();
+            }
+        }
         match self.pending_rect {
             Some(rect) if self.sync_needed(&key, rect) => self.schedule_sync(cx),
+            Some(_) if self.pending_view_resize.is_some() => self.schedule_sync(cx),
             // A collapsed dock is a state, not a failure; the view comes back
             // when the panel is dragged open again.
             None if self.attached.is_some() => self.schedule_sync(cx),

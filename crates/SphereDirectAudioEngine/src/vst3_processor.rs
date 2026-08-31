@@ -256,6 +256,43 @@ pub(crate) mod ffi {
         ) -> *mut SphereDauxVst3Processor;
         pub(crate) fn sphere_daux_vst3_activate(processor: *mut SphereDauxVst3Processor) -> i32;
         pub(crate) fn sphere_daux_vst3_stop_processing(processor: *mut SphereDauxVst3Processor);
+        // Rust-owned view host: the caller owns the window, these drive only
+        // the plug-in's `IPlugView`.
+        pub(crate) fn sphere_daux_vst3_view_attach(
+            processor: *mut SphereDauxVst3Processor,
+            parent_hwnd: u64,
+            width: i32,
+            height: i32,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_detach(processor: *mut SphereDauxVst3Processor);
+        pub(crate) fn sphere_daux_vst3_view_is_attached(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_set_size(
+            processor: *mut SphereDauxVst3Processor,
+            width: i32,
+            height: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_get_size(
+            processor: *mut SphereDauxVst3Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_can_resize(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_constrain(
+            processor: *mut SphereDauxVst3Processor,
+            io_width: *mut i32,
+            io_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_view_take_resize_request(
+            processor: *mut SphereDauxVst3Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
         pub(crate) fn sphere_daux_vst3_ara_is_supported(
             processor: *mut SphereDauxVst3Processor,
         ) -> i32;
@@ -1113,6 +1150,120 @@ impl Vst3RuntimeProcessor {
         }
         // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
         unsafe { ffi::sphere_daux_vst3_stop_processing(self.inner.raw) };
+    }
+
+    /// Attaches the plug-in's editor view to a window **the caller owns**.
+    ///
+    /// This is the host-owned path: nothing in the bridge creates, moves,
+    /// resizes, or destroys a window, so the caller stays the single owner of
+    /// the editor's geometry. `region` is what the host has available; the size
+    /// that comes back is the plug-in's own, which the host lays out around.
+    /// Re-attaching to the same window just re-reports that size.
+    ///
+    /// Main/UI thread only, and `parent` must stay alive until
+    /// [`Self::view_detach`].
+    pub fn view_attach(&self, parent: u64, region: (i32, i32)) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return None;
+        }
+        let mut width = region.0;
+        let mut height = region.1;
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is;
+        // both out-pointers address locals that outlive the call.
+        let ok = unsafe {
+            ffi::sphere_daux_vst3_view_attach(
+                self.inner.raw,
+                parent,
+                region.0,
+                region.1,
+                &mut width,
+                &mut height,
+            )
+        };
+        (ok != 0).then_some((width, height))
+    }
+
+    /// Releases the editor view. The caller's window is left untouched.
+    pub fn view_detach(&self) {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_view_detach(self.inner.raw) };
+    }
+
+    /// Whether a view is attached through the host-owned path.
+    pub fn view_is_attached(&self) -> bool {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return false;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_view_is_attached(self.inner.raw) != 0 }
+    }
+
+    /// Tells the view the size the host has given it.
+    ///
+    /// Call *after* the host surface has actually been resized: this is the
+    /// plug-in's only report of what it really got.
+    pub fn view_set_size(&self, width: i32, height: i32) -> bool {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return false;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_view_set_size(self.inner.raw, width, height) != 0 }
+    }
+
+    /// The view's current content size.
+    pub fn view_size(&self) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        // SAFETY: `raw` is live and both out-pointers address locals.
+        let ok =
+            unsafe { ffi::sphere_daux_vst3_view_get_size(self.inner.raw, &mut width, &mut height) };
+        (ok != 0).then_some((width, height))
+    }
+
+    /// Whether the view accepts host-driven resizing.
+    pub fn view_can_resize(&self) -> bool {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return false;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_view_can_resize(self.inner.raw) != 0 }
+    }
+
+    /// Applies the VST3 size contract to a proposed content size: a fixed view
+    /// snaps to its own size, a resizable one goes through its constraint check.
+    pub fn view_constrain(&self, width: i32, height: i32) -> (i32, i32) {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return (width, height);
+        }
+        let mut width = width;
+        let mut height = height;
+        // SAFETY: `raw` is live and both pointers address locals.
+        unsafe { ffi::sphere_daux_vst3_view_constrain(self.inner.raw, &mut width, &mut height) };
+        (width, height)
+    }
+
+    /// Reads and clears the plug-in's pending resize request, if any.
+    ///
+    /// The bridge records the request rather than acting on it, so the host
+    /// decides what it can grant, resizes its own surface, and reports the
+    /// result back through [`Self::view_set_size`].
+    pub fn view_take_resize_request(&self) -> Option<(i32, i32)> {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return None;
+        }
+        let mut width = 0;
+        let mut height = 0;
+        // SAFETY: `raw` is live and both out-pointers address locals.
+        let pending = unsafe {
+            ffi::sphere_daux_vst3_view_take_resize_request(self.inner.raw, &mut width, &mut height)
+        };
+        (pending != 0).then_some((width, height))
     }
 
     /// Whether this instance's module registers an ARA main factory for the

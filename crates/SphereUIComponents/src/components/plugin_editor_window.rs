@@ -211,6 +211,12 @@ pub struct PluginEditorWindow {
     processor: Option<DirectAudio::Vst3RuntimeProcessor>,
     /// Editor handle from the embed attach; `None` until first attach.
     embed_handle: Option<u64>,
+    /// The window the plug-in's view is parked in, on the host-owned path.
+    ///
+    /// GPUI owns it: this window creates it, positions it under the header,
+    /// destroys it, and is the only thing that resizes it. The bridge is handed
+    /// the handle and does nothing to it but `attached()` / `removed()`.
+    view_content: Option<ContentChildHwnd>,
     status: PluginEditorStatus,
     /// Number of waiting ticks elapsed (reset on retry).
     wait_ticks: u32,
@@ -299,6 +305,7 @@ impl PluginEditorWindow {
             display_name,
             processor,
             embed_handle: None,
+            view_content: None,
             status,
             wait_ticks: 0,
             tick_scheduled: false,
@@ -563,44 +570,65 @@ impl PluginEditorWindow {
             self.note_waiting("host bounds not ready before attach", cx);
             return;
         }
-        // Attach the editor view of the EXISTING runtime instance into our GPUI
-        // window — never create a new VST3 component/controller for the editor.
-        match processor.embed_editor(parent, region.x, region.y, region.width, region.height) {
-            Some(handle) => {
-                self.embed_handle = Some(handle);
-                // Record the single presentation mode the host selected so we
-                // never drive both a child-HWND embed and a tool-window overlay.
-                let mode = presentation_mode_from_host_kind(processor.embed_host_kind());
-                let detached = mode == PluginEditorPresentationMode::DetachedNativeWindow;
-                if detached {
-                    // The plug-in lives in its own standalone OS window; the GPUI
-                    // shell must NOT resize to the plug-in size or push host
-                    // bounds (those are no-ops for detached anyway). Leave the
-                    // small shell as a control/close surface.
-                    self.last_region = None;
-                } else {
-                    let applied_region = self.apply_native_auto_size(window).unwrap_or(region);
-                    self.last_region = Some((
-                        applied_region.x,
-                        applied_region.y,
-                        applied_region.width,
-                        applied_region.height,
-                    ));
-                    // Re-apply bounds + z-order after attach (plugins may resize the host).
-                    processor.embed_set_bounds(
-                        applied_region.x,
-                        applied_region.y,
-                        applied_region.width,
-                        applied_region.height,
+        // GPUI owns the window the view goes into. The bridge is handed the
+        // handle and does nothing to it but attach and detach the plug-in's
+        // view — there is no C++ shell, titlebar, or window procedure on this
+        // path, so this window is the single owner of the editor's geometry.
+        let content_rect = ContentRect {
+            x: region.x,
+            y: region.y,
+            width: region.width.max(1),
+            height: region.height.max(1),
+        };
+        let content = match self.view_content.as_ref() {
+            Some(content) if content.is_valid() => {
+                content.set_bounds(content_rect);
+                None
+            }
+            _ => match ContentChildHwnd::create(parent, content_rect) {
+                Some(content) => Some(content),
+                None => {
+                    self.status = PluginEditorStatus::Failed(
+                        "could not create the editor surface".to_string(),
                     );
-                    processor.embed_refresh();
+                    cx.notify();
+                    return;
                 }
+            },
+        };
+        if let Some(content) = content {
+            self.view_content = Some(content);
+        }
+        let content_hwnd = self
+            .view_content
+            .as_ref()
+            .map(ContentChildHwnd::hwnd)
+            .unwrap_or(0);
+        // Attach the editor view of the EXISTING runtime instance — never create
+        // a new VST3 component/controller for the editor.
+        match processor.view_attach(content_hwnd, (region.width, region.height)) {
+            Some((preferred_w, preferred_h)) => {
+                self.embed_handle = Some(content_hwnd);
+                // One presentation mode remains on this path: the view lives in
+                // a child window this process owns. The tool-window and
+                // detached-native-window shells were the C++ host's, and it is
+                // no longer in the loop.
+                let mode = PluginEditorPresentationMode::ChildHwndEmbed;
+                self.editor_content_size = Some((preferred_w, preferred_h));
+                let applied_region = self.apply_native_auto_size(window).unwrap_or(region);
+                self.last_region = Some((
+                    applied_region.x,
+                    applied_region.y,
+                    applied_region.width,
+                    applied_region.height,
+                ));
+                self.grant_view_size(applied_region);
                 let visible = processor.embed_has_visible_ui();
                 if visible {
                     self.status = PluginEditorStatus::Attached(mode);
                     if plugin_view_debug() {
                         eprintln!(
-                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} visible=immediate (reused runtime instance)",
+                            "[plugin-view] attach ok editor_id={} content=0x{content_hwnd:x} parent=0x{parent:x} mode={mode:?} visible=immediate (reused runtime instance)",
                             self.editor_id()
                         );
                     }
@@ -615,7 +643,7 @@ impl PluginEditorWindow {
                     };
                     if plugin_view_debug() {
                         eprintln!(
-                            "[plugin-view] attach ok editor_id={} handle=0x{handle:x} parent=0x{parent:x} mode={mode:?} visible=deferred (probing ready)",
+                            "[plugin-view] attach ok editor_id={} content=0x{content_hwnd:x} parent=0x{parent:x} mode={mode:?} visible=deferred (probing ready)",
                             self.editor_id()
                         );
                     }
@@ -645,8 +673,34 @@ impl PluginEditorWindow {
         cx.notify();
     }
 
+    /// Tells the view the size this window is actually giving it, and moves the
+    /// child window it lives in to match.
+    ///
+    /// The plug-in never learns a size the window did not apply: the region is
+    /// run through the VST3 size contract first, so a fixed-size editor keeps
+    /// its own size and a resizable one takes what it is offered.
+    fn grant_view_size(&mut self, region: EmbedRegion) {
+        let Some(processor) = self.processor.as_ref() else {
+            return;
+        };
+        if let Some(content) = self.view_content.as_ref() {
+            content.set_bounds(ContentRect {
+                x: region.x,
+                y: region.y,
+                width: region.width.max(1),
+                height: region.height.max(1),
+            });
+        }
+        let (width, height) = processor.view_constrain(region.width, region.height);
+        processor.view_set_size(width, height);
+    }
+
     fn apply_native_auto_size(&mut self, window: &mut Window) -> Option<EmbedRegion> {
-        let (content_w, content_h) = self.processor.as_ref()?.embed_content_size()?;
+        let (content_w, content_h) = self
+            .processor
+            .as_ref()?
+            .view_size()
+            .or(self.editor_content_size)?;
         self.editor_content_size = Some((content_w, content_h));
 
         let scale = window.scale_factor().max(0.5);
@@ -674,9 +728,12 @@ impl PluginEditorWindow {
     fn retry(&mut self, cx: &mut Context<Self>) {
         if self.embed_handle.take().is_some() {
             // Detach the editor view only — the runtime processor keeps running.
+            // Order matters: the plug-in lets go of the child window, and only
+            // then is the child destroyed.
             if let Some(processor) = self.processor.as_ref() {
-                processor.embed_detach();
+                processor.view_detach();
             }
+            self.view_content = None;
         }
         self.status = PluginEditorStatus::Opening;
         self.wait_ticks = 0;
@@ -736,14 +793,9 @@ impl PluginEditorWindow {
             cx.notify();
             return;
         };
-        // Extra refresh nudges any pending message queue and re-applies bounds.
-        processor.embed_refresh();
-        // Quirked CEF/WebView editors benefit
-        // from a second pump on each probe step — Chromium often delivers its
-        // first child window during a later message dispatch.
-        if self.quirk.extra_message_pump {
-            processor.embed_refresh();
-        }
+        // Nothing to nudge: the view is a child of a window this process owns
+        // and moves with it. The probe is now purely "has the plug-in put
+        // anything on screen yet", which is the only question it ever asked.
         let visible = processor.embed_has_visible_ui();
         let is_last = probe_index as usize + 1 >= READY_PROBE_DELAYS_MS.len();
         if plugin_view_debug() {
@@ -764,8 +816,9 @@ impl PluginEditorWindow {
         if is_last {
             // Cap reached and still blank — detach + show fallback panel.
             if self.embed_handle.take().is_some() {
-                processor.embed_detach();
+                processor.view_detach();
             }
+            self.view_content = None;
             let msg = format!(
                 "Editor attached but no visible WebView/editor window appeared \
                  after {} ms. The plug-in may host a Chromium/CEF view that did \
@@ -792,19 +845,23 @@ impl PluginEditorWindow {
         ) {
             return;
         }
-        let Some(processor) = self.processor.as_ref() else {
+        // Cloned, not borrowed: this window resizes itself and its child in
+        // response to what the plug-in reports, and both need `&mut self`.
+        let Some(processor) = self.processor.clone() else {
             return;
         };
         if self.embed_handle.is_none() || !processor.embed_is_valid() {
             return;
         }
-        // Detached: the plug-in's standalone window owns its own size/position.
-        // Never resize the GPUI shell to it or push host bounds.
-        if processor.embed_host_kind() == 2 {
-            return;
+        // A plug-in that wants to change size asks; it does not act. The request
+        // is recorded by the bridge and answered here, where this window is free
+        // to resize itself first and only then tell the view what it got.
+        if let Some(requested) = processor.view_take_resize_request() {
+            self.editor_content_size = Some(requested);
         }
-        if let Some(plugin_size) = processor.embed_content_size() {
-            if self.editor_content_size != Some(plugin_size) {
+        if let Some(plugin_size) = self.editor_content_size {
+            if self.host_preferred_size != Some(plugin_size) {
+                self.host_preferred_size = Some(plugin_size);
                 self.editor_content_size = Some(plugin_size);
                 let scale = window.scale_factor().max(0.5);
                 let shell_w = (plugin_size.0 as f32 / scale).max(EDITOR_WINDOW_MIN_WIDTH);
@@ -840,14 +897,12 @@ impl PluginEditorWindow {
                     self.editor_id()
                 );
             }
-            processor.embed_set_bounds(region.x, region.y, region.width, region.height);
+            self.grant_view_size(region);
         }
-        // Cheap per-frame poll so the overlay still tracks a *parent window move*
-        // (screen coords change while our client-relative region does not). The
-        // C++ side compares the recomputed screen rect against the last applied
-        // one and no-ops when unchanged, so idle frames do no SetWindowPos /
-        // onSize / raise work — no flicker, no resize spam.
-        processor.embed_refresh();
+        // Nothing per-frame beyond this point. The view is a child of a window
+        // this process owns, so a parent window move carries it along with no
+        // work at all — where the C++ shell had to recompute a screen rect
+        // every frame to stay glued to the host.
     }
 
     // --- Host-process editor path (gated; in-process path above is untouched) ---
@@ -1337,8 +1392,11 @@ impl Drop for PluginEditorWindow {
             // Detach the editor view + destroy the host window. The runtime
             // processor (and audio) keep running — only insert removal destroys it.
             if let Some(processor) = self.processor.as_ref() {
-                processor.embed_detach();
+                processor.view_detach();
             }
+            // The child window goes after the view has let go of it, which the
+            // field order in this struct does not guarantee on its own.
+            self.view_content = None;
             if plugin_view_debug() {
                 eprintln!(
                     "[plugin-view] close editor_id={} (drop → detach view only, processor kept)",

@@ -102,6 +102,10 @@ struct SphereDauxVst3Processor;
 // IPlugFrame implementation — defined in editorplatform/windows/editor_embed.cpp.
 // Forward-declared so the processor can hold a raw pointer to its editor frame.
 class PluginEditorFrame;
+// IPlugFrame for the Rust-owned view host. Separate from `PluginEditorFrame`
+// because it owns no window: a resize request is recorded for the host to read
+// and act on, never applied here.
+class HostViewFrame;
 #endif
 #if defined(__APPLE__)
 class MacPluginEditorFrame;
@@ -489,6 +493,21 @@ struct SphereDauxVst3Processor {
   HMODULE plugin_browser_loader =
       nullptr;                         // optional verify-load (WebView2 only)
   int plugin_browser_runtime_kind = 0; // DauxEditorRuntimeKind
+  // ── Rust-owned view host ─────────────────────────────────────────────────
+  //
+  // The window belongs to the caller — a GPUI-owned child HWND — and this side
+  // only drives `IPlugView`. Deliberately kept apart from the `embed_*` state
+  // above: nothing on this path may create, move, resize, or destroy a window,
+  // so there is no second owner of the editor's geometry and no C++ window
+  // procedure in the loop.
+  HWND view_host_parent{nullptr};
+  bool view_host_attached{false};
+  HostViewFrame *view_host_frame{nullptr};
+  // `IPlugFrame::resizeView` lands here instead of moving anything. The host
+  // polls it, resizes its own surface, and calls back with the size it granted.
+  std::atomic<bool> view_host_resize_pending{false};
+  int view_host_resize_w{0};
+  int view_host_resize_h{0};
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
   std::atomic<bool> processor_valid{true};

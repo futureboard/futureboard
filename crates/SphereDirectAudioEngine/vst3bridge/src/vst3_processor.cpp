@@ -4246,6 +4246,407 @@ sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor *processor) {
 #endif
 }
 
+// ── Rust-owned view host ─────────────────────────────────────────────────────
+//
+// Everything above this line creates windows. Nothing below it does.
+//
+// The host — GPUI — owns the window a plug-in editor lives in: it creates the
+// child HWND, positions it, paints the surround, decides when it goes away, and
+// is the only thing that resizes it. This side is reduced to the part of the
+// VST3 contract that genuinely has to be in C++: create the view, hand it a
+// frame, attach it to the HWND it was given, pass sizes both ways, and let it
+// go. There is no shell, no titlebar, no content window and no window procedure
+// on this path, which is what makes the host the single owner of the editor's
+// geometry.
+//
+// `IPlugFrame::resizeView` is the one call that would otherwise need a window
+// here. It is recorded instead: the host polls the request, resizes its own
+// surface to whatever it can give, and reports back through
+// `sphere_daux_vst3_view_set_size`. A plug-in is never told a size the host did
+// not actually apply.
+#ifdef _WIN32
+// Not in an anonymous namespace: the processor struct forward-declares
+// `HostViewFrame` so it can hold a pointer to one, and a namespaced class of the
+// same name is a different type to that declaration.
+
+/// Smallest and largest content size this host will hand a plug-in.
+constexpr int kViewHostMinSide = 64;
+constexpr int kViewHostMaxSide = 8192;
+
+/// `IPlugFrame` that records resize requests instead of acting on them.
+class HostViewFrame final : public Steinberg::IPlugFrame {
+public:
+  explicit HostViewFrame(SphereDauxVst3Processor *owner) : owner_(owner) {}
+
+  Steinberg::tresult PLUGIN_API
+  resizeView(Steinberg::IPlugView *view,
+             Steinberg::ViewRect *newSize) override {
+    if (!owner_ || !view || !newSize || view != owner_->editor_view.get()) {
+      return Steinberg::kResultFalse;
+    }
+    const int width = daux_view_rect_width(*newSize);
+    const int height = daux_view_rect_height(*newSize);
+    if (width < kViewHostMinSide || height < kViewHostMinSide ||
+        width > kViewHostMaxSide || height > kViewHostMaxSide) {
+      return Steinberg::kResultFalse;
+    }
+    owner_->view_host_resize_w = width;
+    owner_->view_host_resize_h = height;
+    owner_->view_host_resize_pending.store(true, std::memory_order_release);
+    if (daux_vst3_editor_debug()) {
+      std::fprintf(stderr, "[view-host] resizeView requested=%dx%d\n", width,
+                   height);
+    }
+    // Accepted as a *request*. The plug-in learns the size that was really
+    // granted from the onSize the host sends once it has resized.
+    return Steinberg::kResultTrue;
+  }
+
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
+    if (!obj) {
+      return Steinberg::kInvalidArgument;
+    }
+    if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::IPlugFrame::iid) ||
+        Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+      *obj = static_cast<Steinberg::IPlugFrame *>(this);
+      addRef();
+      return Steinberg::kResultTrue;
+    }
+    *obj = nullptr;
+    return Steinberg::kNoInterface;
+  }
+
+  Steinberg::uint32 PLUGIN_API addRef() override {
+    return static_cast<Steinberg::uint32>(++refs_);
+  }
+
+  Steinberg::uint32 PLUGIN_API release() override {
+    const auto remaining = --refs_;
+    if (remaining == 0) {
+      delete this;
+      return 0;
+    }
+    return static_cast<Steinberg::uint32>(remaining);
+  }
+
+private:
+  SphereDauxVst3Processor *owner_{nullptr};
+  std::atomic<int> refs_{1};
+};
+
+/// Clamps a content size into the range this host is willing to hand a plug-in.
+static void view_host_clamp(int *width, int *height) {
+  if (width) {
+    *width = std::clamp(*width, kViewHostMinSide, kViewHostMaxSide);
+  }
+  if (height) {
+    *height = std::clamp(*height, kViewHostMinSide, kViewHostMaxSide);
+  }
+}
+
+/// Releases the view and its frame. Touches no window: the parent belongs to
+/// the host, which decides on its own terms when it goes away.
+static void view_host_release(SphereDauxVst3Processor *processor, const char *reason) {
+  if (!processor) {
+    return;
+  }
+  if (processor->editor_view && processor->view_host_attached) {
+    // The SDK's order: clear the frame, then removed(). A view told to let go
+    // of its parent while a frame is being destroyed underneath it has
+    // somewhere to call back into that no longer exists.
+    processor->editor_view->setFrame(nullptr);
+    processor->editor_view->removed();
+  }
+  if (processor->view_host_frame) {
+    processor->view_host_frame->release();
+    processor->view_host_frame = nullptr;
+  }
+  processor->editor_view = nullptr;
+  processor->view_host_attached = false;
+  if (processor->editor_attach_hwnd == processor->view_host_parent) {
+    // Only clear the borrowed handle, never destroy it.
+    processor->editor_attach_hwnd = nullptr;
+  }
+  processor->view_host_parent = nullptr;
+  processor->view_host_resize_pending.store(false, std::memory_order_release);
+  processor->editor_attached = false;
+  daux_plugin_browser_runtime_release(processor);
+  std::fprintf(stderr, "[view-host] released reason=%s\n",
+               reason ? reason : "unknown");
+}
+
+extern "C" int sphere_daux_vst3_view_attach(SphereDauxVst3Processor *processor,
+                                            unsigned long long parent_hwnd,
+                                            int width, int height,
+                                            int *out_width, int *out_height) {
+  if (!processor || !processor->controller) {
+    set_last_error("view host: processor/controller missing");
+    return 0;
+  }
+  HWND parent =
+      reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  if (!parent || !IsWindow(parent)) {
+    set_last_error("view host: invalid parent HWND");
+    return 0;
+  }
+  // Chromium- and WebView-backed editors never finish initializing without an
+  // STA on the thread that owns the parent window, and a view attached from a
+  // DPI-unaware thread reports the wrong size. Both are idempotent.
+  daux_embed_ensure_com_initialized();
+  daux_ensure_thread_dpi_awareness();
+
+  // Re-attaching to the same window is the host asking for the size again, not
+  // a request to tear a live view down and build another.
+  if (processor->view_host_attached && processor->view_host_parent == parent &&
+      processor->editor_view) {
+    if (out_width || out_height) {
+      Steinberg::ViewRect current{};
+      if (processor->editor_view->getSize(&current) == Steinberg::kResultTrue) {
+        if (out_width) {
+          *out_width = daux_view_rect_width(current);
+        }
+        if (out_height) {
+          *out_height = daux_view_rect_height(current);
+        }
+      }
+    }
+    return 1;
+  }
+  if (processor->view_host_attached) {
+    view_host_release(processor, "reattach-to-new-parent");
+  }
+
+  std::fprintf(stderr,
+               "[view-host] attach begin parent=0x%p request=%dx%d tid=%lu\n",
+               static_cast<void *>(parent), width, height,
+               GetCurrentThreadId());
+
+  if (!processor->editor_view) {
+    if (!daux_plugin_browser_runtime_prepare(processor)) {
+      set_last_error("view host: plug-in browser runtime failed to start");
+      return 0;
+    }
+    processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
+        processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
+  }
+  if (!processor->editor_view) {
+    daux_plugin_browser_runtime_release(processor);
+    set_last_error("view host: controller did not create a view");
+    return 0;
+  }
+  if (processor->editor_view->isPlatformTypeSupported(
+          Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
+    processor->editor_view = nullptr;
+    daux_plugin_browser_runtime_release(processor);
+    set_last_error("view host: view does not support HWND");
+    return 0;
+  }
+
+  daux_editor_set_content_scale(processor, parent, "view_host.before_getSize");
+
+  // getSize is the source of truth for the content size. The host's requested
+  // region is only a starting point: a plug-in with a fixed editor gets the
+  // size it asks for, and the host lays out around whatever comes back.
+  int content_w = width > 0 ? width : 0;
+  int content_h = height > 0 ? height : 0;
+  Steinberg::ViewRect preferred{};
+  if (processor->editor_view->getSize(&preferred) == Steinberg::kResultTrue) {
+    const int preferred_w = daux_view_rect_width(preferred);
+    const int preferred_h = daux_view_rect_height(preferred);
+    if (preferred_w > 0 && preferred_h > 0) {
+      content_w = preferred_w;
+      content_h = preferred_h;
+    }
+  }
+  if (content_w <= 0 || content_h <= 0) {
+    content_w = 900;
+    content_h = 600;
+  }
+  view_host_clamp(&content_w, &content_h);
+  daux_constrain_content_size(processor, &content_w, &content_h);
+  view_host_clamp(&content_w, &content_h);
+
+  // The frame goes on before attached(): browser-backed editors bootstrap
+  // through it, and a view that resizes itself during attach has nowhere to
+  // report that without one.
+  processor->view_host_frame = new HostViewFrame(processor);
+  const auto frame_res =
+      processor->editor_view->setFrame(processor->view_host_frame);
+  if (frame_res != Steinberg::kResultTrue &&
+      frame_res != Steinberg::kResultOk) {
+    std::fprintf(stderr, "[view-host] setFrame rejected result=0x%x\n",
+                 static_cast<unsigned>(frame_res));
+  }
+
+  const auto attach_res = processor->editor_view->attached(
+      reinterpret_cast<void *>(parent), Steinberg::kPlatformTypeHWND);
+  if (attach_res != Steinberg::kResultTrue &&
+      attach_res != Steinberg::kResultOk) {
+    std::fprintf(stderr, "[view-host] attach failed result=0x%x\n",
+                 static_cast<unsigned>(attach_res));
+    processor->editor_view->setFrame(nullptr);
+    processor->view_host_frame->release();
+    processor->view_host_frame = nullptr;
+    processor->editor_view = nullptr;
+    daux_plugin_browser_runtime_release(processor);
+    set_last_error("view host: IPlugView::attached failed");
+    return 0;
+  }
+
+  processor->view_host_parent = parent;
+  processor->view_host_attached = true;
+  processor->editor_attached = true;
+  // Published so the shared "is the editor really showing anything" and focus
+  // helpers keep working on this path. It is only ever *read* here: the window
+  // belongs to the host, and `embed_mode` stays false, which is what keeps the
+  // legacy teardown from ever destroying it.
+  processor->editor_attach_hwnd = parent;
+  processor->view_host_resize_pending.store(false, std::memory_order_release);
+
+  // Some editors settle on their real size only inside attached().
+  Steinberg::ViewRect settled{};
+  if (processor->editor_view->getSize(&settled) == Steinberg::kResultTrue) {
+    const int settled_w = daux_view_rect_width(settled);
+    const int settled_h = daux_view_rect_height(settled);
+    if (settled_w > 0 && settled_h > 0) {
+      content_w = settled_w;
+      content_h = settled_h;
+      view_host_clamp(&content_w, &content_h);
+    }
+  }
+
+  if (out_width) {
+    *out_width = content_w;
+  }
+  if (out_height) {
+    *out_height = content_h;
+  }
+  std::fprintf(stderr, "[view-host] attached parent=0x%p content=%dx%d\n",
+               static_cast<void *>(parent), content_w, content_h);
+  return 1;
+}
+
+extern "C" void
+sphere_daux_vst3_view_detach(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->view_host_attached) {
+    return;
+  }
+  view_host_release(processor, "host-detach");
+}
+
+extern "C" int
+sphere_daux_vst3_view_is_attached(SphereDauxVst3Processor *processor) {
+  return (processor && processor->view_host_attached && processor->editor_view)
+             ? 1
+             : 0;
+}
+
+extern "C" int
+sphere_daux_vst3_view_set_size(SphereDauxVst3Processor *processor, int width,
+                               int height) {
+  if (!processor || !processor->view_host_attached || !processor->editor_view) {
+    return 0;
+  }
+  if (width <= 0 || height <= 0) {
+    return 0;
+  }
+  view_host_clamp(&width, &height);
+  Steinberg::ViewRect rect{};
+  rect.left = 0;
+  rect.top = 0;
+  rect.right = width;
+  rect.bottom = height;
+  const auto res = processor->editor_view->onSize(&rect);
+  return (res == Steinberg::kResultTrue || res == Steinberg::kResultOk) ? 1 : 0;
+}
+
+extern "C" int
+sphere_daux_vst3_view_get_size(SphereDauxVst3Processor *processor,
+                               int *out_width, int *out_height) {
+  if (!processor || !processor->editor_view || !out_width || !out_height) {
+    return 0;
+  }
+  Steinberg::ViewRect rect{};
+  if (processor->editor_view->getSize(&rect) != Steinberg::kResultTrue) {
+    return 0;
+  }
+  const int width = daux_view_rect_width(rect);
+  const int height = daux_view_rect_height(rect);
+  if (width <= 0 || height <= 0) {
+    return 0;
+  }
+  *out_width = width;
+  *out_height = height;
+  return 1;
+}
+
+extern "C" int
+sphere_daux_vst3_view_can_resize(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->editor_view) {
+    return 0;
+  }
+  return processor->editor_view->canResize() == Steinberg::kResultTrue ? 1 : 0;
+}
+
+extern "C" int
+sphere_daux_vst3_view_constrain(SphereDauxVst3Processor *processor,
+                                int *io_width, int *io_height) {
+  if (!processor || !io_width || !io_height) {
+    return 0;
+  }
+  view_host_clamp(io_width, io_height);
+  const bool ok = daux_constrain_content_size(processor, io_width, io_height);
+  view_host_clamp(io_width, io_height);
+  return ok ? 1 : 0;
+}
+
+extern "C" int
+sphere_daux_vst3_view_take_resize_request(SphereDauxVst3Processor *processor,
+                                          int *out_width, int *out_height) {
+  if (!processor || !out_width || !out_height) {
+    return 0;
+  }
+  if (!processor->view_host_resize_pending.exchange(
+          false, std::memory_order_acq_rel)) {
+    return 0;
+  }
+  *out_width = processor->view_host_resize_w;
+  *out_height = processor->view_host_resize_h;
+  return 1;
+}
+#else
+extern "C" int sphere_daux_vst3_view_attach(SphereDauxVst3Processor *,
+                                            unsigned long long, int, int, int *,
+                                            int *) {
+  return 0;
+}
+extern "C" void sphere_daux_vst3_view_detach(SphereDauxVst3Processor *) {}
+extern "C" int sphere_daux_vst3_view_is_attached(SphereDauxVst3Processor *) {
+  return 0;
+}
+extern "C" int sphere_daux_vst3_view_set_size(SphereDauxVst3Processor *, int,
+                                              int) {
+  return 0;
+}
+extern "C" int sphere_daux_vst3_view_get_size(SphereDauxVst3Processor *, int *,
+                                              int *) {
+  return 0;
+}
+extern "C" int sphere_daux_vst3_view_can_resize(SphereDauxVst3Processor *) {
+  return 0;
+}
+extern "C" int sphere_daux_vst3_view_constrain(SphereDauxVst3Processor *, int *,
+                                               int *) {
+  return 0;
+}
+extern "C" int
+sphere_daux_vst3_view_take_resize_request(SphereDauxVst3Processor *, int *,
+                                          int *) {
+  return 0;
+}
+#endif
+
 extern "C" void
 sphere_daux_vst3_embed_detach(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32

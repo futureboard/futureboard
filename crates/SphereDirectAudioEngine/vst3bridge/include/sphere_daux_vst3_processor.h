@@ -194,6 +194,64 @@ sphere_daux_vst3_create_for_ara(const char *plugin_path, const char *class_id,
 SPHERE_DAUX_VST3_API int
 sphere_daux_vst3_activate(SphereDauxVst3Processor *processor);
 
+// ── Rust-owned view host ─────────────────────────────────────────────────────
+//
+// The host owns the window; these drive only `IPlugView`. Nothing on this path
+// creates, moves, resizes, or destroys a window, so the caller stays the single
+// owner of the editor's geometry. Main/UI thread only.
+
+/// Creates the plug-in's editor view and attaches it to `parent_hwnd`, which
+/// the caller owns and must keep alive until `sphere_daux_vst3_view_detach`.
+///
+/// `width`/`height` are the region the host has available; the size actually
+/// reported through `out_width`/`out_height` is the plug-in's own, which the
+/// host is expected to lay out around. Re-attaching to the same window is a
+/// no-op that re-reports the size. Returns 1 on success.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_attach(SphereDauxVst3Processor *processor,
+                             unsigned long long parent_hwnd, int width,
+                             int height, int *out_width, int *out_height);
+
+/// Releases the view (`IPlugView::removed`) and its frame. The parent window is
+/// untouched. Safe when nothing is attached.
+SPHERE_DAUX_VST3_API void
+sphere_daux_vst3_view_detach(SphereDauxVst3Processor *processor);
+
+/// 1 while a view is attached through the host-owned path.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_is_attached(SphereDauxVst3Processor *processor);
+
+/// Tells the view the size the host has given it (`IPlugView::onSize`). Call
+/// after the host surface has actually been resized, never before.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_set_size(SphereDauxVst3Processor *processor, int width,
+                               int height);
+
+/// The view's current content size (`IPlugView::getSize`).
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_get_size(SphereDauxVst3Processor *processor,
+                               int *out_width, int *out_height);
+
+/// 1 when the view accepts host-driven resizing (`IPlugView::canResize`).
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_can_resize(SphereDauxVst3Processor *processor);
+
+/// Applies the VST3 size contract to a proposed content size in place: a fixed
+/// view snaps to its own size, a resizable one goes through
+/// `checkSizeConstraint`.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_constrain(SphereDauxVst3Processor *processor,
+                                int *io_width, int *io_height);
+
+/// Reads and clears the plug-in's pending `resizeView` request, if any.
+///
+/// The request is recorded rather than acted on, so the host decides what it
+/// can grant, resizes its own surface, and reports the result back through
+/// `sphere_daux_vst3_view_set_size`.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_view_take_resize_request(SphereDauxVst3Processor *processor,
+                                          int *out_width, int *out_height);
+
 /// Takes the instance out of the processing state without destroying it:
 /// `setProcessing(false)` then `setActive(false)`.
 ///
