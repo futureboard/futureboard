@@ -761,6 +761,22 @@ pub struct RuntimeTrack {
     /// callback block size and mixed into `block_*`.
     pub soundfont_l: Vec<f32>,
     pub soundfont_r: Vec<f32>,
+    /// ARA playback renderers assigned to this track.
+    ///
+    /// Clips these renderers own are skipped by the clip loop: their audio comes
+    /// from the plug-in, which read the source samples out of band through the
+    /// ARA host callbacks. Resolved on the control thread and shipped inside the
+    /// `LoadProject` snapshot, so the callback only iterates.
+    pub ara_renderers: Vec<RuntimeAraRenderer>,
+    /// Scratch for ARA renderer output plus the silent input those renderers are
+    /// fed. Preallocated beside `soundfont_*` and mixed into `block_*`.
+    pub ara_l: Vec<f32>,
+    pub ara_r: Vec<f32>,
+    pub ara_silence: Vec<f32>,
+    /// The ARA renderers' share of `plugin_latency_samples`, tracked separately
+    /// so replacing the renderer set can subtract exactly what it added instead
+    /// of forcing a whole graph rebuild.
+    pub ara_latency_samples: u32,
     /// Per-block MIDI events for the instrument VST3 insert (Phase 2B).
     /// Cleared at the start of `schedule_midi_block`; no steady-path allocation.
     pub midi_block_events: Vec<Vst3MidiEvent>,
@@ -1208,6 +1224,28 @@ impl RuntimeTrackMeter {
 
 /// `RuntimeInsert::kind` resolved to a compact tag at build time so the render
 /// path never does per-block string compares (realtime rules).
+/// One ARA playback renderer bound to a track.
+///
+/// ARA does not change how a plug-in is processed — it changes where its audio
+/// comes from. The renderer is fed silence and produces the clip audio itself,
+/// having read the source samples out of band through the ARA host callbacks in
+/// `SphereAraHost`. The document graph and the binding live there; the engine
+/// only owns the instance and calls it once per block.
+///
+/// `Clone` shares the instance the same way `RuntimeInsert` does: a runtime
+/// graph is rebuilt by cloning, and the plug-in instance must survive that
+/// instead of being torn down and re-created (which would drop its ARA binding).
+#[derive(Debug, Clone)]
+pub struct RuntimeAraRenderer {
+    /// Insert/instance identity, matching the id the app bound in the session.
+    pub instance_id: String,
+    /// The in-process VST3 instance. Same handle type as a native insert; ARA
+    /// binding happened on the control thread before this snapshot was built.
+    pub processor: crate::vst3_processor::Vst3RuntimeProcessor,
+    /// Reported plug-in latency, folded into the track's PDC total at build.
+    pub latency_samples: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeInsertKind {
     /// In-process VST3 (`kind == "native-plugin"`).
@@ -1426,6 +1464,12 @@ pub struct RuntimeClip {
     pub reverse: bool,
     /// Clip-level mute — a muted clip is skipped entirely during render.
     pub muted: bool,
+    /// An ARA plug-in owns this clip's playback.
+    ///
+    /// The clip loop skips it: the plug-in already read the source samples out
+    /// of band through the ARA host callbacks and renders the result itself, so
+    /// mixing the file in here as well would double the audio.
+    pub ara_rendered: bool,
     /// Equal-power fade lengths in output samples, resolved from the snapshot's
     /// fade durations at build time. `0` means no fade. Clamped so
     /// `fade_in + fade_out <= duration_samples` (see `clip_fade_gain`).
@@ -1497,6 +1541,7 @@ impl Clone for RuntimeClip {
             processor: self.processor,
             reverse: self.reverse,
             muted: self.muted,
+            ara_rendered: self.ara_rendered,
             fade_in_samples: self.fade_in_samples,
             fade_out_samples: self.fade_out_samples,
             source: Arc::clone(&self.source),
@@ -1769,6 +1814,36 @@ impl RuntimeProject {
     /// lookup. Re-run whenever the sink map changes (LoadProject preserves the
     /// map across graph swaps; SetPluginBridgeSink installs/removes entries).
     /// Arc clones only — no allocation.
+    /// Replace one track's ARA playback renderers.
+    ///
+    /// Called from the callback's command drain, so it does no allocation: the
+    /// new list arrived fully built from the control thread and the old one goes
+    /// to the graveyard, because dropping the last handle to a bound ARA
+    /// instance destroys a C++ VST3 processor.
+    ///
+    /// PDC follows the renderer set here rather than waiting for the next graph
+    /// build, which is why the ARA share of the latency total is tracked apart
+    /// from the insert share.
+    pub fn set_ara_renderers(&mut self, track_id: &str, renderers: Vec<RuntimeAraRenderer>) {
+        let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) else {
+            crate::graveyard::retire_ara_renderers(renderers);
+            return;
+        };
+        let previous = std::mem::replace(&mut track.ara_renderers, renderers);
+        track.plugin_latency_samples = track
+            .plugin_latency_samples
+            .saturating_sub(track.ara_latency_samples);
+        track.ara_latency_samples = track
+            .ara_renderers
+            .iter()
+            .map(|renderer| renderer.latency_samples)
+            .sum();
+        track.plugin_latency_samples = track
+            .plugin_latency_samples
+            .saturating_add(track.ara_latency_samples);
+        crate::graveyard::retire_ara_renderers(previous);
+    }
+
     pub fn resolve_bridge_sinks(&mut self) {
         let sinks = &self.plugin_bridge_sinks;
         let min_scratch =
@@ -2462,6 +2537,11 @@ impl RuntimeProject {
                 recv_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 soundfont_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 soundfont_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                ara_renderers: Vec::new(),
+                ara_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                ara_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                ara_silence: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                ara_latency_samples: 0,
                 midi_block_events: Vec::with_capacity(256),
                 solfege_pitch_events: Vec::with_capacity(1024),
                 solfege_articulation_events: Vec::with_capacity(256),
@@ -4330,6 +4410,7 @@ mod stretch_runtime_tests {
             offset_seconds: 0.0,
             gain: 1.0,
             muted: false,
+            ara_rendered: false,
             fades: Some(EngineFadeSnapshot {
                 in_duration: 0.0,
                 out_duration: 0.0,
@@ -4891,6 +4972,7 @@ fn build_clip_runtime(
         duration_samples,
         offset_seconds: clip.offset_seconds.max(0.0),
         gain: clip.gain.clamp(0.0, 4.0),
+        ara_rendered: clip.ara_rendered,
         stretch,
         speed_ratio,
         source_read_rate,
@@ -5672,6 +5754,11 @@ mod midi_tests {
             recv_r: vec![0.0; 64],
             soundfont_l: vec![0.0; 64],
             soundfont_r: vec![0.0; 64],
+            ara_renderers: Vec::new(),
+            ara_l: vec![0.0; 64],
+            ara_r: vec![0.0; 64],
+            ara_silence: vec![0.0; 64],
+            ara_latency_samples: 0,
             midi_block_events: Vec::new(),
             solfege_pitch_events: Vec::new(),
             solfege_articulation_events: Vec::new(),

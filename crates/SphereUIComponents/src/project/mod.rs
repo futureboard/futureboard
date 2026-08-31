@@ -477,6 +477,9 @@ pub struct ProjectClip {
     /// as [`AudioClipStretchState::default`] (mode Off, ratio 1.0,
     /// preserve_pitch false) for older projects.
     pub stretch: AudioClipStretchState,
+    /// ARA plug-in bound to this clip (persisted v41+). `None` for older
+    /// projects and for clips no plug-in owns.
+    pub ara: Option<ClipAraBinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -828,6 +831,30 @@ pub struct FutureboardProject {
     pub output_routing_initialized: bool,
     /// v40+: fold state of the conductor lanes above the arrangement.
     pub global_lanes: ProjectGlobalLanes,
+    /// v41+: one saved ARA document per bound plug-in.
+    pub ara_documents: Vec<ProjectAraDocument>,
+}
+
+/// One ARA plug-in's saved document state, for one track.
+///
+/// ARA archives a whole document, not a region, so this is stored per plug-in
+/// instance rather than per clip: every ARA clip on a track shares that track's
+/// document. One instance per (plug-in, track) is also what the engine's
+/// per-track renderer model requires, since a renderer's output lands in exactly
+/// one track's buffer.
+#[derive(Debug, Clone)]
+pub struct ProjectAraDocument {
+    /// Catalog id of the plug-in that wrote this archive.
+    pub plugin_id: String,
+    /// Track whose ARA document this is.
+    pub track_id: String,
+    /// The plug-in's `documentArchiveID` at save time. A plug-in refuses an
+    /// archive whose id it does not recognise, so restoring without checking
+    /// this first would hand it bytes it cannot read.
+    pub archive_id: String,
+    /// Opaque plug-in bytes, stored raw and length-prefixed exactly like
+    /// [`PluginStateBlob::state_bytes`]. Never JSON, never base64.
+    pub data: Vec<u8>,
 }
 
 /// One persisted logical audio bus. Runtime-derived status is deliberately not
@@ -874,6 +901,7 @@ impl FutureboardProject {
             mixer: ProjectMixer::default(),
             assets: Vec::new(),
             global_lanes: ProjectGlobalLanes::default(),
+            ara_documents: Vec::new(),
         }
     }
 }
@@ -895,6 +923,7 @@ pub fn hex_to_rgba(hex: &str) -> gpui::Rgba {
 
 // ── From TimelineState ────────────────────────────────────────────────────────
 
+pub use crate::components::timeline::timeline_state::ClipAraBinding;
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, ClipType, InsertSlotState, TimelineMarkerState, TimelineRegionState,
     TimelineState, TrackType as TlTrackType,
@@ -1197,6 +1226,7 @@ impl From<&TimelineState> for FutureboardProject {
                             muted: c.muted,
                             source,
                             stretch: c.stretch.clone(),
+                            ara: c.ara.clone(),
                         }
                     })
                     .collect();
@@ -1852,6 +1882,7 @@ pub fn apply_to_timeline(
                         muted: pc.muted,
                         audio_import: crate::components::timeline::timeline_state::AudioImportState::default(),
                         stretch: pc.stretch.clone(),
+                        ara: pc.ara.clone(),
                     }
                 })
                 .collect();
@@ -2846,10 +2877,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v40"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v41"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 40);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 40);
+        assert_eq!(version, 41);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 41);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────

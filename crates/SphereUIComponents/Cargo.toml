@@ -62,6 +62,9 @@ sphere_directaudioengine.workspace = true
 sphere-audio-processor.workspace = true
 sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
+# ARA 2 host runtime. Real on Windows/macOS, a reporting stub elsewhere, so no
+# call site in this crate needs a `cfg`.
+sphere-ara-host.workspace = true
 # Built-in plugin editor hosting (feature `builtin-plugin-editor`).
 # Each plugin crate listed here is needed for its embedded editor asset table
 # and its string-id -> wire-index parameter table.

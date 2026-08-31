@@ -294,6 +294,7 @@ mod perf_tests {
                     PluginFormat::Vst3
                 },
                 category: cats[i % cats.len()].to_string(),
+                is_ara: false,
                 raw_category: Some("Fx|Analyzer".to_string()),
                 sub_categories: Some("Fx|Analyzer".to_string()),
                 kind: if i % 7 == 0 {

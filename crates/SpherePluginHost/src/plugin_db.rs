@@ -24,11 +24,11 @@ use crate::registry::{
     classify_kind, display_category, PluginFormat, PluginKind, PluginStatus, RegistryPlugin,
 };
 
-/// 1 → 2 added `plugins.sub_categories`. Migration is additive
-/// (`ALTER TABLE ADD COLUMN`) and read paths tolerate the column's absence, so a
-/// database written by an older build keeps loading and an older build keeps
-/// reading a database written by this one.
-const SCHEMA_VERSION: i32 = 2;
+/// 1 → 2 added `plugins.sub_categories`; 2 → 3 added `plugins.is_ara`. Every
+/// migration is additive (`ALTER TABLE ADD COLUMN`) and read paths tolerate the
+/// column's absence, so a database written by an older build keeps loading and
+/// an older build keeps reading a database written by this one.
+const SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginScanStatus {
@@ -89,6 +89,9 @@ pub struct PluginCatalogEntry {
     /// previously dropped, which made every cached row fall back to the
     /// normalized display string.
     pub sub_categories: Option<String>,
+    /// The plug-in registers an ARA main factory. Cached so the picker can offer
+    /// ARA without re-opening every module at startup.
+    pub is_ara: bool,
     pub path: PathBuf,
     pub class_id: Option<String>,
     pub bundle_id: Option<String>,
@@ -139,6 +142,7 @@ impl PluginCatalogEntry {
             class_id: self.class_id.clone(),
             version: self.version.clone(),
             sdk_metadata_loaded: self.scan_status.is_usable(),
+            is_ara: self.is_ara,
             preset_path: PathBuf::new(),
             scanned_at_ms: parse_iso8601_to_ms(self.last_scanned_at.as_deref()).unwrap_or(0),
             status,
@@ -195,6 +199,7 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
             },
             category,
             sub_categories: p.sub_categories.clone(),
+            is_ara: p.is_ara,
             path: p.path.clone(),
             class_id: p.class_id.clone(),
             bundle_id: None,
@@ -313,6 +318,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              vendor TEXT,
              category TEXT,
              sub_categories TEXT,
+             is_ara INTEGER NOT NULL DEFAULT 0,
              path TEXT NOT NULL,
              class_id TEXT,
              bundle_id TEXT,
@@ -362,6 +368,9 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "plugins", "sub_categories")? {
         conn.execute_batch("ALTER TABLE plugins ADD COLUMN sub_categories TEXT")?;
     }
+    if !has_column(conn, "plugins", "is_ara")? {
+        conn.execute_batch("ALTER TABLE plugins ADD COLUMN is_ara INTEGER NOT NULL DEFAULT 0")?;
+    }
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -397,11 +406,18 @@ pub fn read_all(conn: &Connection) -> rusqlite::Result<Vec<PluginCatalogEntry>> 
     } else {
         "NULL"
     };
+    // Same reasoning for `is_ara`: a pre-v3 database read-only reports every row
+    // as non-ARA until the next writable scan migrates and refills it.
+    let is_ara_expr = if has_column(conn, "plugins", "is_ara")? {
+        "is_ara"
+    } else {
+        "0"
+    };
     let mut stmt = conn.prepare(&format!(
         "SELECT id, format, name, vendor, category, path, class_id, bundle_id, version,
                 is_instrument, is_effect, scan_status, validation_level, disabled, favorite,
                 file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text,
-                {sub_categories_expr}
+                {sub_categories_expr}, {is_ara_expr}
            FROM plugins
           ORDER BY favorite DESC, vendor COLLATE NOCASE ASC, name COLLATE NOCASE ASC"
     ))?;
@@ -416,6 +432,7 @@ pub fn read_all(conn: &Connection) -> rusqlite::Result<Vec<PluginCatalogEntry>> 
             vendor: row.get(3)?,
             category: row.get(4)?,
             sub_categories: row.get(21)?,
+            is_ara: row.get::<_, i64>(22)? != 0,
             path: PathBuf::from(path),
             class_id: row.get(6)?,
             bundle_id: row.get(7)?,
@@ -519,9 +536,9 @@ fn upsert_within(
                 (id, format, name, vendor, category, path, class_id, bundle_id, version,
                  is_instrument, is_effect, scan_status, validation_level, disabled, favorite,
                  file_modified_at, file_size, last_scanned_at, error, metadata_json, search_text,
-                 sub_categories)
+                 sub_categories, is_ara)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
              ON CONFLICT(id) DO UPDATE SET
                 format = excluded.format,
                 name = excluded.name,
@@ -542,7 +559,8 @@ fn upsert_within(
                 last_scanned_at = excluded.last_scanned_at,
                 error = excluded.error,
                 metadata_json = excluded.metadata_json,
-                search_text = excluded.search_text",
+                search_text = excluded.search_text,
+                is_ara = excluded.is_ara",
         )?;
         for e in entries {
             stmt.execute(params![
@@ -568,6 +586,7 @@ fn upsert_within(
                 e.metadata_json,
                 e.search_text,
                 e.sub_categories,
+                e.is_ara as i64,
             ])?;
         }
     }
@@ -823,6 +842,7 @@ mod tests {
             vendor: None,
             category: None,
             sub_categories: Some("Fx|EQ".into()),
+            is_ara: false,
             path: PathBuf::from("C:/x.vst3"),
             class_id: None,
             bundle_id: None,

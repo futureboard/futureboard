@@ -388,6 +388,11 @@ mod tests {
     fn track(id: &str, ty: &str, plugin_latency: u32, sends: Vec<RuntimeSend>) -> RuntimeTrack {
         RuntimeTrack {
             active_voices: 0,
+            ara_renderers: Vec::new(),
+            ara_l: Vec::new(),
+            ara_r: Vec::new(),
+            ara_silence: Vec::new(),
+            ara_latency_samples: 0,
             listen: crate::monitor::ListenMode::Off,
             id: id.to_string(),
             track_type: ty.to_string(),

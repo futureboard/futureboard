@@ -26,6 +26,7 @@ fn main() {
     let sdk_root = manifest_dir.join("../../external/vst3sdk");
     let clap_root = manifest_dir.join("../../external/clap");
     let clap_helpers_root = manifest_dir.join("../../external/clap-helpers");
+    let ara_root = manifest_dir.join("../../external/ARA_SDK");
     let backend_root = manifest_dir.join("vst3backend");
     println!(
         "cargo:rerun-if-changed={}",
@@ -78,6 +79,12 @@ fn main() {
         .include(sdk_root.join("public.sdk/source"))
         .include(clap_root.join("include"))
         .include(clap_helpers_root.join("include"))
+        // Header-only ARA API, for `kARAMainFactoryClass` in the VST3 scanner.
+        // Nothing here links the ARA SDK — the scanner only needs the published
+        // class-category string so it can flag ARA-capable plug-ins without
+        // instantiating them. Taking it from the header instead of copying the
+        // literal keeps the two from drifting.
+        .include(ara_root.join("ARA_API"))
         // Shared VST2 ABI header — same file the runtime bridge uses, so the
         // scanner and the host can never disagree about the AEffect layout.
         .include(manifest_dir.join("../SphereDirectAudioEngine/vst2bridge/include"))

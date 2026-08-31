@@ -25,6 +25,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "SphereAraHost"
+version = "0.1.0"
+dependencies = [
+ "ara2-bridge-companion",
+ "ara2-bridge-core",
+ "ara2-bridge-host",
+ "ara2-bridge-sys",
+]
+
+[[package]]
 name = "SphereDiscordRPC"
 version = "0.1.0"
 dependencies = [
@@ -426,6 +436,44 @@ checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
 dependencies = [
  "object",
 ]
+
+[[package]]
+name = "ara2-bridge-companion"
+version = "0.3.0"
+dependencies = [
+ "ara2-bridge-core",
+ "ara2-bridge-host",
+ "ara2-bridge-sys",
+ "bitflags 2.11.1",
+ "cc",
+]
+
+[[package]]
+name = "ara2-bridge-core"
+version = "0.3.0"
+dependencies = [
+ "ara2-bridge-sys",
+ "base64",
+ "bitflags 2.11.1",
+ "crossbeam-queue",
+ "parking_lot",
+ "quick-xml 0.41.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ara2-bridge-host"
+version = "0.3.0"
+dependencies = [
+ "ara2-bridge-core",
+ "ara2-bridge-sys",
+ "bitflags 2.11.1",
+]
+
+[[package]]
+name = "ara2-bridge-sys"
+version = "0.3.0"
 
 [[package]]
 name = "arbitrary"
@@ -6395,6 +6443,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7787,6 +7844,7 @@ dependencies = [
 name = "sphere_ui_components"
 version = "0.1.0"
 dependencies = [
+ "SphereAraHost",
  "SphereMidiService",
  "SphereSoundfontPlayer",
  "SphereWebView",

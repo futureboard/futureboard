@@ -265,6 +265,8 @@ pub fn builtin_catalog(scanned_at_ms: i64) -> Vec<RegistryPlugin> {
             class_id: Some(entry.stem.to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             sdk_metadata_loaded: true,
+            // Stock plug-ins are hosted directly; none of them is an ARA peer.
+            is_ara: false,
             preset_path: std::path::PathBuf::new(),
             scanned_at_ms,
             status: PluginStatus::PresetReady,
@@ -456,6 +458,7 @@ mod tests {
             class_id: None,
             version: None,
             sdk_metadata_loaded: true,
+            is_ara: false,
             preset_path: std::path::PathBuf::new(),
             scanned_at_ms: 1,
             status: PluginStatus::PresetReady,

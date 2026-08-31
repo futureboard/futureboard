@@ -1,0 +1,25 @@
+[package]
+name = "ara2-bridge-companion"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "CLAP, VST3, and Audio Unit ARA adapters for ara2-bridge (vendored)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/futureboard/ara2-bridge"
+publish = false
+
+[features]
+default = []
+host = ["dep:ara2-bridge-host"]
+clap = []
+vst3 = []
+audio-unit-v2 = []
+
+[dependencies]
+ara2-bridge-core = { path = "../ara2-bridge-core" }
+ara2-bridge-sys = { path = "../ara2-bridge-sys" }
+ara2-bridge-host = { path = "../ara2-bridge-host", optional = true }
+bitflags.workspace = true
+
+[build-dependencies]
+cc.workspace = true

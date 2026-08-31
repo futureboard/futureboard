@@ -579,6 +579,10 @@ pub struct EngineClipSnapshot {
     /// on an audible track. Defaulted so older snapshots deserialize.
     #[serde(default)]
     pub muted: bool,
+    /// An ARA plug-in renders this clip, so the engine must not mix the source
+    /// file for it. Defaulted so older snapshots deserialize as non-ARA.
+    #[serde(default)]
+    pub ara_rendered: bool,
     #[serde(default)]
     pub fades: Option<EngineFadeSnapshot>,
     /// Authoritative audio stretch parameters for this clip. Defaults to Off for

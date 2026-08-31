@@ -1,0 +1,14 @@
+[package]
+name = "ara2-bridge-host"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Safe ARA 2 host authoring runtime (vendored)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/futureboard/ara2-bridge"
+publish = false
+
+[dependencies]
+ara2-bridge-core = { path = "../ara2-bridge-core" }
+ara2-bridge-sys = { path = "../ara2-bridge-sys" }
+bitflags.workspace = true

@@ -5,6 +5,7 @@ extern crate napi_build;
 fn main() {
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let sdk_root = manifest_dir.join("../../external/vst3sdk");
+    let ara_root = manifest_dir.join("../../external/ARA_SDK");
     let bridge_root = manifest_dir.join("vst3bridge");
 
     // Trigger rebuilds when any bridge source or header changes.
@@ -45,6 +46,10 @@ fn main() {
         .include(&sdk_root)
         .include(sdk_root.join("pluginterfaces"))
         .include(sdk_root.join("public.sdk/source"))
+        // Header-only ARA API, for `kARAMainFactoryClass` in the ARA entry
+        // points. Nothing here links or implements ARA — the host runtime lives
+        // in `crates/SphereAraHost`.
+        .include(ara_root.join("ARA_API"))
         .file(bridge_root.join("src/vst3_processor.cpp"))
         .file(bridge_root.join("src/editor_windows.cpp"))
         .file(sdk_root.join("pluginterfaces/base/coreiids.cpp"))

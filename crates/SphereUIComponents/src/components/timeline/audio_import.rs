@@ -833,6 +833,7 @@ mod tests {
                 source_path: source,
             },
             stretch: Default::default(),
+            ara: None,
         }
     }
 

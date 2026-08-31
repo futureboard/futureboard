@@ -101,3 +101,8 @@ package-professional = [
 # [env] support, so a platform-specific default contaminates builds for every
 # other host and cross-compilation target. CI and developer shells must export
 # paths that match Cargo's TARGET before invoking Cargo.
+
+# The vendored ARA bridge needs no entry here either: its C++ shim resolves
+# `external/ARA_SDK` and `external/vst3sdk` from the repository root in
+# `crates/Ara2Bridge/ara2-bridge-companion/build.rs`, with `ARA_SDK_DIR` /
+# `ARA_VST3_SDK_DIR` left as opt-in overrides for out-of-tree SDK experiments.

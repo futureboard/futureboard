@@ -1,0 +1,26 @@
+[package]
+name = "SphereAraHost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "ARA 2 host runtime for Futureboard Studio (Windows/macOS)"
+
+[lib]
+name = "sphere_ara_host"
+path = "src/lib.rs"
+
+# The ARA bindings are pulled in only on the platforms that can actually host an
+# ARA plug-in. Everywhere else `src/stub.rs` provides the same public surface and
+# reports `AraHostError::Unsupported`, so call sites stay free of `cfg`.
+#
+# `ara2-bridge-companion/vst3` compiles a C++ shim against the `external/ARA_SDK`
+# and `external/vst3sdk` submodules; see `crates/Ara2Bridge/VENDORING.md`.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+ara2-bridge-core.workspace = true
+ara2-bridge-host.workspace = true
+ara2-bridge-sys.workspace = true
+ara2-bridge-companion = { workspace = true, features = ["host", "vst3"] }
+
+[lints]
+workspace = true

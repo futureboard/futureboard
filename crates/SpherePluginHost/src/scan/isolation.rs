@@ -692,6 +692,7 @@ pub fn plugin_descriptor_from_info(info: PluginInfo) -> PluginDescriptor {
         error_message: info.load_error,
         class_id: info.class_id,
         sub_categories: info.sub_categories,
+        is_ara: info.is_ara,
         sdk_metadata_loaded: info.sdk_metadata_loaded,
     }
 }
@@ -710,6 +711,7 @@ pub fn plugin_info_from_descriptor(descriptor: &PluginDescriptor) -> PluginInfo 
         version: descriptor.version.clone(),
         sdk_version: None,
         is_shell_child: false,
+        is_ara: descriptor.is_ara,
         sdk_metadata_loaded: descriptor.sdk_metadata_loaded,
         load_error: descriptor.error_message.clone(),
     }

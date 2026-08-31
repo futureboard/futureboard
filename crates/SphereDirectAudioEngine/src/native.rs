@@ -1171,6 +1171,28 @@ impl AudioEngine {
         self.inner.insert_processor(track_id, insert_id)
     }
 
+    /// Instantiate a VST3 plug-in in this process for ARA hosting.
+    ///
+    /// See [`crate::engine::EngineInner::create_ara_processor`] — ARA is the one
+    /// plug-in path that cannot go through the out-of-process host.
+    pub fn create_ara_processor(
+        &self,
+        plugin_path: &str,
+        class_id: &str,
+    ) -> Option<crate::vst3_processor::Vst3RuntimeProcessor> {
+        self.inner.create_ara_processor(plugin_path, class_id)
+    }
+
+    /// Install the ARA playback renderers for one track, replacing any previous
+    /// set. An empty list removes them.
+    pub fn set_ara_renderers(
+        &self,
+        track_id: String,
+        renderers: Vec<crate::runtime::RuntimeAraRenderer>,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_ara_renderers(track_id, renderers)
+    }
+
     /// Poll meter atomics and runtime track meters for UI display.
     pub fn meters(&self) -> JsMeterSnapshot {
         self.inner.get_meters()

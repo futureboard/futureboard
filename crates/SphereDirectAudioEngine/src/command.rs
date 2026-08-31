@@ -155,6 +155,15 @@ pub enum EngineCommand {
         insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     },
+    /// Install the ARA playback renderers for `track_id`, replacing whatever was
+    /// there. The list is built and ARA-bound on the control thread — the
+    /// callback only swaps the vector in and retires the old one off-thread,
+    /// because dropping the last handle to a bound instance destroys a C++ VST3
+    /// processor.
+    SetAraRenderers {
+        track_id: String,
+        renderers: Vec<crate::runtime::RuntimeAraRenderer>,
+    },
     /// Play a pre-decoded standalone browser sample through the master output.
     /// `token` is the `SharedState::audition_request_token` value this decode
     /// was started for; the callback drops the source when a newer selection

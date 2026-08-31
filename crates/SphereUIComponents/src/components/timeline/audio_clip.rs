@@ -785,6 +785,7 @@ mod tests {
             muted: false,
             audio_import: AudioImportState::Ready,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         };
         clip.stretch.original_sample_rate = 48_000;
         clip.stretch.source_start_samples = 48_000;
@@ -816,6 +817,7 @@ mod tests {
             muted: false,
             audio_import: AudioImportState::Ready,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         };
         clip.stretch.original_sample_rate = 48_000;
         clip.stretch.project_sample_rate = 48_000;

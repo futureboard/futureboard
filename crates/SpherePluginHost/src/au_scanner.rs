@@ -92,6 +92,8 @@ fn native_au_to_descriptor(entry: NativePluginInfo) -> Result<PluginDescriptor, 
         version: entry.version,
         path_or_identifier: entry.path,
         category,
+        // ARA hosting is VST3-only in Futureboard; an AU row never claims it.
+        is_ara: false,
         is_instrument,
         is_effect: !is_instrument,
         scan_status: if entry.sdk_metadata_loaded {

@@ -1,0 +1,11 @@
+[package]
+name = "ara2-bridge-sys"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Raw FFI bindings for the Celemony ARA 2 SDK (vendored)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/futureboard/ara2-bridge"
+publish = false
+
+[dependencies]

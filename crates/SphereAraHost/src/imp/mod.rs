@@ -1,0 +1,879 @@
+//! Windows / macOS ARA host runtime.
+//!
+//! Owns the ARA host services, the plug-in's document controller, the document
+//! graph, and every companion binding. See [`crate`] for the boundary rules.
+
+mod services;
+
+use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use ara2_bridge_companion::CompanionRoles;
+use ara2_bridge_companion::vst3::Vst3HostPlugin;
+use ara2_bridge_core::{
+    ApiGeneration, AraError, AudioModificationProperties, AudioSourceProperties, Color,
+    ContentUpdateScopes, DocumentProperties, MusicalContextProperties, PlaybackRegionProperties,
+    PlaybackTransformationFlags, RegionSequenceProperties,
+};
+use ara2_bridge_host::{
+    AudioModificationHandle, AudioSourceHandle, DocumentSession, ExtensionController,
+    ExtensionRoles, HostServices, HostServicesBuilder, LoadedFactory, MusicalContextHandle,
+    PlaybackRegionAssignment, PlaybackRegionHandle, RegionSequenceHandle, RendererRole,
+};
+
+use crate::AraSessionConfig;
+use crate::error::{AraHostError, AraResult};
+use crate::info::{AraFactoryInfo, AraRendererId, AraRoles};
+use crate::model::{
+    AraAudioSourceDesc, AraClipKey, AraColor, AraGraph, AraMusicalTimeline, AraPlaybackRegionDesc,
+    AraPlaybackTransform, AraRegionSequenceDesc, AraSourceKey, AraTrackKey,
+};
+
+use services::{
+    ArchiveService, ArchiveSlot, ArchiveStore, AudioService, ContentService, GraphIndex,
+    ModelService, SharedContent, TransportService,
+};
+
+/// Generations tried when initializing a factory, best first.
+///
+/// ARA 1 is deliberately excluded: it has no region sequences, so the whole
+/// track-to-sequence mapping this crate is built on does not exist there, and no
+/// plug-in Futureboard targets is ARA 1 only.
+const GENERATIONS: [ApiGeneration; 4] = [
+    ApiGeneration::V23Final,
+    ApiGeneration::V2xDraft,
+    ApiGeneration::V2Final,
+    ApiGeneration::V2Draft,
+];
+
+/// Name of the single musical context every region sequence hangs off.
+const MUSICAL_CONTEXT_NAME: &str = "Futureboard timeline";
+
+/// Scopes that stay untouched when only the tempo map or bar signatures move.
+///
+/// ARA's flags name what is *unchanged*, so listing everything but timing is how
+/// a host says "the timing moved and nothing else did".
+const TIMING_CHANGED: ContentUpdateScopes = ContentUpdateScopes::SIGNAL_REMAINS_UNCHANGED
+    .union(ContentUpdateScopes::NOTE_REMAINS_UNCHANGED)
+    .union(ContentUpdateScopes::TUNING_REMAINS_UNCHANGED)
+    .union(ContentUpdateScopes::HARMONIC_REMAINS_UNCHANGED);
+
+pub(crate) fn is_supported() -> bool {
+    true
+}
+
+fn map_error(error: AraError) -> AraHostError {
+    match error {
+        AraError::Poisoned => AraHostError::Poisoned,
+        AraError::InvalidArgument(what) | AraError::InvalidState(what) => {
+            AraHostError::Invalid(what.to_owned())
+        }
+        AraError::Unsupported(what) => AraHostError::Unsupported(what.to_owned()),
+        other => AraHostError::Plugin(other.to_string()),
+    }
+}
+
+fn to_color(color: Option<AraColor>) -> AraResult<Option<Color>> {
+    color
+        .map(|color| Color::new(color.red, color.green, color.blue).map_err(map_error))
+        .transpose()
+}
+
+fn transform_flags(transform: AraPlaybackTransform) -> PlaybackTransformationFlags {
+    let mut flags = PlaybackTransformationFlags::empty();
+    flags.set(
+        PlaybackTransformationFlags::TIMESTRETCH,
+        transform.timestretch,
+    );
+    flags.set(
+        PlaybackTransformationFlags::REFLECT_TEMPO,
+        transform.timestretch_reflecting_tempo,
+    );
+    flags.set(
+        PlaybackTransformationFlags::CONTENT_FADE_HEAD,
+        transform.content_based_fade_at_head,
+    );
+    flags.set(
+        PlaybackTransformationFlags::CONTENT_FADE_TAIL,
+        transform.content_based_fade_at_tail,
+    );
+    flags
+}
+
+fn transform_from_flags(flags: PlaybackTransformationFlags) -> AraPlaybackTransform {
+    AraPlaybackTransform {
+        timestretch: flags.contains(PlaybackTransformationFlags::TIMESTRETCH),
+        timestretch_reflecting_tempo: flags.contains(PlaybackTransformationFlags::REFLECT_TEMPO),
+        content_based_fade_at_head: flags.contains(PlaybackTransformationFlags::CONTENT_FADE_HEAD),
+        content_based_fade_at_tail: flags.contains(PlaybackTransformationFlags::CONTENT_FADE_TAIL),
+    }
+}
+
+fn companion_roles(roles: AraRoles) -> CompanionRoles {
+    let mut bits = CompanionRoles::empty();
+    bits.set(CompanionRoles::PLAYBACK_RENDERER, roles.playback_renderer);
+    bits.set(CompanionRoles::EDITOR_RENDERER, roles.editor_renderer);
+    bits.set(CompanionRoles::EDITOR_VIEW, roles.editor_view);
+    bits
+}
+
+fn extension_roles(roles: AraRoles) -> ExtensionRoles {
+    let mut bits = ExtensionRoles::empty();
+    bits.set(ExtensionRoles::PLAYBACK_RENDERER, roles.playback_renderer);
+    bits.set(ExtensionRoles::EDITOR_RENDERER, roles.editor_renderer);
+    bits.set(ExtensionRoles::EDITOR_VIEW, roles.editor_view);
+    bits
+}
+
+/// Reads factory metadata for `generation`, copying every string.
+fn describe(factory: &LoadedFactory<'_>, generation: ApiGeneration) -> AraFactoryInfo {
+    let metadata = factory.metadata();
+    AraFactoryInfo {
+        factory_id: metadata.factory_id().to_owned(),
+        plug_in_name: metadata.plug_in_name().to_owned(),
+        manufacturer_name: metadata.manufacturer_name().to_owned(),
+        version: metadata.version().to_owned(),
+        information_url: metadata.information_url().to_owned(),
+        document_archive_id: metadata.document_archive_id().to_owned(),
+        compatible_archive_ids: metadata.compatible_archive_ids().to_vec(),
+        supported_transforms: transform_from_flags(PlaybackTransformationFlags::from_bits_retain(
+            metadata.playback_transformations() as u32,
+        )),
+        stores_audio_file_chunks: metadata.stores_audio_file_chunks(),
+        api_generation: generation.as_raw(),
+    }
+}
+
+/// Initializes `factory` at the best generation both sides support.
+///
+/// # Safety
+///
+/// `factory` must be a live `ARAFactory*` whose metadata backing stays readable
+/// for the lifetime of the returned value.
+unsafe fn load_factory(
+    factory: *const c_void,
+) -> AraResult<(LoadedFactory<'static>, ApiGeneration)> {
+    if factory.is_null() {
+        return Err(AraHostError::unsupported("plug-in exposes no ARA factory"));
+    }
+    let raw = factory.cast::<ara2_bridge_sys::ARAFactory>();
+    let mut last = AraHostError::unsupported("no shared ARA 2 generation with this plug-in");
+    for generation in GENERATIONS {
+        // SAFETY: the caller guarantees the factory backing; a generation
+        // mismatch is rejected before the factory is initialized, so retrying
+        // another generation cannot double-initialize it.
+        match unsafe { LoadedFactory::load(raw, generation, None) } {
+            Ok(loaded) => return Ok((loaded, generation)),
+            Err(error) => last = map_error(error),
+        }
+    }
+    Err(last)
+}
+
+/// # Safety
+///
+/// See [`crate::vst3_ara_factory`].
+pub(crate) unsafe fn vst3_ara_factory(main_factory: *mut c_void) -> AraResult<*const c_void> {
+    if main_factory.is_null() {
+        return Err(AraHostError::unsupported(
+            "plug-in exposes no ARA main factory",
+        ));
+    }
+    // SAFETY: the caller guarantees a live VST3 object identity.
+    let queried =
+        unsafe { ara2_bridge_companion::vst3::Vst3HostMainFactory::discover(main_factory) }
+            .map_err(map_error)?;
+    // The queried `IMainFactory` reference is released when `queried` drops; the
+    // `ARAFactory` it returns belongs to the class instance the caller owns and
+    // outlives this call.
+    let factory = queried.factory().map_err(map_error)?;
+    Ok(factory.cast())
+}
+
+/// # Safety
+///
+/// See [`crate::AraSession::probe_factory`].
+pub(crate) unsafe fn probe_factory(factory: *const c_void) -> AraResult<AraFactoryInfo> {
+    // SAFETY: the caller forwards the live-factory contract.
+    let (loaded, generation) = unsafe { load_factory(factory) }?;
+    Ok(describe(&loaded, generation))
+}
+
+struct SourceEntry {
+    handle: AudioSourceHandle,
+    address: usize,
+    desc: AraAudioSourceDesc,
+}
+
+struct SequenceEntry {
+    handle: RegionSequenceHandle,
+    desc: AraRegionSequenceDesc,
+}
+
+struct ClipEntry {
+    modification: AudioModificationHandle,
+    modification_address: usize,
+    region: PlaybackRegionHandle,
+    region_address: usize,
+    desc: AraPlaybackRegionDesc,
+}
+
+/// One bound companion instance and everything it currently renders.
+struct Renderer {
+    /// Keeps the companion entry-point COM reference alive; its `Drop` releases.
+    _plugin: Vst3HostPlugin<'static>,
+    extension: ExtensionController<'static>,
+    roles: AraRoles,
+    /// RAII assignments — dropping one removes the region from the plug-in.
+    assignments: HashMap<AraClipKey, PlaybackRegionAssignment>,
+}
+
+/// Token whose address identifies one archive transfer to the plug-in.
+///
+/// ARA reports archive handles as the address of the reader/writer the host
+/// passed in, so this must be a real, uniquely addressed allocation.
+struct ArchiveToken {
+    _sequence: u64,
+}
+
+pub(crate) struct Session {
+    /// Leaked so the borrow checker sees `'static`; reclaimed in `Drop` strictly
+    /// after `document`, which holds the controller that borrows both.
+    services_ptr: *mut HostServices,
+    factory_ptr: *mut LoadedFactory<'static>,
+    document: Option<DocumentSession<'static, 'static>>,
+    info: AraFactoryInfo,
+
+    index: Arc<GraphIndex>,
+    archives: Arc<ArchiveStore>,
+    content: Arc<ContentService>,
+
+    /// Last document name pushed to the plug-in, so an unchanged name performs
+    /// no ABI call on re-apply.
+    document_name: Option<String>,
+    musical_context: Option<MusicalContextHandle>,
+    sources: HashMap<AraSourceKey, SourceEntry>,
+    sequences: HashMap<AraTrackKey, SequenceEntry>,
+    clips: HashMap<AraClipKey, ClipEntry>,
+
+    renderers: HashMap<AraRendererId, Renderer>,
+    next_renderer: u64,
+    next_archive: u64,
+
+    /// `ExtensionController` is `Rc`-backed, and ARA model calls belong to one
+    /// thread anyway. Making that explicit stops the session being moved.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Session {
+    /// # Safety
+    ///
+    /// See [`crate::AraSession::open`].
+    pub(crate) unsafe fn open(factory: *const c_void, config: AraSessionConfig) -> AraResult<Self> {
+        // SAFETY: the caller forwards the live-factory contract.
+        let (loaded, generation) = unsafe { load_factory(factory) }?;
+        let info = describe(&loaded, generation);
+
+        let index = Arc::new(GraphIndex::default());
+        let archives = Arc::new(ArchiveStore::default());
+        let content = Arc::new(ContentService::new(Arc::clone(&index)));
+
+        let services = HostServicesBuilder::new()
+            .audio(AudioService::new(config.audio, Arc::clone(&index)))
+            .archiving(ArchiveService::new(Arc::clone(&archives)))
+            .model_updates(ModelService::new(config.observer, Arc::clone(&index)))
+            .playback(TransportService::new(config.transport))
+            .content(SharedContent(Arc::clone(&content)))
+            .build(generation)
+            .map_err(map_error)?;
+
+        let properties =
+            DocumentProperties::new(config.document_name.as_deref()).map_err(map_error)?;
+
+        // The controller borrows both the factory and the services for its whole
+        // life, which cannot be expressed inside one owning struct. Leaking both
+        // and reclaiming them in `Drop` — after the document, in this exact
+        // order — keeps that invariant explicit and checkable in one place.
+        let services_ptr = Box::into_raw(Box::new(services));
+        let factory_ptr = Box::into_raw(Box::new(loaded));
+
+        // SAFETY: both boxes were just created here, are not aliased, and stay
+        // live until `Drop` reclaims them after `document` is gone.
+        let (services_ref, factory_ref) = unsafe { (&*services_ptr, &*factory_ptr) };
+
+        let document = match DocumentSession::new(factory_ref, services_ref, properties) {
+            Ok(document) => document,
+            Err(error) => {
+                // SAFETY: nothing borrows either box on this path.
+                unsafe {
+                    drop(Box::from_raw(factory_ptr));
+                    drop(Box::from_raw(services_ptr));
+                }
+                return Err(map_error(error));
+            }
+        };
+
+        Ok(Self {
+            services_ptr,
+            factory_ptr,
+            document: Some(document),
+            info,
+            index,
+            archives,
+            content,
+            document_name: config.document_name.clone(),
+            musical_context: None,
+            sources: HashMap::new(),
+            sequences: HashMap::new(),
+            clips: HashMap::new(),
+            renderers: HashMap::new(),
+            next_renderer: 1,
+            next_archive: 1,
+            _not_send: PhantomData,
+        })
+    }
+
+    pub(crate) fn factory(&self) -> &AraFactoryInfo {
+        &self.info
+    }
+
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.document
+            .as_ref()
+            .is_some_and(DocumentSession::is_poisoned)
+    }
+
+    fn document_mut(&mut self) -> AraResult<&mut DocumentSession<'static, 'static>> {
+        let document = self
+            .document
+            .as_mut()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        if document.is_poisoned() {
+            return Err(AraHostError::Poisoned);
+        }
+        Ok(document)
+    }
+
+    pub(crate) fn set_musical_timeline(&mut self, timeline: &AraMusicalTimeline) -> AraResult<()> {
+        self.content.publish(timeline);
+
+        let Self {
+            document,
+            index,
+            musical_context,
+            ..
+        } = self;
+        let document = document
+            .as_mut()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        if document.is_poisoned() {
+            return Err(AraHostError::Poisoned);
+        }
+
+        // The context object itself carries only a name, order, and colour; the
+        // tempo map reaches the plug-in through the content reader, so updating
+        // an existing context is a content-changed notification, not a rebuild.
+        let properties = MusicalContextProperties::new(Some(MUSICAL_CONTEXT_NAME), 0, None)
+            .map_err(map_error)?;
+        let mut edit = document.edit().map_err(map_error)?;
+        let handle = match *musical_context {
+            Some(handle) => {
+                edit.update_musical_context(handle, properties)
+                    .map_err(map_error)?;
+                edit.update_musical_context_content(handle, None, TIMING_CHANGED)
+                    .map_err(map_error)?;
+                handle
+            }
+            None => edit.create_musical_context(properties).map_err(map_error)?,
+        };
+        edit.finish().map_err(map_error)?;
+
+        let address = document
+            .musical_context_ref(handle)
+            .map_err(map_error)?
+            .as_raw() as usize;
+        index.set_musical_context(Some(address));
+        *musical_context = Some(handle);
+        Ok(())
+    }
+
+    pub(crate) fn apply_graph(&mut self, graph: &AraGraph) -> AraResult<()> {
+        let context = self.musical_context.ok_or_else(|| {
+            AraHostError::invalid("set_musical_timeline must run before apply_graph")
+        })?;
+
+        let supported = self.info.supported_transforms;
+
+        // One destructuring borrow: `document` is mutated through the edit scope
+        // while the graph maps below are updated in the same pass, and the
+        // borrow checker only allows that on disjoint fields.
+        let Self {
+            document,
+            document_name,
+            index,
+            sources,
+            sequences,
+            clips,
+            renderers,
+            ..
+        } = self;
+        let document = document
+            .as_mut()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        if document.is_poisoned() {
+            return Err(AraHostError::Poisoned);
+        }
+
+        let wanted_sources: HashSet<&AraSourceKey> =
+            graph.sources.iter().map(|source| &source.key).collect();
+        let wanted_sequences: HashSet<&AraTrackKey> = graph
+            .sequences
+            .iter()
+            .map(|sequence| &sequence.key)
+            .collect();
+        let wanted_clips: HashSet<&AraClipKey> =
+            graph.regions.iter().map(|region| &region.key).collect();
+
+        let stale_clips: Vec<AraClipKey> = clips
+            .keys()
+            .filter(|key| !wanted_clips.contains(key))
+            .cloned()
+            .collect();
+
+        // A playback region may not be destroyed while a renderer still holds
+        // it, so drop those RAII assignments first.
+        for key in &stale_clips {
+            for renderer in renderers.values_mut() {
+                renderer.assignments.remove(key);
+            }
+        }
+
+        let mut edit = document.edit().map_err(map_error)?;
+
+        // The document name is what the plug-in shows in its own title bar, so
+        // it follows the track it belongs to rather than being set once at open.
+        if let Some(name) = graph.name.as_deref() {
+            if document_name.as_deref() != Some(name) {
+                edit.update_document_properties(
+                    DocumentProperties::new(Some(name)).map_err(map_error)?,
+                )
+                .map_err(map_error)?;
+                *document_name = Some(name.to_owned());
+            }
+        }
+
+        // Teardown is leaf-first: regions, then modifications, then the sources
+        // and sequences they referenced.
+        for key in &stale_clips {
+            if let Some(entry) = clips.remove(key) {
+                edit.destroy_playback_region(entry.region)
+                    .map_err(map_error)?;
+                edit.destroy_audio_modification(entry.modification)
+                    .map_err(map_error)?;
+                index.remove_region(entry.region_address);
+                index.remove_modification(entry.modification_address);
+            }
+        }
+
+        let stale_sources: Vec<AraSourceKey> = sources
+            .keys()
+            .filter(|key| !wanted_sources.contains(key))
+            .cloned()
+            .collect();
+        for key in stale_sources {
+            if let Some(entry) = sources.remove(&key) {
+                edit.destroy_audio_source(entry.handle).map_err(map_error)?;
+                index.remove_source(entry.address);
+            }
+        }
+
+        let stale_sequences: Vec<AraTrackKey> = sequences
+            .keys()
+            .filter(|key| !wanted_sequences.contains(key))
+            .cloned()
+            .collect();
+        for key in stale_sequences {
+            if let Some(entry) = sequences.remove(&key) {
+                edit.destroy_region_sequence(entry.handle)
+                    .map_err(map_error)?;
+            }
+        }
+
+        // Build-up runs in dependency order: sequences and sources first, then
+        // the modifications and regions that reference them.
+        let context_ref = edit.musical_context_ref(context).map_err(map_error)?;
+        for desc in &graph.sequences {
+            let properties = RegionSequenceProperties::new(
+                Some(desc.name.as_str()),
+                desc.order_index,
+                context_ref,
+                to_color(desc.color)?,
+            )
+            .map_err(map_error)?;
+            match sequences.get_mut(&desc.key) {
+                Some(entry) if entry.desc == *desc => {}
+                Some(entry) => {
+                    edit.update_region_sequence(entry.handle, properties)
+                        .map_err(map_error)?;
+                    entry.desc = desc.clone();
+                }
+                None => {
+                    let handle = edit.create_region_sequence(properties).map_err(map_error)?;
+                    sequences.insert(
+                        desc.key.clone(),
+                        SequenceEntry {
+                            handle,
+                            desc: desc.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut new_sources: Vec<(AraSourceKey, AudioSourceHandle)> = Vec::new();
+        for desc in &graph.sources {
+            let properties = AudioSourceProperties::new(
+                Some(desc.name.as_str()),
+                desc.key.as_str(),
+                desc.frame_count,
+                desc.sample_rate,
+                desc.channel_count,
+                false.into(),
+            )
+            .map_err(map_error)?;
+            match sources.get_mut(&desc.key) {
+                Some(entry) if entry.desc == *desc => {}
+                Some(entry) => {
+                    edit.update_audio_source(entry.handle, properties)
+                        .map_err(map_error)?;
+                    entry.desc = desc.clone();
+                }
+                None => {
+                    let handle = edit.create_audio_source(properties).map_err(map_error)?;
+                    // The plug-in may only read samples once access is enabled;
+                    // without this every analysis request comes back empty.
+                    edit.set_audio_source_samples_access(handle, true)
+                        .map_err(map_error)?;
+                    new_sources.push((desc.key.clone(), handle));
+                    sources.insert(
+                        desc.key.clone(),
+                        SourceEntry {
+                            handle,
+                            address: 0,
+                            desc: desc.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut new_clips: Vec<AraClipKey> = Vec::new();
+        for desc in &graph.regions {
+            let transform = desc.transform.intersect(supported);
+            let sequence = sequences
+                .get(&desc.track)
+                .ok_or_else(|| AraHostError::invalid("region references an unbuilt track"))?
+                .handle;
+            let sequence_ref = edit.region_sequence_ref(sequence).map_err(map_error)?;
+            let region_properties = PlaybackRegionProperties::for_ara2(
+                transform_flags(transform).bits() as i32,
+                desc.start_in_modification,
+                desc.duration_in_modification,
+                desc.start_in_playback,
+                desc.duration_in_playback,
+                sequence_ref,
+                Some(desc.name.as_str()),
+                to_color(desc.color)?,
+            )
+            .map_err(map_error)?;
+
+            match clips.get_mut(&desc.key) {
+                Some(entry) if entry.desc == *desc => {}
+                Some(entry) => {
+                    edit.update_playback_region(entry.region, region_properties)
+                        .map_err(map_error)?;
+                    entry.desc = desc.clone();
+                }
+                None => {
+                    let source = sources
+                        .get(&desc.source)
+                        .ok_or_else(|| {
+                            AraHostError::invalid("region references an unbuilt audio source")
+                        })?
+                        .handle;
+                    let modification_properties = AudioModificationProperties::new(
+                        Some(desc.name.as_str()),
+                        desc.key.as_str(),
+                    )
+                    .map_err(map_error)?;
+                    let modification = edit
+                        .create_audio_modification(source, modification_properties)
+                        .map_err(map_error)?;
+                    let region = edit
+                        .create_playback_region(modification, region_properties)
+                        .map_err(map_error)?;
+                    new_clips.push(desc.key.clone());
+                    clips.insert(
+                        desc.key.clone(),
+                        ClipEntry {
+                            modification,
+                            modification_address: 0,
+                            region,
+                            region_address: 0,
+                            desc: desc.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        edit.finish().map_err(map_error)?;
+
+        // Object addresses are only readable once the edit scope has closed and
+        // the plug-in has accepted every object.
+        for (key, handle) in new_sources {
+            let address = document
+                .audio_source_ref(handle)
+                .map_err(map_error)?
+                .as_raw() as usize;
+            if let Some(entry) = sources.get_mut(&key) {
+                entry.address = address;
+            }
+            index.insert_source(address, key);
+        }
+        for key in new_clips {
+            let Some(entry) = clips.get_mut(&key) else {
+                continue;
+            };
+            let modification_address = document
+                .audio_modification_ref(entry.modification)
+                .map_err(map_error)?
+                .as_raw() as usize;
+            let region_address = document
+                .playback_region_ref(entry.region)
+                .map_err(map_error)?
+                .as_raw() as usize;
+            entry.modification_address = modification_address;
+            entry.region_address = region_address;
+            index.insert_modification(modification_address, key.clone());
+            index.insert_region(region_address, key);
+        }
+
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// See [`crate::AraSession::bind_renderer`].
+    pub(crate) unsafe fn bind_renderer(
+        &mut self,
+        component: *mut c_void,
+        roles: AraRoles,
+    ) -> AraResult<AraRendererId> {
+        if component.is_null() {
+            return Err(AraHostError::invalid("null VST3 component for ARA binding"));
+        }
+        // SAFETY: the caller guarantees a live, initialized VST3 component
+        // identity that outlives this session's use of the binding.
+        let plugin = unsafe { Vst3HostPlugin::discover(component) }.map_err(map_error)?;
+
+        let known = companion_roles(AraRoles::ALL);
+        let assigned = companion_roles(roles);
+        let Self {
+            document,
+            renderers,
+            next_renderer,
+            ..
+        } = self;
+        let document = document
+            .as_mut()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        if document.is_poisoned() {
+            return Err(AraHostError::Poisoned);
+        }
+        let controller = document.controller_ref();
+
+        // SAFETY: `controller` belongs to this session's factory, which is the
+        // same plug-in the caller instantiated, and outlives the binding.
+        let instance = unsafe {
+            plugin.bind(
+                controller,
+                known,
+                assigned,
+                // ARA 1 style binding takes every role at once; only accept that
+                // fallback when the caller actually asked for every role.
+                roles == AraRoles::ALL,
+            )
+        }
+        .map_err(map_error)?;
+
+        // SAFETY: the instance was produced by the binding above for this exact
+        // document controller and role set, and `plugin` keeps it alive.
+        let extension = unsafe {
+            document.bind_extension(
+                instance,
+                extension_roles(AraRoles::ALL),
+                extension_roles(roles),
+            )
+        }
+        .map_err(map_error)?;
+
+        let id = AraRendererId(*next_renderer);
+        *next_renderer += 1;
+        renderers.insert(
+            id,
+            Renderer {
+                _plugin: plugin,
+                extension,
+                roles,
+                assignments: HashMap::new(),
+            },
+        );
+        Ok(id)
+    }
+
+    pub(crate) fn unbind_renderer(&mut self, renderer: AraRendererId) -> AraResult<()> {
+        self.renderers
+            .remove(&renderer)
+            .map(|_| ())
+            .ok_or_else(|| AraHostError::invalid("unknown ARA renderer"))
+    }
+
+    pub(crate) fn set_renderer_regions(
+        &mut self,
+        renderer: AraRendererId,
+        clips: &[AraClipKey],
+    ) -> AraResult<()> {
+        let wanted: HashSet<&AraClipKey> = clips.iter().collect();
+        let Self {
+            document,
+            clips: graph_clips,
+            renderers,
+            ..
+        } = self;
+        let document = document
+            .as_ref()
+            .ok_or_else(|| AraHostError::invalid("ARA session is already closed"))?;
+        let Some(entry) = renderers.get_mut(&renderer) else {
+            return Err(AraHostError::invalid("unknown ARA renderer"));
+        };
+        let role = if entry.roles.playback_renderer {
+            RendererRole::Playback
+        } else if entry.roles.editor_renderer {
+            RendererRole::Editor
+        } else {
+            return Err(AraHostError::invalid(
+                "this ARA instance holds no renderer role",
+            ));
+        };
+
+        // Dropping an assignment removes the region from the plug-in.
+        entry.assignments.retain(|key, _| wanted.contains(key));
+
+        for key in clips {
+            if entry.assignments.contains_key(key) {
+                continue;
+            }
+            let region = graph_clips
+                .get(key)
+                .ok_or_else(|| AraHostError::invalid("clip is not in the ARA graph"))?
+                .region;
+            let assignment = entry
+                .extension
+                .assign_playback_region(document, role, region)
+                .map_err(map_error)?;
+            entry.assignments.insert(key.clone(), assignment);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_rendering(
+        &mut self,
+        renderer: AraRendererId,
+        enabled: bool,
+    ) -> AraResult<()> {
+        self.renderers
+            .get(&renderer)
+            .ok_or_else(|| AraHostError::invalid("unknown ARA renderer"))?
+            .extension
+            .set_rendering(enabled)
+            .map_err(map_error)
+    }
+
+    pub(crate) fn store_archive(&mut self) -> AraResult<Vec<u8>> {
+        let token = Box::new(ArchiveToken {
+            _sequence: self.next_archive,
+        });
+        self.next_archive += 1;
+        let address = std::ptr::from_ref(token.as_ref()) as usize;
+        let archive_id = self.info.document_archive_id.clone();
+        self.archives.open(
+            address,
+            ArchiveSlot {
+                bytes: Vec::new(),
+                archive_id: Some(archive_id),
+            },
+        );
+
+        let document = self.document_mut()?;
+        let result = document.store_document_to_archive(token.as_ref());
+        let slot = self.archives.take(address);
+        drop(token);
+        result.map_err(map_error)?;
+        Ok(slot.map(|slot| slot.bytes).unwrap_or_default())
+    }
+
+    pub(crate) fn restore_archive(&mut self, bytes: &[u8]) -> AraResult<()> {
+        let token = Box::new(ArchiveToken {
+            _sequence: self.next_archive,
+        });
+        self.next_archive += 1;
+        let address = std::ptr::from_ref(token.as_ref()) as usize;
+        let archive_id = self.info.document_archive_id.clone();
+        self.archives.open(
+            address,
+            ArchiveSlot {
+                bytes: bytes.to_vec(),
+                archive_id: Some(archive_id),
+            },
+        );
+
+        let document = self.document_mut()?;
+        let outcome = document
+            .restore_document_from_archive(token.as_ref())
+            .and_then(|edit| edit.finish());
+        self.archives.take(address);
+        drop(token);
+        outcome.map_err(map_error)
+    }
+
+    pub(crate) fn close(mut self) -> AraResult<()> {
+        // Renderers must release their assignments before the graph they point
+        // into is torn down.
+        self.renderers.clear();
+        let Some(document) = self.document.take() else {
+            return Ok(());
+        };
+        document
+            .close()
+            .map_err(|error| AraHostError::Plugin(error.to_string()))
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Order is the whole point: assignments, then the document (which
+        // destroys the controller), then the factory (which uninitializes ARA),
+        // and only then the host services the controller was calling into.
+        self.renderers.clear();
+        drop(self.document.take());
+        // SAFETY: both pointers came from `Box::into_raw` in `open`, are never
+        // aliased elsewhere, and nothing borrows them once `document` is gone.
+        unsafe {
+            drop(Box::from_raw(self.factory_ptr));
+            drop(Box::from_raw(self.services_ptr));
+        }
+    }
+}

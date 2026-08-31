@@ -27,6 +27,14 @@ members = [
     "crates/SphereDiscordRPC",
     "crates/SpherePlatform",
     "crates/SphereWebView",
+    "crates/SphereAraHost",
+
+    # Vendored ARA 2 bindings, trimmed to the host-side crates Futureboard uses.
+    # See `crates/Ara2Bridge/VENDORING.md` for provenance and local changes.
+    "crates/Ara2Bridge/ara2-bridge-sys",
+    "crates/Ara2Bridge/ara2-bridge-core",
+    "crates/Ara2Bridge/ara2-bridge-host",
+    "crates/Ara2Bridge/ara2-bridge-companion",
     "crates/BuiltinAudioPlugins",
     # Builtin stock DSP cores (engine integration deferred).
     "crates/BuiltinAudioPlugins/crates/builtin_dsp_core",
@@ -102,6 +110,16 @@ sphere-video-player = { path = "crates/SphereVideoPlayer" }
 sphere-discord-rpc = { path = "crates/SphereDiscordRPC", package = "SphereDiscordRPC" }
 sphere-platform = { path = "crates/SpherePlatform", package = "SpherePlatform" }
 sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
+# ARA 2 host runtime. Real implementation on Windows/macOS, stub elsewhere.
+sphere-ara-host = { path = "crates/SphereAraHost", package = "SphereAraHost" }
+
+# Vendored ARA 2 SDK bindings (from futureboard/ara2-bridge v0.3.0). Source lives
+# in-tree under `crates/Ara2Bridge`; its C++ VST3 shim compiles against the
+# `external/ARA_SDK` and `external/vst3sdk` submodules directly.
+ara2-bridge-core = { path = "crates/Ara2Bridge/ara2-bridge-core" }
+ara2-bridge-host = { path = "crates/Ara2Bridge/ara2-bridge-host" }
+ara2-bridge-sys = { path = "crates/Ara2Bridge/ara2-bridge-sys" }
+ara2-bridge-companion = { path = "crates/Ara2Bridge/ara2-bridge-companion", default-features = false }
 
 # BuiltinAudioPlugins stock DSP cores (no DirectAudioEngine wiring yet).
 builtin-audio-plugins = { path = "crates/BuiltinAudioPlugins", package = "BuiltinAudioPlugins" }

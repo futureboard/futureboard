@@ -65,6 +65,21 @@ impl Default for AudioImportState {
     }
 }
 
+/// An audio clip handed to an ARA plug-in for editing.
+///
+/// Identifies the plug-in well enough to re-instantiate it on load. The plug-in's
+/// own edits are not here — they live in its ARA document archive, stored once
+/// per plug-in on the project rather than per clip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipAraBinding {
+    /// Catalog id of the ARA plug-in (`RegistryPlugin::id`).
+    pub plugin_id: String,
+    /// VST3 module path, so the plug-in can be re-instantiated on load.
+    pub plugin_path: String,
+    /// VST3 audio-module class id inside that module.
+    pub class_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipState {
     pub id: String,
@@ -82,6 +97,12 @@ pub struct ClipState {
     /// clip; only meaningful for audio clips (MIDI clips carry a default `Off`
     /// instance). See [`AudioClipStretchState`].
     pub stretch: AudioClipStretchState,
+    /// Set while an ARA plug-in owns this clip's playback.
+    ///
+    /// The engine then skips the source file for this clip and mixes the
+    /// plug-in's output instead, so this and the ARA session must be changed
+    /// together — see `layout::ara_ops`.
+    pub ara: Option<ClipAraBinding>,
 }
 
 impl ClipState {

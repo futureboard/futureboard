@@ -415,6 +415,10 @@ struct SphereDauxVst3Processor {
   ComponentHandlerImpl component_handler; // installed on IEditController
   /// Owned copy of the loaded module path (survives after create() returns).
   std::string plugin_path;
+  /// `PClassInfo::name` of the instantiated audio-module class. ARA pairs a main
+  /// factory with its audio module by exact class name, so this is what the ARA
+  /// entry points match on.
+  std::string class_name;
 
 #if defined(_WIN32)
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;

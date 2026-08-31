@@ -38,6 +38,10 @@ pub struct NativePluginInfo {
     pub sdk_version: Option<String>,
     #[serde(default)]
     pub is_shell_child: Option<bool>,
+    /// Absent for scanners that predate ARA detection, and for the CLAP and
+    /// VST2 backends, which never emit it.
+    #[serde(default)]
+    pub is_ara: bool,
     pub sdk_metadata_loaded: bool,
     #[serde(default)]
     pub load_error: Option<String>,
@@ -181,6 +185,7 @@ fn scan_native_root(path: &str, format: PluginFormat) -> Result<Vec<PluginInfo>,
                 version: plugin.version,
                 sdk_version: plugin.sdk_version,
                 is_shell_child: plugin.is_shell_child.unwrap_or(false),
+                is_ara: plugin.is_ara,
                 sdk_metadata_loaded: plugin.sdk_metadata_loaded,
                 load_error: plugin.load_error,
             }
@@ -330,6 +335,7 @@ fn plugin_from_path(path: &Path, format: PluginFormat) -> PluginInfo {
         version: None,
         sdk_version: None,
         is_shell_child: false,
+        is_ara: false,
         sdk_metadata_loaded: false,
         load_error: Some("Plug-in metadata was not read".to_string()),
     }
@@ -350,7 +356,27 @@ pub fn stable_id_for_au(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sort_and_dedup, PluginInfo};
+    use super::{sort_and_dedup, NativePluginInfo, PluginInfo};
+
+    /// The C++ VST3 scanner emits `isAra` for every class; CLAP, VST2, and any
+    /// pre-ARA cached payload omit it entirely and must still parse.
+    #[test]
+    fn native_json_carries_ara_flag_and_defaults_to_false() {
+        let with_ara: NativePluginInfo = serde_json::from_str(
+            r#"{"name":"Melodyne","vendor":"Celemony","category":"Audio Module Class",
+                "format":"VST3","path":"C:/m.vst3","classId":"ABCD",
+                "isShellChild":false,"isAra":true,"sdkMetadataLoaded":true}"#,
+        )
+        .expect("VST3 payload with isAra must parse");
+        assert!(with_ara.is_ara);
+
+        let legacy: NativePluginInfo = serde_json::from_str(
+            r#"{"name":"Comp","vendor":"Acme","category":"Audio Module Class",
+                "format":"CLAP","path":"C:/c.clap","sdkMetadataLoaded":true}"#,
+        )
+        .expect("payload without isAra must still parse");
+        assert!(!legacy.is_ara);
+    }
 
     fn plugin(id: &str, name: &str) -> PluginInfo {
         PluginInfo {
@@ -363,6 +389,7 @@ mod tests {
             path: String::new(),
             module_path: None,
             class_id: None,
+            is_ara: false,
             version: None,
             sdk_version: None,
             is_shell_child: false,

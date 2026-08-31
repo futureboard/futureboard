@@ -141,6 +141,9 @@ pub struct RegistryPlugin {
     pub class_id: Option<String>,
     pub version: Option<String>,
     pub sdk_metadata_loaded: bool,
+    /// The plug-in exposes an ARA main factory, so it can be attached to an
+    /// audio clip through `SphereAraHost` instead of only as a track insert.
+    pub is_ara: bool,
     pub preset_path: PathBuf,
     pub scanned_at_ms: i64,
     pub status: PluginStatus,
@@ -161,6 +164,15 @@ impl RegistryPlugin {
     /// Whether this row is a Futureboard built-in (stock) plug-in.
     pub fn is_builtin(&self) -> bool {
         crate::builtin::is_builtin_id(&self.id)
+    }
+
+    /// Whether this plug-in can be attached to an audio clip through ARA.
+    ///
+    /// ARA hosting is VST3-only and in-process, so a row that advertises an ARA
+    /// factory in another format is reported as not usable rather than offered
+    /// and then failing at bind time.
+    pub fn supports_ara(&self) -> bool {
+        self.is_ara && self.format == PluginFormat::Vst3 && self.class_id.is_some()
     }
 
     /// Insert onto a track is supported for wired formats (or any built-in) once
@@ -670,6 +682,7 @@ pub fn registry_plugin_from_scan(info: &PluginInfo, scanned_at_ms: i64) -> Regis
         class_id: info.class_id.clone(),
         version: info.version.clone(),
         sdk_metadata_loaded: info.sdk_metadata_loaded,
+        is_ara: info.is_ara,
         preset_path,
         scanned_at_ms,
         status,

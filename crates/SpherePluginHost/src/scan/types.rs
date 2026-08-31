@@ -192,6 +192,9 @@ pub struct PluginDescriptor {
     pub class_id: Option<String>,
     #[serde(default)]
     pub sub_categories: Option<String>,
+    /// The plug-in exposes an ARA main factory. Only the VST3 scanner sets it.
+    #[serde(default)]
+    pub is_ara: bool,
     #[serde(default)]
     pub sdk_metadata_loaded: bool,
 }

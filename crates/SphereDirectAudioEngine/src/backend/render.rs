@@ -697,6 +697,12 @@ pub fn drain_commands(
                     track.listen = crate::monitor::ListenMode::Off;
                 }
             }
+            EngineCommand::SetAraRenderers {
+                track_id,
+                renderers,
+            } => {
+                runtime.set_ara_renderers(&track_id, renderers);
+            }
             EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
                 match sink {
                     Some(sink) => {

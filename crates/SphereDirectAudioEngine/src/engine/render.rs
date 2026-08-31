@@ -1062,6 +1062,11 @@ fn render_project_block_interleaved_core(
         if !transport_active {
             break; // stopped-transport preview block — no timeline material
         }
+        // An ARA plug-in renders this clip itself (see `render_ara_block`), so
+        // the file must not also be mixed in here.
+        if runtime.clips[clip_index].ara_rendered {
+            continue;
+        }
         // The overwhelmingly common non-looping path rejects inactive clips
         // before cloning their Arc source or reading the rest of their DSP
         // metadata. Large arrangements otherwise touched every clip every
@@ -1599,6 +1604,65 @@ fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64) {
     }
 }
 
+/// Mix this track's ARA playback renderers into `block_*`.
+///
+/// An ARA renderer generates the audio for the playback regions assigned to it,
+/// reading the source samples out of band through the host callbacks in
+/// `SphereAraHost`. It is therefore fed silence rather than the track signal,
+/// and the clips it owns were skipped by the clip loop.
+///
+/// Realtime rules: the renderer list and its buffers are built on the control
+/// thread; this only fills, calls, and sums. Buffers grow once to the largest
+/// block seen, exactly like `block_*` and `recv_*` above.
+fn render_ara_block(track: &mut RuntimeTrack, frames: usize, transport: RuntimeTransportContext) {
+    if frames == 0 || track.ara_renderers.is_empty() {
+        return;
+    }
+    if track.ara_l.len() < frames {
+        track.ara_l.resize(frames, 0.0);
+        track.ara_r.resize(frames, 0.0);
+        track.ara_silence.resize(frames, 0.0);
+    }
+    // The silence buffer is only ever read, so it is filled once here rather
+    // than trusted to stay zero after a plug-in wrote through its input pointer.
+    track.ara_silence[..frames].fill(0.0);
+
+    for index in 0..track.ara_renderers.len() {
+        // Split the borrow: the renderer is mutated while the track's own
+        // buffers are written.
+        let (renderers, out_l, out_r, silence, block_l, block_r) = (
+            &mut track.ara_renderers,
+            &mut track.ara_l,
+            &mut track.ara_r,
+            &track.ara_silence,
+            &mut track.block_l,
+            &mut track.block_r,
+        );
+        let renderer = &mut renderers[index];
+        if !renderer.processor.is_processor_valid() {
+            continue;
+        }
+        out_l[..frames].fill(0.0);
+        out_r[..frames].fill(0.0);
+        // ARA rendering is transport-driven: the plug-in maps the process
+        // context's project position onto its playback regions, so the context
+        // has to be published before every block, not only while playing.
+        renderer.processor.set_process_context(&transport);
+        if !renderer.processor.process_stereo_block(
+            &silence[..frames],
+            &silence[..frames],
+            &mut out_l[..frames],
+            &mut out_r[..frames],
+        ) {
+            continue;
+        }
+        for frame in 0..frames {
+            block_l[frame] += out_l[frame];
+            block_r[frame] += out_r[frame];
+        }
+    }
+}
+
 fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
     if frames == 0
         || track
@@ -1802,6 +1866,7 @@ pub fn apply_track_chain_block(
         apply_plugin_param_automation(track, transport.ppq_position);
     }
 
+    render_ara_block(track, frames, transport);
     render_soundfont_instrument_block(track, frames);
     render_solfege_instrument_block(track, frames);
 

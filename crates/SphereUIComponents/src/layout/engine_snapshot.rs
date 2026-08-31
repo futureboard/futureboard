@@ -1048,6 +1048,10 @@ fn build_engine_project_snapshot_inner(
                     offset_seconds: clip_source_offset_seconds(state, clip),
                     gain: clip.gain.clamp(0.0, 4.0),
                     muted: clip.muted,
+                    // A bound clip's audio comes from the ARA plug-in, which
+                    // already read the source out of band; the engine must skip
+                    // the file for it or the clip would play twice.
+                    ara_rendered: clip.ara.is_some(),
                     fades,
                     stretch: sphere_stretch.clone(),
                     audio_process: Some(EngineClipAudioProcess {

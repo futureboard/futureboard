@@ -37,6 +37,8 @@ use crate::settings::{GlobalSettingsModel, SettingsModel};
 use crate::theme::{self, Colors};
 use SpherePluginHost::load_au_cache_state;
 
+mod ara_graph;
+mod ara_ops;
 mod audio_transport;
 mod bottom_panel_ops;
 mod browser_ops;

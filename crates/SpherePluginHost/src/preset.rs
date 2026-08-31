@@ -239,6 +239,9 @@ pub fn read_preset_file(preset_path: &Path) -> Result<RegistryPlugin, String> {
         class_id: pm.class_id,
         version: pm.version,
         sdk_metadata_loaded: pm.sdk_metadata_loaded,
+        // Presets predate ARA detection and store no ARA flag; the catalog row
+        // from the scan is the authority, so this projection stays conservative.
+        is_ara: false,
         preset_path: preset_path.to_path_buf(),
         scanned_at_ms: parsed.created_at,
         status,

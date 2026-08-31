@@ -30,6 +30,9 @@ pub struct PluginInfo {
     pub version: Option<String>,
     pub sdk_version: Option<String>,
     pub is_shell_child: bool,
+    /// The module also registers an ARA main-factory class for this plug-in, so
+    /// it can be driven through ARA instead of as a plain insert.
+    pub is_ara: bool,
     pub sdk_metadata_loaded: bool,
     /// Why the module could not be opened, when `sdk_metadata_loaded` is false.
     /// Carried so a failed plug-in is reportable by path *and* reason instead of

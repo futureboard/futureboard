@@ -296,6 +296,7 @@ mod tests {
             muted: false,
             audio_import: AudioImportState::Ready,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         };
         state
             .tracks

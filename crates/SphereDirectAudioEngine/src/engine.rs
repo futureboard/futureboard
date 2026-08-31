@@ -825,6 +825,12 @@ pub struct EngineInner {
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
     plugin_bridge_sinks: Mutex<crate::plugin_bridge::PluginBridgeSinkMap>,
+    /// Control-thread mirror of the ARA renderers installed per track.
+    ///
+    /// `LoadProject` replaces the whole graph, so without this the renderers
+    /// would vanish on the next project sync and every live ARA binding would be
+    /// destroyed behind the user's back.
+    ara_renderers: Mutex<HashMap<String, Vec<crate::runtime::RuntimeAraRenderer>>>,
     audio_cache: Mutex<HashMap<String, Arc<ClipAudioSource>>>,
     inactive_audio_cache_lru: Mutex<VecDeque<String>>,
 
@@ -921,6 +927,7 @@ impl EngineInner {
             input_state_revision: AtomicU64::new(0),
             runtime: Mutex::new(RuntimeProject::default()),
             plugin_bridge_sinks: Mutex::new(Default::default()),
+            ara_renderers: Mutex::new(HashMap::new()),
             audio_cache: Mutex::new(HashMap::new()),
             inactive_audio_cache_lru: Mutex::new(VecDeque::new()),
             glitch_counter: Arc::new(AtomicU64::new(0)),
@@ -1317,6 +1324,36 @@ impl EngineInner {
             self.plugin_bridge_sinks.lock().remove(&insert_id);
         }
         self.send_command(EngineCommand::SetPluginBridgeSink { insert_id, sink })
+    }
+
+    /// Install the ARA playback renderers for one track, replacing any previous
+    /// set. Pass an empty list to remove them.
+    ///
+    /// The caller owns ARA: it creates the in-process VST3 instances, binds them
+    /// to its `SphereAraHost` document, and assigns their playback regions
+    /// before handing them over. The engine only calls `process()` on them and
+    /// folds their latency into PDC.
+    ///
+    /// The renderers are mirrored on the control thread so a later `LoadProject`
+    /// can carry them into the rebuilt graph instead of silently dropping them,
+    /// which would tear down live ARA bindings on every project sync.
+    pub fn set_ara_renderers(
+        &self,
+        track_id: String,
+        renderers: Vec<crate::runtime::RuntimeAraRenderer>,
+    ) -> Result<(), SphereAudioError> {
+        {
+            let mut mirror = self.ara_renderers.lock();
+            if renderers.is_empty() {
+                mirror.remove(&track_id);
+            } else {
+                mirror.insert(track_id.clone(), renderers.clone());
+            }
+        }
+        self.send_command(EngineCommand::SetAraRenderers {
+            track_id,
+            renderers,
+        })
     }
 
     pub fn set_bridge_editor_active(
@@ -2188,6 +2225,39 @@ impl EngineInner {
     /// runtime rebuild or insert removal (the GUI editor relies on this so it
     /// can attach to / refresh the *existing* instance without re-locking the
     /// engine every frame). Used by the GPUI PluginView for the embedded editor.
+    /// Instantiate a VST3 plug-in in this process for ARA hosting.
+    ///
+    /// ARA is the one plug-in path that does not go through the out-of-process
+    /// host: the plug-in reads the clip's samples through host callbacks that
+    /// talk straight to project state, which cannot cross the bridge without an
+    /// ARA IPC layer. So the instance lives here, beside the engine that will
+    /// process it.
+    ///
+    /// Returns `None` when the module cannot be loaded, or when it exposes no
+    /// ARA main factory for `class_id` — an ARA session must never be opened
+    /// against a plug-in that will refuse to bind.
+    ///
+    /// Control thread only. The caller owns the returned handle, binds it to its
+    /// ARA document, and installs it with [`Self::set_ara_renderers`].
+    pub fn create_ara_processor(
+        &self,
+        plugin_path: &str,
+        class_id: &str,
+    ) -> Option<crate::vst3_processor::Vst3RuntimeProcessor> {
+        let sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+        let processor = crate::vst3_processor::Vst3RuntimeProcessor::new_with_format(
+            plugin_path,
+            class_id,
+            sample_rate,
+            crate::plugin_backend::PluginModuleFormat::Vst3,
+        )?;
+        if !processor.supports_ara() {
+            processor.set_destroy_reason("not-ara-capable");
+            return None;
+        }
+        Some(processor)
+    }
+
     pub fn insert_processor(
         &self,
         track_id: &str,
@@ -2464,6 +2534,27 @@ impl EngineInner {
             let message = format!("Live input unavailable: {error}");
             eprintln!("[SphereAudio] {message}");
             self.status.lock().last_error = Some(message);
+        }
+        // Carry live ARA renderers into the rebuilt graph. A project sync must
+        // not tear down bound ARA instances: the binding, the document graph,
+        // and any analysis the plug-in has done all belong to the instance, and
+        // re-creating it would throw them away and restart analysis.
+        {
+            let mirror = self.ara_renderers.lock();
+            if !mirror.is_empty() {
+                for track in runtime.tracks.iter_mut() {
+                    if let Some(renderers) = mirror.get(&track.id) {
+                        track.ara_renderers = renderers.clone();
+                        track.ara_latency_samples = renderers
+                            .iter()
+                            .map(|renderer| renderer.latency_samples)
+                            .sum();
+                        track.plugin_latency_samples = track
+                            .plugin_latency_samples
+                            .saturating_add(track.ara_latency_samples);
+                    }
+                }
+            }
         }
         *self.runtime.lock() = runtime.clone();
         *current_project = Some(snapshot.clone());
@@ -4022,6 +4113,7 @@ impl EngineInner {
                 EngineCommand::SetTimeSignatureMap(_) => "SetTimeSignatureMap",
                 EngineCommand::SetLoop { .. } => "SetLoop",
                 EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
+                EngineCommand::SetAraRenderers { .. } => "SetAraRenderers",
                 EngineCommand::CommandBarrier { .. } => "CommandBarrier",
                 EngineCommand::SetBridgeEditorActive { .. } => "SetBridgeEditorActive",
                 EngineCommand::StartAudition { .. } => "StartAudition",
@@ -4614,6 +4706,12 @@ where
                             for track in runtime.tracks.iter_mut() {
                                 track.listen = crate::monitor::ListenMode::Off;
                             }
+                        }
+                        EngineCommand::SetAraRenderers {
+                            track_id,
+                            renderers,
+                        } => {
+                            runtime.set_ara_renderers(&track_id, renderers);
                         }
                         EngineCommand::SetPluginBridgeSink { insert_id, sink } => {
                             match sink {
@@ -5632,6 +5730,11 @@ mod bridge_insert_tests {
             recv_r: vec![0.0; 8],
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
+            ara_renderers: Vec::new(),
+            ara_l: vec![0.0; 8],
+            ara_r: vec![0.0; 8],
+            ara_silence: vec![0.0; 8],
+            ara_latency_samples: 0,
             midi_block_events: Vec::new(),
             solfege_pitch_events: Vec::new(),
             solfege_articulation_events: Vec::new(),
@@ -6103,6 +6206,11 @@ mod bridge_insert_tests {
             recv_r: vec![0.0; 8],
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
+            ara_renderers: Vec::new(),
+            ara_l: vec![0.0; 8],
+            ara_r: vec![0.0; 8],
+            ara_silence: vec![0.0; 8],
+            ara_latency_samples: 0,
             midi_block_events: Vec::new(),
             solfege_pitch_events: Vec::new(),
             solfege_articulation_events: Vec::new(),
@@ -6242,6 +6350,11 @@ mod bridge_insert_tests {
             recv_r: vec![0.0; 8],
             soundfont_l: vec![0.0; 8],
             soundfont_r: vec![0.0; 8],
+            ara_renderers: Vec::new(),
+            ara_l: vec![0.0; 8],
+            ara_r: vec![0.0; 8],
+            ara_silence: vec![0.0; 8],
+            ara_latency_samples: 0,
             midi_block_events: Vec::new(),
             solfege_pitch_events: Vec::new(),
             solfege_articulation_events: Vec::new(),
@@ -6330,6 +6443,11 @@ mod routing_tests {
             recv_r: vec![0.0; cap],
             soundfont_l: vec![0.0; cap],
             soundfont_r: vec![0.0; cap],
+            ara_renderers: Vec::new(),
+            ara_l: vec![0.0; cap],
+            ara_r: vec![0.0; cap],
+            ara_silence: vec![0.0; cap],
+            ara_latency_samples: 0,
             midi_block_events: Vec::new(),
             solfege_pitch_events: Vec::new(),
             solfege_articulation_events: Vec::new(),
@@ -6420,6 +6538,7 @@ mod routing_tests {
                 processor: ClipDspProcessor::Resample,
                 reverse: false,
                 muted: false,
+                ara_rendered: false,
                 fade_in_samples: 0,
                 fade_out_samples: 0,
                 source,
@@ -6506,6 +6625,7 @@ mod routing_tests {
                     processor: ClipDspProcessor::Resample,
                     reverse,
                     muted: false,
+                    ara_rendered: false,
                     fade_in_samples: 0,
                     fade_out_samples: 0,
                     source,

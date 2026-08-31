@@ -246,6 +246,19 @@ pub(crate) mod ffi {
         pub(crate) fn sphere_daux_vst3_get_latency_samples(
             processor: *mut SphereDauxVst3Processor,
         ) -> i32;
+        // ARA 2 entry points. VST3 only — the CLAP and VST2 bridges expose no
+        // equivalent, so `Vst3RuntimeProcessor` gates these on the format
+        // instead of routing them through `plugin_backend::backend`.
+        pub(crate) fn sphere_daux_vst3_ara_is_supported(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst3_ara_create_main_factory(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> *mut std::ffi::c_void;
+        pub(crate) fn sphere_daux_vst3_ara_release_main_factory(unknown: *mut std::ffi::c_void);
+        pub(crate) fn sphere_daux_vst3_ara_component_unknown(
+            processor: *mut SphereDauxVst3Processor,
+        ) -> *mut std::ffi::c_void;
         pub(crate) fn sphere_daux_vst3_set_process_context(
             processor: *mut SphereDauxVst3Processor,
             tempo: c_double,
@@ -995,6 +1008,49 @@ impl Vst3RuntimeProcessor {
         unsafe { backend::get_latency_samples(self.inner.format, self.inner.raw) }
     }
 
+    /// Whether this instance's module registers an ARA main factory for the
+    /// exact class that was instantiated.
+    ///
+    /// Always false for CLAP and VST2: Futureboard hosts ARA through VST3 only.
+    pub fn supports_ara(&self) -> bool {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return false;
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_ara_is_supported(self.inner.raw) != 0 }
+    }
+
+    /// Instantiates the module's ARA main-factory class.
+    ///
+    /// Returns `None` when the plug-in is not ARA-capable. The guard must be
+    /// dropped before this processor is, because the class instance lives in the
+    /// module this processor owns.
+    pub fn ara_main_factory(&self) -> Option<AraMainFactory> {
+        if !self.supports_ara() {
+            return None;
+        }
+        // SAFETY: `raw` is a live VST3 processor; the returned reference is
+        // owned by the guard below, which releases it exactly once.
+        let unknown = unsafe { ffi::sphere_daux_vst3_ara_create_main_factory(self.inner.raw) };
+        if unknown.is_null() {
+            return None;
+        }
+        Some(AraMainFactory { unknown })
+    }
+
+    /// Borrows the initialized component's `FUnknown`, which carries the ARA
+    /// plug-in entry point.
+    ///
+    /// The pointer is owned by this processor and must not outlive it or be
+    /// released by the caller.
+    pub fn ara_component_unknown(&self) -> *mut std::ffi::c_void {
+        if self.inner.raw.is_null() || self.inner.format != PluginModuleFormat::Vst3 {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `raw` is a live VST3 processor for as long as this handle is.
+        unsafe { ffi::sphere_daux_vst3_ara_component_unknown(self.inner.raw) }
+    }
+
     /// Push the current transport state into the plugin's VST3 `ProcessContext`
     /// for the next `process()` call (tempo, time signature, project position,
     /// playing/recording). Call once per block on the thread that drives
@@ -1396,6 +1452,25 @@ impl Clone for Vst3RuntimeProcessor {
 mod tests {
     use super::*;
 
+    /// Links the ARA entry points and checks their null contract. Without this
+    /// the C++ symbols are only proven to exist when something actually loads an
+    /// ARA plug-in, which no automated run does.
+    #[test]
+    fn ara_entry_points_link_and_reject_null() {
+        // SAFETY: every ARA entry point null-checks its processor argument.
+        unsafe {
+            assert_eq!(
+                ffi::sphere_daux_vst3_ara_is_supported(std::ptr::null_mut()),
+                0
+            );
+            assert!(ffi::sphere_daux_vst3_ara_create_main_factory(std::ptr::null_mut()).is_null());
+            assert!(ffi::sphere_daux_vst3_ara_component_unknown(std::ptr::null_mut()).is_null());
+            // Releasing null must be a no-op, so a failed create needs no branch
+            // at the call site.
+            ffi::sphere_daux_vst3_ara_release_main_factory(std::ptr::null_mut());
+        }
+    }
+
     #[test]
     fn process_context_keeps_tempo_raw_while_ppq_uses_sample_rate() {
         let bpm: f64 = 128.0;
@@ -1478,3 +1553,36 @@ impl Drop for Vst3RuntimeProcessorInner {
         );
     }
 }
+
+/// Owning handle to a plug-in's ARA main-factory class instance.
+///
+/// Hands `SphereAraHost` the `Steinberg::FUnknown*` it needs to reach the
+/// `ARAFactory`. It must be dropped before the [`Vst3RuntimeProcessor`] it came
+/// from, whose module owns the class.
+#[derive(Debug)]
+pub struct AraMainFactory {
+    unknown: *mut std::ffi::c_void,
+}
+
+impl AraMainFactory {
+    /// Borrows the `Steinberg::FUnknown*` of the ARA main-factory class.
+    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.unknown
+    }
+}
+
+impl Drop for AraMainFactory {
+    fn drop(&mut self) {
+        if !self.unknown.is_null() {
+            // SAFETY: exactly one reference was handed over by
+            // `sphere_daux_vst3_ara_create_main_factory`, and this is its only
+            // release.
+            unsafe { ffi::sphere_daux_vst3_ara_release_main_factory(self.unknown) };
+            self.unknown = std::ptr::null_mut();
+        }
+    }
+}
+
+// The handle is a plain COM reference; it is created and released on the model
+// thread and carries no interior mutability of its own.
+unsafe impl Send for AraMainFactory {}

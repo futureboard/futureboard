@@ -803,6 +803,7 @@ mod tests {
                     source_path: Some(source.clone()),
                 },
                 stretch: AudioClipStretchState::default(),
+                ara: None,
             }],
             row_height_px: None,
             soundfont: None,
@@ -843,6 +844,7 @@ mod tests {
                 source_path: Some(source.to_path_buf()),
             },
             stretch: AudioClipStretchState::default(),
+            ara: None,
         }
     }
 

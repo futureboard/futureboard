@@ -298,6 +298,7 @@ impl TimelineState {
             muted: false,
             audio_import: AudioImportState::default(),
             stretch: AudioClipStretchState::default(),
+            ara: None,
         })
     }
 
@@ -349,6 +350,7 @@ impl TimelineState {
             muted: false,
             audio_import: AudioImportState::default(),
             stretch: AudioClipStretchState::default(),
+            ara: None,
         })
     }
 

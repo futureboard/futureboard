@@ -588,6 +588,7 @@ fn audio_clip(
         muted: false,
         source,
         stretch: AudioClipStretchState::default(),
+        ara: None,
     })
 }
 

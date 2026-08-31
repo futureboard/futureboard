@@ -1,15 +1,15 @@
 use super::{
-    AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
-    InputMonitorMode, MidiAccent, MidiArticulation, MidiControllerKind, MidiControllerLane,
-    MidiControllerPoint, MidiNote, MidiPitchPoint, MidiSysExEvent, MidiSysExKind, PluginFormat,
-    PluginStateBlob, ProjectAsset, ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip,
-    ProjectInsert, ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectSolfegeEngine, ProjectSolfegeLane,
-    ProjectSongSectionType, ProjectSongTextEvent, ProjectSongTextEventKind, ProjectSoundfontPlayer,
-    ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack,
-    ProjectTrackAudioFormat, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
-    ProjectTrackType, SoundfontEnvelope, SoundfontRenderQuality, TrackRouting,
-    V33TrackInputRouting,
+    AutomationLane, AutomationPoint, AutomationTargetDesc, ClipAraBinding, ClipSource,
+    FutureboardProject, InputMonitorMode, MidiAccent, MidiArticulation, MidiControllerKind,
+    MidiControllerLane, MidiControllerPoint, MidiNote, MidiPitchPoint, MidiSysExEvent,
+    MidiSysExKind, PluginFormat, PluginStateBlob, ProjectAraDocument, ProjectAsset,
+    ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip, ProjectInsert,
+    ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer, ProjectPluginInstance,
+    ProjectSend, ProjectSolfegeEngine, ProjectSolfegeLane, ProjectSongSectionType,
+    ProjectSongTextEvent, ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTempoPoint,
+    ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat,
+    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, SoundfontEnvelope,
+    SoundfontRenderQuality, TrackRouting, V33TrackInputRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -92,7 +92,11 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// dragged heights — after the output routing. A v39 file loads with every lane
 /// expanded at its default height, which is the state it was saved in, since
 /// that is what v39 always restored.
-pub const PROJECT_VERSION: u32 = 40;
+/// v41 appends each clip's ARA binding after its stretch block, and the ARA
+/// document archives after the conductor lanes. A v40 file loads with no clip
+/// bound to an ARA plug-in and no archives — the state it was saved in, since
+/// v40 could not express an ARA binding at all.
+pub const PROJECT_VERSION: u32 = 41;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -730,6 +734,17 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
     }
     // v16: stretch/pitch block trails the source for every clip.
     encode_stretch(w, &c.stretch);
+    // v41: ARA binding trails the stretch block. Identity only — the plug-in's
+    // edits live in the document archive at project level, keyed by plug-in.
+    match &c.ara {
+        Some(ara) => {
+            w.write_u8(1);
+            w.write_str(&ara.plugin_id);
+            w.write_str(&ara.plugin_path);
+            w.write_str(&ara.class_id);
+        }
+        None => w.write_u8(0),
+    }
 }
 
 fn encode_input_monitor(w: &mut FbWriter, m: InputMonitorMode) {
@@ -1344,6 +1359,17 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
     w.write_opt_f32(&project.global_lanes.time_signature_height);
     w.write_opt_f32(&project.global_lanes.song_text_height);
 
+    // ARA document archives (v41+). Appended after the conductor lanes for the
+    // same reason that block was appended after the routing: the body is
+    // positional, so a v40 file simply ends there.
+    w.write_u32(project.ara_documents.len() as u32);
+    for document in &project.ara_documents {
+        w.write_str(&document.plugin_id);
+        w.write_str(&document.track_id);
+        w.write_str(&document.archive_id);
+        w.write_bytes(&document.data);
+    }
+
     w.into_bytes()
 }
 
@@ -1374,6 +1400,12 @@ const MIN_AUDIO_CONNECTION_BYTES: usize = 26;
 const MAX_AUDIO_CONNECTIONS: usize = 100_000;
 /// Hard ceiling on bindings in one connection. Far above any real layout.
 const MAX_AUDIO_PORT_BINDINGS: usize = 1024;
+/// Smallest ARA document record on the wire: three empty strings and an empty
+/// blob, each a bare u32 length.
+const MIN_ARA_DOCUMENT_BYTES: usize = 16;
+/// Hard ceiling on saved ARA documents, mirroring the other collections. One per
+/// bound plug-in, so real projects hold a handful.
+const MAX_ARA_DOCUMENTS: usize = 1024;
 
 fn decode_audio_connection(r: &mut FbReader) -> Result<ProjectAudioConnection, ProjectError> {
     let id = r.read_str()?;
@@ -1852,6 +1884,16 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
     } else {
         AudioClipStretchState::default()
     };
+    // v41: ARA binding trails the stretch block.
+    let ara = if version >= 41 && r.read_u8()? == 1 {
+        Some(ClipAraBinding {
+            plugin_id: r.read_str()?,
+            plugin_path: r.read_str()?,
+            class_id: r.read_str()?,
+        })
+    } else {
+        None
+    };
     Ok(ProjectClip {
         id,
         name,
@@ -1862,6 +1904,7 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
         muted,
         source,
         stretch,
+        ara,
     })
 }
 
@@ -2381,9 +2424,33 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         super::ProjectGlobalLanes::default()
     };
 
+    // ARA document archives (v41+). A v40 file has none, which is the state it
+    // was saved in: v40 could not bind a clip to an ARA plug-in at all.
+    let ara_documents = if version >= 41 {
+        let count = r.read_u32()? as usize;
+        if count > MAX_ARA_DOCUMENTS || count > r.remaining() / MIN_ARA_DOCUMENT_BYTES {
+            return Err(ProjectError::Corrupted(
+                "invalid ARA document count".to_string(),
+            ));
+        }
+        let mut documents = Vec::with_capacity(count);
+        for _ in 0..count {
+            documents.push(ProjectAraDocument {
+                plugin_id: r.read_str()?,
+                track_id: r.read_str()?,
+                archive_id: r.read_str()?,
+                data: r.read_bytes()?,
+            });
+        }
+        documents
+    } else {
+        Vec::new()
+    };
+
     Ok(FutureboardProject {
         audio_connections,
         global_lanes,
+        ara_documents,
         master_output_connection_id,
         monitor_output_connection_id,
         output_routing_initialized,
@@ -2716,15 +2783,15 @@ mod tests {
         let mut body = encode_body(&FutureboardProject::new("Legacy Song Text"));
         // `encode_body` ends with the Song Text count, the v34 Audio
         // Connections count, the v35 output-routing block (two absent optional
-        // strings plus the bootstrap latch), and the v40 conductor-lane fold
-        // block (four collapse latches plus five absent optional heights). A
-        // v24-v26 fixture reads none of them, so drop the whole tail before
-        // appending the legacy cue block in its place.
+        // strings plus the bootstrap latch), the v40 conductor-lane fold block
+        // (four collapse latches plus five absent optional heights), and the v41
+        // ARA document count. A v24-v26 fixture reads none of them, so drop the
+        // whole tail before appending the legacy cue block in its place.
         let v35_output_routing_bytes = 1 + 1 + 1;
         let v40_global_lane_bytes = 4 + 5;
         body.truncate(
             body.len()
-                - 2 * std::mem::size_of::<u32>()
+                - 3 * std::mem::size_of::<u32>()
                 - v35_output_routing_bytes
                 - v40_global_lane_bytes,
         );
@@ -2798,6 +2865,7 @@ mod tests {
                 ],
             },
             stretch: AudioClipStretchState::default(),
+            ara: None,
         };
         let mut w = FbWriter::new();
         encode_clip(&mut w, &clip);
@@ -3337,6 +3405,7 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch,
+            ara: None,
         }
     }
 
@@ -3349,6 +3418,65 @@ mod tests {
         let mut r = FbReader::new(&bytes);
         let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
         assert_eq!(decoded.stretch, clip.stretch);
+    }
+
+    #[test]
+    fn ara_binding_roundtrips_v41() {
+        let mut clip = empty_clip_with_stretch(sample_stretch());
+        clip.ara = Some(ClipAraBinding {
+            plugin_id: "vst3:celemony.melodyne".to_string(),
+            plugin_path: "C:/Program Files/Common Files/VST3/Melodyne.vst3".to_string(),
+            class_id: "1234ABCD".to_string(),
+        });
+        let mut w = FbWriter::new();
+        encode_clip(&mut w, &clip);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(decoded.ara, clip.ara);
+        // The stretch block still decodes: the binding is appended after it, not
+        // spliced into the positional body.
+        assert_eq!(decoded.stretch, clip.stretch);
+    }
+
+    #[test]
+    fn v40_clip_loads_without_an_ara_binding() {
+        // A v40 writer stops after the stretch block. Reading those exact bytes
+        // as v40 must not consume the (absent) ARA presence byte.
+        let clip = empty_clip_with_stretch(sample_stretch());
+        let mut w = FbWriter::new();
+        encode_clip(&mut w, &clip);
+        let mut bytes = w.into_bytes();
+        assert_eq!(bytes.pop(), Some(0), "v41 writes a zero ARA presence byte");
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, 40).unwrap();
+        assert_eq!(decoded.ara, None);
+        assert_eq!(decoded.stretch, clip.stretch);
+    }
+
+    #[test]
+    fn ara_documents_roundtrip_v41() {
+        let mut project = FutureboardProject::new("ara");
+        project.ara_documents.push(ProjectAraDocument {
+            plugin_id: "vst3:celemony.melodyne".to_string(),
+            track_id: "track-1".to_string(),
+            archive_id: "com.celemony.ara.melodyne.v5".to_string(),
+            // Opaque bytes, including a NUL and a high byte, to prove the blob
+            // survives as raw data rather than as text.
+            data: vec![0x00, 0xFF, 0x10, b'M', b'D'],
+        });
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).unwrap();
+        assert_eq!(decoded.ara_documents.len(), 1);
+        assert_eq!(decoded.ara_documents[0].track_id, "track-1");
+        assert_eq!(
+            decoded.ara_documents[0].data,
+            vec![0x00, 0xFF, 0x10, b'M', b'D']
+        );
+        assert_eq!(
+            decoded.ara_documents[0].archive_id,
+            "com.celemony.ara.melodyne.v5"
+        );
     }
 
     #[test]
@@ -3398,6 +3526,7 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         });
         track.soundfont = Some(ProjectSoundfontPlayer {
             path: Some(PathBuf::from("/home/user/SoundFonts/GeneralUser-GS.sf2")),
@@ -3479,6 +3608,7 @@ mod tests {
             muted: false,
             source: ClipSource::Empty,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         });
         let mut project = FutureboardProject::new("Plain");
         project.tracks.push(track);

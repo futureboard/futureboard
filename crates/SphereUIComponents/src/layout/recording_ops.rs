@@ -720,6 +720,7 @@ impl StudioLayout {
                     muted: false,
                     audio_import: AudioImportState::default(),
                     stretch: AudioClipStretchState::default(),
+                    ara: None,
                 };
                 if let Some(track) = timeline
                     .state

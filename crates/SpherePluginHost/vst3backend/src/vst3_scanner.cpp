@@ -4,6 +4,12 @@
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/stringconvert.h"
 
+// Only for `kARAMainFactoryClass`. An ARA-capable VST3 registers a second
+// factory class in this category whose name matches its audio-module class, so
+// ARA capability is visible from `getClassInfo` alone — no instantiation, and
+// therefore no change to this scanner's crash-isolation model.
+#include "ARAVST3.h"
+
 #include "clap/clap.h"
 #include "clap/factory/plugin-factory.h"
 
@@ -99,6 +105,9 @@ struct ClassEntry {
   std::string class_id;
   std::string version;
   std::string sdk_version;
+  /// This module also registers an ARA main-factory class with the same name,
+  /// so the plug-in can be driven through ARA (see `ARAVST3.h`).
+  bool is_ara = false;
 };
 
 /// Emit an entry for a module whose metadata could not be read.
@@ -620,6 +629,10 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
 
     // Collect audio/plugin classes first so we can compute isShellChild.
     std::vector<ClassEntry> audio_classes;
+    // Names of the ARA main-factory classes this module registers. ARA pairs a
+    // main factory with its audio module by exact class name, so this is the
+    // key the second pass below matches on.
+    std::vector<std::string> ara_factory_names;
     int skipped = 0;
 
     for (Steinberg::int32 i = 0; i < class_count; ++i) {
@@ -677,6 +690,19 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
         continue;
       }
 
+      // An ARA main-factory class is not a plug-in of its own — it is the ARA
+      // entry point belonging to the audio-module class of the same name. Note
+      // it and keep going; it must not become a catalog row.
+      if (category == kARAMainFactoryClass) {
+        if (debug) {
+          std::fprintf(stderr,
+                       "[SpherePluginHost]     -> ARA main factory for \"%s\"\n",
+                       name.c_str());
+        }
+        ara_factory_names.push_back(name);
+        continue;
+      }
+
       // Only VST3 audio module classes are user-visible plug-ins. Some vendors
       // also expose Plugin Compatibility or Controller classes from the same
       // module; listing those creates duplicate rows for one plug-in.
@@ -697,11 +723,23 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
           {name, vendor, category, sub_categories, class_id, version, sdk_version});
     }
 
+    // ARA binds a main factory to its audio module by exact class name, so an
+    // ARA main factory with no matching audio class is ignored rather than
+    // guessed at.
+    for (auto& entry : audio_classes) {
+      for (const auto& ara_name : ara_factory_names) {
+        if (ara_name == entry.name) {
+          entry.is_ara = true;
+          break;
+        }
+      }
+    }
+
     if (debug) {
       std::fprintf(stderr,
                    "[SpherePluginHost]   Accepted: %zu plugin classes, "
-                   "skipped: %d\n",
-                   audio_classes.size(), skipped);
+                   "skipped: %d, ARA factories: %zu\n",
+                   audio_classes.size(), skipped, ara_factory_names.size());
     }
 
     // isShellChild: this module exposes more than one audio plugin class.
@@ -725,6 +763,7 @@ extern "C" SpherePluginHostString sphere_vst3_scan_path_json(const char* path) {
       json += "\"sdkVersion\":\"" + escape_json(entry.sdk_version) + "\",";
       json += "\"isShellChild\":" +
               std::string(is_shell ? "true" : "false") + ",";
+      json += "\"isAra\":" + std::string(entry.is_ara ? "true" : "false") + ",";
       json += "\"sdkMetadataLoaded\":true}";
     }
   };

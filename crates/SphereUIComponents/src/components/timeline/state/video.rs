@@ -67,6 +67,7 @@ impl TimelineState {
             muted: false,
             audio_import: AudioImportState::Ready,
             stretch: AudioClipStretchState::default(),
+            ara: None,
         };
 
         if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {

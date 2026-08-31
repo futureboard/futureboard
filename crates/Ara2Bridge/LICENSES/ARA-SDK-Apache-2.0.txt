@@ -1,0 +1,10 @@
+Celemony ARA SDK/API notice
+
+The ARA headers, SDK examples, behavior-derived tests, generated derivatives,
+ported utilities, fixtures, and vectors identified by `sdk-provenance.toml`
+originate from Celemony's ARA SDK/API release 2.3.0 and are licensed under
+Apache-2.0. The complete Apache-2.0 terms are included at repository and source
+bundle root as `LICENSE`.
+
+Normative source: https://github.com/Celemony/ARA_API/tree/65ec5c43b943a48cb5446f448a0492db6af8534b
+License: https://github.com/Celemony/ARA_API/blob/65ec5c43b943a48cb5446f448a0492db6af8534b/LICENSE.txt

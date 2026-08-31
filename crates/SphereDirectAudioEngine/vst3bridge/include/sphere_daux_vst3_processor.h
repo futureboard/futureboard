@@ -173,6 +173,35 @@ SPHERE_DAUX_VST3_API int
 sphere_daux_vst3_embed_content_size(SphereDauxVst3Processor *processor,
                                     int *out_width, int *out_height);
 
+// ── ARA 2 entry points ───────────────────────────────────────────────────────
+// ARA hosting lives in `crates/SphereAraHost`, which owns the document graph and
+// the host services. This bridge only hands it the two COM pointers ARA needs
+// from a VST3 module, so the ARA COM work stays in the audited shim inside
+// `ara2-bridge-companion` and never gets hand-rolled here.
+
+/// 1 when the loaded module registers an ARA main-factory class matching this
+/// instance's audio-module class, 0 otherwise. Cheap: reads factory class info
+/// that is already loaded, and instantiates nothing.
+SPHERE_DAUX_VST3_API int
+sphere_daux_vst3_ara_is_supported(SphereDauxVst3Processor *processor);
+
+/// Instantiates this module's ARA main-factory class and returns its
+/// `Steinberg::FUnknown*` with one owning reference, or null when the module has
+/// no matching ARA class. Release it with
+/// `sphere_daux_vst3_ara_release_main_factory`, and always before destroying the
+/// processor that owns the module.
+SPHERE_DAUX_VST3_API void *
+sphere_daux_vst3_ara_create_main_factory(SphereDauxVst3Processor *processor);
+
+/// Releases a reference returned by `sphere_daux_vst3_ara_create_main_factory`.
+SPHERE_DAUX_VST3_API void sphere_daux_vst3_ara_release_main_factory(void *unknown);
+
+/// Borrows the initialized component's `Steinberg::FUnknown*`, which is what
+/// carries `ARA::IPlugInEntryPoint(2)`. The pointer is owned by the processor:
+/// it must not be released, and it dies with the processor.
+SPHERE_DAUX_VST3_API void *
+sphere_daux_vst3_ara_component_unknown(SphereDauxVst3Processor *processor);
+
 /// Returns 1 if the processor has not been destroyed, 0 if it has.
 /// The audio callback should call this before processing and bypass the insert
 /// if it returns 0, to avoid use-after-free crashes.

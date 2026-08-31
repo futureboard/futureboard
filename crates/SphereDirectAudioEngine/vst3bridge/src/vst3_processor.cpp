@@ -48,6 +48,10 @@
 #include "sphere_daux_editor_bridge.h"
 #include "vst3_processor_internal.hpp"
 
+// Only for `kARAMainFactoryClass`. ARA hosting itself lives in
+// `crates/SphereAraHost`; this file just locates the ARA entry points.
+#include "ARAVST3.h"
+
 // IPlugFrame is a GUI-layer interface whose class IID is not emitted by the
 // SDK IID TUs we compile (coreiids.cpp / vstinitiids.cpp). Our IPlugFrame
 // implementation's queryInterface references IPlugFrame::iid, so define the
@@ -2431,6 +2435,12 @@ sphere_daux_vst3_create(const char *plugin_path, const char *class_id,
   }
   std::fprintf(stderr, "[DAUx VST3] component created classId=%s\n",
                uid->toString().c_str());
+  for (const auto &info : factory.classInfos()) {
+    if (info.ID() == *uid) {
+      instance->class_name = info.name();
+      break;
+    }
+  }
   if (auto pb =
           Steinberg::FUnknownPtr<Steinberg::IPluginBase>(instance->component)) {
     if (pb->initialize(&instance->host_context) != Steinberg::kResultOk) {
@@ -4523,6 +4533,72 @@ sphere_daux_vst3_get_latency_samples(SphereDauxVst3Processor *processor) {
     return 0;
   const auto latency = processor->processor->getLatencySamples();
   return static_cast<int>(latency);
+}
+
+// ── ARA 2 entry points ───────────────────────────────────────────────────────
+//
+// An ARA-capable VST3 registers a second factory class in the
+// `kARAMainFactoryClass` category whose name equals its audio-module class name.
+// Only that pairing is trusted here: a main factory with no name match belongs
+// to a different plug-in in the same shell module.
+
+namespace {
+
+/// The ARA main-factory class matching `processor`'s audio-module class, if any.
+VST3::Optional<VST3::UID>
+daux_ara_main_factory_uid(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->module || processor->class_name.empty())
+    return {};
+  const auto factory = processor->module->getFactory();
+  for (const auto &info : factory.classInfos()) {
+    if (info.category() == kARAMainFactoryClass &&
+        info.name() == processor->class_name) {
+      return VST3::Optional<VST3::UID>(info.ID());
+    }
+  }
+  return {};
+}
+
+} // namespace
+
+extern "C" int
+sphere_daux_vst3_ara_is_supported(SphereDauxVst3Processor *processor) {
+  return daux_ara_main_factory_uid(processor) ? 1 : 0;
+}
+
+extern "C" void *
+sphere_daux_vst3_ara_create_main_factory(SphereDauxVst3Processor *processor) {
+  set_last_error("");
+  const auto uid = daux_ara_main_factory_uid(processor);
+  if (!uid) {
+    set_last_error("module has no matching ARA main factory class");
+    return nullptr;
+  }
+  auto instance =
+      processor->module->getFactory().createInstance<Steinberg::FUnknown>(*uid);
+  if (!instance) {
+    set_last_error("ARA main factory class could not be instantiated");
+    return nullptr;
+  }
+  // Hand the caller the reference `createInstance` already produced; the
+  // matching release is `sphere_daux_vst3_ara_release_main_factory`.
+  return static_cast<void *>(instance.take());
+}
+
+extern "C" void sphere_daux_vst3_ara_release_main_factory(void *unknown) {
+  if (unknown) {
+    static_cast<Steinberg::FUnknown *>(unknown)->release();
+  }
+}
+
+extern "C" void *
+sphere_daux_vst3_ara_component_unknown(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->component)
+    return nullptr;
+  // Borrowed: the component is owned by the processor, and ARA binding must not
+  // outlive it.
+  return static_cast<void *>(
+      static_cast<Steinberg::FUnknown *>(processor->component.get()));
 }
 
 // ── Plugin state persistence ─────────────────────────────────────────────────

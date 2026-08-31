@@ -1,0 +1,23 @@
+[package]
+name = "ara2-bridge-core"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Shared safe types and dispatch infrastructure for ara2-bridge (vendored)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/futureboard/ara2-bridge"
+readme = "README.md"
+publish = false
+
+[dependencies]
+ara2-bridge-sys = { path = "../ara2-bridge-sys" }
+base64.workspace = true
+bitflags.workspace = true
+crossbeam-queue = "0.3"
+parking_lot.workspace = true
+quick-xml = "0.41"
+thiserror.workspace = true
+
+[dev-dependencies]
+# Only for the audio-file-path unit tests kept from upstream.
+tempfile.workspace = true

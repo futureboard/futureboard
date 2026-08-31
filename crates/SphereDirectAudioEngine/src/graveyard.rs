@@ -68,6 +68,7 @@ fn audio_file_sender() -> &'static Sender<Box<AudioFileBuffer>> {
 pub fn prime() {
     let _ = sender();
     let _ = audio_file_sender();
+    let _ = ara_sender();
 }
 
 /// Hand a retired runtime graph to the background dropper.
@@ -86,6 +87,36 @@ pub fn retire(old: RuntimeProject) {
 #[inline]
 pub fn retire_audio_file(old: Box<AudioFileBuffer>) {
     if let Err(err) = audio_file_sender().try_send(old) {
+        drop(err.into_inner());
+    }
+}
+
+fn ara_sender() -> &'static Sender<Vec<crate::runtime::RuntimeAraRenderer>> {
+    static GY: OnceLock<Sender<Vec<crate::runtime::RuntimeAraRenderer>>> = OnceLock::new();
+    GY.get_or_init(|| {
+        let (tx, rx) = bounded::<Vec<crate::runtime::RuntimeAraRenderer>>(GRAVEYARD_CAPACITY);
+        let _ = std::thread::Builder::new()
+            .name("daux-ara-graveyard".to_string())
+            .spawn(move || {
+                while let Ok(old) = rx.recv() {
+                    drop(old);
+                }
+            });
+        tx
+    })
+}
+
+/// Dispose a retired ARA renderer list away from the realtime callback.
+///
+/// Dropping the last handle to a bound ARA instance destroys a C++ VST3
+/// processor, which is exactly the OS work `retire` exists to keep off the audio
+/// thread.
+#[inline]
+pub fn retire_ara_renderers(old: Vec<crate::runtime::RuntimeAraRenderer>) {
+    if old.is_empty() {
+        return;
+    }
+    if let Err(err) = ara_sender().try_send(old) {
         drop(err.into_inner());
     }
 }

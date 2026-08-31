@@ -95,10 +95,14 @@ pub use crate::plugin_backend::PluginModuleFormat;
 /// Shared automation curve shaping — the UI lane renderer calls this so the drawn
 /// curve matches realtime playback and offline export exactly.
 pub use crate::runtime::automation_curve_factor;
+// ARA renderers are built by the app (which owns the ARA document) and installed
+// with `AudioEngine::set_ara_renderers`, so the type has to be nameable outside
+// this crate.
+pub use crate::runtime::RuntimeAraRenderer;
 pub use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint, TempoSegment};
 pub use crate::transport::RuntimeTransportSnapshot;
 pub use crate::vst3_processor::{
-    RuntimeTransportContext, Vst3MidiEvent, Vst3MidiEventKind, Vst3PluginState,
+    AraMainFactory, RuntimeTransportContext, Vst3MidiEvent, Vst3MidiEventKind, Vst3PluginState,
     Vst3RuntimeProcessor,
 };
 
