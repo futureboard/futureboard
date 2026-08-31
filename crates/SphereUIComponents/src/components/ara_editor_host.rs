@@ -172,10 +172,15 @@ impl AraEditorHost {
     /// `render` runs every frame, so the same line is written only when it
     /// actually changes; `DESIGN.md` requires high-rate logs to be gated, and
     /// this one is additionally deduplicated.
-    fn trace(&mut self, line: String) {
+    /// Takes a closure so nothing is formatted, and nothing is allocated, on the
+    /// overwhelmingly common path where the trace is off. `render` runs every
+    /// frame; building a string there to throw it away is work the panel does
+    /// forever and reads never.
+    fn trace(&mut self, line: impl FnOnce() -> String) {
         if !view_debug() {
             return;
         }
+        let line = line();
         if self.traced.as_deref() == Some(line.as_str()) {
             return;
         }
@@ -366,7 +371,7 @@ impl Render for AraEditorHost {
         let _scope = crate::perf::PerfScope::enter("BottomPanelAraEditor");
 
         if self.owner.read(cx).ara_editor_is_popped_out() {
-            self.trace("render: popped out".to_string());
+            self.trace(|| "render: popped out".to_string());
             self.request_detach(cx);
             return unavailable_panel(
                 "This editor is open in its own window — use Dock to bring it back.",
@@ -375,7 +380,7 @@ impl Render for AraEditorHost {
         }
         let target = self.owner.read(cx).ara_panel_target(cx);
         let Some(key) = target else {
-            self.trace("render: no ARA target for the selection".to_string());
+            self.trace(|| "render: no ARA target for the selection".to_string());
             self.request_detach(cx);
             return unavailable_panel("This clip is not being edited by an ARA plug-in.")
                 .into_any_element();
@@ -396,13 +401,13 @@ impl Render for AraEditorHost {
             .measured
             .get()
             .and_then(|bounds| Self::embed_rect(bounds, window.scale_factor()));
-        self.trace(format!(
-            "render: target={} rect={:?} attached={} status={:?}",
-            key.plugin_id,
-            self.pending_rect,
-            self.attached.is_some(),
-            self.status
-        ));
+        let pending_rect = self.pending_rect;
+        let attached = self.attached.is_some();
+        let status = self.status.clone();
+        let plugin_id = key.plugin_id.clone();
+        self.trace(move || {
+            format!("render: target={plugin_id} rect={pending_rect:?} attached={attached} status={status:?}")
+        });
         // A plug-in can ask to resize at any moment. Taking the request here is
         // one atomic exchange on the bridge — no plug-in call, no window work —
         // and the answer goes out on the deferred tick with everything else.
@@ -499,8 +504,12 @@ fn unavailable_panel(message: &str) -> impl IntoElement {
 }
 
 /// Whether the docked-editor trace is enabled.
+///
+/// Resolved once: `var_os` takes the process-wide environment lock and
+/// allocates, and this is asked on every frame the panel renders.
 fn view_debug() -> bool {
-    std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
 }
 
 /// Whether a plug-in view can be parked inside a GPUI panel on this platform.

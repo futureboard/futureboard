@@ -352,18 +352,25 @@ impl DirectXRenderer {
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
             }
-            .context(format!(
-                "scene too large:\
-                {} paths, {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
-                scene.paths.len(),
-                scene.shadows.len(),
-                scene.quads.len(),
-                scene.underlines.len(),
-                scene.monochrome_sprites.len(),
-                scene.subpixel_sprites.len(),
-                scene.polychrome_sprites.len(),
-                scene.surfaces.len(),
-            ))?;
+            // Lazily: `context` takes its argument by value, so this ran the
+            // whole format -- one heap allocation and eight integer formats --
+            // for every batch of every frame, to describe a failure that had
+            // not happened. A busy scene has dozens of batches, so it was
+            // dozens of allocations per frame on the draw path.
+            .with_context(|| {
+                format!(
+                    "scene too large:\
+                    {} paths, {} shadows, {} quads, {} underlines, {} mono, {} subpixel, {} poly, {} surfaces",
+                    scene.paths.len(),
+                    scene.shadows.len(),
+                    scene.quads.len(),
+                    scene.underlines.len(),
+                    scene.monochrome_sprites.len(),
+                    scene.subpixel_sprites.len(),
+                    scene.polychrome_sprites.len(),
+                    scene.surfaces.len(),
+                )
+            })?;
         }
         self.present()
     }

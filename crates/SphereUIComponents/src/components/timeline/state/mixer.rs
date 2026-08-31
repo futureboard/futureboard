@@ -47,7 +47,8 @@ impl TimelineState {
     // two views can never drift apart.
 
     pub fn fader_debug_enabled() -> bool {
-        std::env::var_os("FUTUREBOARD_FADER_DEBUG").is_some()
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_FADER_DEBUG").is_some())
     }
 
     pub fn display_master_volume(&self) -> f32 {

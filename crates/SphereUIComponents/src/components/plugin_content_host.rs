@@ -31,8 +31,10 @@ pub struct ContentRect {
     pub height: i32,
 }
 
+/// Resolved once: this is asked from the window procedure, on every paint.
 fn debug_enabled() -> bool {
-    std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
 }
 
 #[cfg(target_os = "windows")]
@@ -354,7 +356,8 @@ mod imp {
     /// per frame rather than once per window resize; `DESIGN.md` requires
     /// high-rate logs to be environment-gated.
     fn view_debug() -> bool {
-        std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
     }
 
     impl ContentChildHwnd {

@@ -163,8 +163,10 @@ pub const EDITOR_WINDOW_MIN_HEIGHT: f32 = 200.0;
 /// error. ~5 s — generous, but never an infinite silent spin.
 const MAX_WAIT_TICKS: u32 = 150;
 
+/// Resolved once: this is asked from the editor tick, several times a frame.
 fn plugin_view_debug() -> bool {
-    std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some())
 }
 
 /// Explicit lifecycle state for the embedded editor. The UI renders a distinct
@@ -353,13 +355,23 @@ impl PluginEditorWindow {
         let w: f32 = viewport.width.into();
         let h: f32 = viewport.height.into();
         let header_px = HEADER_H * scale;
-        if let Some((content_w, content_h)) = self.editor_content_size {
-            return EmbedRegion {
-                x: 0,
-                y: header_px.round() as i32,
-                width: content_w.max(1),
-                height: content_h.max(1),
-            };
+        // A fixed-size editor gets exactly its own size and the window is sized
+        // around it. A resizable one follows the window, so the user dragging
+        // the frame actually reaches the plug-in instead of being overridden by
+        // the size it happened to open at.
+        let fixed = self
+            .processor
+            .as_ref()
+            .is_some_and(|processor| !processor.view_can_resize());
+        if fixed {
+            if let Some((content_w, content_h)) = self.editor_content_size {
+                return EmbedRegion {
+                    x: 0,
+                    y: header_px.round() as i32,
+                    width: content_w.max(1),
+                    height: content_h.max(1),
+                };
+            }
         }
         EmbedRegion {
             x: 0,

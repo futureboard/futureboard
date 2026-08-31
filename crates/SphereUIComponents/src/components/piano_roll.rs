@@ -500,7 +500,8 @@ thread_local! {
 /// `FUTUREBOARD_MIDI_ZOOM_DEBUG`. Off by default — zoom logging must not be
 /// always-on (per project debug-flag conventions).
 fn midi_zoom_debug_enabled() -> bool {
-    std::env::var_os("FUTUREBOARD_MIDI_ZOOM_DEBUG").is_some()
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_ZOOM_DEBUG").is_some())
 }
 
 /// `true` when `beat` is (within tolerance) an integer multiple of `m`.
