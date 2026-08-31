@@ -4948,6 +4948,10 @@ where
                         .saturating_sub(frames_in_block);
                 }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+                // ARA reaches the plug-in only through the per-block process
+                // context, so a bound instance keeps the graph awake while
+                // stopped — see `RuntimeProject::has_ara_renderers`.
+                let ara_wakeup = runtime.has_ara_renderers();
                 let audition_active = !audition.is_idle();
                 // Park the Browser preview playhead here as well: the mix below
                 // is skipped entirely on idle blocks, so the sentinel would
@@ -4962,7 +4966,8 @@ where
                     || bridge_preview_tail
                     || metronome.preview_tail_samples > 0
                     || metronome.stop_tail_samples > 0
-                    || bridge_editor_wakeup;
+                    || bridge_editor_wakeup
+                    || ara_wakeup;
                 let preview_render_active = graph_wake_active || audition_active;
                 if preview_render_active
                     && !playing_local

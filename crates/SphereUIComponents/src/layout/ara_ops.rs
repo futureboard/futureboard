@@ -46,6 +46,14 @@ pub struct AraSessionKey {
 /// only value anyone looks at.
 const INBOX_CAPACITY: usize = 512;
 
+/// How long a control-thread ARA change waits for the audio callback to confirm
+/// that this track's renderers are out of the graph.
+///
+/// Long enough to cover a large device block plus scheduling jitter, short
+/// enough that a stalled or closed stream does not hang the gesture — the wait
+/// simply gives up, and nothing is processing in that case anyway.
+const RENDERER_BARRIER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Bounded drop-oldest queue shared with plug-in threads.
 struct Inbox<T> {
     items: Mutex<std::collections::VecDeque<T>>,
@@ -418,7 +426,46 @@ impl AraState {
         media_paths: HashMap<AraSourceKey, PathBuf>,
     ) -> AraResult<()> {
         let pending = self.pending_archives.remove(key);
-        let session = self.ensure_session(engine, key, plugin_name, plugin_path, class_id)?;
+        self.ensure_session(engine, key, plugin_name, plugin_path, class_id)?;
+
+        // The edit below creates and destroys playback regions on an instance
+        // the engine may be rendering, and each one calls into the plug-in. ARA
+        // does not allow the region set to change under a live `process()`, so
+        // the track's renderers leave the engine first; `finish_apply` puts them
+        // back once the model is whole again.
+        Self::suspend_renderers(engine, &key.track_id);
+        let outcome = self.apply_model(
+            engine,
+            key,
+            plugin_name,
+            timeline,
+            graph,
+            media_paths,
+            pending,
+        );
+        if outcome.is_err() {
+            // A failed edit must not leave the track silent until some later,
+            // unrelated sync happens to reinstall it.
+            Self::install_renderers(engine, &self.sessions, &key.track_id);
+        }
+        outcome
+    }
+
+    /// The model edit itself, with the track's renderers already suspended.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_model(
+        &mut self,
+        engine: &DirectAudio::AudioEngine,
+        key: &AraSessionKey,
+        plugin_name: &str,
+        timeline: &AraMusicalTimeline,
+        graph: &AraGraph,
+        media_paths: HashMap<AraSourceKey, PathBuf>,
+        pending: Option<(String, Vec<u8>)>,
+    ) -> AraResult<()> {
+        let Some(session) = self.sessions.get_mut(key) else {
+            return Err(AraHostError::invalid("ARA session disappeared mid-apply"));
+        };
 
         session.audio.publish(media_paths);
         session.session.set_rendering(session.renderer, false)?;
@@ -437,6 +484,24 @@ impl AraState {
             }
         }
         self.finish_apply(engine, key, graph)
+    }
+
+    /// Takes a track's ARA renderers out of the engine and waits for the audio
+    /// callback to confirm it.
+    ///
+    /// `set_ara_renderers` only *queues* the change, so without this barrier the
+    /// callback can still be inside `process()` on the very instance whose ARA
+    /// model is about to be edited or destroyed. A `false` ack means the barrier
+    /// was not confirmed — no stream is open, or the callback is stalled — and
+    /// in neither case is anything processing, so the caller carries on.
+    ///
+    /// Control thread only: it blocks, briefly, on the audio callback.
+    fn suspend_renderers(engine: &DirectAudio::AudioEngine, track_id: &str) {
+        if let Err(error) = engine.set_ara_renderers(track_id.to_string(), Vec::new()) {
+            eprintln!("[ARA] could not suspend renderers for track {track_id}: {error}");
+            return;
+        }
+        let _ = engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT);
     }
 
     fn finish_apply(
@@ -509,11 +574,21 @@ impl AraState {
         };
         let plugin_name = session.plugin_name.clone();
         // Order matters: stop the engine calling the instance, then release the
-        // ARA graph, then let the processor drop.
+        // ARA graph, then let the processor drop. The removal is only *queued*,
+        // so the barrier is part of "stop the engine calling it" — the region
+        // assignments dropped by `session.close()` call into a plug-in the
+        // callback would otherwise still be rendering.
         Self::install_renderers(engine, &self.sessions, &key.track_id);
+        let _ = engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT);
         let AraTrackSession {
             session, processor, ..
         } = session;
+        // Last line of defence for a view that has not come down yet — a
+        // project closing out from under a docked editor, say. The plug-in's
+        // editor reads the document about to be destroyed, so it is released
+        // here; whoever owned the view detaches again later and finds nothing
+        // left to release.
+        processor.embed_detach();
         if let Err(error) = session.close() {
             self.last_error = Some(format!("{plugin_name} reported errors on close: {error}"));
         }

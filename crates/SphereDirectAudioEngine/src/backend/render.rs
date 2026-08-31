@@ -963,6 +963,7 @@ fn paused_preview_wake(
         || runtime.bridge_panic_flush_samples > 0
         || runtime.bridge_preview_tail_samples > 0
         || runtime.has_bridge_editor_active()
+        || runtime.has_ara_renderers()
         || local.preview_tail_samples > 0
         || local.stop_tail_samples > 0
         || software_monitoring
@@ -1113,6 +1114,11 @@ fn fill_output_f32_inner(
     // so the plugin's own UI keyboard stays audible (parity with the legacy
     // callback path).
     let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+    // ARA's only host-to-plug-in transport channel is the per-block process
+    // context, so an ARA-bound track keeps the graph running while stopped —
+    // see `RuntimeProject::has_ara_renderers`. The block itself is silent: a
+    // playback renderer sounds nothing with `playing` clear.
+    let ara_wakeup = runtime.has_ara_renderers();
     let audition_active = !local.audition.is_idle();
     // Reasons the *graph* has to run while the transport is stopped. A Browser
     // preview is deliberately not one of them: it is a decoded buffer mixed
@@ -1123,6 +1129,7 @@ fn fill_output_f32_inner(
         || panic_flush
         || bridge_preview_tail
         || bridge_editor_wakeup
+        || ara_wakeup
         || local.preview_tail_samples > 0
         || local.stop_tail_samples > 0
         || software_monitoring;

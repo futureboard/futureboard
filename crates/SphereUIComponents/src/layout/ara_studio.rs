@@ -165,14 +165,61 @@ impl StudioLayout {
         // The engine must stop mixing this track's clip files in the same pass,
         // or every clip plays twice until the next unrelated sync.
         self.mark_engine_project_dirty();
+        // Binding an ARA plug-in *is* the request to work on the track, so its
+        // editor comes up with it instead of costing a second trip through the
+        // context menu. Only when the session really started: a failed bind has
+        // already put its reason in `last_error`, and a panel opened on nothing
+        // would bury it behind an empty rectangle.
+        if self.ara.processor(&key).is_some() {
+            if let Some(clip_id) = self.first_audio_clip_of_track(track_id, cx) {
+                self.open_ara_editor(&clip_id, cx);
+            }
+        }
         cx.notify();
     }
 
+    /// Earliest audio clip on a track, which is what the ARA editor opens on.
+    ///
+    /// The panel resolves its target from the clip selection, so auto-opening
+    /// needs a clip to select; the earliest one is the one the user is looking
+    /// at when they bind the track.
+    fn first_audio_clip_of_track(&self, track_id: &str, cx: &gpui::App) -> Option<String> {
+        let state = &self.timeline.read(cx).state;
+        let track = state.tracks.iter().find(|track| track.id == track_id)?;
+        track
+            .clips
+            .iter()
+            .filter(|clip| {
+                matches!(
+                    clip.clip_type,
+                    crate::components::timeline::timeline_state::ClipType::Audio { .. }
+                )
+            })
+            .min_by(|a, b| {
+                a.start_beat
+                    .partial_cmp(&b.start_beat)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|clip| clip.id.clone())
+    }
+
     /// Removes a track's ARA plug-in and closes its session.
+    ///
+    /// The session outlives the editor on purpose. A plug-in's view draws from
+    /// the ARA document, and neither host of that view lets go synchronously —
+    /// the docked panel tears down on a deferred tick (`DestroyWindow`
+    /// re-enters GPUI, so it cannot run inline) and a popped-out window
+    /// releases its view when GPUI actually removes it. Destroying the document
+    /// while a view is still open on it takes the app down, so the close is
+    /// pushed past the detach handshake, the same way [`Self::pop_out_ara_editor`]
+    /// waits before asking the controller for a second view.
     pub(crate) fn unbind_track_from_ara(&mut self, track_id: &str, cx: &mut Context<Self>) {
         let Some((plugin_id, _)) = self.ara_binding_for_track(track_id, cx) else {
             return;
         };
+        // Cleared first: while the track still names a plug-in, the next layout
+        // render would re-target the panel at the session being torn down and
+        // re-attach the view behind the teardown.
         self.timeline.update(cx, |timeline, cx| {
             if let Some(track) = timeline
                 .state
@@ -190,11 +237,32 @@ impl StudioLayout {
             track_id: track_id.to_string(),
         };
         self.close_ara_editor(&key, cx);
-        if let Some(engine) = self.audio_bridge.engine.as_ref() {
-            self.ara.close(engine, &key);
-        }
+        self.ara_editor_popped_out = false;
+        self.ara_editor
+            .update(cx, |host, cx| host.request_detach(cx));
         self.mark_engine_project_dirty();
         cx.notify();
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            for _ in 0..16 {
+                let released = this
+                    .update(cx, |layout, cx| !layout.ara_editor.read(cx).is_attached())
+                    .unwrap_or(true);
+                if released {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_millis(16)).await;
+            }
+            let _ = this.update(cx, |layout, cx| {
+                let Some(engine) = layout.audio_bridge.engine.clone() else {
+                    return;
+                };
+                layout.ara.close(&engine, &key);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Rebuilds and re-applies the ARA document for one session.
@@ -245,7 +313,18 @@ impl StudioLayout {
         ) {
             self.ara.last_error = Some(format!("{}: {error}", choice.name));
             eprintln!("[ARA] {} failed: {error}", choice.name);
+            return;
         }
+
+        // ARA has no host-to-plug-in transport call: the plug-in reads the
+        // host's position and playing state out of the process context it is
+        // handed per block. Until the stream is open it is handed none, so its
+        // editor playhead sits wherever it was left and its own play button
+        // toggles against a stale transport state. Warming here means a freshly
+        // bound plug-in is in step before the first Play instead of after it.
+        // Failure is not fatal to the binding — the document is already applied,
+        // and `ensure_audio_stream_warm` has reported why.
+        let _ = self.ensure_audio_stream_warm();
     }
 
     /// Re-applies every live ARA session against the current project.
@@ -259,6 +338,16 @@ impl StudioLayout {
         let keys: Vec<AraSessionKey> = self.ara.keys().cloned().collect();
         let choices = self.ara_plugin_choices();
         for key in keys {
+            // A session whose track no longer names it is on its way out — see
+            // `unbind_track_from_ara`, which clears the binding first and closes
+            // the session once the plug-in's view has let go. Re-applying it
+            // here would edit a model that is being torn down.
+            if self
+                .ara_binding_for_track(&key.track_id, cx)
+                .is_none_or(|(plugin_id, _)| plugin_id != key.plugin_id)
+            {
+                continue;
+            }
             if let Some(choice) = choices.iter().find(|choice| choice.id == key.plugin_id) {
                 let choice = choice.clone();
                 self.sync_ara_session(&key, &choice, cx);
@@ -377,6 +466,9 @@ impl StudioLayout {
             return;
         }
         for request in self.ara.take_transport_requests() {
+            // Paired with the trace on the ARA host side, this says whether a
+            // request the plug-in made actually reached the transport.
+            ara_trace(&format!("applying transport request {request:?}"));
             match request {
                 AraTransportRequest::Start => self.start_native_playback(cx),
                 AraTransportRequest::Stop => self.stop_native_playback(cx),

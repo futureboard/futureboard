@@ -1802,7 +1802,11 @@ impl RuntimeProject {
             let track = &self.tracks[track_index];
             active_source_mask[track_index] |= !track.inserts.is_empty()
                 || track.soundfont_player.is_some()
-                || track.solfege_engine.is_some();
+                || track.solfege_engine.is_some()
+                // An ARA plug-in is the track's source: its clips are skipped by
+                // the clip loop because the plug-in renders them itself, so the
+                // track has to stay in the pass on its own account.
+                || !track.ara_renderers.is_empty();
         }
         self.audio_graph.active_source_mask = active_source_mask;
         self.resolve_bridge_sinks();
@@ -3821,6 +3825,26 @@ impl RuntimeProject {
 
     pub fn has_bridge_editor_active(&self) -> bool {
         !self.bridge_editor_active.is_empty()
+    }
+
+    /// Whether any track is rendered by an ARA plug-in.
+    ///
+    /// ARA has no host-to-plug-in transport call: the plug-in reads the host's
+    /// position and playing state out of the process context it is handed per
+    /// block, and that is the only channel there is. A host that stops calling
+    /// the instance the moment the transport stops therefore freezes the
+    /// plug-in's idea of the transport at the last block it saw — its editor
+    /// playhead stops following seeks, and its own play button keeps toggling
+    /// against a stale "still playing" state. So an ARA-bound track is a reason
+    /// to keep the graph running while stopped, exactly like an open bridged
+    /// editor is.
+    ///
+    /// Realtime-safe: a length check per track, no allocation, no locking —
+    /// the same shape as the `midi_block_events` scan in `paused_preview_wake`.
+    pub fn has_ara_renderers(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|track| !track.ara_renderers.is_empty())
     }
 }
 

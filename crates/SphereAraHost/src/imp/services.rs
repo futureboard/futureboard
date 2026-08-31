@@ -459,30 +459,43 @@ impl TransportService {
     }
 }
 
+// Every request is traced before it is queued. The plug-in asking and the host
+// acting on it are two different threads a frame apart, so without a record at
+// the boundary "the plug-in never pressed play" and "the host dropped it" look
+// identical from the outside.
 impl PlaybackProvider for TransportService {
     fn start(&self) -> Result<(), AraError> {
+        trace("plug-in requested transport start");
         self.control.request(AraTransportRequest::Start);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), AraError> {
+        trace("plug-in requested transport stop");
         self.control.request(AraTransportRequest::Stop);
         Ok(())
     }
 
     fn set_position(&self, position: f64) -> Result<(), AraError> {
+        trace(&format!(
+            "plug-in requested playback position {position:.3}s"
+        ));
         self.control
             .request(AraTransportRequest::SetPosition(position));
         Ok(())
     }
 
     fn set_cycle_range(&self, start: f64, duration: f64) -> Result<(), AraError> {
+        trace(&format!(
+            "plug-in requested cycle range {start:.3}s +{duration:.3}s"
+        ));
         self.control
             .request(AraTransportRequest::SetCycleRange { start, duration });
         Ok(())
     }
 
     fn enable_cycle(&self, enable: bool) -> Result<(), AraError> {
+        trace(&format!("plug-in requested cycle enable={enable}"));
         self.control
             .request(AraTransportRequest::EnableCycle(enable));
         Ok(())
