@@ -1680,6 +1680,11 @@ impl StudioLayout {
         ) {
             Ok(handle) => {
                 self.plugin_editors.open.insert(key, handle);
+                // The loading shell put up while the plug-in was still being
+                // loaded has been replaced by this window. Nothing else drops
+                // it on this path, and left behind it is a blank window of its
+                // own -- named after the plug-in -- sitting beside the DAW.
+                self.close_bridge_editor(cx, &track_id, &insert_id);
                 self.refresh_plugin_editor_chrome(cx);
             }
             Err(err) => {

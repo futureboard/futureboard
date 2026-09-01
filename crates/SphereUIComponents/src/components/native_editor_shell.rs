@@ -593,11 +593,9 @@ mod imp {
         let new_style = WINDOW_STYLE((style.0 & !frame_bits.0) | borderless.0);
         SetWindowLongPtrW(hwnd, GWL_STYLE, new_style.0 as isize);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let new_ex = if owner.is_some() {
-            (ex & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0
-        } else {
-            ex | WS_EX_APPWINDOW.0
-        };
+        // Same rule as at creation: off the taskbar and out of Alt-Tab whether
+        // or not an owner could be resolved.
+        let new_ex = (ex & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex as isize);
         if let Some(owner) = owner {
             SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
@@ -1777,11 +1775,11 @@ mod imp {
 
             unsafe {
                 let owner = validated_owner(owner_hwnd);
-                let ex_style = if owner.is_some() {
-                    WS_EX_TOOLWINDOW
-                } else {
-                    WS_EX_APPWINDOW
-                };
+                // Never an app window, owned or not. A plug-in editor is part of
+                // the DAW, not a second application, and an unowned shell taking
+                // `WS_EX_APPWINDOW` is how a blank "API-2500 Stereo" ends up on
+                // the taskbar beside the DAW's own entry.
+                let ex_style = WS_EX_TOOLWINDOW;
                 let top = CreateWindowExW(
                     ex_style,
                     SHELL_CLASS,
