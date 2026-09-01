@@ -52,13 +52,13 @@ mod imp {
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW,
+        CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClassNameW,
         GetClientRect, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow,
-        RegisterClassW, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, GWL_STYLE, GW_CHILD,
-        HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE,
-        WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL,
-        WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW,
-        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        RegisterClassW, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, GA_PARENT, GWL_STYLE,
+        GW_CHILD, GW_OWNER, HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
+        WH_GETMESSAGE, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
+        WM_NULL, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
+        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
 
     /// Space presses claimed from an embedded plug-in view, waiting for the UI
@@ -92,50 +92,130 @@ mod imp {
         if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
             return false;
         }
-        if msg.wParam.0 != VK_SPACE_W || msg.lParam.0 & KEY_REPEAT_BIT != 0 {
+        if msg.wParam.0 != VK_SPACE_W {
+            return false;
+        }
+        if msg.lParam.0 & KEY_REPEAT_BIT != 0 {
             return false;
         }
         unsafe {
             let held = |vk: i32| GetKeyState(vk) < 0;
             // VK_CONTROL / VK_MENU / VK_LWIN / VK_RWIN.
             if held(0x11) || held(0x12) || held(0x5B) || held(0x5C) {
+                transport_trace(|| "space with a modifier; left alone".to_string());
                 return false;
             }
             // Only keys headed into an embedded plug-in view. Everywhere else in
             // the app GPUI already routes Space through the key bindings, and
             // claiming it here as well would toggle the transport twice.
             let target = msg.hwnd;
-            let inside = HOSTS
-                .lock()
-                .map(|hosts| {
-                    hosts.iter().any(|&host| {
-                        let host = hwnd_from(host);
-                        target == host || IsChild(host, target).as_bool()
-                    })
-                })
-                .unwrap_or(false);
+            let inside = inside_a_plugin_view(target);
             if !inside {
+                transport_trace(|| {
+                    let hosts = HOSTS
+                        .lock()
+                        .map(|hosts| {
+                            hosts
+                                .iter()
+                                .map(|host| format!("0x{host:x}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "space at 0x{:x} (class '{}') is not inside a host; hosts=[{hosts}]",
+                        target.0 as u64,
+                        class_name_of(target)
+                    )
+                });
                 return false;
             }
             // A caret owns Space — typing a note name must not start playback.
             let focus = GetFocus();
             if !focus.0.is_null() {
-                let mut class = [0u16; 128];
-                let len = GetClassNameW(focus, &mut class);
-                if len > 0 {
-                    let name =
-                        String::from_utf16_lossy(&class[..len as usize]).to_ascii_lowercase();
-                    if name == "edit"
-                        || name == "combobox"
-                        || name.starts_with("richedit")
-                        || name.contains("textbox")
-                    {
-                        return false;
-                    }
+                let name = class_name_of(focus);
+                if name == "edit"
+                    || name == "combobox"
+                    || name.starts_with("richedit")
+                    || name.contains("textbox")
+                {
+                    transport_trace(|| format!("space belongs to a caret in '{name}'"));
+                    return false;
                 }
+            }
+            if debug_enabled() {
+                eprintln!("[transport-key] space claimed at 0x{:x}", target.0 as u64);
             }
             true
         }
+    }
+
+    /// Whether `target` belongs to an embedded plug-in view.
+    ///
+    /// Walks parents *and* owners. `IsChild` alone is not enough: a VST3 view is
+    /// supposed to be a `WS_CHILD` of the handle it was attached to, but plug-ins
+    /// routinely put parts of their UI — menus, note editors, tooltips — in
+    /// popups that are *owned* by that window rather than children of it, and a
+    /// key pressed in one of those is still a key pressed in the plug-in.
+    unsafe fn inside_a_plugin_view(target: HWND) -> bool {
+        let Ok(hosts) = HOSTS.lock() else {
+            return false;
+        };
+        if hosts.is_empty() {
+            return false;
+        }
+        let mut hwnd = target;
+        // Bounded: a window tree deep enough to exhaust this is not one of ours,
+        // and an owner cycle would otherwise hang the message loop.
+        for _ in 0..32 {
+            if hwnd.0.is_null() {
+                return false;
+            }
+            if hosts.iter().any(|&host| hwnd_from(host) == hwnd) {
+                return true;
+            }
+            // SAFETY: `hwnd` is checked non-null above; both calls tolerate a
+            // window that has since been destroyed by returning null.
+            let next = unsafe { GetAncestor(hwnd, GA_PARENT) };
+            let next = if next.0.is_null() || next == hwnd {
+                unsafe { GetWindow(hwnd, GW_OWNER).unwrap_or_default() }
+            } else {
+                next
+            };
+            if next == hwnd {
+                return false;
+            }
+            hwnd = next;
+        }
+        false
+    }
+
+    /// Lower-cased window class of `hwnd`, for diagnostics and the caret test.
+    unsafe fn class_name_of(hwnd: HWND) -> String {
+        let mut class = [0u16; 128];
+        // SAFETY: the buffer outlives the call and the length is honoured.
+        let len = unsafe { GetClassNameW(hwnd, &mut class) };
+        if len <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&class[..len as usize]).to_ascii_lowercase()
+    }
+
+    /// Trace for the transport-key path.
+    ///
+    /// Every step of it is invisible from outside: the hook either sees a key or
+    /// it does not, and the window it lands on either is inside a plug-in view
+    /// or is not. "Space does nothing" cannot distinguish those.
+    ///
+    /// Gated, except for the first press the hook declines — one line saying why
+    /// the first Space went nowhere is worth more than a hundred saying it again,
+    /// and it is the line somebody reporting this will already have.
+    fn transport_trace(line: impl FnOnce() -> String) {
+        static FIRST_DECLINE: AtomicBool = AtomicBool::new(false);
+        if !debug_enabled() && FIRST_DECLINE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("[transport-key] {}", line());
     }
 
     /// Claims the transport key before the plug-in's own window procedure runs.
@@ -194,9 +274,13 @@ mod imp {
         match installed {
             Ok(hook) if !hook.is_invalid() => {
                 HOOK.store(hook.0 as isize, Ordering::Release);
-                if debug_enabled() {
-                    eprintln!("[plugin-content-hwnd] transport key hook installed");
-                }
+                // Not gated: whether the one path by which Space can reach the
+                // transport from inside a plug-in exists at all is worth a line.
+                eprintln!(
+                    "[transport-key] hook installed on thread {} for host 0x{hwnd:x}",
+                    // SAFETY: a plain query with no arguments.
+                    unsafe { GetCurrentThreadId() }
+                );
             }
             _ => eprintln!(
                 "[plugin-content-hwnd] WARNING could not install the transport key hook; \
