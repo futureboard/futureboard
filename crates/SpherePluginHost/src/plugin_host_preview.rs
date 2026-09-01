@@ -685,7 +685,7 @@ impl PluginHostPreviewEngine {
     pub fn log_host_registry(&self) {
         eprintln!("[plugin-host-registry] instances={}", self.instances.len());
         for (id, instance) in &self.instances {
-            let editor = instance.processor.embed_is_valid();
+            let editor = instance.processor.view_is_attached();
             let dsp = instance.processor.is_ready();
             eprintln!("[plugin-host-registry] instance={id} loaded=true editor={editor} dsp={dsp}");
         }
@@ -779,7 +779,7 @@ impl PluginHostPreviewEngine {
         let retired = self.instances.remove(plugin_instance_id);
         if let Some(instance) = &retired {
             let mut midi = instance.midi.lock();
-            instance.processor.embed_detach();
+            instance.processor.view_detach();
             midi.panic();
         }
         if self.instances.is_empty() {
@@ -825,7 +825,8 @@ impl PluginHostPreviewEngine {
             .embed_set_instance_label(plugin_instance_id);
         instance
             .processor
-            .embed_editor(parent_hwnd, 0, 0, width, height)
+            .view_attach(parent_hwnd, (width, height))
+            .map(|_| parent_hwnd)
     }
 
     pub fn embed_resize_for_instance(&self, plugin_instance_id: &str, width: i32, height: i32) {
@@ -833,12 +834,11 @@ impl PluginHostPreviewEngine {
             eprintln!(
                 "[plugin-bridge] ResizeEditor instance={plugin_instance_id} width={width} height={height}"
             );
-            instance.processor.embed_set_bounds(0, 0, width, height);
-            instance.processor.embed_refresh();
+            instance.processor.view_set_size(width, height);
             let host_hwnd = instance.processor.handle_value();
             eprintln!("[plugin-host-layout] host_hwnd=0x{host_hwnd:x}");
             eprintln!("[plugin-host-layout] host_client=({width},{height})");
-            if let Some((child_w, child_h)) = instance.processor.embed_content_size() {
+            if let Some((child_w, child_h)) = instance.processor.view_size() {
                 eprintln!("[plugin-host-layout] plugin_child_count=1");
                 eprintln!("[plugin-host-layout] child=plugin_view client=({child_w},{child_h})");
                 let child_matches = child_w == width && child_h == height;
@@ -850,11 +850,10 @@ impl PluginHostPreviewEngine {
         }
     }
 
-    pub fn embed_refresh_for_instance(&self, plugin_instance_id: &str) {
-        if let Some(instance) = self.instances.get(plugin_instance_id) {
-            instance.processor.embed_refresh();
-        }
-    }
+    /// Kept as a no-op: the plug-in's view is a child of a window the main app
+    /// owns, so it is carried along by its parent. Nothing on this side has a
+    /// shell left to keep glued to anything.
+    pub fn embed_refresh_for_instance(&self, _plugin_instance_id: &str) {}
 
     /// Detach editor UI only — processor stays loaded and active.
     pub fn editor_detach_for_instance(&mut self, plugin_instance_id: &str) {
@@ -863,7 +862,7 @@ impl PluginHostPreviewEngine {
             // internals as process(), so serialize it with the per-voice render
             // guard instead of racing the audio producer.
             let _voice_guard = instance.midi.lock();
-            instance.processor.embed_detach();
+            instance.processor.view_detach();
         }
         eprintln!(
             "[PluginHost] editor closed id={plugin_instance_id} instance_still_active={}",
@@ -875,14 +874,14 @@ impl PluginHostPreviewEngine {
     pub fn embed_detach_for_instance(&mut self, plugin_instance_id: &str) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
             let mut midi = instance.midi.lock();
-            instance.processor.embed_detach();
+            instance.processor.view_detach();
             midi.panic();
         }
     }
 
     pub fn editor_content_size_for_instance(&self, plugin_instance_id: &str) -> (u32, u32) {
         if let Some(instance) = self.instances.get(plugin_instance_id) {
-            if let Some((w, h)) = instance.processor.embed_content_size() {
+            if let Some((w, h)) = instance.processor.view_size() {
                 return (w.max(1) as u32, h.max(1) as u32);
             }
         }

@@ -2843,8 +2843,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             "[plugin-bridge] ResizeEditor instance={instance_id} \
                              width={width} height={height} dpi={dpi}"
                         );
-                        processor.embed_set_bounds(0, 0, width as i32, height as i32);
-                        processor.embed_refresh();
+                        processor.view_set_size(width as i32, height as i32);
                         pending_resizes.remove(&instance_id);
                     }
                 }
@@ -2882,7 +2881,6 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                         user_closed.push(instance_id.clone());
                         continue;
                     }
-                    processor.embed_refresh();
                     // Safe mode: no extra per-editor pump here — the main
                     // `pump_messages` below drains the whole thread queue.
                     if !platform::editor_safe_mode() {
@@ -2970,15 +2968,13 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                         // Lock busy — keep the entry and retry next tick.
                         return true;
                     };
-                    processor.embed_refresh();
                     if let Some((width, height)) = entry.second_resize {
                         eprintln!(
                             "[PluginEditorLifecycle] second resize instance={} size={}x{}",
                             entry.instance_id, width, height
                         );
                         eprintln!("[editor-size] delayed resize = {}x{}", width, height);
-                        processor.embed_set_bounds(0, 0, width as i32, height as i32);
-                        processor.embed_refresh();
+                        processor.view_set_size(width as i32, height as i32);
                     }
                     if !platform::editor_safe_mode() {
                         if let Some(host_hwnd) = registry
@@ -4767,7 +4763,12 @@ fn schedule_unified_editor_attach(
             "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult=begin"
         );
         let started = Instant::now();
-        let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
+        // The window belongs to the main app, which handed us its HWND. This
+        // only creates the plug-in's view and attaches it there -- no shell, no
+        // titlebar, no window procedure of ours in the way.
+        let handle = processor
+            .view_attach(parent_hwnd, (w, h))
+            .map(|_| parent_hwnd);
         let elapsed = started.elapsed();
         let attach_hwnd = processor.embed_attach_hwnd();
         eprintln!(
@@ -4778,7 +4779,7 @@ fn schedule_unified_editor_attach(
             elapsed.as_millis()
         );
         let (preferred_width, preferred_height) = processor
-            .embed_content_size()
+            .view_size()
             .map(|(cw, ch)| (cw.max(1) as u32, ch.max(1) as u32))
             .unwrap_or((width.max(1), height.max(1)));
         let resizable = processor.editor_resizable().unwrap_or(true);
@@ -4870,11 +4871,13 @@ fn schedule_unified_editor_attach(
                 w,
                 h
             );
-            let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
+            let handle = processor
+                .view_attach(parent_hwnd, (w, h))
+                .map(|_| parent_hwnd);
             let elapsed = started.elapsed();
             let attach_hwnd = processor.embed_attach_hwnd();
             let (preferred_width, preferred_height) = processor
-                .embed_content_size()
+                .view_size()
                 .map(|(w, h)| (w.max(1) as u32, h.max(1) as u32))
                 .unwrap_or((width.max(1), height.max(1)));
             let resizable = processor.editor_resizable().unwrap_or(true);
@@ -4920,10 +4923,9 @@ fn schedule_unified_editor_attach(
             });
             if attached {
                 loop {
-                    if !processor.embed_is_valid() {
+                    if !processor.view_is_attached() {
                         break;
                     }
-                    processor.embed_refresh();
                     let _ = platform::pump_messages();
                     let _ = platform::wait_for_input(8);
                 }
@@ -4950,13 +4952,13 @@ fn drain_editor_attach_results(
                     "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=late_attach_after_timeout\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
                     result.plugin_instance_id
                 );
-                result.processor.embed_detach();
+                result.processor.view_detach();
             }
             continue;
         };
         if pending.request_id != result.request_id {
             if result.handle.is_some() {
-                result.processor.embed_detach();
+                result.processor.view_detach();
             }
             continue;
         }
@@ -5037,13 +5039,10 @@ fn finalize_editor_attach(
         "[editor-size] client rect = {}x{}",
         result.preferred_width, result.preferred_height
     );
-    result.processor.embed_set_bounds(
-        0,
-        0,
+    result.processor.view_set_size(
         result.preferred_width as i32,
         result.preferred_height as i32,
     );
-    result.processor.embed_refresh();
     eprintln!(
         "[editor-open] resize {}x{} ok plugin={} insert={} hwnd=0x{:x} thread_id={}",
         result.preferred_width,
