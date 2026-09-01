@@ -26,8 +26,8 @@ use gpui::{
 
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::plugin_editor_chrome::{
-    render_chrome_tools, render_tab_strip, PluginEditorAction, PluginEditorChrome, PluginEditorTab,
-    TAB_STRIP_H,
+    render_chrome_tools, render_preset_menu, render_tab_strip, PluginEditorAction,
+    PluginEditorChrome, PluginEditorTab, TAB_STRIP_H,
 };
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
@@ -264,6 +264,11 @@ pub struct PluginEditorWindow {
     chrome: PluginEditorChrome,
     /// Chrome controls the user pressed, waiting for the studio to apply them.
     chrome_actions: Vec<PluginEditorAction>,
+    /// Whether the preset list is showing.
+    ///
+    /// Window state, not the studio's: which menu is open is nobody else's
+    /// business, and it closes the moment a preset is picked.
+    preset_menu_open: bool,
     /// Every plug-in open on this channel, in slot order.
     ///
     /// One window per channel: its inserts are a chain, and the tab strip is how
@@ -341,6 +346,7 @@ impl PluginEditorWindow {
                 ..PluginEditorChrome::default()
             },
             chrome_actions: Vec::new(),
+            preset_menu_open: false,
             tabs: Vec::new(),
             status,
             wait_ticks: 0,
@@ -1794,14 +1800,24 @@ impl Render for PluginEditorWindow {
                     });
                 }
             }))
-            .child(render_chrome_tools(&self.chrome, {
+            .child(render_chrome_tools(&self.chrome, self.preset_menu_open, {
                 let this = cx.entity().downgrade();
                 move |action, cx| {
                     // Queued on the window; the studio drains it on its next
                     // poll. Applying it here would need the insert and the
-                    // engine, neither of which this window owns.
+                    // engine, neither of which this window owns. Opening the
+                    // preset list is the exception — it is this window's own
+                    // state and nothing else has to know.
                     let _ = this.update(cx, |editor, cx| {
-                        editor.chrome_actions.push(action);
+                        match action {
+                            PluginEditorAction::TogglePresetMenu(open) => {
+                                editor.preset_menu_open = open;
+                            }
+                            action => {
+                                editor.preset_menu_open = false;
+                                editor.chrome_actions.push(action);
+                            }
+                        }
                         cx.notify();
                     });
                 }
@@ -1819,6 +1835,19 @@ impl Render for PluginEditorWindow {
                     .bottom_0()
                     .bg(Colors::surface_base()),
             );
+
+        if self.preset_menu_open {
+            let this = cx.entity().downgrade();
+            root = root.child(div().absolute().top(px(HEADER_H)).left(px(70.0)).child(
+                render_preset_menu(&self.chrome, move |action, cx| {
+                    let _ = this.update(cx, |editor, cx| {
+                        editor.preset_menu_open = false;
+                        editor.chrome_actions.push(action);
+                        cx.notify();
+                    });
+                }),
+            ));
+        }
 
         if let Some(overlay) = content_overlay {
             root = root.child(

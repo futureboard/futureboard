@@ -521,6 +521,18 @@ pub fn default_preset_root() -> PathBuf {
         .join("Audio Plug-ins")
 }
 
+/// Where a user's own plug-in presets live.
+///
+/// A sibling of the scan cache, not a folder inside it: both are `.pst`, but
+/// [`crate::preset::load_cached_plugins`] walks its whole root and reads every
+/// file there as a plug-in registry row. A preset the user saved is not one.
+pub fn user_preset_root() -> PathBuf {
+    dirs::document_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Futureboard Studio")
+        .join("Plug-in Presets")
+}
+
 fn safe_file_name(value: &str) -> String {
     value
         .chars()

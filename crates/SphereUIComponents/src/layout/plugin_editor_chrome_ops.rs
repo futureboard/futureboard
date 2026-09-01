@@ -357,6 +357,11 @@ impl StudioLayout {
             PluginEditorAction::SavePreset => {
                 self.save_plugin_editor_preset(track_id, insert_id, cx);
             }
+            PluginEditorAction::SelectPreset(index) => {
+                self.load_plugin_editor_preset(track_id, insert_id, index, cx);
+            }
+            // Window state; it never reaches here.
+            PluginEditorAction::TogglePresetMenu(_) => {}
             PluginEditorAction::SelectTab(target) => {
                 self.select_plugin_editor_tab(track_id, &target, cx);
             }
@@ -377,8 +382,8 @@ impl StudioLayout {
         let Some(plugin_id) = self.insert_plugin_id(track_id, insert_id, cx) else {
             return;
         };
-        let presets = list_presets(&plugin_id);
-        if presets.is_empty() {
+        let count = list_presets(&plugin_id).len() as i64;
+        if count == 0 {
             return;
         }
         let key = (track_id.to_string(), insert_id.to_string());
@@ -388,9 +393,26 @@ impl StudioLayout {
             .get(&key)
             .copied()
             .unwrap_or(0) as i64;
-        let count = presets.len() as i64;
-        let next = ((current + delta as i64) % count + count) % count;
-        let index = next as usize;
+        let index = (((current + delta as i64) % count + count) % count) as usize;
+        self.load_plugin_editor_preset(track_id, insert_id, index, cx);
+    }
+
+    /// Loads one preset by position in the list.
+    fn load_plugin_editor_preset(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(plugin_id) = self.insert_plugin_id(track_id, insert_id, cx) else {
+            return;
+        };
+        let presets = list_presets(&plugin_id);
+        if index >= presets.len() {
+            return;
+        }
+        let key = (track_id.to_string(), insert_id.to_string());
         let Some(dir) = preset_dir(&plugin_id) else {
             return;
         };
@@ -471,13 +493,7 @@ impl StudioLayout {
                 return;
             }
         };
-        if let Err(error) = std::fs::create_dir_all(&dir) {
-            eprintln!(
-                "[plugin-preset] could not create {}: {error}",
-                dir.display()
-            );
-            return;
-        }
+
         // Numbered rather than prompting: the editor has no room for a dialog,
         // and a preset the user can rename on disk beats one they cannot save.
         let existing = list_presets(&plugin_id);
@@ -489,7 +505,26 @@ impl StudioLayout {
             }
             index += 1;
         };
-        if let Err(error) = std::fs::write(&path, &bytes) {
+        let plugin_name = self
+            .timeline
+            .read(cx)
+            .state
+            .insert_slots(track_id)
+            .and_then(|slots| {
+                slots
+                    .iter()
+                    .find(|slot| slot.id == insert_id)
+                    .map(|slot| slot.display_name.clone())
+            })
+            .unwrap_or_else(|| plugin_id.clone());
+        if let Err(error) = SpherePluginHost::preset::write_state_preset(
+            &path,
+            &SpherePluginHost::preset::StatePreset {
+                plugin_id: plugin_id.clone(),
+                plugin_name,
+                state: bytes.clone(),
+            },
+        ) {
             eprintln!(
                 "[plugin-preset] could not write {}: {error}",
                 path.display()

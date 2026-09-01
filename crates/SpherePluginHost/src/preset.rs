@@ -290,6 +290,123 @@ pub fn clear_plugin_cache() -> Result<u32, String> {
     clear_all_presets()
 }
 
+/// One user preset: a plug-in's own opaque state under a name.
+///
+/// Written in the same FBPST container as the scan cache — one format for every
+/// `.pst` the app writes — with the state in the payload the header has always
+/// reserved for it and the metadata saying so.
+pub struct StatePreset {
+    /// Stable plug-in identifier the state belongs to. A preset is only ever
+    /// restored into the plug-in that produced it.
+    pub plugin_id: String,
+    /// Plug-in display name, for anything that reads the file on its own.
+    pub plugin_name: String,
+    /// The plug-in's opaque state, exactly as it handed it over.
+    pub state: Vec<u8>,
+}
+
+/// Writes a user preset to `path`, creating parent directories.
+pub fn write_state_preset(path: &Path, preset: &StatePreset) -> Result<(), String> {
+    if preset.state.is_empty() {
+        return Err("preset has no plug-in state to store".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let bytes = build_state_preset_binary(preset);
+    // Written aside and renamed, like the scan cache: a preset half-written by
+    // an interrupted save is worse than no preset.
+    let tmp = path.with_extension("pst.tmp");
+    {
+        let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reads back the plug-in state a user preset carries.
+///
+/// The `plugin_id` in the file is returned with it: state belongs to one
+/// plug-in, and handing it to another is not a preset, it is corruption.
+pub fn read_state_preset(path: &Path) -> Result<(String, Vec<u8>), String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() < 24 || &bytes[..5] != PRESET_MAGIC {
+        return Err("Not an FBPST preset".to_string());
+    }
+    let meta_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+    let state_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    let meta_start = 24usize;
+    let meta_end = meta_start
+        .checked_add(meta_len)
+        .ok_or_else(|| "Preset metadata length overflow".to_string())?;
+    let state_end = meta_end
+        .checked_add(state_len)
+        .ok_or_else(|| "Preset state length overflow".to_string())?;
+    if bytes.len() < state_end {
+        return Err("Preset state truncated".to_string());
+    }
+    if state_len == 0 {
+        return Err("Preset carries no plug-in state".to_string());
+    }
+    let parsed: PresetMetadataOwned =
+        serde_json::from_slice(&bytes[meta_start..meta_end]).map_err(|e| e.to_string())?;
+    Ok((
+        parsed.plugin_metadata.id,
+        bytes[meta_end..state_end].to_vec(),
+    ))
+}
+
+fn build_state_preset_binary(preset: &StatePreset) -> Vec<u8> {
+    let metadata = PresetMetadata {
+        preset_format: "Mochi preset: Futureboard",
+        version: 1,
+        created_at: now_millis(),
+        plugin_metadata: PresetPluginMetadata {
+            id: &preset.plugin_id,
+            name: &preset.plugin_name,
+            vendor: "",
+            format: "",
+            category: "",
+            raw_category: None,
+            sub_categories: None,
+            kind: "effect",
+            path: String::new(),
+            class_id: None,
+            version: None,
+            sdk_metadata_loaded: false,
+        },
+        plugin_state: PresetPluginState {
+            encoding: "binary",
+            byte_length: preset.state.len() as u32,
+            source: "captured",
+        },
+    };
+    let meta = serde_json::to_vec(&metadata).unwrap_or_default();
+    let mut out = Vec::with_capacity(24 + meta.len() + preset.state.len());
+    out.extend_from_slice(&preset_header(meta.len(), preset.state.len()));
+    out.extend_from_slice(&meta);
+    out.extend_from_slice(&preset.state);
+    out
+}
+
+/// The 24-byte FBPST header shared by every `.pst` this app writes.
+fn preset_header(meta_len: usize, state_len: usize) -> [u8; 24] {
+    let mut header = [0u8; 24];
+    header[..5].copy_from_slice(PRESET_MAGIC);
+    header[6..8].copy_from_slice(&1u16.to_le_bytes());
+    header[8..12].copy_from_slice(&(meta_len as u32).to_le_bytes());
+    header[12..16].copy_from_slice(&(state_len as u32).to_le_bytes());
+    header
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
 fn build_preset_binary(plugin: &RegistryPlugin) -> Vec<u8> {
     let kind = plugin.kind.as_str();
     let metadata = PresetMetadata {
@@ -318,14 +435,62 @@ fn build_preset_binary(plugin: &RegistryPlugin) -> Vec<u8> {
     };
 
     let meta = serde_json::to_vec(&metadata).unwrap_or_default();
-    let mut header = [0u8; 24];
-    header[..5].copy_from_slice(PRESET_MAGIC);
-    header[6..8].copy_from_slice(&1u16.to_le_bytes());
-    header[8..12].copy_from_slice(&(meta.len() as u32).to_le_bytes());
-    header[12..16].copy_from_slice(&0u32.to_le_bytes());
-
     let mut out = Vec::with_capacity(24 + meta.len());
-    out.extend_from_slice(&header);
+    out.extend_from_slice(&preset_header(meta.len(), 0));
     out.extend_from_slice(&meta);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A user preset is an FBPST file like any other: same magic, same header,
+    /// with the state in the payload the header reserves. Anything that reads
+    /// `.pst` reads this one too.
+    #[test]
+    fn a_state_preset_round_trips_through_the_shared_container() {
+        let dir = std::env::temp_dir().join("fb-preset-roundtrip");
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("Preset 1.pst");
+        let state: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        write_state_preset(
+            &path,
+            &StatePreset {
+                plugin_id: "vst3:abcdef".to_string(),
+                plugin_name: "Auto-Tune Pro".to_string(),
+                state: state.clone(),
+            },
+        )
+        .expect("write");
+
+        let raw = fs::read(&path).expect("read back");
+        assert_eq!(&raw[..5], PRESET_MAGIC, "same container as the scan cache");
+        let declared = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
+        assert_eq!(declared, state.len(), "header declares the state length");
+
+        let (plugin_id, restored) = read_state_preset(&path).expect("parse");
+        assert_eq!(plugin_id, "vst3:abcdef");
+        assert_eq!(restored, state, "state comes back byte for byte");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The scan cache's own presets carry no state, and asking for one says so
+    /// rather than handing back an empty blob a plug-in would swallow.
+    #[test]
+    fn a_cache_preset_reports_that_it_carries_no_state() {
+        let dir = std::env::temp_dir().join("fb-preset-nostate");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("cache.pst");
+        let meta = br#"{"pluginMetadata":{"id":"x","name":"X"}}"#;
+        let mut bytes = preset_header(meta.len(), 0).to_vec();
+        bytes.extend_from_slice(meta);
+        fs::write(&path, &bytes).expect("write");
+
+        assert!(read_state_preset(&path).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

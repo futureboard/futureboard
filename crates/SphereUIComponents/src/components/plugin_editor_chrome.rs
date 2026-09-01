@@ -113,6 +113,68 @@ impl PluginEditorChrome {
     }
 }
 
+/// Renders the open preset list, to be placed under the chrome row.
+///
+/// Drawn by the window rather than inside the row so it can overlap the
+/// plug-in's region: the row is 26 pixels tall and a preset list is not.
+pub fn render_preset_menu(
+    chrome: &PluginEditorChrome,
+    emit: impl Fn(PluginEditorAction, &mut App) + Clone + 'static,
+) -> gpui::AnyElement {
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .min_w(px(180.0))
+        .max_h(px(320.0))
+        .py(px(4.0))
+        .rounded(px(4.0))
+        .bg(Colors::surface_panel_raised())
+        .border_1()
+        .border_color(Colors::border_subtle())
+        .overflow_hidden()
+        .occlude();
+
+    if chrome.presets.is_empty() {
+        return list
+            .child(
+                div()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .text_size(px(10.0))
+                    .font(theme::ui_font())
+                    .text_color(Colors::text_faint())
+                    .child("No presets saved for this plug-in"),
+            )
+            .into_any_element();
+    }
+
+    for (index, name) in chrome.presets.iter().enumerate() {
+        let selected = chrome.preset_index == Some(index);
+        let pick = emit.clone();
+        list = list.child(
+            div()
+                .id(ElementId::Name(format!("plugin-preset-{index}").into()))
+                .flex()
+                .items_center()
+                .h(px(22.0))
+                .px(px(10.0))
+                .text_size(px(10.0))
+                .font(theme::ui_font())
+                .text_color(if selected {
+                    Colors::text_primary()
+                } else {
+                    Colors::text_secondary()
+                })
+                .when(selected, |style| style.bg(Colors::surface_control_hover()))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|style| style.bg(Colors::surface_control_hover()))
+                .on_click(move |_, _window, cx| pick(PluginEditorAction::SelectPreset(index), cx))
+                .child(name.clone()),
+        );
+    }
+    list.into_any_element()
+}
+
 /// Height of the tab strip. Sized to a browser tab, which is what it is.
 pub const TAB_STRIP_H: f32 = 30.0;
 
@@ -241,6 +303,10 @@ pub enum PluginEditorAction {
     StepPreset(i32),
     /// Store the plug-in's current state as a new preset.
     SavePreset,
+    /// Load the preset at this index.
+    SelectPreset(usize),
+    /// Open or close the preset list.
+    TogglePresetMenu(bool),
     /// Bring another of this channel's open plug-ins to the front.
     SelectTab(String),
     /// Close one plug-in's tab. Closing the last one closes the window.
@@ -358,6 +424,7 @@ const CHROME_ROW_H: f32 = 26.0;
 /// `emit` queues an action on the window.
 pub fn render_chrome_tools(
     chrome: &PluginEditorChrome,
+    menu_open: bool,
     emit: impl Fn(PluginEditorAction, &mut App) + Clone + 'static,
 ) -> gpui::AnyElement {
     let active = chrome.active;
@@ -366,6 +433,7 @@ pub fn render_chrome_tools(
     let emit_active = emit.clone();
     let emit_prev = emit.clone();
     let emit_next = emit.clone();
+    let emit_menu = emit.clone();
     let emit_save = emit;
 
     div()
@@ -401,19 +469,36 @@ pub fn render_chrome_tools(
                     false,
                     move |_window, cx| emit_prev(PluginEditorAction::StepPreset(-1), cx),
                 ))
+                // The name is the menu trigger. A chain of presets is stepped
+                // through with the chevrons; picking one by name needs a list.
                 .child(
                     div()
+                        .id("plugin-editor-preset-menu")
                         .flex()
                         .items_center()
+                        .gap(px(6.0))
                         .h(px(18.0))
                         .px(px(8.0))
-                        .min_w(px(96.0))
+                        .min_w(px(120.0))
                         .rounded(px(3.0))
                         .bg(Colors::surface_base())
                         .text_size(px(10.0))
                         .font(theme::ui_font())
                         .text_color(Colors::text_secondary())
-                        .child(chrome.preset_label()),
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .occlude()
+                        .hover(|style| style.bg(Colors::surface_control_hover()))
+                        .on_click(move |_, _window, cx| {
+                            emit_menu(PluginEditorAction::TogglePresetMenu(!menu_open), cx)
+                        })
+                        .child(div().flex_1().child(chrome.preset_label()))
+                        .child(
+                            svg()
+                                .path(assets::ICON_CHEVRON_DOWN_PATH)
+                                .w(px(10.0))
+                                .h(px(10.0))
+                                .text_color(Colors::text_faint()),
+                        ),
                 )
                 .child(chrome_icon_button(
                     "plugin-editor-preset-next",
