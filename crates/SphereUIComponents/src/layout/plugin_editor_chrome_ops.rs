@@ -130,21 +130,37 @@ impl StudioLayout {
             .as_deref()
             .map(list_presets)
             .unwrap_or_default();
-        // The engine is the only place that knows what an insert really costs
-        // and what it delays by; both are absent until a stream is running,
-        // which is why the readouts show a dash rather than a zero.
-        let load = self
-            .audio_bridge
-            .engine
+        // A bridged plug-in reports through its shared region, which the host
+        // writes and the bridge runtime holds; the engine's control-side graph
+        // is a clone from when the stream opened and never sees either value.
+        // An in-process insert has no region, so that one does come from the
+        // engine.
+        let bridged = self
+            .plugin_editors
+            .bridge_runtime
             .as_ref()
-            .and_then(|engine| engine.insert_load(track_id, insert_id));
+            .and_then(|runtime| runtime.lock().ok()?.instance_load(insert_id));
+        let (cpu_load, latency_samples) = match bridged {
+            Some((share, latency)) => (share, latency),
+            None => {
+                let load = self
+                    .audio_bridge
+                    .engine
+                    .as_ref()
+                    .and_then(|engine| engine.insert_load(track_id, insert_id));
+                (
+                    load.map(|(share, _)| share),
+                    load.map(|(_, latency)| latency).unwrap_or(0),
+                )
+            }
+        };
         Some(PluginEditorChrome {
             plugin_name: slot.display_name.clone(),
             insert_number: index + 1,
             active: slot.enabled && !slot.bypassed,
-            latency_samples: load.map(|(_, latency)| latency).unwrap_or(0),
+            latency_samples,
             sample_rate,
-            cpu_load: load.map(|(share, _)| share),
+            cpu_load,
             preset_index: self
                 .plugin_editors
                 .preset_selection

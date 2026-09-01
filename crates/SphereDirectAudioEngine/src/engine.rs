@@ -912,6 +912,27 @@ impl Default for EngineInner {
     }
 }
 
+/// Gated, throttled trace for [`EngineInner::insert_load`].
+///
+/// One line a second at most: the editor asks every poll, and a readout that is
+/// wrong is wrong every poll too — the first line says as much as a thousand.
+fn insert_load_trace(line: impl FnOnce() -> String) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()) {
+        return;
+    }
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    if last.is_some_and(|last| now.duration_since(last) < std::time::Duration::from_secs(1)) {
+        return;
+    }
+    *last = Some(now);
+    eprintln!("[insert-load] {}", line());
+}
+
 impl EngineInner {
     pub fn new() -> Self {
         log_sphere_audio_processor_diagnostics_once();
@@ -2280,6 +2301,11 @@ impl EngineInner {
 
     /// What one insert costs and how much delay it adds, for its own editor.
     ///
+    /// Traced under `FUTUREBOARD_PLUGIN_VIEW_DEBUG`, once a second: every value
+    /// in a plug-in editor's CPU/latency readout crosses a process boundary and
+    /// three layers of lookup, and "it reads zero" says nothing about which of
+    /// them came up empty.
+    ///
     /// Returns `(cpu_share, latency_samples)` where `cpu_share` is the fraction
     /// of one audio block this insert's processing took, smoothed. `None` when
     /// the insert is not in the graph. The latency is the plug-in's own report,
@@ -2291,8 +2317,24 @@ impl EngineInner {
         use std::sync::atomic::Ordering;
         let deadline_us = self.shared.callback_deadline_us.load(Ordering::Relaxed);
         let runtime = self.runtime.lock();
-        let track = runtime.tracks.iter().find(|track| track.id == track_id)?;
-        let insert = track.inserts.iter().find(|insert| insert.id == insert_id)?;
+        let Some(track) = runtime.tracks.iter().find(|track| track.id == track_id) else {
+            insert_load_trace(|| {
+                format!(
+                    "no runtime track '{track_id}'; known={:?}",
+                    runtime.tracks.iter().map(|t| &t.id).collect::<Vec<_>>()
+                )
+            });
+            return None;
+        };
+        let Some(insert) = track.inserts.iter().find(|insert| insert.id == insert_id) else {
+            insert_load_trace(|| {
+                format!(
+                    "no insert '{insert_id}' on '{track_id}'; known={:?}",
+                    track.inserts.iter().map(|i| &i.id).collect::<Vec<_>>()
+                )
+            });
+            return None;
+        };
         let bridged = insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge;
         let sink = insert.bridge_sink.as_ref();
         // A bridged plug-in runs in another process, so the engine's own timing
@@ -2320,6 +2362,15 @@ impl EngineInner {
                 .map(|vst3| vst3.get_latency_samples().max(0) as u32)
                 .unwrap_or(0)
         };
+        insert_load_trace(|| {
+            format!(
+                "'{insert_id}' kind={:?} sink={} host_load={:?} engine_us={} deadline_us={deadline_us}                  -> share={share:.4} latency={latency}",
+                insert.kind_tag,
+                sink.is_some(),
+                sink.and_then(|sink| sink.reported_process_load()),
+                insert.cpu_us.load(Ordering::Relaxed),
+            )
+        });
         Some((share, latency))
     }
 

@@ -186,6 +186,40 @@ impl PluginBridgeRuntime {
         )
     }
 
+    /// What one bridged plug-in costs and delays: `(cpu_share, latency_samples)`.
+    ///
+    /// Read straight from the shared region the host writes into, not from the
+    /// engine's graph. The engine's control-side `RuntimeProject` is a clone
+    /// taken when the stream opened -- the sink installed for a plug-in loaded
+    /// afterwards, and the block times the callback records, both land on the
+    /// copy the audio thread owns, so asking that side reports zero forever.
+    /// This is the same memory the host publishes into and the only live view of
+    /// it the UI has.
+    ///
+    /// `cpu_share` is `None` until a block has actually been processed: an
+    /// unmeasured plug-in has no cost to report, and reporting 0% would say it
+    /// is free.
+    pub fn instance_load(&self, instance_id: &str) -> Option<(Option<f32>, u32)> {
+        use std::sync::atomic::Ordering;
+        let bridge = self.shared_audio.get(instance_id)?.bridge();
+        let latency = bridge.latency_samples.load(Ordering::Relaxed);
+        let micros = bridge.last_process_micros.load(Ordering::Relaxed);
+        let sample_rate = bridge.sample_rate.load(Ordering::Relaxed);
+        // The block's own wall-clock budget: the same duration means very
+        // different things at 64 frames and at 1024. `block_frames` is what the
+        // last block actually ran at; before any block it is 0, so fall back to
+        // what the region was prepared for.
+        let frames = match bridge.block_frames.load(Ordering::Relaxed) {
+            0 => bridge.max_block_size.load(Ordering::Relaxed),
+            frames => frames,
+        };
+        if micros == 0 || frames == 0 || sample_rate == 0 {
+            return Some((None, latency));
+        }
+        let deadline_micros = frames as f64 * 1_000_000.0 / sample_rate as f64;
+        Some((Some((micros as f64 / deadline_micros) as f32), latency))
+    }
+
     pub fn loaded_descriptor(&self, instance: &str) -> Option<BridgeLoadedPlugin> {
         self.loaded
             .get(instance)
