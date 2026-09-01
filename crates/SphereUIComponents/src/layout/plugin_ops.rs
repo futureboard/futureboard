@@ -1643,6 +1643,51 @@ impl StudioLayout {
     /// in a native child region under it. If already open, this is a no-op (the
     /// window stays up). UI thread only; bad plugin → the editor window shows a
     /// fallback panel, never a crash.
+    /// Opens the GPUI editor window for one bridged insert.
+    ///
+    /// Called from a spawned task, never from inside a frame — see the note at
+    /// its only call site.
+    fn open_bridged_editor_window(
+        &mut self,
+        owner_bounds: gpui::Bounds<gpui::Pixels>,
+        key: (String, String),
+        track_id: String,
+        insert_id: String,
+        display_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        // Nothing is guaranteed to still be true a turn later: the insert may
+        // have been removed, or a second click may have opened the window
+        // already.
+        if self.plugin_editors.open.contains_key(&key) {
+            return;
+        }
+        let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
+            eprintln!(
+                "[plugin-runtime] external bridge mandatory but no runtime for editor                  instance={insert_id}"
+            );
+            return;
+        };
+        match crate::components::plugin_editor_window::open_plugin_editor_window(
+            owner_bounds,
+            track_id.clone(),
+            insert_id.clone(),
+            display_name,
+            None,
+            Some(runtime),
+            false,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.plugin_editors.open.insert(key, handle);
+                self.refresh_plugin_editor_chrome(cx);
+            }
+            Err(err) => {
+                eprintln!("[plugin-view] open FAILED track={track_id} slot={insert_id} err={err}");
+            }
+        }
+    }
+
     pub(super) fn open_insert_editor(
         &mut self,
         track_id: &str,
@@ -2045,33 +2090,31 @@ impl StudioLayout {
             // The editor lives in a GPUI window: the plug-in's view is a child
             // of it, and the titlebar strip above carries the controls that
             // belong to the plug-in but cannot be drawn over its surface.
-            let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
-                eprintln!(
-                    "[plugin-runtime] external bridge mandatory but no runtime for editor                      instance={insert_id}"
-                );
-                return;
-            };
+            //
+            // Opened on a later turn of the event loop, never from here.
+            // `open_window` reaches the platform, and creating a window
+            // dispatches synchronous messages that re-enter GPUI; doing that
+            // while a frame is anywhere on the stack draws a second window
+            // inside the first one's draw. A spawned task is past the frame
+            // entirely, which no `defer` from inside an update can promise.
             let owner_bounds = window.bounds();
-            match crate::components::plugin_editor_window::open_plugin_editor_window(
-                owner_bounds,
-                track_id.to_string(),
-                insert_id.to_string(),
-                display_name,
-                None,
-                Some(runtime),
-                false,
-                cx,
-            ) {
-                Ok(handle) => {
-                    self.plugin_editors.open.insert(key, handle);
-                    self.refresh_plugin_editor_chrome(cx);
-                }
-                Err(err) => {
-                    eprintln!(
-                        "[plugin-view] open FAILED track={track_id} slot={insert_id} err={err}"
+            let track = track_id.to_string();
+            let insert = insert_id.to_string();
+            let executor = cx.background_executor().clone();
+            cx.spawn(async move |this, cx| {
+                executor.timer(std::time::Duration::from_millis(1)).await;
+                let _ = this.update(cx, |layout, cx| {
+                    layout.open_bridged_editor_window(
+                        owner_bounds,
+                        key,
+                        track,
+                        insert,
+                        display_name,
+                        cx,
                     );
-                }
-            }
+                });
+            })
+            .detach();
             return;
         }
 

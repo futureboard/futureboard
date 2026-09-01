@@ -269,6 +269,17 @@ thread_local! {
     /// This allows multiple test Apps to have isolated arenas, preventing
     /// cross-session corruption when the scheduler interleaves their tasks.
     static CURRENT_ELEMENT_ARENA: Cell<Option<*const RefCell<Arena>>> = const { Cell::new(None) };
+
+    /// How many draws are on this thread's stack.
+    ///
+    /// Normally one. It is more when a draw re-enters the platform -- opening a
+    /// window, or anything that dispatches a synchronous window message -- and
+    /// that inner window draws before the outer one has finished. The inner
+    /// draw must not then clear the arena the outer draw is still allocating
+    /// in, or the outer frame's elements are freed underneath it and the next
+    /// deref hits "attempted to dereference an ArenaRef after its Arena was
+    /// cleared". See `ArenaClearNeeded::clear`.
+    static ELEMENT_ARENA_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Allocates an element in the current arena. Uses the app-specific arena if one
@@ -300,16 +311,23 @@ impl ElementArenaScope {
             current.set(Some(arena as *const RefCell<Arena>));
             prev
         });
+        ELEMENT_ARENA_DEPTH.with(|depth| depth.set(depth.get() + 1));
         Self { previous }
     }
 }
 
 impl Drop for ElementArenaScope {
     fn drop(&mut self) {
+        ELEMENT_ARENA_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
         CURRENT_ELEMENT_ARENA.with(|current| {
             current.set(self.previous);
         });
     }
+}
+
+/// Whether a draw is still in progress further up this thread's stack.
+fn element_arena_is_nested() -> bool {
+    ELEMENT_ARENA_DEPTH.with(|depth| depth.get() > 0)
 }
 
 /// Returned when the element arena has been used and so must be cleared before the next draw.
@@ -327,7 +345,17 @@ impl ArenaClearNeeded {
     }
 
     /// Clear the element arena.
+    ///
+    /// Skipped while a draw is still on the stack above this one. A window
+    /// opened, or a synchronous window message dispatched, from inside a draw
+    /// can make another window draw and finish first; clearing here would free
+    /// the elements the outer draw is still building and turn its next deref
+    /// into a panic. The outer draw's own clear reclaims both frames, so the
+    /// only cost of skipping is that the arena grows a chunk.
     pub fn clear(self) {
+        if element_arena_is_nested() {
+            return;
+        }
         // SAFETY: The arena pointer is valid because ArenaClearNeeded is created
         // at the end of draw() and must be cleared before the next draw.
         let arena_cell = unsafe { &*self.arena };
