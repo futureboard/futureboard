@@ -3061,6 +3061,40 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         // rate is met instead of throttled to this ~120 Hz idle loop.
 
         let tick = IDLE_TICK.fetch_add(1, Ordering::Relaxed);
+
+        // Republish every loaded plug-in's latency on the idle loop.
+        //
+        // The producer publishes it too, but only every 64 blocks it actually
+        // processes, so a plug-in prepared on a stopped transport has never
+        // reported one and its editor reads 0 ms. This loop runs whether or not
+        // audio is flowing, which is exactly when the number is asked for. Cheap
+        // and throttled: one `getLatencySamples` per instance per ~4 s, and the
+        // store is skipped when nothing moved.
+        if tick.is_multiple_of(480) {
+            let mapped: Vec<String> = region_slots
+                .lock()
+                .map(|slots| slots.keys().cloned().collect())
+                .unwrap_or_default();
+            for instance_id in mapped {
+                let Some(processor) = preview.lock().clone_processor_for(&instance_id) else {
+                    continue;
+                };
+                let latency = processor.get_latency_samples().max(0) as u32;
+                let Ok(slots) = region_slots.lock() else {
+                    break;
+                };
+                let Some(region) = slots.get(&instance_id) else {
+                    continue;
+                };
+                let bridge = region.bridge();
+                if bridge.latency_samples.load(Ordering::Relaxed) == latency {
+                    continue;
+                }
+                bridge.latency_samples.store(latency, Ordering::Relaxed);
+                eprintln!("[plugin-host-dsp] latency instance={instance_id} samples={latency}");
+            }
+        }
+
         if platform::plugin_debug()
             && !platform::editor_safe_mode()
             && !registry.is_empty()
