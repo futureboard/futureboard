@@ -286,6 +286,24 @@ impl PluginBridgeSink for SharedRegionSink {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn reported_process_load(&self) -> Option<f32> {
+        use std::sync::atomic::Ordering;
+        let bridge = self.region.bridge();
+        let micros = bridge.last_process_micros.load(Ordering::Relaxed);
+        let frames = bridge.block_frames.load(Ordering::Relaxed);
+        let sample_rate = bridge.sample_rate.load(Ordering::Relaxed);
+        if frames == 0 || sample_rate == 0 {
+            return None;
+        }
+        // The block's own wall-clock budget, not a fixed millisecond count: the
+        // same duration means very different things at 64 frames and at 1024.
+        let deadline_micros = frames as f64 * 1_000_000.0 / sample_rate as f64;
+        if deadline_micros <= 0.0 {
+            return None;
+        }
+        Some((micros as f64 / deadline_micros) as f32)
+    }
+
     fn set_transport(&self, ctx: &DirectAudio::vst3_processor::RuntimeTransportContext) {
         self.region
             .bridge()

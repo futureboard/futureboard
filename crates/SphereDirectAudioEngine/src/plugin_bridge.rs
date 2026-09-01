@@ -117,6 +117,18 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
         0
     }
 
+    /// The bridged plug-in's own DSP cost, as a share of one block, or `None`
+    /// when the host has not measured one yet.
+    ///
+    /// Measured in the host process around the plug-in's `process()`, which is
+    /// the only place its real cost is visible: from the engine's side a bridged
+    /// insert is a shared-memory read, and timing that would report the cost of
+    /// the bridge rather than of the plug-in. Default `None` for sinks without a
+    /// host (test stubs).
+    fn reported_process_load(&self) -> Option<f32> {
+        None
+    }
+
     /// Publish the transport ProcessContext (tempo, time signature, project
     /// position, playing/recording) for the next block, so the host fills the
     /// bridged plugin's VST3 `ProcessContext` with real transport instead of a

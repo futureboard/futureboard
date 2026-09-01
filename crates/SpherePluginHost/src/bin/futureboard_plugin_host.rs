@@ -4035,6 +4035,28 @@ fn dispatch(
             eprintln!(
                 "[plugin-host-dsp] prepared instance={plugin_instance_id} sr={sr} block={block} requestedOutputs={output_channels} outputs={actual_output_channels} output_bus_channels={output_bus_channels:?} same_instance=true"
             );
+            // Publish the plug-in's latency now rather than waiting for the
+            // producer's 64-block cadence. A plug-in that has been prepared but
+            // never played has a latency to report, and the editor asks for it
+            // the moment it opens -- a stopped transport should not read 0 ms
+            // for a plug-in that delays by 60.
+            let prepared_latency = preview
+                .lock()
+                .clone_processor_for(&plugin_instance_id)
+                .map(|processor| processor.get_latency_samples().max(0));
+            if let Some(latency) = prepared_latency {
+                if let Ok(slots) = region_slots.lock() {
+                    if let Some(region) = slots.get(&plugin_instance_id) {
+                        region
+                            .bridge()
+                            .latency_samples
+                            .store(latency as u32, Ordering::Relaxed);
+                        eprintln!(
+                            "[plugin-host-dsp] latency instance={plugin_instance_id} samples={latency}"
+                        );
+                    }
+                }
+            }
             let _ = ipc::write_frame(
                 out,
                 &HostEvent::ProcessingPrepared {

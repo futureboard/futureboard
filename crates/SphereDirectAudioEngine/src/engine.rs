@@ -2293,17 +2293,25 @@ impl EngineInner {
         let runtime = self.runtime.lock();
         let track = runtime.tracks.iter().find(|track| track.id == track_id)?;
         let insert = track.inserts.iter().find(|insert| insert.id == insert_id)?;
-        let cpu_us = insert.cpu_us.load(Ordering::Relaxed) as f32;
-        let share = if deadline_us > 0 {
-            cpu_us / deadline_us as f32
-        } else {
-            0.0
-        };
-        let latency = if insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge {
-            insert
-                .bridge_sink
-                .as_ref()
-                .map(|sink| sink.reported_latency_samples())
+        let bridged = insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge;
+        let sink = insert.bridge_sink.as_ref();
+        // A bridged plug-in runs in another process, so the engine's own timing
+        // around it measures the shared-memory handshake, not the plug-in. The
+        // host measures the real thing around `process()` and publishes it in
+        // the region; prefer that, and fall back to what this side saw.
+        let share = sink
+            .filter(|_| bridged)
+            .and_then(|sink| sink.reported_process_load())
+            .unwrap_or_else(|| {
+                let cpu_us = insert.cpu_us.load(Ordering::Relaxed) as f32;
+                if deadline_us > 0 {
+                    cpu_us / deadline_us as f32
+                } else {
+                    0.0
+                }
+            });
+        let latency = if bridged {
+            sink.map(|sink| sink.reported_latency_samples())
                 .unwrap_or(0)
         } else {
             insert
