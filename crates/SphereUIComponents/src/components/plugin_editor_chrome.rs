@@ -16,18 +16,33 @@
 //! That keeps the window a view over real state instead of a second place where
 //! a plug-in's active flag or preset list is decided.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, ElementId, InteractiveElement, IntoElement, ParentElement,
+    div, px, svg, App, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
+use crate::assets;
 use crate::theme::{self, Colors};
+
+/// One plug-in open in a channel's editor window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginEditorTab {
+    /// Insert slot id — how the studio and the host both address it.
+    pub insert_id: String,
+    /// Plug-in name, as the tab shows it.
+    pub display_name: String,
+    /// 1-based slot position on the channel.
+    pub insert_number: usize,
+}
 
 /// What the chrome shows, as of the studio's last refresh.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PluginEditorChrome {
     /// Plug-in display name, as the titlebar shows it.
     pub plugin_name: String,
+    /// Channel this window belongs to, for the title.
+    pub track_name: String,
     /// 1-based insert slot this plug-in occupies on its track.
     pub insert_number: usize,
     /// Whether the insert is processing. `false` covers both a disabled and a
@@ -98,6 +113,121 @@ impl PluginEditorChrome {
     }
 }
 
+/// Height of the tab strip. Sized to a browser tab, which is what it is.
+pub const TAB_STRIP_H: f32 = 30.0;
+
+/// Renders the tab strip: one tab per plug-in open on this channel.
+///
+/// Browser-shaped on purpose — a channel's inserts are a chain the user moves
+/// along, and a row of named tabs with their own close buttons is the gesture
+/// everyone already has for that.
+pub fn render_tab_strip(
+    tabs: &[PluginEditorTab],
+    active: &str,
+    emit: impl Fn(PluginEditorAction, &mut App) + Clone + 'static,
+) -> gpui::AnyElement {
+    let mut strip = div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .h(px(TAB_STRIP_H))
+        .px(px(4.0))
+        .gap(px(2.0))
+        .bg(Colors::surface_panel_alt())
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .overflow_hidden();
+
+    for tab in tabs {
+        let selected = tab.insert_id == active;
+        let select = emit.clone();
+        let close = emit.clone();
+        let select_id = tab.insert_id.clone();
+        let close_id = tab.insert_id.clone();
+        strip = strip.child(
+            div()
+                .id(ElementId::Name(
+                    format!("plugin-tab-{}", tab.insert_id).into(),
+                ))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(TAB_STRIP_H - 4.0))
+                .pl(px(10.0))
+                .pr(px(4.0))
+                .max_w(px(220.0))
+                .rounded_t(px(5.0))
+                .bg(if selected {
+                    Colors::surface_panel()
+                } else {
+                    Colors::surface_panel_alt()
+                })
+                .when(selected, |style| {
+                    style
+                        .border_t(px(1.0))
+                        .border_l(px(1.0))
+                        .border_r(px(1.0))
+                        .border_color(Colors::border_subtle())
+                })
+                .cursor(gpui::CursorStyle::PointingHand)
+                .occlude()
+                .hover(|style| style.bg(Colors::surface_control_hover()))
+                .on_click(move |_, _window, cx| {
+                    select(PluginEditorAction::SelectTab(select_id.clone()), cx)
+                })
+                // The slot number leads: on a channel with two of the same
+                // plug-in, the name alone does not say which one this is.
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font(theme::ui_font())
+                        .text_color(Colors::text_faint())
+                        .child(tab.insert_number.to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_size(px(11.0))
+                        .font(theme::ui_font())
+                        .text_color(if selected {
+                            Colors::text_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .child(tab.display_name.clone()),
+                )
+                .child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("plugin-tab-close-{}", tab.insert_id).into(),
+                        ))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(px(3.0))
+                        .hover(|style| style.bg(Colors::surface_control_hover()))
+                        .occlude()
+                        .on_click(move |_, _window, cx| {
+                            close(PluginEditorAction::CloseTab(close_id.clone()), cx)
+                        })
+                        .child(
+                            svg()
+                                .path(assets::ICON_CLOSE_SMALL_PATH)
+                                .w(px(10.0))
+                                .h(px(10.0))
+                                .text_color(Colors::text_faint()),
+                        ),
+                ),
+        );
+    }
+
+    strip.into_any_element()
+}
+
 /// A control the chrome asks the studio to carry out.
 ///
 /// Queued rather than applied: the window has no access to the insert, the
@@ -111,6 +241,10 @@ pub enum PluginEditorAction {
     StepPreset(i32),
     /// Store the plug-in's current state as a new preset.
     SavePreset,
+    /// Bring another of this channel's open plug-ins to the front.
+    SelectTab(String),
+    /// Close one plug-in's tab. Closing the last one closes the window.
+    CloseTab(String),
 }
 
 /// Small square/pill button used across the chrome.
@@ -156,18 +290,56 @@ fn chrome_button(
     }
 }
 
-/// A label/value pair, for the readouts.
-fn chrome_readout(label: &str, value: String) -> impl IntoElement {
+/// An icon-only button, for controls whose glyph says it better than a word.
+fn chrome_icon_button(
+    id: impl Into<ElementId>,
+    icon: &'static str,
+    enabled: bool,
+    active: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let tint = if !enabled {
+        Colors::text_faint()
+    } else if active {
+        Colors::text_primary()
+    } else {
+        Colors::text_secondary()
+    };
+    let glyph = svg().path(icon).w(px(13.0)).h(px(13.0)).text_color(tint);
+    let base = div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(22.0))
+        .h(px(18.0))
+        .rounded(px(3.0))
+        .child(glyph);
+    if !enabled {
+        return base.into_any_element();
+    }
+    base.cursor(gpui::CursorStyle::PointingHand)
+        .occlude()
+        .when(active, |style| style.bg(Colors::accent_primary()))
+        .when(!active, |style| {
+            style.hover(|style| style.bg(Colors::surface_control_hover()))
+        })
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .into_any_element()
+}
+
+/// An icon with a value beside it, for the readouts.
+fn chrome_readout(icon: &'static str, value: String) -> impl IntoElement {
     div()
         .flex()
         .items_center()
         .gap(px(4.0))
         .child(
-            div()
-                .text_size(px(9.0))
-                .font(theme::ui_font())
-                .text_color(Colors::text_faint())
-                .child(label.to_string()),
+            svg()
+                .path(icon)
+                .w(px(11.0))
+                .h(px(11.0))
+                .text_color(Colors::text_faint()),
         )
         .child(
             div()
@@ -208,9 +380,9 @@ pub fn render_chrome_tools(
         .border_color(Colors::border_subtle())
         // Active: the plug-in's own on/off, in the one strip that is never
         // covered by its view.
-        .child(chrome_button(
+        .child(chrome_icon_button(
             "plugin-editor-active",
-            if active { "ACTIVE" } else { "BYPASSED" },
+            assets::ICON_POWER_PATH,
             true,
             active,
             move |_window, cx| emit_active(PluginEditorAction::SetActive(!active), cx),
@@ -222,9 +394,9 @@ pub fn render_chrome_tools(
                 .flex()
                 .items_center()
                 .gap(px(2.0))
-                .child(chrome_button(
+                .child(chrome_icon_button(
                     "plugin-editor-preset-prev",
-                    "‹",
+                    assets::ICON_CHEVRON_LEFT_PATH,
                     has_presets,
                     false,
                     move |_window, cx| emit_prev(PluginEditorAction::StepPreset(-1), cx),
@@ -243,9 +415,9 @@ pub fn render_chrome_tools(
                         .text_color(Colors::text_secondary())
                         .child(chrome.preset_label()),
                 )
-                .child(chrome_button(
+                .child(chrome_icon_button(
                     "plugin-editor-preset-next",
-                    "›",
+                    assets::ICON_CHEVRON_RIGHT_PATH,
                     has_presets,
                     false,
                     move |_window, cx| emit_next(PluginEditorAction::StepPreset(1), cx),
@@ -261,7 +433,10 @@ pub fn render_chrome_tools(
         // Readouts sit at the far end: they are watched, not operated, so they
         // stay clear of the controls the pointer goes for.
         .child(div().flex_1())
-        .child(chrome_readout("CPU", chrome.cpu_label()))
-        .child(chrome_readout("LAT", chrome.latency_label()))
+        .child(chrome_readout(assets::ICON_CPU_PATH, chrome.cpu_label()))
+        .child(chrome_readout(
+            assets::ICON_TIMER_PATH,
+            chrome.latency_label(),
+        ))
         .into_any_element()
 }

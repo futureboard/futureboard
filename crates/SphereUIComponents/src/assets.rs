@@ -27,6 +27,9 @@ pub mod icons {
     pub const MENU: &str = include_str!("../../../packages/shared/lucide/icons/menu.svg");
     pub const SEARCH: &str = include_str!("../../../packages/shared/lucide/icons/search.svg");
     pub const X: &str = include_str!("../../../packages/shared/lucide/icons/x.svg");
+    pub const POWER: &str = include_str!("../../../packages/shared/lucide/icons/power.svg");
+    pub const CHEVRON_LEFT: &str =
+        include_str!("../../../packages/shared/lucide/icons/chevron-left.svg");
 
     // App Icons
     pub const TIMELINE_SCROLL: &str =
@@ -162,6 +165,12 @@ pub const ICON_PLAYHEAD_HANDLE_PATH: &str = "icons/playhead_handle.svg";
 pub const ICON_PLUGIN_CLAP_PATH: &str = "icons/plugins/clap.svg";
 pub const ICON_PLUGIN_VST3_PATH: &str = "icons/plugins/vst3.svg";
 pub const TIMELINE_SCROLL_PATH: &str = "icons/timelinescroll.svg";
+
+// Plug-in editor chrome. `ICON_X_PATH` is the window-control close, drawn to
+// match the titlebar buttons; a tab's own close is the lighter lucide glyph.
+pub const ICON_POWER_PATH: &str = "icons/power.svg";
+pub const ICON_CHEVRON_LEFT_PATH: &str = "icons/chevron-left.svg";
+pub const ICON_CLOSE_SMALL_PATH: &str = "icons/x.svg";
 
 #[cfg(target_os = "windows")]
 fn log_startup_dpi() {

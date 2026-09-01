@@ -88,6 +88,12 @@ pub(crate) struct PluginEditorWindows {
     /// Not persisted and not the plug-in's own state: it is only which entry of
     /// the preset list the user last stepped to, so the strip can name it.
     pub preset_selection: std::collections::HashMap<(String, String), usize>,
+    /// Inserts with an editor tab open, per channel.
+    ///
+    /// One window per channel, one tab per plug-in the user opened in it. This
+    /// is the list the tab strip is built from; `open` holds the window itself,
+    /// still keyed by whichever insert opened it first.
+    pub editor_tabs: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl PluginEditorWindows {
@@ -683,17 +689,31 @@ impl StudioLayout {
         // lives now. Its own drive loop never drains the shared queue -- this
         // poll is the single drain -- so an event that is not handed over here
         // is lost and the window sits on "Loading" forever.
+        // Matched on what the window actually hosts, not on the key it was
+        // filed under: a channel's window keeps the key of whichever insert
+        // opened it first, and its other tabs would never be found by that.
         let gpui_target = self
             .plugin_editors
             .open
             .iter()
-            .find(|((_, insert_id), _)| insert_id == plugin_instance_id)
-            .map(|(key, handle)| (key.clone(), handle.clone()));
+            .map(|(key, handle)| (key.clone(), *handle))
+            .find(|(_, handle)| {
+                handle
+                    .read_with(cx, |editor, _cx| editor.hosts_insert(plugin_instance_id))
+                    .unwrap_or(false)
+            });
         if let Some((key, handle)) = gpui_target {
-            let closed = matches!(
-                event,
-                ClientEvent::Host(HostEvent::EditorClosed { .. }) | ClientEvent::Disconnected
-            );
+            // An `EditorClosed` only means *this* window when this window has an
+            // editor to lose. One arriving while it is still opening belongs to
+            // whatever was torn down to make room for it.
+            let attached = handle
+                .update(cx, |editor, _window, _cx| editor.is_attached())
+                .unwrap_or(false);
+            let closed = attached
+                && matches!(
+                    event,
+                    ClientEvent::Host(HostEvent::EditorClosed { .. }) | ClientEvent::Disconnected
+                );
             let delivered = handle
                 .update(cx, |editor, window, cx| {
                     editor.ingest_host_event(event.clone(), window, cx);
@@ -1587,6 +1607,19 @@ impl StudioLayout {
     /// Close a native editor session: send `CloseEditor` to the host (view
     /// `removed()`), then drop the session so the shell window is destroyed.
     /// Only called on genuine close (user / replace / track-delete / shutdown).
+    /// Drops a loading shell without telling the host anything.
+    ///
+    /// The plug-in's editor is not being closed — it is moving into the GPUI
+    /// window that just opened — so the host must not be sent `CloseEditor`.
+    fn drop_bridge_loading_shell(&mut self, track_id: &str, instance_id: &str) {
+        let key = (track_id.to_string(), instance_id.to_string());
+        if self.plugin_editors.bridge.remove(&key).is_some() {
+            eprintln!(
+                "[plugin-editor-window] loading shell dropped instance={instance_id}                  (editor moved into its own window)"
+            );
+        }
+    }
+
     pub(super) fn close_bridge_editor(
         &mut self,
         cx: &mut Context<Self>,
@@ -1662,6 +1695,40 @@ impl StudioLayout {
         if self.plugin_editors.open.contains_key(&key) {
             return;
         }
+        // One window per channel. A second plug-in on the same channel becomes
+        // another tab in the window that is already open rather than a window of
+        // its own — the inserts are one chain, and the user is moving along it.
+        {
+            let tabs = self
+                .plugin_editors
+                .editor_tabs
+                .entry(track_id.clone())
+                .or_default();
+            if !tabs.iter().any(|id| id == &insert_id) {
+                tabs.push(insert_id.clone());
+            }
+        }
+        if let Some(existing) = self.plugin_editor_window_for(&track_id) {
+            let reused = existing
+                .update(cx, |editor, window, cx| {
+                    editor.activate_tab(&insert_id, &display_name, window, cx);
+                    window.activate_window();
+                })
+                .is_ok();
+            if reused {
+                self.drop_bridge_loading_shell(&track_id, &insert_id);
+                self.refresh_plugin_editor_chrome(cx);
+                return;
+            }
+            // The window is gone -- closed from its own titlebar. Drop it and
+            // the tabs it was showing, then open a fresh one below.
+            self.plugin_editors
+                .open
+                .retain(|(track, _), _| track != &track_id);
+            self.plugin_editors
+                .editor_tabs
+                .insert(track_id.clone(), vec![insert_id.clone()]);
+        }
         let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
             eprintln!(
                 "[plugin-runtime] external bridge mandatory but no runtime for editor                  instance={insert_id}"
@@ -1681,10 +1748,14 @@ impl StudioLayout {
             Ok(handle) => {
                 self.plugin_editors.open.insert(key, handle);
                 // The loading shell put up while the plug-in was still being
-                // loaded has been replaced by this window. Nothing else drops
-                // it on this path, and left behind it is a blank window of its
-                // own -- named after the plug-in -- sitting beside the DAW.
-                self.close_bridge_editor(cx, &track_id, &insert_id);
+                // loaded has been replaced by this window. Dropped locally, not
+                // closed through the host: `close_bridge_editor` sends
+                // CloseEditor, the host answers EditorClosed, and that answer --
+                // arriving a moment after this window opened -- would be read as
+                // "this editor was closed" and take the new window down with it.
+                // That is the first open closing itself while the second, with
+                // no shell to drop, works.
+                self.drop_bridge_loading_shell(&track_id, &insert_id);
                 self.refresh_plugin_editor_chrome(cx);
             }
             Err(err) => {

@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use gpui::Context;
 
-use crate::components::plugin_editor_chrome::{PluginEditorAction, PluginEditorChrome};
+use crate::components::plugin_editor_chrome::{
+    PluginEditorAction, PluginEditorChrome, PluginEditorTab,
+};
 use crate::layout::StudioLayout;
 
 /// Extension for a stored preset file: the plug-in's own opaque state bytes,
@@ -107,7 +109,11 @@ impl StudioLayout {
             else {
                 continue;
             };
-            let _ = handle.update(cx, |editor, _window, cx| editor.set_chrome(chrome, cx));
+            let tabs = self.plugin_editor_tabs_for(&track_id, cx);
+            let _ = handle.update(cx, |editor, _window, cx| {
+                editor.set_chrome(chrome, cx);
+                editor.set_tabs(tabs, cx);
+            });
         }
     }
 
@@ -154,8 +160,15 @@ impl StudioLayout {
                 )
             }
         };
+        let track_name = state
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .map(|track| track.name.clone())
+            .unwrap_or_default();
         Some(PluginEditorChrome {
             plugin_name: slot.display_name.clone(),
+            track_name,
             insert_number: index + 1,
             active: slot.enabled && !slot.bypassed,
             latency_samples,
@@ -169,6 +182,115 @@ impl StudioLayout {
                 .filter(|index| *index < presets.len()),
             presets,
         })
+    }
+
+    /// The plug-ins open on one channel, in slot order.
+    ///
+    /// A tab exists for every insert the user has opened an editor for on this
+    /// channel; the window shows one of them at a time. Slot order rather than
+    /// the order they were opened, because that is the order the audio actually
+    /// goes through them in.
+    fn plugin_editor_tabs_for(&self, track_id: &str, cx: &Context<Self>) -> Vec<PluginEditorTab> {
+        let Some(open) = self.plugin_editors.editor_tabs.get(track_id) else {
+            return Vec::new();
+        };
+        if open.is_empty() {
+            return Vec::new();
+        }
+        let state = &self.timeline.read(cx).state;
+        let Some(slots) = state.insert_slots(track_id) else {
+            return Vec::new();
+        };
+        slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| open.iter().any(|id| id == &slot.id))
+            .map(|(index, slot)| PluginEditorTab {
+                insert_id: slot.id.clone(),
+                display_name: slot.display_name.clone(),
+                insert_number: index + 1,
+            })
+            .collect()
+    }
+
+    /// Brings one of a channel's open plug-ins to the front of its window.
+    fn select_plugin_editor_tab(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.plugin_editor_window_for(track_id) else {
+            return;
+        };
+        let display_name = self
+            .timeline
+            .read(cx)
+            .state
+            .insert_slots(track_id)
+            .and_then(|slots| {
+                slots
+                    .iter()
+                    .find(|slot| slot.id == insert_id)
+                    .map(|slot| slot.display_name.clone())
+            })
+            .unwrap_or_else(|| insert_id.to_string());
+        let _ = handle.update(cx, |editor, window, cx| {
+            editor.activate_tab(insert_id, &display_name, window, cx);
+        });
+    }
+
+    /// Closes one tab. The last one closes the window with it.
+    fn close_plugin_editor_tab(&mut self, track_id: &str, insert_id: &str, cx: &mut Context<Self>) {
+        let remaining: Vec<String> = {
+            let tabs = self
+                .plugin_editors
+                .editor_tabs
+                .entry(track_id.to_string())
+                .or_default();
+            tabs.retain(|id| id != insert_id);
+            tabs.clone()
+        };
+        let was_active = self
+            .plugin_editor_window_for(track_id)
+            .and_then(|handle| {
+                handle
+                    .update(cx, |editor, _window, _cx| {
+                        editor.insert_key().1 == insert_id
+                    })
+                    .ok()
+            })
+            .unwrap_or(false);
+        // The plug-in keeps processing; only its editor closed.
+        self.close_bridge_editor(cx, track_id, insert_id);
+        let Some(handle) = self.plugin_editor_window_for(track_id) else {
+            return;
+        };
+        let Some(next) = remaining.first().cloned() else {
+            self.plugin_editors.editor_tabs.remove(track_id);
+            self.plugin_editors
+                .open
+                .retain(|(track, _), _| track != track_id);
+            let _ = handle.update(cx, |_editor, window, _cx| window.remove_window());
+            return;
+        };
+        if was_active {
+            self.select_plugin_editor_tab(track_id, &next, cx);
+        }
+        cx.notify();
+    }
+
+    /// The editor window hosting one channel, whichever insert opened it.
+    pub(super) fn plugin_editor_window_for(
+        &self,
+        track_id: &str,
+    ) -> Option<gpui::WindowHandle<crate::components::plugin_editor_window::PluginEditorWindow>>
+    {
+        self.plugin_editors
+            .open
+            .iter()
+            .find(|((track, _), _)| track == track_id)
+            .map(|(_, handle)| *handle)
     }
 
     /// Applies whatever the chrome's controls asked for since the last poll.
@@ -234,6 +356,12 @@ impl StudioLayout {
             }
             PluginEditorAction::SavePreset => {
                 self.save_plugin_editor_preset(track_id, insert_id, cx);
+            }
+            PluginEditorAction::SelectTab(target) => {
+                self.select_plugin_editor_tab(track_id, &target, cx);
+            }
+            PluginEditorAction::CloseTab(target) => {
+                self.close_plugin_editor_tab(track_id, &target, cx);
             }
         }
     }

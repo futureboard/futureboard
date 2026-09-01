@@ -26,7 +26,8 @@ use gpui::{
 
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::plugin_editor_chrome::{
-    render_chrome_tools, PluginEditorAction, PluginEditorChrome,
+    render_chrome_tools, render_tab_strip, PluginEditorAction, PluginEditorChrome, PluginEditorTab,
+    TAB_STRIP_H,
 };
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
@@ -162,8 +163,8 @@ fn build_host_backend(
 /// plug-in's surface.
 const CHROME_H: f32 = 26.0;
 
-/// Logical-pixel height reserved above the plug-in: titlebar plus chrome row.
-const HEADER_H: f32 = TITLEBAR_HEIGHT + CHROME_H;
+/// Logical-pixel height reserved above the plug-in: titlebar, tabs, chrome row.
+const HEADER_H: f32 = TITLEBAR_HEIGHT + TAB_STRIP_H + CHROME_H;
 pub const EDITOR_WINDOW_WIDTH: f32 = 820.0;
 pub const EDITOR_WINDOW_HEIGHT: f32 = 560.0;
 pub const EDITOR_WINDOW_MIN_WIDTH: f32 = 360.0;
@@ -263,6 +264,13 @@ pub struct PluginEditorWindow {
     chrome: PluginEditorChrome,
     /// Chrome controls the user pressed, waiting for the studio to apply them.
     chrome_actions: Vec<PluginEditorAction>,
+    /// Every plug-in open on this channel, in slot order.
+    ///
+    /// One window per channel: its inserts are a chain, and the tab strip is how
+    /// the user moves along it. Only the active tab's view is attached — a
+    /// plug-in editor is a cross-process native window, and holding several of
+    /// them live behind one another buys nothing anybody can see.
+    tabs: Vec<PluginEditorTab>,
     focus_handle: FocusHandle,
 }
 
@@ -333,6 +341,7 @@ impl PluginEditorWindow {
                 ..PluginEditorChrome::default()
             },
             chrome_actions: Vec::new(),
+            tabs: Vec::new(),
             status,
             wait_ticks: 0,
             tick_scheduled: false,
@@ -1118,6 +1127,108 @@ impl PluginEditorWindow {
         cx.notify();
     }
 
+    /// The window's title: the channel it belongs to, then the plug-in in front.
+    ///
+    /// The channel leads because the window is the channel's — the tab strip
+    /// already names every plug-in in it.
+    fn window_title(&self) -> String {
+        let track = self.chrome.track_name.as_str();
+        let plugin = self.chrome.window_title();
+        if track.is_empty() {
+            return plugin;
+        }
+        format!("{track} - {plugin}")
+    }
+
+    /// Replaces the tab list. Cheap to call every poll — an unchanged list
+    /// notifies nothing.
+    pub(crate) fn set_tabs(&mut self, tabs: Vec<PluginEditorTab>, cx: &mut Context<Self>) {
+        if self.tabs == tabs {
+            return;
+        }
+        self.tabs = tabs;
+        cx.notify();
+    }
+
+    /// Whether this window is hosting `insert_id`, on any of its tabs.
+    pub(crate) fn hosts_insert(&self, insert_id: &str) -> bool {
+        self.insert_id == insert_id || self.tabs.iter().any(|tab| tab.insert_id == insert_id)
+    }
+
+    /// The channel this window belongs to.
+    pub(crate) fn track_id(&self) -> &str {
+        &self.track_id
+    }
+
+    /// Brings another of this channel's plug-ins to the front.
+    ///
+    /// The current view is released first: the window has one region for a
+    /// plug-in to live in, and two views in it at once is not something a
+    /// plug-in has to tolerate. The lifecycle then restarts from `Opening` for
+    /// the new insert, exactly as it did when the window was created.
+    pub(crate) fn activate_tab(
+        &mut self,
+        insert_id: &str,
+        display_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.insert_id == insert_id {
+            return;
+        }
+        self.release_active_view();
+        self.insert_id = insert_id.to_string();
+        self.display_name = display_name.to_string();
+        self.chrome = PluginEditorChrome {
+            plugin_name: display_name.to_string(),
+            ..PluginEditorChrome::default()
+        };
+        self.status = PluginEditorStatus::Opening;
+        self.wait_ticks = 0;
+        self.host_mounted_logged = false;
+        self.last_region = None;
+        self.editor_content_size = None;
+        self.host_preferred_size = None;
+        self.host_auto_size_applied = false;
+        self.host_auto_size_settled = false;
+        if let Some(host) = self.host.as_mut() {
+            host.last_region = None;
+        }
+        let _ = window;
+        self.schedule_tick(cx);
+        cx.notify();
+    }
+
+    /// Detaches whatever this window currently hosts, without closing it.
+    fn release_active_view(&mut self) {
+        if self.embed_handle.take().is_some() {
+            if let Some(processor) = self.processor.as_ref() {
+                processor.view_detach();
+            }
+        }
+        if let Some(host) = self.host.as_mut() {
+            let closing = self.insert_id.clone();
+            if let Some(shared) = host.shared.as_ref() {
+                if let Ok(mut runtime) = shared.lock() {
+                    runtime.close_editor(closing.clone());
+                }
+            } else if let Some(client) = host.client.as_mut() {
+                let _ = client.close_editor(format!("{}::{}", self.track_id, closing));
+            }
+            host.content = None;
+        }
+        self.view_content = None;
+    }
+
+    /// Whether a plug-in view is actually attached in this window.
+    ///
+    /// The studio asks before acting on a close from the host: a window that has
+    /// not attached yet has no editor to lose, and the close belongs to whatever
+    /// was torn down to make room for it.
+    pub(crate) fn is_attached(&self) -> bool {
+        matches!(self.status, PluginEditorStatus::Attached(_))
+    }
+
     /// The insert slot this window is editing, as the studio addresses it.
     pub(crate) fn insert_key(&self) -> (&str, &str) {
         (self.track_id.as_str(), self.insert_id.as_str())
@@ -1670,10 +1781,19 @@ impl Render for PluginEditorWindow {
             .overflow_hidden()
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
             .child(crate::components::title_bar::external_window_titlebar(
-                self.chrome.window_title(),
+                self.window_title(),
                 "plugin-editor-window-close",
                 move |window, _cx| window.remove_window(),
             ))
+            .child(render_tab_strip(&self.tabs, &self.insert_id, {
+                let this = cx.entity().downgrade();
+                move |action, cx| {
+                    let _ = this.update(cx, |editor, cx| {
+                        editor.chrome_actions.push(action);
+                        cx.notify();
+                    });
+                }
+            }))
             .child(render_chrome_tools(&self.chrome, {
                 let this = cx.entity().downgrade();
                 move |action, cx| {
