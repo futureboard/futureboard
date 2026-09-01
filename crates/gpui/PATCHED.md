@@ -59,6 +59,23 @@ layout is reused only when it was built for exactly the width being asked for.
 Measured on a 31-track session: layout measure callbacks cost 13.5 ms per frame
 across 3,637 calls, inside a 20.9 ms layout solve.
 
+## Windows: Keys Aimed at Non-GPUI Windows Were Dropped
+
+The Windows message loop asks whether GPUI already handled a `WM_KEYDOWN` by
+sending the target window a private `WM_GPUI_KEYDOWN` and reading the reply,
+treating `0` as "handled" and skipping `TranslateMessage`/`DispatchMessage`.
+
+`DefWindowProc` answers `0` to any message it does not recognise. So every
+window in the process that is *not* GPUI's -- and a DAW has several on the same
+queue: a plug-in's native `IPlugView`, a hosted CEF browser, an editor shell's
+own chrome -- claimed every key aimed at it, and the loop threw the message away
+before the window's own procedure ever ran. Text fields inside an in-process
+plug-in editor could be clicked but never typed into.
+
+`translate_accelerator` now puts the question only to windows in
+`raw_window_handles`. Anything else is dispatched to whoever it was addressed
+to, which is what Win32 would have done anyway.
+
 ## Maintenance Notes
 
 When updating GPUI from upstream, preserve this Futureboard patch or port it

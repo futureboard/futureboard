@@ -6,6 +6,21 @@ use serde_json::Value;
 
 use crate::plugin_backend::{backend, PluginModuleFormat};
 
+/// Space presses the C++ editor window procedures claimed for the DAW
+/// transport since the last call, and cleared by it.
+///
+/// The counter is process-wide, so whichever process hosts those windows has to
+/// drain it: the separated plug-in host for the editors it owns, and the Studio
+/// for the in-process ones. It went unread in the Studio for as long as the
+/// in-process editor path existed, which is a press that is claimed — taken
+/// away from the plug-in — and then dropped, so Space in an in-process editor
+/// did nothing at all rather than falling back to the plug-in.
+pub fn take_transport_toggle_requests() -> u32 {
+    // SAFETY: a plain exchange on a C++ atomic counter; no arguments, no
+    // pointers, and safe to call from any thread.
+    unsafe { ffi::sphere_daux_vst3_take_transport_toggle_requests() }
+}
+
 /// `FUTUREBOARD_VST3_MIDI_DEBUG=1` enables VST3 MIDI bridge traces.
 pub fn vst3_midi_debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -396,6 +411,10 @@ pub(crate) mod ffi {
             processor: *mut SphereDauxVst3Processor,
         ) -> *mut c_char;
         pub(crate) fn sphere_daux_vst3_parameters_json_free(data: *mut c_char);
+        /// Process-wide, not per-processor: the C++ editor window procedures
+        /// claim the transport key before the plug-in's view can eat it and
+        /// count the presses here for whoever hosts them.
+        pub(crate) fn sphere_daux_vst3_take_transport_toggle_requests() -> u32;
     }
 
     // Short aliases so `vst2_processor::backend` can name both bridges'

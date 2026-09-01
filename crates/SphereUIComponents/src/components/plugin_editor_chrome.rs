@@ -16,10 +16,13 @@
 //! That keeps the window a view over real state instead of a second place where
 //! a plug-in's active flag or preset list is decided.
 
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, ElementId, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, size, svg, App, AppContext, Bounds, Context, ElementId, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Point, Render, StatefulInteractiveElement, Styled,
+    Subscription, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
 use crate::assets;
@@ -124,9 +127,8 @@ pub fn render_preset_menu(
     let mut list = div()
         .flex()
         .flex_col()
-        .min_w(px(180.0))
-        .max_h(px(320.0))
-        .py(px(4.0))
+        .size_full()
+        .py(px(PRESET_MENU_PAD))
         .rounded(px(4.0))
         .bg(Colors::surface_panel_raised())
         .border_1()
@@ -156,7 +158,7 @@ pub fn render_preset_menu(
                 .id(ElementId::Name(format!("plugin-preset-{index}").into()))
                 .flex()
                 .items_center()
-                .h(px(22.0))
+                .h(px(PRESET_MENU_ROW_H))
                 .px(px(10.0))
                 .text_size(px(10.0))
                 .font(theme::ui_font())
@@ -173,6 +175,135 @@ pub fn render_preset_menu(
         );
     }
     list.into_any_element()
+}
+
+/// Width of the preset list, and the row and padding it is built from. The
+/// window has to be sized before it is opened, so the list's geometry cannot
+/// live only inside its own layout.
+const PRESET_MENU_W: f32 = 200.0;
+const PRESET_MENU_ROW_H: f32 = 22.0;
+const PRESET_MENU_PAD: f32 = 4.0;
+const PRESET_MENU_MAX_H: f32 = 320.0;
+
+/// Size the preset list window needs for `count` presets.
+pub fn preset_menu_size(count: usize) -> gpui::Size<Pixels> {
+    // An empty list still shows one row saying so, which is the whole reason it
+    // opens at all when nothing is saved yet.
+    let rows = count.max(1) as f32;
+    let height = (PRESET_MENU_PAD * 2.0 + rows * PRESET_MENU_ROW_H).min(PRESET_MENU_MAX_H);
+    size(px(PRESET_MENU_W), px(height))
+}
+
+/// The preset list, in a window of its own.
+///
+/// It cannot be drawn inside the editor window, and that is not a layering bug
+/// to be fixed with z-order. Below the header the client area *is* a native
+/// child window the plug-in draws into, and a native child composites above
+/// everything its host paints — which is why the chrome row is described up
+/// there as "the one strip that is never covered by its view". A list dropped
+/// from that row lands squarely in the covered region, so it was being built
+/// and drawn every frame and never once seen.
+///
+/// A borderless `PopUp` is what a menu over a native child has to be. It also
+/// dismisses the way a menu should: losing activation closes it, so clicking
+/// anywhere else — including into the plug-in's own view — puts it away.
+pub struct PresetMenuWindow {
+    chrome: PluginEditorChrome,
+    on_action: Rc<dyn Fn(PluginEditorAction, &mut App)>,
+    /// Whether this window has ever held activation.
+    ///
+    /// Dismiss-on-blur must not fire before the list has been shown. The window
+    /// it opens over hosts a plug-in's native child, and a plug-in that takes
+    /// keyboard focus back on its own would otherwise deactivate the list on the
+    /// frame it appeared — closing it before anyone saw it, which is the exact
+    /// symptom this window exists to fix.
+    seen_active: bool,
+    /// Dropped with the window; while it lives, losing focus closes the list.
+    _activation: Option<Subscription>,
+}
+
+impl PresetMenuWindow {
+    fn new(
+        chrome: PluginEditorChrome,
+        on_action: Rc<dyn Fn(PluginEditorAction, &mut App)>,
+    ) -> Self {
+        Self {
+            chrome,
+            on_action,
+            seen_active: false,
+            _activation: None,
+        }
+    }
+}
+
+impl Render for PresetMenuWindow {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let emit = self.on_action.clone();
+        div()
+            .size_full()
+            .child(render_preset_menu(&self.chrome, move |action, cx| {
+                emit(action, cx)
+            }))
+    }
+}
+
+/// Opens the preset list at `origin`, in screen coordinates.
+///
+/// `on_action` is handed every choice the list makes, including the
+/// [`PluginEditorAction::TogglePresetMenu`] it sends when it dismisses itself,
+/// so the editor window has one place to learn the list is gone.
+pub fn open_preset_menu(
+    origin: Point<Pixels>,
+    chrome: PluginEditorChrome,
+    on_action: impl Fn(PluginEditorAction, &mut App) + 'static,
+    cx: &mut App,
+) -> Option<WindowHandle<PresetMenuWindow>> {
+    let bounds = Bounds {
+        origin,
+        size: preset_menu_size(chrome.presets.len()),
+    };
+    let options = WindowOptions {
+        titlebar: None,
+        focus: true,
+        show: true,
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_decorations: None,
+        ..Default::default()
+    };
+    let on_action: Rc<dyn Fn(PluginEditorAction, &mut App)> = Rc::new(on_action);
+    cx.open_window(options, |window, cx| {
+        cx.new(|cx| {
+            let mut menu = PresetMenuWindow::new(chrome, on_action);
+            // A menu that outlives the click that dismissed it is a menu the
+            // user has to hunt down. The first activation callback fires for
+            // this window becoming active, so only a *loss* closes it.
+            menu._activation = Some(cx.observe_window_activation(
+                window,
+                |menu: &mut PresetMenuWindow, window: &mut Window, cx: &mut Context<_>| {
+                    if window.is_window_active() {
+                        menu.seen_active = true;
+                        return;
+                    }
+                    // Never shown yet: a plug-in that grabbed focus back is not
+                    // the user dismissing anything. Staying open is the right
+                    // failure here — the list is at worst sticky, rather than
+                    // gone before it was seen.
+                    if !menu.seen_active {
+                        return;
+                    }
+                    let on_action = menu.on_action.clone();
+                    on_action(PluginEditorAction::TogglePresetMenu(false), cx);
+                    window.remove_window();
+                },
+            ));
+            menu
+        })
+    })
+    .ok()
 }
 
 /// Height of the tab strip. Sized to a browser tab, which is what it is.

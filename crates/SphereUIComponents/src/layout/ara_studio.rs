@@ -246,8 +246,17 @@ impl StudioLayout {
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             for _ in 0..16 {
+                // Both owners, not just the docked one. A popped-out editor
+                // holds its view in a window of its own, and the docked host
+                // reports "not attached" for the whole time it is popped out —
+                // so waiting on that alone let the very first poll answer
+                // "released" and destroy the document under the window that
+                // still had a view on it.
                 let released = this
-                    .update(cx, |layout, cx| !layout.ara_editor.read(cx).is_attached())
+                    .update(cx, |layout, cx| {
+                        !layout.ara_editor.read(cx).is_attached()
+                            && !layout.ara.view_is_attached(&key)
+                    })
                     .unwrap_or(true);
                 if released {
                     break;

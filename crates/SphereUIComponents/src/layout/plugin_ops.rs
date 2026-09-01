@@ -8,6 +8,7 @@ use crate::components::plugin_picker::{
     ensure_default_highlight, PickerFilter, PluginInsertKind, PluginPickerState, STUB_PLUGIN_ID,
 };
 use crate::components::timeline::timeline_state::{PluginRuntimeBackend, PluginRuntimeState};
+use crate::components::transport_key::{self, TransportKeySource};
 use SpherePluginHost::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
@@ -315,7 +316,6 @@ impl StudioLayout {
         // never hold a borrow of `self` across `handle.update`.
         let mut editor_routes: Vec<(String, ClientEvent)> = Vec::new();
         let mut disconnect_all = false;
-        let mut transport_toggle = false;
         for event in events {
             if let Some(instance) =
                 crate::components::plugin_editor_window::PluginEditorWindow::editor_event_instance_id(
@@ -636,29 +636,30 @@ impl StudioLayout {
                 // so the main window never saw it. Run the same command the
                 // arrangement's spacebar and the chrome Play button run — the
                 // host reports the key, this process decides what it means.
-                ClientEvent::Host(HostEvent::TransportToggleRequested { source }) => {
-                    // Coalesced, not replayed. Several independent claim paths
-                    // feed this — the host's two message pumps, the C++ editor
-                    // window procs, and the low-level keyboard hook — and any
-                    // two of them catching the same physical press produced two
-                    // play/pause dispatches, which cancel out and read as "the
-                    // key did nothing". Nobody presses Space twice inside one
-                    // 16 ms drain, so more than one here is always duplicates.
-                    if !transport_toggle {
+                ClientEvent::Host(HostEvent::TransportToggleRequested { source, time_ms }) => {
+                    // Handed to the process-wide transport-key router, not run
+                    // here. Several independent claim paths can see one physical
+                    // press — this process's message hook over an embedded view,
+                    // the editor shells' window procedures, and the host's own
+                    // filters — and each of them running play/pause for what it
+                    // collected made a single Space play and immediately stop.
+                    //
+                    // `time_ms` is the press's Win32 message time, which is the
+                    // same tick count in the host process and in this one, so
+                    // the router can tell a second report of one press from a
+                    // second press.
+                    if transport_key::claim(TransportKeySource::PluginHost, time_ms) {
                         eprintln!(
-                            "[plugin-bridge] event TransportToggleRequested source={source} -> transport:play-pause"
+                            "[Keyboard] plug-in host reported the transport key source={source} time={}",
+                            time_ms
+                                .map(|t| t.to_string())
+                                .unwrap_or_else(|| "-".to_string())
                         );
                     }
-                    transport_toggle = true;
                     changed = true;
                 }
                 _ => {}
             }
-        }
-        // After the loop: dispatching a command re-enters the layout, and doing
-        // that mid-drain would run it before the rest of this batch is applied.
-        if transport_toggle {
-            self.dispatch_command_id("transport:play-pause", cx);
         }
         // Forward editor-targeted events to the owning editor window(s).
         for (instance, event) in editor_routes {
@@ -1423,7 +1424,6 @@ impl StudioLayout {
         let runtime = self.plugin_editors.bridge_runtime.as_ref().cloned();
         let mut to_close: Vec<(String, String)> = Vec::new();
         let mut changed = false;
-        let mut transport_toggles: u32 = 0;
         for (key, session) in self.plugin_editors.bridge.iter_mut() {
             session.shell.pump_messages();
             // Open watchdog (spec A6): a session still loading past the deadline
@@ -1540,7 +1540,6 @@ impl StudioLayout {
                 }
             }
             let poll = session.shell.poll();
-            transport_toggles = transport_toggles.saturating_add(poll.transport_toggles);
             if poll.close_requested {
                 eprintln!(
                     "[plugin-editor-window] user close requested instance={}",
@@ -1581,22 +1580,6 @@ impl StudioLayout {
         }
         for key in to_close {
             self.close_bridge_editor(cx, &key.0, &key.1);
-            changed = true;
-        }
-        // Space pressed while the editor's own chrome held focus. The shell is a
-        // raw Win32 window in this process, so neither GPUI nor the plug-in host
-        // saw the key — run the same command the arrangement's spacebar runs.
-        //
-        // One press, one toggle — see the coalescing note in
-        // `poll_plugin_bridge_runtime`. The shell's window proc and the host's
-        // message pumps can both claim the same Space, and replaying every
-        // claim turned one press into two play/pause commands that cancelled
-        // out.
-        if transport_toggles > 0 {
-            eprintln!(
-                "[PluginEditorInput] transport toggle from editor shell -> transport:play-pause"
-            );
-            self.dispatch_command_id("transport:play-pause", cx);
             changed = true;
         }
         if changed {

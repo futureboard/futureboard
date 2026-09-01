@@ -65,6 +65,27 @@ fn trace(line: &str) {
     }
 }
 
+/// Runs one step of an ARA teardown, announcing it before and timing it after.
+///
+/// Announced *before* on purpose. Every step here is a call into a plug-in that
+/// can block the main thread forever, and when one does, the only evidence of
+/// which one is the log — so the last line has to name the call that is stuck,
+/// not the last one that finished.
+///
+/// Not gated behind a debug flag either. This runs when a user removes ARA from
+/// a track, not on any hot path, and a flag nobody had set when the app froze is
+/// no use to anybody.
+fn step<T>(plugin_name: &str, label: &str, work: impl FnOnce() -> T) -> T {
+    eprintln!("[ara-close] '{plugin_name}' {label}...");
+    let started = std::time::Instant::now();
+    let out = work();
+    eprintln!(
+        "[ara-close] '{plugin_name}' {label} done in {} ms",
+        started.elapsed().as_millis()
+    );
+    out
+}
+
 /// Bounded drop-oldest queue shared with plug-in threads.
 struct Inbox<T> {
     items: Mutex<std::collections::VecDeque<T>>,
@@ -584,43 +605,93 @@ impl AraState {
             return;
         };
         let plugin_name = session.plugin_name.clone();
-        // Teardown order, and every step of it matters. Each is traced because
-        // the failure mode when one is missing is a hung main thread with
-        // nothing in the log to say which call never returned.
+        // Teardown order, and every step of it matters. Each is timed and
+        // reported, because the failure mode when one is wrong is a hung main
+        // thread and the only thing that identifies which call never returned is
+        // the absence of the line after it. That is worth four lines per removal
+        // whether or not a debug flag is set — this runs once when a user
+        // removes ARA from a track, not on any hot path.
+        //
+        // The shape is: out of the audio graph, then the UI down, then the audio
+        // instance down, then the document. Nothing that calls into the plug-in
+        // may sit between deactivating the instance and destroying the document.
         //
         // 1. Take the instance out of the audio graph. The removal is only
         //    *queued*, so the barrier is part of this step: the region
         //    assignments dropped in step 4 call into a plug-in the callback
         //    would otherwise still be rendering.
-        Self::install_renderers(engine, &self.sessions, &key.track_id);
-        let confirmed = engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT);
-        trace(&format!(
-            "close '{plugin_name}': renderers removed, callback barrier confirmed={confirmed}"
-        ));
+        let confirmed = step(&plugin_name, "1/4 removing renderers", || {
+            Self::install_renderers(engine, &self.sessions, &key.track_id);
+            engine.wait_for_command_barrier(RENDERER_BARRIER_TIMEOUT)
+        });
+        if !confirmed {
+            // Not fatal by itself, but it is the precondition every later step
+            // assumes, so it must not pass silently: the audio callback may
+            // still be inside this instance while step 3 deactivates it.
+            eprintln!(
+                "[ara-close] WARNING '{plugin_name}': the audio callback did not confirm the \
+                 renderer removal within {RENDERER_BARRIER_TIMEOUT:?}"
+            );
+        }
         let AraTrackSession {
             session, processor, ..
         } = session;
-        // 2. Leave the processing state. A plug-in whose renderer is still
+        // 2. Release the plug-in's editor view, through *both* paths a view can
+        //    have been attached by. Last line of defence for a view that has not
+        //    come down yet — a project closing out from under a docked editor,
+        //    say.
+        //
+        //    `embed_detach` alone was not that defence. It returns immediately
+        //    unless the plug-in is in embed mode, and no ARA editor is: the
+        //    docked panel and the popped-out window both attach through the
+        //    host-owned view path (`view_attach`), where the host owns the
+        //    window and the call drives only `IPlugView`. So the view survived,
+        //    step 4 destroyed the document under it, and the app went down.
+        //
+        //    First, not third. `removed()` is real work inside the plug-in's
+        //    editor, and run between deactivating the instance and closing the
+        //    document it lands in the one gap where the plug-in has no audio
+        //    instance to answer with and the host is about to wait on its
+        //    readers — the crash became a hang there. Taking the UI down while
+        //    the instance is still whole is also just the ordinary case: it is
+        //    what closing an editor window during playback does every day.
+        step(&plugin_name, "2/4 releasing the editor view", || {
+            processor.view_detach();
+            processor.embed_detach();
+        });
+        // 3. Leave the processing state. A plug-in whose renderer is still
         //    active is entitled to hold its render lock, and step 4 then waits
         //    on it from the main thread — which is the hang, not a crash.
-        processor.stop_processing();
-        trace("close: instance left the processing state");
-        // 3. Release the plug-in's editor view. Last line of defence for a view
-        //    that has not come down yet — a project closing out from under a
-        //    docked editor, say. The view reads the document about to be
-        //    destroyed; whoever owned it detaches again later and finds nothing
-        //    left to release.
-        processor.embed_detach();
-        trace("close: editor view released");
+        step(&plugin_name, "3/4 stopping processing", || {
+            processor.stop_processing()
+        });
         // 4. Destroy the ARA binding and the document controller.
-        if let Err(error) = session.close() {
+        //
+        //    This is the step that can block: closing the document revokes the
+        //    host's audio readers, and revoking one waits for whichever of the
+        //    plug-in's threads is reading through it to let go.
+        let closed = step(&plugin_name, "4/4 closing the ARA document", || {
+            session.close()
+        });
+        if let Err(error) = closed {
             self.last_error = Some(format!("{plugin_name} reported errors on close: {error}"));
         }
-        trace("close: ARA document closed");
         // 5. The processor drops with the last handle, which terminates the
         //    companion instance.
         processor.set_destroy_reason("ara-unbound");
         self.pending_archives.remove(key);
+    }
+
+    /// Whether any editor still holds a view on this session's plug-in.
+    ///
+    /// Asks the plug-in, not any one host. A docked panel and a popped-out
+    /// window attach through the same view host, so waiting on only one of them
+    /// answers "released" while the other is still drawing from the document
+    /// that is about to be destroyed.
+    pub fn view_is_attached(&self, key: &AraSessionKey) -> bool {
+        self.sessions
+            .get(key)
+            .is_some_and(|session| session.processor.view_is_attached())
     }
 
     /// Tears down every session, e.g. when a project closes.

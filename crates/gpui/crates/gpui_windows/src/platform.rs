@@ -431,8 +431,31 @@ impl WindowsPlatform {
     }
 }
 
-fn translate_accelerator(msg: &MSG) -> Option<()> {
+/// Whether GPUI handled `msg` itself, in which case the loop must not dispatch
+/// it.
+///
+/// GPUI asks by sending the target a private message and reading the reply,
+/// treating 0 as "handled". That question is only meaningful for GPUI's own
+/// windows: `DefWindowProc` answers 0 to any message it does not recognise, so
+/// every *other* window in the process claimed every key aimed at it and the
+/// loop dropped the message without ever dispatching it.
+///
+/// A DAW has such windows on this very queue — a plug-in's native editor view,
+/// a hosted browser, an editor shell's own chrome. Their keystrokes were being
+/// thrown away before their window procedures ran, so text fields inside an
+/// in-process plug-in editor could be clicked but never typed into. So the
+/// question is put only to windows GPUI actually owns; anything else is
+/// dispatched to whoever it was addressed to, which is what Win32 was going to
+/// do anyway.
+fn translate_accelerator(msg: &MSG, windows: &RwLock<SmallVec<[SafeHwnd; 4]>>) -> Option<()> {
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return None;
+    }
+    if !windows
+        .read()
+        .iter()
+        .any(|handle| handle.as_raw() == msg.hwnd)
+    {
         return None;
     }
 
@@ -495,7 +518,7 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if translate_accelerator(&msg).is_none() {
+                if translate_accelerator(&msg, &self.raw_window_handles).is_none() {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -1028,8 +1051,12 @@ impl WindowsPlatformInner {
                     // then quit out of foreground work to allow us to process other gpui events first before returning back to foreground task work
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
-                    let process_message = |msg: &_| {
-                        if translate_accelerator(msg).is_none() {
+                    let all_windows = self.raw_window_handles.upgrade();
+                    let process_message = |msg: &MSG| {
+                        let handled = all_windows
+                            .as_deref()
+                            .and_then(|windows| translate_accelerator(msg, windows));
+                        if handled.is_none() {
                             _ = unsafe { TranslateMessage(msg) };
                             unsafe { DispatchMessageW(msg) };
                         }

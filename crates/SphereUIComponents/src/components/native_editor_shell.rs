@@ -34,14 +34,6 @@ pub struct NativeShellPoll {
     /// New **content** (client-below-titlebar) size since the last poll, if the
     /// window was resized/maximized. The owner forwards it as `ResizeEditor`.
     pub resized: Option<(i32, i32)>,
-    /// Bare Space presses claimed by the shell's own chrome since the last poll.
-    ///
-    /// The shell is a raw Win32 window in the main process, so a key pressed
-    /// while *it* holds focus reaches neither GPUI (which only routes keys for
-    /// its own windows) nor the plug-in host process (which claims Space for the
-    /// windows it owns). Without this, Space did nothing whenever focus sat on
-    /// the editor's titlebar or frame instead of inside the plug-in's view.
-    pub transport_toggles: u32,
 }
 
 /// Default plugin editor shell content size before the plug-in reports its
@@ -101,12 +93,12 @@ mod imp {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         ChildWindowFromPoint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetClassNameW, GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-        IsDialogMessageW, IsWindow, IsZoomed, LoadCursorW, PeekMessageW, RegisterClassW,
-        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-        GWLP_HWNDPARENT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM, HTBOTTOMLEFT,
-        HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-        HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE, SWP_FRAMECHANGED,
+        GetClassNameW, GetClientRect, GetForegroundWindow, GetMessageTime, GetWindowLongPtrW,
+        GetWindowRect, IsDialogMessageW, IsWindow, IsZoomed, LoadCursorW, PeekMessageW,
+        RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        TranslateMessage, GWLP_HWNDPARENT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HMENU, HTBOTTOM,
+        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+        HTTOPRIGHT, HWND_TOP, IDC_ARROW, MA_ACTIVATE, MINMAXINFO, MSG, PM_REMOVE, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
         SW_MINIMIZE, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
@@ -116,6 +108,8 @@ mod imp {
         WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
         WS_THICKFRAME, WS_VISIBLE,
     };
+
+    use crate::components::transport_key::{self, TransportKeySource};
 
     const SHELL_CLASS: PCWSTR = w!("SpherePluginEditorShell");
     const CONTENT_CLASS: PCWSTR = w!("SpherePluginEditorContent");
@@ -724,8 +718,6 @@ mod imp {
         /// resize, DPI change). Exempts programmatic resizes from the
         /// fixed-size min/max lock above.
         programmatic_resize: AtomicBool,
-        /// Bare Space presses seen by the shell chrome, drained by `poll`.
-        transport_toggles: AtomicU32,
     }
 
     impl ShellInner {
@@ -755,7 +747,6 @@ mod imp {
                 initial_auto_size_done: AtomicBool::new(false),
                 resizable: AtomicBool::new(true),
                 programmatic_resize: AtomicBool::new(false),
-                transport_toggles: AtomicU32::new(0),
             })
         }
     }
@@ -1168,14 +1159,28 @@ mod imp {
                     if name == "edit"
                         || name == "combobox"
                         || name.starts_with("richedit")
+                        || name.starts_with("windows.ui.core")
                         || name.contains("textbox")
                     {
                         return false;
                     }
                 }
             }
-            if let Some(inner) = inner_ref(hwnd) {
-                inner.transport_toggles.fetch_add(1, Ordering::Relaxed);
+            if inner_ref(hwnd).is_some() {
+                // Reported to the process-wide transport-key router rather than
+                // to this shell: the shell's window procedure, the message hook
+                // over the embedded view, and the plug-in host's own filter can
+                // all see one press, and three sinks each running play/pause for
+                // what they collected is how a single Space became "play, then
+                // stop immediately".
+                //
+                // `GetMessageTime` is the time of the message being dispatched
+                // right now, which is the same tick count every other process
+                // sees for this press, so the router can recognise it as one.
+                transport_key::claim(
+                    TransportKeySource::EditorShell,
+                    Some(GetMessageTime() as u32),
+                );
                 return true;
             }
         }
@@ -2257,7 +2262,6 @@ mod imp {
             NativeShellPoll {
                 close_requested: self.inner.close_requested.load(Ordering::Relaxed),
                 resized,
-                transport_toggles: self.inner.transport_toggles.swap(0, Ordering::Relaxed),
             }
         }
 

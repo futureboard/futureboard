@@ -669,6 +669,134 @@ pub fn fb_segmented_button(
     fb_segment(id, label, active, FbSegment::Only, on_click)
 }
 
+// ---------------------------------------------------------------------------
+// Dock tabs
+// ---------------------------------------------------------------------------
+
+/// The two planes a dock tab strip spans.
+///
+/// A dock tab is not a chip in a toolbar — it is a notch cut out of the panel
+/// below it, the way a browser tab is. That only reads if the active tab is
+/// filled with the *body's* own plane while the strip around it sits a plane
+/// lower, so both colours have to come from the panel that owns the strip
+/// rather than be assumed here. A tab filled with anything but `body` looks
+/// like a button parked on a shelf.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FbDockPlanes {
+    /// The trench the strip itself paints. One plane below `body`.
+    pub strip: Rgba,
+    /// The panel plane directly under the strip, which the active tab joins.
+    pub body: Rgba,
+}
+
+/// Strip that holds a run of [`fb_dock_tab`]s.
+///
+/// Square by contract: a dock tab bar is full-bleed chrome, and a rounded strip
+/// exposes a wedge of whatever is behind it at the panel's corner.
+///
+/// No bottom rule. The two planes already separate themselves — the strip is a
+/// whole step darker than the panel under it — and a hairline across that step
+/// only redraws a boundary the values had already made, while cutting the
+/// active tab off from the surface it is supposed to be part of.
+///
+/// Tabs are laid out against the **bottom** edge rather than centred, so the
+/// active tab's fill runs all the way into the panel's.
+///
+/// The caller adds the tabs, then any trailing controls — those want
+/// `.items_center()` and `.h_full()` of their own, since the strip aligns to
+/// the bottom for the tabs' sake.
+pub fn fb_dock_tab_strip(planes: FbDockPlanes) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_end()
+        .h(px(size::COMFORTABLE))
+        .px(px(space::BASE))
+        .gap(px(space::HAIR))
+        .bg(planes.strip)
+}
+
+/// One tab in an [`fb_dock_tab_strip`], shaped like a browser tab.
+///
+/// The active tab is rounded on top, square on the bottom, and filled with the
+/// body plane. Its bottom edge sits on the strip's, and the strip draws no rule
+/// there, so the tab's fill runs straight into the panel's — one continuous
+/// surface, with the inactive tabs reading as being behind it.
+///
+/// An inactive tab paints no fill at all. Filling every tab would turn the run
+/// into a segmented control, which says "pick one of these values", not "you
+/// are looking at this surface".
+///
+/// No lines anywhere: no outline on any tab, no accent bar on the active one,
+/// and no rule under the strip. Each was drawing a boundary the planes had
+/// already drawn — the active tab is a whole step lighter than the trench, its
+/// label is brighter and semibold, and it is the only one whose fill continues
+/// past the strip. Every added stroke pulls the shape back toward reading as a
+/// button rather than as part of the panel.
+pub fn fb_dock_tab(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<String>,
+    icon_path: Option<&'static str>,
+    active: bool,
+    planes: FbDockPlanes,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let label: String = label.into();
+    let r = radius::CONTROL;
+    let rest = if active {
+        planes.body
+    } else {
+        Colors::with_alpha(planes.strip, 0.0)
+    };
+    let hover = Colors::composite(planes.strip, Colors::state_hover());
+    let pressed = Colors::composite(planes.strip, Colors::state_recessed());
+    let text = if active {
+        Colors::tab_text_active()
+    } else {
+        Colors::tab_text_muted()
+    };
+    let text_hover = Colors::tab_text();
+    let focus = Colors::state_focus_ring();
+
+    div()
+        .id(id)
+        .role(Role::Tab)
+        .aria_label(label.clone())
+        .aria_selected(active)
+        .focusable()
+        .tab_stop(true)
+        .focus_visible(move |style| style.shadow(elevation::focus_ring(focus)))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(space::SNUG))
+        .h(px(size::DEFAULT))
+        .px(px(space::LOOSE))
+        .rounded_tl(px(r))
+        .rounded_tr(px(r))
+        .rounded_bl(px(radius::NONE))
+        .rounded_br(px(radius::NONE))
+        .bg(rest)
+        .text_size(px(typography::UI_XS))
+        .font_weight(if active {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::MEDIUM
+        })
+        // Set on the tab as well as on the icon: the label is a plain string
+        // child and inherits its colour from here, not from the svg.
+        .text_color(text)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .when(!active, |el| {
+            el.hover(move |s| s.bg(hover).text_color(text_hover))
+                .active(move |s| s.bg(pressed))
+        })
+        .children(icon_path.map(|path| svg().path(path).w(px(14.0)).h(px(14.0)).text_color(text)))
+        .child(label)
+        .on_click(on_click)
+}
+
 /// Determinate progress bar. The track is a capsule; the fill is square so the
 /// leading edge *is* the value — a rounded fill cap makes small percentages
 /// unreadable and never reaches either end.

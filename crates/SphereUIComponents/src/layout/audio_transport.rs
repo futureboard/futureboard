@@ -792,15 +792,33 @@ impl StudioLayout {
             // ARA plug-ins post transport requests and model updates from their
             // own threads; this is where those land on the UI thread.
             self.poll_ara(cx);
-            // Space pressed inside an embedded plug-in editor. The plug-in's
-            // native child owns every key that reaches it, so the press was
-            // claimed before its window procedure ran and is replayed here as
-            // the transport command it was meant to be. One press, one toggle —
-            // the same coalescing rule the editor shells follow.
-            if crate::components::plugin_content_host::take_transport_toggles() > 0 {
-                eprintln!(
-                    "[PluginEditorInput] transport toggle from embedded editor -> transport:play-pause"
+            // The one place Space becomes play/pause when it was pressed
+            // somewhere GPUI's key bindings could not see it.
+            //
+            // A plug-in's native child owns every key that reaches it, so the
+            // press is claimed before that window's procedure runs — by this
+            // process's message hook, by an editor shell's own procedure, by the
+            // C++ bridge windows, by CEF, or by the separated plug-in host over
+            // IPC. All of them report to one router, which is what makes them
+            // one press again; this is the only place that turns presses into
+            // commands.
+            //
+            // The C++ bridge counter is drained here rather than by its claim
+            // site because it is process-wide and has none: it is written by the
+            // editor window procedures and was only ever read by the plug-in
+            // host process, so every Space claimed from an in-process editor was
+            // taken away from the plug-in and then dropped.
+            for _ in 0..DirectAudio::vst3_processor::take_transport_toggle_requests() {
+                crate::components::transport_key::claim(
+                    crate::components::transport_key::TransportKeySource::NativeBridge,
+                    None,
                 );
+            }
+            if crate::components::transport_key::take() > 0 {
+                // Coalesced, not replayed: more than one press waiting here is a
+                // burst that piled up behind a plug-in's own modal loop, and
+                // replaying it would toggle back to where it started.
+                eprintln!("[Keyboard] transport key -> transport:play-pause");
                 self.dispatch_command_id("transport:play-pause", cx);
             }
         }

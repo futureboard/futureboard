@@ -292,6 +292,17 @@ pub enum HostEvent {
         /// Where the key was seen, for diagnostics ("editor" / "window").
         #[serde(default)]
         source: String,
+        /// The press's Win32 message time (`MSG.time` / `KBDLLHOOKSTRUCT.time`),
+        /// when the claim site had one.
+        ///
+        /// It identifies the *physical* press, and it is the same tick count in
+        /// every process that sees it. The main app can have claimed the same
+        /// key itself — an editor embedded in one of its windows is watched by
+        /// its own message hook as well as by this process's filters — and
+        /// without an identity the two reports become two play/pause commands,
+        /// which cancel out and read as the key doing nothing.
+        #[serde(default)]
+        time_ms: Option<u32>,
     },
     /// Host accepted a load request and is resolving the plugin.
     PluginLoading { plugin_instance_id: String },
@@ -619,11 +630,12 @@ mod tests {
     }
 
     /// The transport key event carries no instance and must stay decodable from
-    /// an older host that predates the `source` field.
+    /// an older host that predates the `source` and `time_ms` fields.
     #[test]
     fn transport_toggle_event_round_trips_and_tolerates_a_missing_source() {
         let ev = HostEvent::TransportToggleRequested {
             source: "editor".into(),
+            time_ms: Some(1_234_567),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &ev).unwrap();
@@ -634,7 +646,8 @@ mod tests {
         assert_eq!(
             read_frame::<HostEvent, _>(&mut legacy).unwrap(),
             Some(HostEvent::TransportToggleRequested {
-                source: String::new()
+                source: String::new(),
+                time_ms: None
             })
         );
     }

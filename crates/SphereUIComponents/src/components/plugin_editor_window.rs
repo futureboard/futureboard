@@ -19,15 +19,15 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement, Point, Render, StatefulInteractiveElement, Styled, Window,
+    div, point, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, Point, Render, StatefulInteractiveElement, Styled, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::plugin_editor_chrome::{
-    render_chrome_tools, render_preset_menu, render_tab_strip, PluginEditorAction,
-    PluginEditorChrome, PluginEditorTab, TAB_STRIP_H,
+    open_preset_menu as open_preset_menu_window, render_chrome_tools, render_tab_strip,
+    PluginEditorAction, PluginEditorChrome, PluginEditorTab, PresetMenuWindow, TAB_STRIP_H,
 };
 use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
@@ -165,6 +165,11 @@ const CHROME_H: f32 = 26.0;
 
 /// Logical-pixel height reserved above the plug-in: titlebar, tabs, chrome row.
 const HEADER_H: f32 = TITLEBAR_HEIGHT + TAB_STRIP_H + CHROME_H;
+
+/// Where the preset list hangs from, measured across the chrome row: the row's
+/// own padding, the active toggle, and the previous-preset chevron, which is
+/// where the preset button starts.
+const PRESET_MENU_ANCHOR_X: f32 = 70.0;
 pub const EDITOR_WINDOW_WIDTH: f32 = 820.0;
 pub const EDITOR_WINDOW_HEIGHT: f32 = 560.0;
 pub const EDITOR_WINDOW_MIN_WIDTH: f32 = 360.0;
@@ -264,11 +269,23 @@ pub struct PluginEditorWindow {
     chrome: PluginEditorChrome,
     /// Chrome controls the user pressed, waiting for the studio to apply them.
     chrome_actions: Vec<PluginEditorAction>,
-    /// Whether the preset list is showing.
+    /// The open preset list, which is a window of its own.
     ///
     /// Window state, not the studio's: which menu is open is nobody else's
     /// business, and it closes the moment a preset is picked.
-    preset_menu_open: bool,
+    ///
+    /// A window rather than an element because the region a dropdown from the
+    /// chrome row falls into belongs to the plug-in's native child, and a native
+    /// child composites above anything this window paints. Drawn here it was
+    /// built every frame and never once visible.
+    preset_menu: Option<WindowHandle<PresetMenuWindow>>,
+    /// Screen origin of this window, recorded during the last draw.
+    ///
+    /// The preset list is a separate window and has to be placed in screen
+    /// coordinates, but the click that opens it arrives with no `Window` to ask.
+    /// `render` is the one place that has one, so it leaves the answer here —
+    /// the same measure-in-render, act-later shape the docked ARA panel uses.
+    window_origin: Point<Pixels>,
     /// Every plug-in open on this channel, in slot order.
     ///
     /// One window per channel: its inserts are a chain, and the tab strip is how
@@ -346,7 +363,8 @@ impl PluginEditorWindow {
                 ..PluginEditorChrome::default()
             },
             chrome_actions: Vec::new(),
-            preset_menu_open: false,
+            preset_menu: None,
+            window_origin: point(px(0.0), px(0.0)),
             tabs: Vec::new(),
             status,
             wait_ticks: 0,
@@ -450,6 +468,48 @@ impl PluginEditorWindow {
     /// we never queue more than one pending tick at a time.
     /// Queues the next lifecycle step for after the current draw.
     ///
+    /// Opens the preset list under the chrome row's preset button.
+    ///
+    /// The anchor is this window's screen origin plus the button's offset in the
+    /// header, because the list is a separate window: it cannot be positioned by
+    /// the layout that contains the button.
+    fn open_preset_menu(&mut self, cx: &mut Context<Self>) {
+        self.close_preset_menu(cx);
+        let origin = point(
+            self.window_origin.x + px(PRESET_MENU_ANCHOR_X),
+            self.window_origin.y + px(HEADER_H),
+        );
+        let this = cx.entity().downgrade();
+        self.preset_menu = open_preset_menu_window(
+            origin,
+            self.chrome.clone(),
+            move |action, cx| {
+                let _ = this.update(cx, |editor, cx| {
+                    match action {
+                        // The list dismissed itself; it has already closed its own
+                        // window, so only the handle is dropped here.
+                        PluginEditorAction::TogglePresetMenu(false) => {
+                            editor.preset_menu = None;
+                        }
+                        action => {
+                            editor.close_preset_menu(cx);
+                            editor.chrome_actions.push(action);
+                        }
+                    }
+                    cx.notify();
+                });
+            },
+            cx,
+        );
+    }
+
+    /// Closes the preset list if it is open.
+    fn close_preset_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.preset_menu.take() {
+            let _ = handle.update(cx, |_menu, window, _cx| window.remove_window());
+        }
+    }
+
     /// Everything `drive` does — creating the content child window, sending
     /// `OpenEditor`, resizing this window — dispatches Win32 messages
     /// synchronously, and any of those can re-enter GPUI. Run from inside
@@ -1704,7 +1764,11 @@ impl Render for PluginEditorWindow {
         // the element arena. `render` records the window it is drawing into and
         // hands the work to the deferred tick — the same rule the docked ARA
         // panel follows for the same reason.
-        let _ = window;
+        //
+        // Where this window sits on screen is recorded here too: the preset list
+        // is a window of its own, so it has to be placed in screen coordinates,
+        // and the click that opens it arrives with no `Window` to ask.
+        self.window_origin = window.bounds().origin;
         self.schedule_tick(cx);
 
         // When attached, GPUI must not paint anything below the titlebar — gpui
@@ -1800,28 +1864,35 @@ impl Render for PluginEditorWindow {
                     });
                 }
             }))
-            .child(render_chrome_tools(&self.chrome, self.preset_menu_open, {
-                let this = cx.entity().downgrade();
-                move |action, cx| {
-                    // Queued on the window; the studio drains it on its next
-                    // poll. Applying it here would need the insert and the
-                    // engine, neither of which this window owns. Opening the
-                    // preset list is the exception — it is this window's own
-                    // state and nothing else has to know.
-                    let _ = this.update(cx, |editor, cx| {
-                        match action {
-                            PluginEditorAction::TogglePresetMenu(open) => {
-                                editor.preset_menu_open = open;
+            .child(render_chrome_tools(
+                &self.chrome,
+                self.preset_menu.is_some(),
+                {
+                    let this = cx.entity().downgrade();
+                    move |action, cx| {
+                        // Queued on the window; the studio drains it on its next
+                        // poll. Applying it here would need the insert and the
+                        // engine, neither of which this window owns. Opening the
+                        // preset list is the exception — it is this window's own
+                        // state and nothing else has to know.
+                        let _ = this.update(cx, |editor, cx| {
+                            match action {
+                                PluginEditorAction::TogglePresetMenu(true) => {
+                                    editor.open_preset_menu(cx);
+                                }
+                                PluginEditorAction::TogglePresetMenu(false) => {
+                                    editor.close_preset_menu(cx);
+                                }
+                                action => {
+                                    editor.close_preset_menu(cx);
+                                    editor.chrome_actions.push(action);
+                                }
                             }
-                            action => {
-                                editor.preset_menu_open = false;
-                                editor.chrome_actions.push(action);
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-            }))
+                            cx.notify();
+                        });
+                    }
+                },
+            ))
             // The plug-in's own surface sits below the header. It is a native
             // child window composited above this one, so a ground painted here
             // cannot hide it — it only stops the swap chain's last contents
@@ -1835,19 +1906,6 @@ impl Render for PluginEditorWindow {
                     .bottom_0()
                     .bg(Colors::surface_base()),
             );
-
-        if self.preset_menu_open {
-            let this = cx.entity().downgrade();
-            root = root.child(div().absolute().top(px(HEADER_H)).left(px(70.0)).child(
-                render_preset_menu(&self.chrome, move |action, cx| {
-                    let _ = this.update(cx, |editor, cx| {
-                        editor.preset_menu_open = false;
-                        editor.chrome_actions.push(action);
-                        cx.notify();
-                    });
-                }),
-            ));
-        }
 
         if let Some(overlay) = content_overlay {
             root = root.child(

@@ -3008,15 +3008,20 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         // The main app owns what play/pause means; this only reports that the
         // key was pressed somewhere the main app's window could not see it.
         timed_section!("transport_key_poll", {
-            let toggles = platform::take_transport_toggle_requests();
-            for _ in 0..toggles {
+            for time_ms in platform::take_transport_toggle_requests() {
                 if platform::plugin_debug() {
-                    eprintln!("[PluginEditorInput] transport toggle requested from editor focus");
+                    eprintln!(
+                        "[Keyboard] host reporting transport key time={}",
+                        time_ms
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    );
                 }
                 let _ = ipc::write_frame(
                     &mut out,
                     &HostEvent::TransportToggleRequested {
                         source: "editor".to_string(),
+                        time_ms,
                     },
                 );
             }
@@ -5330,6 +5335,7 @@ mod platform {
     use windows::Win32::Foundation::{CloseHandle, HWND};
     use windows::Win32::Foundation::{LPARAM, RECT, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::SystemInformation::GetTickCount64;
     use windows::Win32::System::Threading::{
         GetCurrentProcessId, GetCurrentThreadId, GetExitCodeProcess, OpenProcess,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -5352,9 +5358,9 @@ mod platform {
         GA_ROOT, GUITHREADINFO, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD, GW_OWNER,
         HWND_TOP, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE,
         QS_ALLINPUT, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WH_KEYBOARD_LL,
-        WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
-        WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        WINDOW_EX_STYLE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+        WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -5591,6 +5597,25 @@ mod platform {
         });
     }
 
+    /// When Space went down, so auto-repeat toggles nothing.
+    ///
+    /// A low-level hook is handed raw key transitions, not messages, so there is
+    /// no `lParam` bit 30 to consult: every repeat arrives as another
+    /// `WM_KEYDOWN` and, unfiltered, held Space toggled the transport thirty
+    /// times a second.
+    ///
+    /// The paired key-up is not something this can *wait* for. The hook is
+    /// system-wide, so it normally sees every release wherever focus went, but a
+    /// release swallowed by a hook ahead of this one -- or arriving while this
+    /// one was uninstalled by `LowLevelHooksTimeout` and reinstalled -- would
+    /// otherwise leave Space stuck "down" and the transport key dead for good.
+    /// So the down state expires: nobody holds Space for two seconds and means
+    /// the next press to be the same press.
+    static SPACE_DOWN_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// How long a `SPACE_DOWN_AT` with no matching release stays believed.
+    const SPACE_HELD_MAX_MS: u64 = 2_000;
+
     unsafe extern "system" fn transport_ll_keyboard_proc(
         code: i32,
         wparam: WPARAM,
@@ -5598,38 +5623,103 @@ mod platform {
     ) -> windows::Win32::Foundation::LRESULT {
         if code >= 0 {
             let msg = wparam.0 as u32;
-            if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-                let injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
-                if !injected && kb.vkCode == VK_SPACE.0 as u32 {
-                    let held = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) < 0;
-                    if !held(VK_CONTROL) && !held(VK_MENU) && !held(VK_LWIN) && !held(VK_RWIN) {
-                        let fg = GetForegroundWindow();
-                        let mut pid = 0u32;
-                        if !fg.is_invalid() {
-                            GetWindowThreadProcessId(fg, Some(&mut pid));
-                        }
-                        if pid == GetCurrentProcessId() {
-                            let focus = foreground_focus_window();
-                            let text =
-                                !focus.is_invalid() && is_text_entry_class(&class_name(focus));
-                            if !text {
-                                TRANSPORT_TOGGLE_REQUESTS
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if plugin_debug() {
-                                    eprintln!(
-                                        "[PluginEditorInput] transport key claimed via WH_KEYBOARD_LL"
-                                    );
-                                }
-                                // Swallow so the plug-in does not also act on Space.
-                                return windows::Win32::Foundation::LRESULT(1);
-                            }
-                        }
-                    }
+            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            let injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
+            let space = !injected && kb.vkCode == VK_SPACE.0 as u32;
+            if space && (msg == WM_KEYUP || msg == WM_SYSKEYUP) {
+                SPACE_DOWN_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            if space && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+                let now = GetTickCount64();
+                let down_at = SPACE_DOWN_AT.load(std::sync::atomic::Ordering::Relaxed);
+                let repeated = down_at != 0 && now.saturating_sub(down_at) < SPACE_HELD_MAX_MS;
+                SPACE_DOWN_AT.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+                let held = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) < 0;
+                let modified = held(VK_CONTROL) || held(VK_MENU) || held(VK_LWIN) || held(VK_RWIN);
+                // Keyboard input belongs to whoever owns *focus*, which is not
+                // the same question as who owns the foreground window. An editor
+                // embedded into a Studio-owned window is a plug-in view whose
+                // top-level ancestor belongs to the Studio process, so asking
+                // "is the foreground window mine" answered no for exactly the
+                // case with no other route to the transport, and Space in a
+                // docked ARA editor went into the plug-in and stopped there.
+                //
+                // Asking about the focus window instead gets both halves right:
+                // the plug-in view is this process's, so this claims the key;
+                // the arrangement is the Studio's, so GPUI's own key bindings
+                // keep it and this never fires. One owner per press, decided by
+                // the same thing Windows uses to route the key.
+                let focus = foreground_focus_window();
+                let mut focus_pid = 0u32;
+                if !focus.is_invalid() {
+                    GetWindowThreadProcessId(focus, Some(&mut focus_pid));
+                }
+                let ours = focus_pid == GetCurrentProcessId();
+                let text = !focus.is_invalid() && is_text_entry_class(&class_name(focus));
+                let claimed = ours && !text && !modified && !repeated;
+                keyboard_trace(
+                    "WH_KEYBOARD_LL",
+                    focus,
+                    focus_pid,
+                    kb.time,
+                    repeated,
+                    claimed,
+                );
+                if claimed {
+                    claim_transport_toggle(Some(kb.time));
+                    // Swallow so the plug-in does not also act on Space.
+                    return windows::Win32::Foundation::LRESULT(1);
                 }
             }
         }
         CallNextHookEx(None, code, wparam, lparam)
+    }
+
+    /// One line per transport-key decision, because none of this is visible from
+    /// outside: the key is either seen or it is not, and it either belongs to a
+    /// plug-in or to the DAW.
+    ///
+    /// Gated behind `FUTUREBOARD_KEY_DEBUG`, except the first press this process
+    /// declines -- that line is what somebody reporting "Space does nothing"
+    /// will already have.
+    fn keyboard_trace(
+        site: &str,
+        focus: HWND,
+        focus_pid: u32,
+        time_ms: u32,
+        repeated: bool,
+        claimed: bool,
+    ) {
+        static FIRST_DECLINE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !key_debug()
+            && !plugin_debug()
+            && (claimed || FIRST_DECLINE.swap(true, std::sync::atomic::Ordering::Relaxed))
+        {
+            return;
+        }
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let mut fg_pid = 0u32;
+            if !foreground.is_invalid() {
+                GetWindowThreadProcessId(foreground, Some(&mut fg_pid));
+            }
+            eprintln!(
+                "[Keyboard] host site={site} focus=0x{:x} focus_class='{}' focus_pid={focus_pid} \
+                 foreground=0x{:x} foreground_pid={fg_pid} self_pid={} time={time_ms} \
+                 repeated={repeated} claimed={claimed}",
+                focus.0 as u64,
+                class_name(focus),
+                foreground.0 as u64,
+                GetCurrentProcessId(),
+            );
+        }
+    }
+
+    /// Whether the keyboard-routing trace is on (`FUTUREBOARD_KEY_DEBUG`).
+    fn key_debug() -> bool {
+        static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_KEY_DEBUG").is_some())
     }
 
     pub fn ensure_dpi_awareness() {
@@ -5843,12 +5933,14 @@ mod platform {
                 // transport never heard about it. That is why Play/Pause from a
                 // plug-in editor did nothing.
                 if is_transport_toggle_key(&msg) {
-                    TRANSPORT_TOGGLE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if plugin_debug() {
+                    claim_transport_toggle(Some(msg.time));
+                    if plugin_debug() || key_debug() {
                         eprintln!(
-                            "[PluginEditorInput] transport key claimed (editor pump) hwnd=0x{:x} class='{}'",
+                            "[Keyboard] host site=editor-pump hwnd=0x{:x} class='{}' \
+                             time={} claimed=true",
                             msg.hwnd.0 as u64,
-                            class_name(msg.hwnd)
+                            class_name(msg.hwnd),
+                            msg.time
                         );
                     }
                     pumped += 1;
@@ -5880,13 +5972,53 @@ mod platform {
     /// for pathological message storms — it never drops messages.
     const MAX_PUMP_PER_CALL: u32 = 512;
 
-    /// Transport-key presses claimed and not yet reported to the main app.
+    /// Transport-key presses claimed and not yet reported to the main app,
+    /// each with the Win32 message time that identifies the physical press.
     ///
     /// Written by the editor UI thread's two message pumps and by the hook
-    /// thread; drained by the IPC loop. Nothing else is published alongside it,
-    /// so the count needs atomicity but no ordering.
-    static TRANSPORT_TOGGLE_REQUESTS: std::sync::atomic::AtomicU32 =
-        std::sync::atomic::AtomicU32::new(0);
+    /// thread; drained by the IPC loop.
+    ///
+    /// A press, not a count: the main app watches the editors embedded in its
+    /// own windows with a message hook of its own, so one Space can be seen
+    /// here *and* there. The time is the same tick count in both processes, so
+    /// reporting it lets the main app recognise the second report of one press
+    /// instead of running play/pause twice for it -- which cancels out, and is
+    /// what "Space does nothing" actually was.
+    static TRANSPORT_CLAIMS: std::sync::Mutex<TransportClaims> =
+        std::sync::Mutex::new(TransportClaims {
+            times: [None; TRANSPORT_CLAIM_RING],
+            head: 0,
+            len: 0,
+        });
+
+    /// Presses held between the claim and the next IPC drain. Bounded: the drain
+    /// runs every loop iteration, so anything past this is a stuck main app, and
+    /// dropping the oldest is better than growing without limit inside a hook.
+    const TRANSPORT_CLAIM_RING: usize = 16;
+
+    struct TransportClaims {
+        times: [Option<u32>; TRANSPORT_CLAIM_RING],
+        head: usize,
+        len: usize,
+    }
+
+    /// Record a Space press claimed for the DAW transport.
+    ///
+    /// `time_ms` is the press's Win32 message time where the claim site has one.
+    /// Every claim site in this process funnels through here so there is one
+    /// place that decides what a claim is.
+    pub fn claim_transport_toggle(time_ms: Option<u32>) {
+        let Ok(mut claims) = TRANSPORT_CLAIMS.lock() else {
+            return;
+        };
+        let slot = (claims.head + claims.len) % TRANSPORT_CLAIM_RING;
+        claims.times[slot] = time_ms;
+        if claims.len == TRANSPORT_CLAIM_RING {
+            claims.head = (claims.head + 1) % TRANSPORT_CLAIM_RING;
+        } else {
+            claims.len += 1;
+        }
+    }
 
     /// Window classes that own a text caret. Space belongs to them, never to the
     /// transport — renaming a preset must not start playback.
@@ -5928,15 +6060,26 @@ mod platform {
         true
     }
 
-    /// Number of transport-key presses since the last call. The IPC loop turns
-    /// each into a `HostEvent::TransportToggleRequested`.
-    pub fn take_transport_toggle_requests() -> u32 {
-        let from_pump = TRANSPORT_TOGGLE_REQUESTS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    /// Transport-key presses since the last call, each with the message time
+    /// identifying it where the claim site had one. The IPC loop turns each into
+    /// a `HostEvent::TransportToggleRequested`.
+    pub fn take_transport_toggle_requests() -> Vec<Option<u32>> {
+        let mut out = Vec::new();
+        if let Ok(mut claims) = TRANSPORT_CLAIMS.lock() {
+            for i in 0..claims.len {
+                out.push(claims.times[(claims.head + i) % TRANSPORT_CLAIM_RING]);
+            }
+            claims.head = 0;
+            claims.len = 0;
+        }
         // C++ editor shell / shared VST3 host also publishes claims here (e.g.
         // Content HWND WndProc when focus never enters the PeekMessage path).
+        // That counter carries no time, so those presses go out unidentified and
+        // the main app falls back to its short blind window for them.
         let from_daux =
             unsafe { daux_transport::sphere_daux_vst3_take_transport_toggle_requests() };
-        from_pump.saturating_add(from_daux)
+        out.extend(std::iter::repeat_n(None, from_daux as usize));
+        out
     }
 
     mod daux_transport {
@@ -6177,12 +6320,14 @@ mod platform {
                 // means play/pause with an editor focused exactly as it does in
                 // the arrangement. Swallowed here and reported over IPC.
                 if is_transport_toggle_key(&msg) {
-                    TRANSPORT_TOGGLE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if debug {
+                    claim_transport_toggle(Some(msg.time));
+                    if debug || key_debug() {
                         eprintln!(
-                            "[PluginEditorInput] transport key claimed hwnd=0x{:x} class='{}'",
+                            "[Keyboard] host site=thread-pump hwnd=0x{:x} class='{}' \
+                             time={} claimed=true",
                             msg.hwnd.0 as u64,
-                            class_name(msg.hwnd)
+                            class_name(msg.hwnd),
+                            msg.time
                         );
                     }
                     dispatched += 1;
@@ -6486,10 +6631,14 @@ mod platform {
         }
     }
 
-    /// Number of transport-key presses claimed from plug-in editor windows since
-    /// the last call. Platform pumps + the process-wide C++ VST3 counter all
-    /// feed this.
-    pub fn take_transport_toggle_requests() -> u32 {
+    /// Transport-key presses claimed from plug-in editor windows since the last
+    /// call. Platform pumps + the process-wide C++ VST3 counter both feed this.
+    ///
+    /// Neither of these carries a message time, so every press goes out
+    /// unidentified and the main app deduplicates them by its short blind
+    /// window. Only the Windows path can do better, and only because Win32 hands
+    /// it a per-press tick count that means the same thing in both processes.
+    pub fn take_transport_toggle_requests() -> Vec<Option<u32>> {
         let from_platform = {
             #[cfg(target_os = "macos")]
             {
@@ -6502,7 +6651,8 @@ mod platform {
         };
         let from_daux =
             unsafe { daux_transport::sphere_daux_vst3_take_transport_toggle_requests() };
-        from_platform.saturating_add(from_daux)
+        let total = from_platform.saturating_add(from_daux) as usize;
+        vec![None; total]
     }
 
     mod daux_transport {

@@ -31,6 +31,24 @@ pub struct ContentRect {
     pub height: i32,
 }
 
+/// What kind of view a content host holds, which decides who owns the keys that
+/// land inside it.
+///
+/// A native plug-in view is opaque: nothing in this process can tell a note
+/// editor from a search box inside it, so the transport key is claimed at the
+/// window level and only a Win32 caret class can veto it. A web view is not
+/// opaque — CEF knows whether a DOM text field has focus and says so on every
+/// key — so the transport key is left alone here and claimed there instead.
+/// Claiming it at both would take Space away from the editor's own text
+/// fields, which is exactly what the caret veto exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentHostKind {
+    /// A plug-in's own native view (VST3 `IPlugView`, ARA editor).
+    NativeView,
+    /// A CEF browser hosting a built-in plug-in's editor.
+    WebView,
+}
+
 /// Resolved once: this is asked from the window procedure, on every paint.
 fn debug_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -39,10 +57,11 @@ fn debug_enabled() -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use std::sync::{Mutex, Once};
 
-    use super::{debug_enabled, ContentRect};
+    use super::{debug_enabled, ContentHostKind, ContentRect};
+    use crate::components::transport_key::{self, TransportKeySource};
     use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::COLORREF;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -53,29 +72,23 @@ mod imp {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClassNameW,
-        GetClientRect, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow,
-        RegisterClassW, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, GA_PARENT, GWL_STYLE,
-        GW_CHILD, GW_OWNER, HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER,
-        WH_GETMESSAGE, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
-        WM_NULL, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN,
-        WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        GetClientRect, GetDesktopWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect,
+        GetWindowThreadProcessId, IsChild, IsWindow, RegisterClassW, SetWindowPos,
+        SetWindowsHookExW, UnhookWindowsHookEx, GA_PARENT, GWL_STYLE, GW_CHILD, GW_OWNER,
+        HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE,
+        WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL,
+        WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW,
+        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
 
-    /// Space presses claimed from an embedded plug-in view, waiting for the UI
-    /// to turn them into one transport toggle each.
-    static TRANSPORT_TOGGLES: AtomicU32 = AtomicU32::new(0);
-
-    /// Every live content host, so the hook can tell a key aimed at an embedded
-    /// plug-in view from one aimed at the app's own UI.
-    static HOSTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    /// Every live content host and what it holds, so the hook can tell a key
+    /// aimed at an embedded plug-in view from one aimed at the app's own UI —
+    /// and a native view, whose keys it must claim, from a web view, whose keys
+    /// CEF decides about.
+    static HOSTS: Mutex<Vec<(u64, ContentHostKind)>> = Mutex::new(Vec::new());
 
     /// The installed `WH_GETMESSAGE` hook as a raw `HHOOK`, or 0 for none.
     static HOOK: AtomicIsize = AtomicIsize::new(0);
-
-    /// Drains the Space presses claimed since the last call.
-    pub fn take_transport_toggles() -> u32 {
-        TRANSPORT_TOGGLES.swap(0, Ordering::Relaxed)
-    }
 
     /// Whether this message is a bare Space aimed at an embedded plug-in view.
     ///
@@ -95,6 +108,7 @@ mod imp {
         if msg.wParam.0 != VK_SPACE_W {
             return false;
         }
+        // Auto-repeat: one press is one toggle, whatever the repeat rate is.
         if msg.lParam.0 & KEY_REPEAT_BIT != 0 {
             return false;
         }
@@ -102,92 +116,102 @@ mod imp {
             let held = |vk: i32| GetKeyState(vk) < 0;
             // VK_CONTROL / VK_MENU / VK_LWIN / VK_RWIN.
             if held(0x11) || held(0x12) || held(0x5B) || held(0x5C) {
-                transport_trace(|| "space with a modifier; left alone".to_string());
+                keyboard_trace(msg, "modifier held", None);
                 return false;
             }
             // Only keys headed into an embedded plug-in view. Everywhere else in
             // the app GPUI already routes Space through the key bindings, and
             // claiming it here as well would toggle the transport twice.
             let target = msg.hwnd;
-            let inside = inside_a_plugin_view(target);
-            if !inside {
-                transport_trace(|| {
-                    let hosts = HOSTS
-                        .lock()
-                        .map(|hosts| {
-                            hosts
-                                .iter()
-                                .map(|host| format!("0x{host:x}"))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
-                        .unwrap_or_default();
-                    format!(
-                        "space at 0x{:x} (class '{}') is not inside a host; hosts=[{hosts}]",
-                        target.0 as u64,
-                        class_name_of(target)
-                    )
-                });
+            let Some(kind) = owning_host(target) else {
+                keyboard_trace(msg, "not inside a plug-in view", None);
+                return false;
+            };
+            // CEF answers this one. It is the only thing that can see whether a
+            // DOM text field has focus, and it reports the presses it decides
+            // are the transport's through `request_global_play_pause`. Claiming
+            // here as well would take Space away from the editor's own text
+            // fields — every Win32 class test sees only `Chrome_*`.
+            if kind == ContentHostKind::WebView {
+                keyboard_trace(msg, "web view; CEF decides", Some(kind));
                 return false;
             }
             // A caret owns Space — typing a note name must not start playback.
             let focus = GetFocus();
             if !focus.0.is_null() {
                 let name = class_name_of(focus);
-                if name == "edit"
-                    || name == "combobox"
-                    || name.starts_with("richedit")
-                    || name.contains("textbox")
-                {
-                    transport_trace(|| format!("space belongs to a caret in '{name}'"));
+                if is_text_entry_class(&name) {
+                    keyboard_trace(msg, "caret owns the key", Some(kind));
                     return false;
                 }
             }
-            if debug_enabled() {
-                eprintln!("[transport-key] space claimed at 0x{:x}", target.0 as u64);
-            }
+            keyboard_trace(msg, "claimed", Some(kind));
             true
         }
     }
 
-    /// Whether `target` belongs to an embedded plug-in view.
+    /// Window classes that own a text caret. Space belongs to them, never to the
+    /// transport — typing a note name must not start playback.
+    ///
+    /// Deliberately a *class* test and not a "is this a plug-in" test: a plug-in
+    /// editor is not a text field, and vetoing the whole window whenever one is
+    /// focused is how Space stops working inside plug-in editors entirely.
+    fn is_text_entry_class(class: &str) -> bool {
+        class == "edit"
+            || class == "combobox"
+            || class.starts_with("richedit")
+            || class.starts_with("windows.ui.core")
+            || class.contains("textbox")
+    }
+
+    /// The content host `target` belongs to, if any.
     ///
     /// Walks parents *and* owners. `IsChild` alone is not enough: a VST3 view is
     /// supposed to be a `WS_CHILD` of the handle it was attached to, but plug-ins
     /// routinely put parts of their UI — menus, note editors, tooltips — in
     /// popups that are *owned* by that window rather than children of it, and a
     /// key pressed in one of those is still a key pressed in the plug-in.
-    unsafe fn inside_a_plugin_view(target: HWND) -> bool {
+    unsafe fn owning_host(target: HWND) -> Option<ContentHostKind> {
         let Ok(hosts) = HOSTS.lock() else {
-            return false;
+            return None;
         };
         if hosts.is_empty() {
-            return false;
+            return None;
         }
+        // SAFETY: a plain query with no arguments.
+        let desktop = unsafe { GetDesktopWindow() };
         let mut hwnd = target;
         // Bounded: a window tree deep enough to exhaust this is not one of ours,
         // and an owner cycle would otherwise hang the message loop.
         for _ in 0..32 {
-            if hwnd.0.is_null() {
-                return false;
+            if hwnd.0.is_null() || hwnd == desktop {
+                return None;
             }
-            if hosts.iter().any(|&host| hwnd_from(host) == hwnd) {
-                return true;
+            if let Some(&(_, kind)) = hosts.iter().find(|(host, _)| hwnd_from(*host) == hwnd) {
+                return Some(kind);
             }
-            // SAFETY: `hwnd` is checked non-null above; both calls tolerate a
-            // window that has since been destroyed by returning null.
-            let next = unsafe { GetAncestor(hwnd, GA_PARENT) };
-            let next = if next.0.is_null() || next == hwnd {
-                unsafe { GetWindow(hwnd, GW_OWNER).unwrap_or_default() }
+            // A child's parent, or a top-level window's owner — and which of
+            // those to ask has to be decided from the style. `GetAncestor` does
+            // not follow owners by design, and for a top-level window it answers
+            // the *desktop* rather than null, so asking it first and falling
+            // back to the owner "if that was null" never reaches the owner at
+            // all: the walk stops one step short every single time, which is the
+            // step a plug-in's menu or floating editor needs.
+            //
+            // SAFETY: `hwnd` is checked non-null above, and every call here
+            // tolerates a window destroyed since by answering null/zero.
+            let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+            let next = if style & (WS_CHILD.0 as isize) != 0 {
+                unsafe { GetAncestor(hwnd, GA_PARENT) }
             } else {
-                next
+                unsafe { GetWindow(hwnd, GW_OWNER).unwrap_or_default() }
             };
             if next == hwnd {
-                return false;
+                return None;
             }
             hwnd = next;
         }
-        false
+        None
     }
 
     /// Lower-cased window class of `hwnd`, for diagnostics and the caret test.
@@ -204,18 +228,44 @@ mod imp {
     /// Trace for the transport-key path.
     ///
     /// Every step of it is invisible from outside: the hook either sees a key or
-    /// it does not, and the window it lands on either is inside a plug-in view
-    /// or is not. "Space does nothing" cannot distinguish those.
+    /// it does not, and the window it lands on either belongs to a plug-in view
+    /// or does not. "Space does nothing" cannot distinguish those, so this says
+    /// which window the key landed on, what that window is, and who was given
+    /// the key.
     ///
     /// Gated, except for the first press the hook declines — one line saying why
     /// the first Space went nowhere is worth more than a hundred saying it again,
     /// and it is the line somebody reporting this will already have.
-    fn transport_trace(line: impl FnOnce() -> String) {
+    unsafe fn keyboard_trace(msg: &MSG, verdict: &str, kind: Option<ContentHostKind>) {
         static FIRST_DECLINE: AtomicBool = AtomicBool::new(false);
-        if !debug_enabled() && FIRST_DECLINE.swap(true, Ordering::Relaxed) {
+        let claimed = verdict == "claimed";
+        if !transport_key::key_debug()
+            && !debug_enabled()
+            && (claimed || FIRST_DECLINE.swap(true, Ordering::Relaxed))
+        {
             return;
         }
-        eprintln!("[transport-key] {}", line());
+        unsafe {
+            let focus = GetFocus();
+            let mut pid = 0u32;
+            let tid = GetWindowThreadProcessId(msg.hwnd, Some(&mut pid));
+            eprintln!(
+                "[Keyboard] studio msg=0x{:04x} hwnd=0x{:x} class='{}' focus=0x{:x} \
+                 focus_class='{}' host={} pid={pid} tid={tid} time={} repeat={} verdict={verdict}",
+                msg.message,
+                msg.hwnd.0 as u64,
+                class_name_of(msg.hwnd),
+                focus.0 as u64,
+                class_name_of(focus),
+                match kind {
+                    Some(ContentHostKind::NativeView) => "native-view",
+                    Some(ContentHostKind::WebView) => "web-view",
+                    None => "none",
+                },
+                msg.time,
+                msg.lParam.0 & (1 << 30) != 0,
+            );
+        }
     }
 
     /// Claims the transport key before the plug-in's own window procedure runs.
@@ -236,8 +286,14 @@ mod imp {
                 // explicitly allowed to modify.
                 let msg = unsafe { &mut *msg };
                 if unsafe { claims_transport(msg) } {
-                    TRANSPORT_TOGGLES.fetch_add(1, Ordering::Relaxed);
-                    // Swallowed rather than passed on: one press, one toggle.
+                    // The message time identifies this physical press in every
+                    // process that sees it, so the router can recognise the
+                    // plug-in host reporting the same one.
+                    transport_key::claim(TransportKeySource::EmbeddedView, Some(msg.time));
+                    // Swallowed rather than passed on, whether or not the router
+                    // took it: the press is spoken for either way, and letting
+                    // a deduplicated one through would type a space into the
+                    // plug-in instead.
                     msg.message = WM_NULL;
                     msg.wParam = WPARAM(0);
                     msg.lParam = LPARAM(0);
@@ -253,11 +309,16 @@ mod imp {
     /// queue — the thread the plug-in's window lives on. That is the difference
     /// from the system-wide low-level hook the out-of-process plug-in host
     /// needs: this one cannot stall typing anywhere else on the machine.
-    fn register_host(hwnd: u64) {
+    ///
+    /// It also means this hook covers exactly the in-process editors (ARA,
+    /// in-process VST3, CEF): a key headed for a window the separated host owns
+    /// is queued on *that* process's thread and never appears here, which is
+    /// why that process has to claim its own.
+    fn register_host(hwnd: u64, kind: ContentHostKind) {
         let Ok(mut hosts) = HOSTS.lock() else {
             return;
         };
-        hosts.push(hwnd);
+        hosts.push((hwnd, kind));
         if HOOK.load(Ordering::Acquire) != 0 {
             return;
         }
@@ -277,13 +338,13 @@ mod imp {
                 // Not gated: whether the one path by which Space can reach the
                 // transport from inside a plug-in exists at all is worth a line.
                 eprintln!(
-                    "[transport-key] hook installed on thread {} for host 0x{hwnd:x}",
+                    "[Keyboard] studio transport hook installed on thread {} for host 0x{hwnd:x}",
                     // SAFETY: a plain query with no arguments.
                     unsafe { GetCurrentThreadId() }
                 );
             }
             _ => eprintln!(
-                "[plugin-content-hwnd] WARNING could not install the transport key hook; \
+                "[Keyboard] WARNING could not install the studio transport key hook; \
                  Space will not reach the transport from an embedded editor"
             ),
         }
@@ -293,7 +354,7 @@ mod imp {
         let Ok(mut hosts) = HOSTS.lock() else {
             return;
         };
-        if let Some(index) = hosts.iter().position(|&entry| entry == hwnd) {
+        if let Some(index) = hosts.iter().position(|&(entry, _)| entry == hwnd) {
             hosts.remove(index);
         }
         if !hosts.is_empty() {
@@ -491,9 +552,18 @@ mod imp {
             }
         }
 
-        /// Create the content child window under `top_hwnd`. Returns `None` if
-        /// `top_hwnd` is not a window or window creation fails.
+        /// Create the content child window under `top_hwnd` for a plug-in's own
+        /// native view. Returns `None` if `top_hwnd` is not a window or window
+        /// creation fails.
         pub fn create(top_hwnd: u64, rect: ContentRect) -> Option<Self> {
+            Self::create_for(ContentHostKind::NativeView, top_hwnd, rect)
+        }
+
+        /// As [`Self::create`], saying what the host will hold.
+        ///
+        /// The kind decides who owns the transport key inside it — see
+        /// [`ContentHostKind`].
+        pub fn create_for(kind: ContentHostKind, top_hwnd: u64, rect: ContentRect) -> Option<Self> {
             if top_hwnd == 0 {
                 return None;
             }
@@ -535,7 +605,7 @@ mod imp {
                     top_hwnd,
                     content_hwnd: content_u64,
                 };
-                register_host(content_u64);
+                register_host(content_u64, kind);
                 if debug_enabled() {
                     eprintln!("[PluginEditorWindow] content_hwnd != top_hwnd");
                 }
@@ -597,7 +667,7 @@ mod imp {
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
-    use super::ContentRect;
+    use super::{ContentHostKind, ContentRect};
 
     /// Non-Windows stub. Host-process editor embedding via NSView/X11 is a later
     /// slice; this keeps the crate compiling everywhere.
@@ -607,6 +677,13 @@ mod imp {
 
     impl ContentChildHwnd {
         pub fn create(_top_hwnd: u64, _rect: ContentRect) -> Option<Self> {
+            None
+        }
+        pub fn create_for(
+            _kind: ContentHostKind,
+            _top_hwnd: u64,
+            _rect: ContentRect,
+        ) -> Option<Self> {
             None
         }
         pub fn hwnd(&self) -> u64 {
@@ -620,21 +697,6 @@ mod imp {
             false
         }
     }
-
-    /// No embedded views here, so nothing is ever claimed.
-    pub fn take_transport_toggles() -> u32 {
-        0
-    }
 }
 
 pub use imp::ContentChildHwnd;
-
-/// Space presses claimed from an embedded plug-in view since the last drain.
-///
-/// A native child owns the keys that reach it, and this host routes focus into
-/// the plug-in on purpose so its own text fields work. Space is the exception:
-/// the DAW transport has to stay reachable while a plug-in editor is up, so it
-/// is intercepted here and handed to the transport by whoever drains this.
-pub fn take_transport_toggles() -> u32 {
-    imp::take_transport_toggles()
-}

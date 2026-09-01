@@ -1,10 +1,20 @@
 use crate::assets;
+use crate::components::controls::{fb_dock_tab, fb_dock_tab_strip, FbDockPlanes};
 use crate::i18n::I18n;
 use crate::theme::Colors;
 use gpui::{
-    div, px, svg, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, StatefulInteractiveElement, Styled, Window,
+    div, px, App, AppContext, Empty, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window,
 };
+
+/// See `bottom_panel_shell::dock_planes` — the same two planes, because this is
+/// the same dock.
+fn dock_planes() -> FbDockPlanes {
+    FbDockPlanes {
+        strip: Colors::bottom_panel_header_bg(),
+        body: Colors::bottom_panel_bg(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BottomTab {
@@ -91,72 +101,14 @@ fn tab_button(
     active_tab: BottomTab,
     on_click: std::sync::Arc<impl Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let active = tab == active_tab;
-    let label: String = label.into();
-    let on_click_clone = on_click.clone();
-    let text_color = if active {
-        Colors::tab_text_active()
-    } else {
-        Colors::tab_text_muted()
-    };
-
-    let mut btn = div()
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .h(px(24.0))
-        .px(px(10.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        // Apply text color at the button level too so the label (a plain
-        // string child, not an svg) inherits the right color. Previously
-        // only the icon got `.text_color`, so inactive labels rendered with
-        // the default (black) text color.
-        .text_color(text_color)
-        .id(id)
-        .role(Role::Tab)
-        .aria_label(label.clone())
-        .aria_selected(active)
-        .focusable()
-        .tab_stop(true)
-        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
-        .on_click(move |_, window, cx| {
-            on_click_clone(&tab, window, cx);
-        })
-        .child(
-            svg()
-                .path(icon_path)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(text_color),
-        )
-        .child(label);
-
-    if active {
-        btn = btn
-            .bg(Colors::tab_bg_active())
-            // Accent indicator at the bottom
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(0.0))
-                    .left(px(6.0))
-                    .right(px(6.0))
-                    .h(px(2.0))
-                    .bg(Colors::tab_indicator_active()),
-            );
-    } else {
-        btn = btn.hover(|style| {
-            style
-                .bg(Colors::tab_bg_hover())
-                .text_color(Colors::tab_text())
-        });
-    }
-
-    btn
+    fb_dock_tab(
+        id,
+        label,
+        Some(icon_path),
+        tab == active_tab,
+        dock_planes(),
+        move |_event, window, cx| on_click(&tab, window, cx),
+    )
 }
 
 pub fn bottom_panel(
@@ -203,15 +155,7 @@ pub fn bottom_panel(
         )
         // Tab Header
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(28.0))
-                .px(px(8.0))
-                .border_b(px(1.0))
-                .border_color(Colors::panel_border())
-                .bg(Colors::bottom_panel_header_bg())
+            fb_dock_tab_strip(dock_planes())
                 .child(tab_button(
                     "bottom-tab-mixer",
                     i18n.tr("bottom-panel.tab.mixer"),

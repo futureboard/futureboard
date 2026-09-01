@@ -38,8 +38,9 @@ use crate::components::builtin_plugin_editor::{
 use crate::components::builtin_plugin_editor_surface::{
     editor_char_keys, editor_key, editor_mouse_button, OffscreenSurface,
 };
-use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
+use crate::components::plugin_content_host::{ContentChildHwnd, ContentHostKind, ContentRect};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
+use crate::components::transport_key::{self, TransportKeySource};
 use crate::theme::Colors;
 
 pub const BUILTIN_EDITOR_WIDTH: f32 = 1180.0;
@@ -1558,13 +1559,14 @@ impl BuiltinPluginEditorWindow {
     /// One pump tick. Consumes completion events without invoking CEF.
     fn tick(&mut self, cx: &mut Context<Self>) -> PumpTick {
         let mut content_to_drop = None;
+        // CEF saw Space with no DOM text field focused. It goes through the
+        // one transport-key router with everything else rather than straight to
+        // the command, so a press this editor's window hook also caught cannot
+        // toggle twice -- and each press is one toggle, never a replay of a
+        // count that piled up behind a slow tick.
         let play_pause_requests = host::take_global_play_pause_requests(self.view_id);
-        if play_pause_requests > 0 {
-            if let Some(dispatch) = self.host_ops.dispatch_global_command.as_ref() {
-                for _ in 0..play_pause_requests {
-                    dispatch("transport:play-pause", cx);
-                }
-            }
+        for _ in 0..play_pause_requests {
+            transport_key::claim(TransportKeySource::WebEditor, None);
         }
         for event in host::take_view_events(self.view_id) {
             match event {
@@ -1754,7 +1756,12 @@ impl BuiltinPluginEditorWindow {
             let content = match self.content.as_ref() {
                 Some(content) if content.is_valid() => content,
                 _ => {
-                    let Some(created) = ContentChildHwnd::create(
+                    // A web view, not a native plug-in view: CEF is the only
+                    // thing that can see whether a DOM text field has focus, so
+                    // it -- not the Win32 message hook -- decides what Space
+                    // means in here.
+                    let Some(created) = ContentChildHwnd::create_for(
+                        ContentHostKind::WebView,
                         top_hwnd,
                         ContentRect {
                             x: rect.x,
@@ -2176,7 +2183,8 @@ impl Render for BuiltinPluginEditorWindow {
             }
             window.prevent_default();
             cx.stop_propagation();
-            this.dispatch_transport_play_pause(cx);
+            let _ = this;
+            Self::claim_transport_key();
         });
 
         div()
@@ -2769,11 +2777,16 @@ impl BuiltinPluginEditorWindow {
         keystroke.key_char.as_deref() == Some(" ")
     }
 
-    /// Run the same transport command the chrome Play button uses.
-    fn dispatch_transport_play_pause(&self, cx: &mut Context<Self>) {
-        if let Some(dispatch) = self.host_ops.dispatch_global_command.as_ref() {
-            dispatch("transport:play-pause", cx);
-        }
+    /// Hand a Space press to the process-wide transport-key router, which is
+    /// what turns it into the same play/pause the arrangement's spacebar runs.
+    ///
+    /// Not dispatched from here. Three things can see one press in this window
+    /// -- the shell's capture handler, the surface's own handler, and CEF's
+    /// pre-key filter -- and each of them running the command for what it saw
+    /// plays and immediately stops, which is indistinguishable from Space doing
+    /// nothing. The router is where they become one press again.
+    fn claim_transport_key() {
+        transport_key::claim(TransportKeySource::WebEditor, None);
     }
 
     fn on_surface_key_down(
@@ -2788,7 +2801,7 @@ impl BuiltinPluginEditorWindow {
         if Self::is_transport_toggle_keystroke(&event.keystroke) && !event.is_held {
             window.prevent_default();
             cx.stop_propagation();
-            self.dispatch_transport_play_pause(cx);
+            Self::claim_transport_key();
             return;
         }
 

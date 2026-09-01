@@ -87,6 +87,7 @@ pub mod stem_extractor_dialog;
 pub mod text_input;
 pub mod timeline;
 pub mod title_bar;
+pub mod transport_key;
 pub mod transport_perf_meter;
 pub mod update_dialog;
 pub mod video_player_window;

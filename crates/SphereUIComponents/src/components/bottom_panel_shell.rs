@@ -3,21 +3,30 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, px, svg, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    div, px, App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, Role, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
 use crate::components::bottom_panel::{BottomPanelResizeDrag, BottomTab};
+use crate::components::controls::{fb_dock_tab, fb_dock_tab_strip, FbDockPlanes};
 use crate::components::editor_panel::ClipEditorPanel;
 use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::icon_button::icon_button;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 use crate::i18n::I18n;
 use crate::layout::{StudioLayout, WorkspaceActivePanel};
-use crate::theme::Colors;
+use crate::theme::{space, Colors};
 
-const TABBAR_H: f32 = 28.0;
+/// The trench the tab strip paints and the panel plane the active tab merges
+/// into. Both are the dock's own tokens: the tab only reads as continuous with
+/// the panel if it is filled with what is actually under it.
+fn dock_planes() -> FbDockPlanes {
+    FbDockPlanes {
+        strip: Colors::bottom_panel_header_bg(),
+        body: Colors::bottom_panel_bg(),
+    }
+}
 
 pub struct BottomPanelShell {
     owner: Entity<StudioLayout>,
@@ -143,11 +152,7 @@ impl Render for BottomPanelShell {
             .h(px(panel_state.height_px))
             .w_full()
             .border_t(px(1.0))
-            .border_color(if bottom_panel_owns_active_panel(active_panel) {
-                Colors::panel_border_focused()
-            } else {
-                Colors::panel_border()
-            })
+            .border_color(Colors::panel_border())
             .bg(Colors::bottom_panel_bg())
             .relative()
             .on_mouse_down(gpui::MouseButton::Left, {
@@ -219,16 +224,6 @@ fn active_panel_matches_tab(panel: WorkspaceActivePanel, tab: BottomTab) -> bool
     )
 }
 
-fn bottom_panel_owns_active_panel(panel: WorkspaceActivePanel) -> bool {
-    matches!(
-        panel,
-        WorkspaceActivePanel::Mixer
-            | WorkspaceActivePanel::Editor
-            | WorkspaceActivePanel::PianoRoll
-            | WorkspaceActivePanel::EffectEditor
-    )
-}
-
 fn render_resize_handle(
     on_resize_start: Arc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
@@ -268,19 +263,7 @@ fn render_tab_bar(
     crate::perf::count("bottom_panel_tabbar_layout_count", 1);
     crate::perf::count("bottom_panel_tabbar_paint_count", 1);
 
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(TABBAR_H))
-        .px(px(8.0))
-        .border_b(px(1.0))
-        .border_color(if bottom_panel_owns_active_panel(active_panel) {
-            Colors::panel_border_focused()
-        } else {
-            Colors::panel_border()
-        })
-        .bg(Colors::bottom_panel_header_bg())
+    fb_dock_tab_strip(dock_planes())
         .child(tab_button(
             "bottom-tab-mixer",
             i18n.tr("bottom-panel.tab.mixer"),
@@ -300,50 +283,60 @@ fn render_tab_bar(
             on_tab_click.clone(),
         ))
         .child(div().flex_1())
-        .children(ara_pop.map(|(popped_out, on_toggle)| {
-            let label = if popped_out {
-                "Dock plug-in editor"
-            } else {
-                "Pop out plug-in editor"
-            };
-            icon_button(
-                Some(assets::ICON_MAXIMIZE_PATH),
-                label,
-                px(20.0),
-                px(20.0),
-                px(12.0),
-                if popped_out {
-                    Colors::accent_primary()
-                } else {
-                    Colors::text_muted()
-                },
-            )
-            .id("bottom-panel-ara-pop")
-            .role(Role::Button)
-            .aria_label(label)
-            .focusable()
-            .tab_stop(true)
-            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_click(move |event, window, cx| on_toggle(event, window, cx))
-        }))
+        // The strip bottom-aligns its tabs; the trailing controls are not tabs and
+        // centre themselves in the full strip height instead.
         .child(
-            icon_button(
-                Some(assets::ICON_MINUS_PATH),
-                "Hide bottom panel",
-                px(20.0),
-                px(20.0),
-                px(12.0),
-                Colors::text_muted(),
-            )
-            .id("bottom-panel-hide")
-            .role(Role::Button)
-            .aria_label("Hide bottom panel")
-            .focusable()
-            .tab_stop(true)
-            .focus_visible(|style| style.bg(Colors::surface_control_hover()))
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_click(move |event, window, cx| on_close_panel(event, window, cx)),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .h_full()
+                .gap(px(space::HAIR))
+                .children(ara_pop.map(|(popped_out, on_toggle)| {
+                    let label = if popped_out {
+                        "Dock plug-in editor"
+                    } else {
+                        "Pop out plug-in editor"
+                    };
+                    icon_button(
+                        Some(assets::ICON_MAXIMIZE_PATH),
+                        label,
+                        px(20.0),
+                        px(20.0),
+                        px(12.0),
+                        if popped_out {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_muted()
+                        },
+                    )
+                    .id("bottom-panel-ara-pop")
+                    .role(Role::Button)
+                    .aria_label(label)
+                    .focusable()
+                    .tab_stop(true)
+                    .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(move |event, window, cx| on_toggle(event, window, cx))
+                }))
+                .child(
+                    icon_button(
+                        Some(assets::ICON_MINUS_PATH),
+                        "Hide bottom panel",
+                        px(20.0),
+                        px(20.0),
+                        px(12.0),
+                        Colors::text_muted(),
+                    )
+                    .id("bottom-panel-hide")
+                    .role(Role::Button)
+                    .aria_label("Hide bottom panel")
+                    .focusable()
+                    .tab_stop(true)
+                    .focus_visible(|style| style.bg(Colors::surface_control_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(move |event, window, cx| on_close_panel(event, window, cx)),
+                ),
         )
     // TODO(effect-editor): The Effect Editor tab is temporarily hidden while the
     // panel is unfinished. The `BottomTab::EffectEditor` variant, its
@@ -362,64 +355,18 @@ fn tab_button(
     active_panel: WorkspaceActivePanel,
     on_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
+    // A dock tab reads as active for the tab the panel is showing *and* for the
+    // workspace panel that owns focus, because those can disagree while a
+    // plug-in editor holds the Editor slot.
     let active = tab == active_tab || active_panel_matches_tab(active_panel, tab);
-    let label: String = label.into();
-    let on_click_clone = on_click.clone();
-    let text_color = if active {
-        Colors::tab_text_active()
-    } else {
-        Colors::tab_text_muted()
-    };
-
-    let mut btn = div()
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.0))
-        .h(px(24.0))
-        .px(px(10.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(text_color)
-        .id(id)
-        .role(Role::Tab)
-        .aria_label(label.clone())
-        .aria_selected(active)
-        .focusable()
-        .tab_stop(true)
-        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
-        .on_click(move |_, window, cx| {
-            on_click_clone(&tab, window, cx);
-        })
-        .child(
-            svg()
-                .path(icon_path)
-                .w(px(14.0))
-                .h(px(14.0))
-                .text_color(text_color),
-        )
-        .child(label);
-
-    if active {
-        btn = btn.bg(Colors::tab_bg_active()).child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .left(px(6.0))
-                .right(px(6.0))
-                .h(px(2.0))
-                .bg(Colors::tab_indicator_active()),
-        );
-    } else {
-        btn = btn.hover(|style| {
-            style
-                .bg(Colors::tab_bg_hover())
-                .text_color(Colors::tab_text())
-        });
-    }
-    btn
+    fb_dock_tab(
+        id,
+        label,
+        Some(icon_path),
+        active,
+        dock_planes(),
+        move |_event, window, cx| on_click(&tab, window, cx),
+    )
 }
 
 fn render_active_tab(
