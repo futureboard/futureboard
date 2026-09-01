@@ -83,6 +83,11 @@ pub(crate) struct PluginEditorWindows {
     /// `(plugin_instance_id, display_name)` in the order they were added.
     /// Drives the indeterminate load dialog; empty closes it.
     pub loading: Vec<(String, String)>,
+    /// Which stored preset the editor chrome is sitting on, per insert.
+    ///
+    /// Not persisted and not the plug-in's own state: it is only which entry of
+    /// the preset list the user last stepped to, so the strip can name it.
+    pub preset_selection: std::collections::HashMap<(String, String), usize>,
 }
 
 impl PluginEditorWindows {
@@ -673,6 +678,40 @@ impl StudioLayout {
     ) {
         use SpherePluginHost::ipc::HostEvent;
         use SpherePluginHost::plugin_host_client::ClientEvent;
+
+        // The GPUI editor window first: it is where a bridged insert's editor
+        // lives now. Its own drive loop never drains the shared queue -- this
+        // poll is the single drain -- so an event that is not handed over here
+        // is lost and the window sits on "Loading" forever.
+        let gpui_target = self
+            .plugin_editors
+            .open
+            .iter()
+            .find(|((_, insert_id), _)| insert_id == plugin_instance_id)
+            .map(|(key, handle)| (key.clone(), handle.clone()));
+        if let Some((key, handle)) = gpui_target {
+            let closed = matches!(
+                event,
+                ClientEvent::Host(HostEvent::EditorClosed { .. }) | ClientEvent::Disconnected
+            );
+            let delivered = handle
+                .update(cx, |editor, window, cx| {
+                    editor.ingest_host_event(event.clone(), window, cx);
+                })
+                .is_ok();
+            if delivered {
+                if closed {
+                    // The host let the editor go; drop the window with it rather
+                    // than leaving an empty frame behind.
+                    let _ = handle.update(cx, |_editor, window, _cx| window.remove_window());
+                    self.plugin_editors.open.remove(&key);
+                }
+                return;
+            }
+            // Stale handle -- the window is gone. Fall through so the legacy
+            // shell still gets a chance at the event.
+            self.plugin_editors.open.remove(&key);
+        }
 
         // Clone the shared-runtime Arc up front so we can send ResizeEditor while
         // holding a `&mut` borrow of the matched session.
@@ -1998,8 +2037,41 @@ impl StudioLayout {
                 return;
             }
             eprintln!("[PluginEditor] opening instance={insert_id}");
-            let owner_hwnd = studio_native_hwnd(window);
-            self.open_bridge_editor(track_id, insert_id, display_name, owner_hwnd, cx);
+            if super::plugin_editor_chrome_ops::legacy_native_editor_shell() {
+                let owner_hwnd = studio_native_hwnd(window);
+                self.open_bridge_editor(track_id, insert_id, display_name, owner_hwnd, cx);
+                return;
+            }
+            // The editor lives in a GPUI window: the plug-in's view is a child
+            // of it, and the titlebar strip above carries the controls that
+            // belong to the plug-in but cannot be drawn over its surface.
+            let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() else {
+                eprintln!(
+                    "[plugin-runtime] external bridge mandatory but no runtime for editor                      instance={insert_id}"
+                );
+                return;
+            };
+            let owner_bounds = window.bounds();
+            match crate::components::plugin_editor_window::open_plugin_editor_window(
+                owner_bounds,
+                track_id.to_string(),
+                insert_id.to_string(),
+                display_name,
+                None,
+                Some(runtime),
+                false,
+                cx,
+            ) {
+                Ok(handle) => {
+                    self.plugin_editors.open.insert(key, handle);
+                    self.refresh_plugin_editor_chrome(cx);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[plugin-view] open FAILED track={track_id} slot={insert_id} err={err}"
+                    );
+                }
+            }
             return;
         }
 

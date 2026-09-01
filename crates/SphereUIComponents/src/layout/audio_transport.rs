@@ -784,6 +784,11 @@ impl StudioLayout {
             self.poll_plugin_bridge_runtime(cx);
             // Drive native main-owned editor shells: honor OS close + forward resizes.
             self.drive_bridge_editors(cx);
+            // The plug-in editor windows' titlebar strips: what they show comes
+            // from the engine and the project, and what their controls asked for
+            // is applied here rather than in the window.
+            self.drain_plugin_editor_chrome_actions(cx);
+            self.refresh_plugin_editor_chrome(cx);
             // ARA plug-ins post transport requests and model updates from their
             // own threads; this is where those land on the UI thread.
             self.poll_ara(cx);

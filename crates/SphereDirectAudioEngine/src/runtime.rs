@@ -1297,6 +1297,14 @@ pub struct RuntimeInsert {
     pub bridge_sink: Option<crate::plugin_bridge::SharedPluginBridgeSink>,
     pub dsp: InsertDspState,
     pub vst3: Option<Vst3RuntimeProcessor>,
+    /// Smoothed cost of this insert's last blocks, in microseconds.
+    ///
+    /// Written by the audio callback and read by the control thread, so it is an
+    /// atomic rather than a plain field: a plug-in editor showing what its own
+    /// plug-in costs is the point of measuring it, and that read comes from the
+    /// UI. `Arc` because a graph rebuild moves the insert but the meter should
+    /// not restart.
+    pub cpu_us: std::sync::Arc<std::sync::atomic::AtomicU32>,
     pub callback_process_log_done: bool,
     pub silent_process_blocks: u32,
     /// Consecutive blocks the external plugin host failed to deliver on time
@@ -2460,6 +2468,7 @@ impl RuntimeProject {
                         output_sample_rate,
                     ),
                     vst3,
+                    cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                     callback_process_log_done: false,
                     silent_process_blocks: 0,
                     bridge_missed_blocks: 0,
@@ -5754,6 +5763,7 @@ mod midi_tests {
                 bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
+                cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 callback_process_log_done: false,
                 silent_process_blocks: 0,
                 bridge_missed_blocks: 0,

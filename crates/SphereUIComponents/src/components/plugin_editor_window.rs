@@ -25,7 +25,10 @@ use gpui::{
 };
 
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
-use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
+use crate::components::plugin_editor_chrome::{
+    render_chrome_tools, PluginEditorAction, PluginEditorChrome,
+};
+use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::layout::plugin_bridge_runtime::SharedPluginBridgeRuntime;
 use crate::theme::{self, Colors};
 use SpherePluginHost::editor_quirk::{match_quirk, PluginEditorQuirk};
@@ -244,6 +247,14 @@ pub struct PluginEditorWindow {
     /// the in-process editor path is NEVER used — if `host` is `None` the window
     /// surfaces a failure instead of silently embedding in-process.
     bridge_required: bool,
+    /// What the titlebar strip shows, as of the studio's last refresh.
+    ///
+    /// Pushed in rather than read here: the insert, the engine and the preset
+    /// store all belong to the studio, and a window that went looking for them
+    /// itself would be a second place each of them is decided.
+    chrome: PluginEditorChrome,
+    /// Chrome controls the user pressed, waiting for the studio to apply them.
+    chrome_actions: Vec<PluginEditorAction>,
     focus_handle: FocusHandle,
 }
 
@@ -282,6 +293,7 @@ impl PluginEditorWindow {
         // callbacks read project state directly, so they cannot be hosted behind
         // the bridge. For those the in-process editor is the only path, and it is
         // opened deliberately rather than through the legacy escape hatch.
+        let display_name_for_chrome = display_name.clone();
         let bridge_required = plugin_host_bridge_enabled() && !in_process;
         let host = if bridge_required {
             build_host_backend(processor.as_ref(), &display_name, shared_bridge)
@@ -308,6 +320,11 @@ impl PluginEditorWindow {
             processor,
             embed_handle: None,
             view_content: None,
+            chrome: PluginEditorChrome {
+                plugin_name: display_name_for_chrome,
+                ..PluginEditorChrome::default()
+            },
+            chrome_actions: Vec::new(),
             status,
             wait_ticks: 0,
             tick_scheduled: false,
@@ -359,10 +376,14 @@ impl PluginEditorWindow {
         // around it. A resizable one follows the window, so the user dragging
         // the frame actually reaches the plug-in instead of being overridden by
         // the size it happened to open at.
-        let fixed = self
-            .processor
-            .as_ref()
-            .is_some_and(|processor| !processor.view_can_resize());
+        // On the bridged path there is no local view to ask, and the region is
+        // released by `maybe_release_initial_preferred_size` once the user
+        // resizes away from the plug-in's preferred size — so it keeps using the
+        // recorded content size, exactly as before.
+        let fixed = match self.processor.as_ref() {
+            Some(processor) => !processor.view_can_resize(),
+            None => true,
+        };
         if fixed {
             if let Some((content_w, content_h)) = self.editor_content_size {
                 return EmbedRegion {
@@ -1066,6 +1087,29 @@ impl PluginEditorWindow {
         cx.notify();
     }
 
+    /// Refreshes what the titlebar strip shows.
+    ///
+    /// Cheap to call every poll: an unchanged chrome notifies nothing, so the
+    /// window does not repaint for a CPU reading that landed on the same
+    /// rounded percent.
+    pub(crate) fn set_chrome(&mut self, chrome: PluginEditorChrome, cx: &mut Context<Self>) {
+        if self.chrome == chrome {
+            return;
+        }
+        self.chrome = chrome;
+        cx.notify();
+    }
+
+    /// The insert slot this window is editing, as the studio addresses it.
+    pub(crate) fn insert_key(&self) -> (&str, &str) {
+        (self.track_id.as_str(), self.insert_id.as_str())
+    }
+
+    /// Drains the chrome controls the user pressed since the last call.
+    pub(crate) fn take_chrome_actions(&mut self) -> Vec<PluginEditorAction> {
+        std::mem::take(&mut self.chrome_actions)
+    }
+
     /// Entry point for events routed by `StudioLayout` in shared-bridge mode.
     /// The shared runtime queue is drained in exactly one place (StudioLayout),
     /// which dispatches each editor-targeted event here so this window can leave
@@ -1602,11 +1646,25 @@ impl Render for PluginEditorWindow {
             .font(theme::ui_font())
             .overflow_hidden()
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
-            .child(external_window_titlebar(
-                self.display_name.clone(),
-                "plugin-editor-window-close",
-                move |window, _cx| window.remove_window(),
-            ));
+            .child(
+                crate::components::title_bar::external_window_titlebar_with_tools(
+                    self.chrome.window_title(),
+                    render_chrome_tools(&self.chrome, {
+                        let this = cx.entity().downgrade();
+                        move |action, cx| {
+                            // Queued on the window; the studio drains it on its next
+                            // poll. Applying it here would need the insert and the
+                            // engine, neither of which this window owns.
+                            let _ = this.update(cx, |editor, cx| {
+                                editor.chrome_actions.push(action);
+                                cx.notify();
+                            });
+                        }
+                    }),
+                    "plugin-editor-window-close",
+                    move |window, _cx| window.remove_window(),
+                ),
+            );
 
         if let Some(overlay) = content_overlay {
             root = root.child(

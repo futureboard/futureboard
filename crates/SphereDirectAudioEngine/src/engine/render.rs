@@ -1876,6 +1876,10 @@ pub fn apply_track_chain_block(
         let midi = instrument_ix
             .filter(|&i| i == ix)
             .map(|_| midi_events.as_slice());
+        // What this one insert costs, so a plug-in's own editor can say what it
+        // is spending. Two clock reads per insert per block, no allocation and
+        // no lock -- the same instrument the callback already applies to itself.
+        let started = std::time::Instant::now();
         if insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge {
             // Arc clone (refcount bump only) so the sink can be borrowed
             // alongside the &mut insert.
@@ -1898,7 +1902,26 @@ pub fn apply_track_chain_block(
                 transport,
             );
         }
+        publish_insert_cpu(insert, started.elapsed());
     }
+}
+
+/// Fold one insert's block time into its smoothed meter.
+///
+/// A single block is far too jumpy to read -- a plug-in that allocates on one
+/// block and coasts on the next would swing the readout wildly -- so this is an
+/// exponential average with a short attack. Store-only from the audio thread;
+/// the control side reads the same atomic.
+#[inline]
+fn publish_insert_cpu(insert: &crate::runtime::RuntimeInsert, elapsed: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    const SMOOTHING: f32 = 0.15;
+    let micros = elapsed.as_micros().min(u32::MAX as u128) as f32;
+    let previous = insert.cpu_us.load(Ordering::Relaxed) as f32;
+    let smoothed = previous + (micros - previous) * SMOOTHING;
+    insert
+        .cpu_us
+        .store(smoothed.round().max(0.0) as u32, Ordering::Relaxed);
 }
 
 fn push_vst3_midi_to_sink(

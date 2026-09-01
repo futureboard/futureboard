@@ -2278,6 +2278,43 @@ impl EngineInner {
             .and_then(|insert| insert.vst3.as_ref().cloned())
     }
 
+    /// What one insert costs and how much delay it adds, for its own editor.
+    ///
+    /// Returns `(cpu_share, latency_samples)` where `cpu_share` is the fraction
+    /// of one audio block this insert's processing took, smoothed. `None` when
+    /// the insert is not in the graph. The latency is the plug-in's own report,
+    /// not the host's block buffering around it: a plug-in editor is answering
+    /// for the plug-in.
+    ///
+    /// Control thread only -- it takes the runtime lock.
+    pub fn insert_load(&self, track_id: &str, insert_id: &str) -> Option<(f32, u32)> {
+        use std::sync::atomic::Ordering;
+        let deadline_us = self.shared.callback_deadline_us.load(Ordering::Relaxed);
+        let runtime = self.runtime.lock();
+        let track = runtime.tracks.iter().find(|track| track.id == track_id)?;
+        let insert = track.inserts.iter().find(|insert| insert.id == insert_id)?;
+        let cpu_us = insert.cpu_us.load(Ordering::Relaxed) as f32;
+        let share = if deadline_us > 0 {
+            cpu_us / deadline_us as f32
+        } else {
+            0.0
+        };
+        let latency = if insert.kind_tag == crate::runtime::RuntimeInsertKind::ExternalBridge {
+            insert
+                .bridge_sink
+                .as_ref()
+                .map(|sink| sink.reported_latency_samples())
+                .unwrap_or(0)
+        } else {
+            insert
+                .vst3
+                .as_ref()
+                .map(|vst3| vst3.get_latency_samples().max(0) as u32)
+                .unwrap_or(0)
+        };
+        Some((share, latency))
+    }
+
     pub fn focus_insert_editor(
         &self,
         track_id: &str,
@@ -5712,6 +5749,8 @@ mod bridge_insert_tests {
                 bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
+                cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 callback_process_log_done: false,
                 silent_process_blocks: 0,
                 bridge_missed_blocks: 0,
@@ -6117,6 +6156,7 @@ mod bridge_insert_tests {
             bridge_sink: None,
             dsp: InsertDspState::default(),
             vst3: None,
+            cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             callback_process_log_done: false,
             silent_process_blocks: 0,
             bridge_missed_blocks: 0,

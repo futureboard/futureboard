@@ -61,6 +61,7 @@ mod mixer_ops;
 mod stem_extract_ops;
 pub(crate) use mixer_ops::{clone_track_for_mixer, clone_track_for_mixer_summary};
 pub(crate) mod plugin_bridge_runtime;
+mod plugin_editor_chrome_ops;
 mod plugin_load_progress;
 mod plugin_ops;
 mod plugin_picker_window;

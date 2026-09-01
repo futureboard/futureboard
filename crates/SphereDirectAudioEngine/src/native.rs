@@ -1171,6 +1171,12 @@ impl AudioEngine {
         self.inner.insert_processor(track_id, insert_id)
     }
 
+    /// `(cpu_share, latency_samples)` for one insert — see
+    /// [`crate::engine::EngineInner::insert_load`]. Control thread only.
+    pub fn insert_load(&self, track_id: &str, insert_id: &str) -> Option<(f32, u32)> {
+        self.inner.insert_load(track_id, insert_id)
+    }
+
     /// Instantiate a VST3 plug-in in this process for ARA hosting.
     ///
     /// See [`crate::engine::EngineInner::create_ara_processor`] — ARA is the one
