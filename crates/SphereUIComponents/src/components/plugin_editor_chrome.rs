@@ -178,7 +178,12 @@ fn chrome_readout(label: &str, value: String) -> impl IntoElement {
         )
 }
 
-/// Builds the titlebar tool strip. `emit` queues an action on the window.
+/// Height of the chrome row. Mirrors `plugin_editor_window::CHROME_H`.
+const CHROME_ROW_H: f32 = 26.0;
+
+/// Builds the chrome row that sits under the titlebar, above the plug-in.
+///
+/// `emit` queues an action on the window.
 pub fn render_chrome_tools(
     chrome: &PluginEditorChrome,
     emit: impl Fn(PluginEditorAction, &mut App) + Clone + 'static,
@@ -193,10 +198,14 @@ pub fn render_chrome_tools(
 
     div()
         .flex()
+        .flex_row()
         .items_center()
         .gap(px(10.0))
-        .pr(px(8.0))
-        .flex_shrink_0()
+        .h(px(CHROME_ROW_H))
+        .px(px(8.0))
+        .bg(Colors::surface_panel())
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
         // Active: the plug-in's own on/off, in the one strip that is never
         // covered by its view.
         .child(chrome_button(
@@ -249,6 +258,9 @@ pub fn render_chrome_tools(
                     move |_window, cx| emit_save(PluginEditorAction::SavePreset, cx),
                 )),
         )
+        // Readouts sit at the far end: they are watched, not operated, so they
+        // stay clear of the controls the pointer goes for.
+        .child(div().flex_1())
         .child(chrome_readout("CPU", chrome.cpu_label()))
         .child(chrome_readout("LAT", chrome.latency_label()))
         .into_any_element()

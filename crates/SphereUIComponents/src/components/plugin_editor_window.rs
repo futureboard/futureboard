@@ -154,8 +154,16 @@ fn build_host_backend(
     })
 }
 
-/// Logical-pixel height reserved for the GPUI-drawn header (matches titlebar).
-const HEADER_H: f32 = TITLEBAR_HEIGHT;
+/// Logical-pixel height of the chrome row under the titlebar.
+///
+/// A row of its own rather than controls squeezed into the titlebar: the
+/// titlebar has a plug-in's name to show and window buttons to keep reachable,
+/// and plug-in names are long. This is the strip the host owns above the
+/// plug-in's surface.
+const CHROME_H: f32 = 26.0;
+
+/// Logical-pixel height reserved above the plug-in: titlebar plus chrome row.
+const HEADER_H: f32 = TITLEBAR_HEIGHT + CHROME_H;
 pub const EDITOR_WINDOW_WIDTH: f32 = 820.0;
 pub const EDITOR_WINDOW_HEIGHT: f32 = 560.0;
 pub const EDITOR_WINDOW_MIN_WIDTH: f32 = 360.0;
@@ -1661,24 +1669,35 @@ impl Render for PluginEditorWindow {
             .font(theme::ui_font())
             .overflow_hidden()
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))
+            .child(crate::components::title_bar::external_window_titlebar(
+                self.chrome.window_title(),
+                "plugin-editor-window-close",
+                move |window, _cx| window.remove_window(),
+            ))
+            .child(render_chrome_tools(&self.chrome, {
+                let this = cx.entity().downgrade();
+                move |action, cx| {
+                    // Queued on the window; the studio drains it on its next
+                    // poll. Applying it here would need the insert and the
+                    // engine, neither of which this window owns.
+                    let _ = this.update(cx, |editor, cx| {
+                        editor.chrome_actions.push(action);
+                        cx.notify();
+                    });
+                }
+            }))
+            // The plug-in's own surface sits below the header. It is a native
+            // child window composited above this one, so a ground painted here
+            // cannot hide it — it only stops the swap chain's last contents
+            // showing through wherever the plug-in does not reach.
             .child(
-                crate::components::title_bar::external_window_titlebar_with_tools(
-                    self.chrome.window_title(),
-                    render_chrome_tools(&self.chrome, {
-                        let this = cx.entity().downgrade();
-                        move |action, cx| {
-                            // Queued on the window; the studio drains it on its next
-                            // poll. Applying it here would need the insert and the
-                            // engine, neither of which this window owns.
-                            let _ = this.update(cx, |editor, cx| {
-                                editor.chrome_actions.push(action);
-                                cx.notify();
-                            });
-                        }
-                    }),
-                    "plugin-editor-window-close",
-                    move |window, _cx| window.remove_window(),
-                ),
+                div()
+                    .absolute()
+                    .top(px(HEADER_H))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .bg(Colors::surface_base()),
             );
 
         if let Some(overlay) = content_overlay {

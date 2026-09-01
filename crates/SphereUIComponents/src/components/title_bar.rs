@@ -289,32 +289,6 @@ pub fn external_window_titlebar_with_icon(
     close_id: impl Into<gpui::ElementId>,
     on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
 ) -> impl IntoElement {
-    external_window_titlebar_inner(icon_path, title, None, close_id, on_close)
-}
-
-/// Same bar with a window-specific tool strip between the draggable area and the
-/// window controls.
-///
-/// The plug-in editor is the case this exists for: its chrome is not decoration
-/// but the controls that belong to the plug-in — active, presets, and what it
-/// costs — and they have to sit in the one strip of the window that is not the
-/// plug-in's own surface.
-pub fn external_window_titlebar_with_tools(
-    title: impl Into<String>,
-    tools: gpui::AnyElement,
-    close_id: impl Into<gpui::ElementId>,
-    on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
-) -> impl IntoElement {
-    external_window_titlebar_inner(None, title, Some(tools), close_id, on_close)
-}
-
-fn external_window_titlebar_inner(
-    icon_path: Option<&'static str>,
-    title: impl Into<String>,
-    tools: Option<gpui::AnyElement>,
-    close_id: impl Into<gpui::ElementId>,
-    on_close: impl Fn(&mut Window, &mut App) + 'static + Clone,
-) -> impl IntoElement {
     let policy = PlatformChromePolicy::external_dialog();
     let on_close = on_close.clone();
     let title_text = crate::platform_chrome::branded_window_title(&title.into());
@@ -359,10 +333,6 @@ fn external_window_titlebar_inner(
         .bg(Colors::surface_titlebar())
         .child(title_row)
         .child(draggable_spacer());
-
-    if let Some(tools) = tools {
-        bar = bar.child(tools);
-    }
 
     if policy.show_window_controls {
         bar = bar

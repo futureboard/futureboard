@@ -161,6 +161,12 @@ fn main() {
     // identity). Owned WS_EX_TOOLWINDOW popups already stay off the taskbar /
     // Alt-Tab; this is belt-and-braces against accidental app-visibility.
     SpherePluginHost::plugin_host_lifecycle::set_futureboard_app_user_model_id();
+    // ... and take the one window this process can still show off the taskbar.
+    // A debug build is a console subsystem app, and that console is a blank
+    // window sitting among the DAW's own.
+    if !selftest {
+        SpherePluginHost::plugin_host_lifecycle::hide_own_console_window();
+    }
 
     platform::com_init();
     platform::ensure_dpi_awareness();
