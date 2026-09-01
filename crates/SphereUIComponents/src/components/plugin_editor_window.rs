@@ -425,6 +425,16 @@ impl PluginEditorWindow {
     /// Schedule one deferred re-render tick (~32 ms) so the state machine keeps
     /// advancing while we wait for the native handle / layout bounds. Guarded so
     /// we never queue more than one pending tick at a time.
+    /// Queues the next lifecycle step for after the current draw.
+    ///
+    /// Everything `drive` does — creating the content child window, sending
+    /// `OpenEditor`, resizing this window — dispatches Win32 messages
+    /// synchronously, and any of those can re-enter GPUI. Run from inside
+    /// `render` that re-entry lands in the middle of a frame and dereferences
+    /// the element arena the frame is still building: "attempted to dereference
+    /// an ArenaRef after its Arena was cleared". So `render` only ever records
+    /// what it saw and calls this; the work itself happens here, in an update
+    /// that owns the window rather than one that is drawing it.
     fn schedule_tick(&mut self, cx: &mut Context<Self>) {
         if self.tick_scheduled {
             return;
@@ -432,10 +442,10 @@ impl PluginEditorWindow {
         self.tick_scheduled = true;
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            executor.timer(Duration::from_millis(32)).await;
-            let _ = this.update(cx, |this, cx| {
+            executor.timer(Duration::from_millis(16)).await;
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.tick_scheduled = false;
-                cx.notify();
+                this.drive(window, cx);
             });
         })
         .detach();
@@ -1563,9 +1573,14 @@ impl PluginEditorWindow {
 
 impl Render for PluginEditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Drive the attach lifecycle every frame; this advances the explicit
-        // state machine and resyncs the host region on resize once attached.
-        self.drive(window, cx);
+        // The lifecycle does not run here. Creating the content child window,
+        // sending OpenEditor and resizing this window all dispatch Win32
+        // messages that re-enter GPUI, and re-entering during a draw panics in
+        // the element arena. `render` records the window it is drawing into and
+        // hands the work to the deferred tick — the same rule the docked ARA
+        // panel follows for the same reason.
+        let _ = window;
+        self.schedule_tick(cx);
 
         // When attached, GPUI must not paint anything below the titlebar — gpui
         // composites its surface above child HWNDs (DirectComposition topmost). A
