@@ -18,8 +18,8 @@ use crate::transport;
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
 pub use crate::engine::{
-    render_project_block_interleaved, render_project_block_interleaved_with_live_input,
-    render_project_sample,
+    render_project_block_interleaved, render_project_block_interleaved_with_inputs,
+    render_project_block_interleaved_with_live_input, render_project_sample,
 };
 
 fn command_debug_enabled() -> bool {
@@ -1197,22 +1197,20 @@ fn fill_output_f32_inner(
             // rest of this callback a zeroed buffer instead of processing it.
             data.fill(0.0);
             frames_in_block
-        } else if software_monitoring && monitor_input_ready {
-            render_project_block_interleaved_with_live_input(
-                runtime,
-                base_sample,
-                master_vol,
-                data,
-                channels,
-                transport_playing,
-                shared.time_sig_num.load(Ordering::Relaxed),
-                shared.time_sig_den.load(Ordering::Relaxed),
-                loop_bounds,
-                &local.monitor_input_l[..frames_in_block as usize],
-                &local.monitor_input_r[..frames_in_block as usize],
-            )
         } else {
-            render_project_block_interleaved(
+            // One call for both input sources. A jam-routed track draws from
+            // the jam bus whether or not a capture stream is open, because a
+            // remote performer does not depend on this machine having an
+            // interface plugged in.
+            let live_input = if software_monitoring && monitor_input_ready {
+                Some((
+                    &local.monitor_input_l[..frames_in_block as usize],
+                    &local.monitor_input_r[..frames_in_block as usize],
+                ))
+            } else {
+                None
+            };
+            render_project_block_interleaved_with_inputs(
                 runtime,
                 base_sample,
                 master_vol,
@@ -1222,6 +1220,8 @@ fn fill_output_f32_inner(
                 shared.time_sig_num.load(Ordering::Relaxed),
                 shared.time_sig_den.load(Ordering::Relaxed),
                 loop_bounds,
+                live_input,
+                Some(&shared.jam_bus),
             )
         };
         if !local.render_path_logged {
@@ -1363,6 +1363,21 @@ fn fill_output_f32_inner(
     // through external-bridge-plugin inserts is the normal path).
     if plugin_bridge_master_fallback_enabled() {
         let _ = mix_plugin_bridge(data, channels, runtime, master_vol);
+    }
+
+    // Audio Jam publish tap. `data` is the master bus feed, before the Control
+    // Room touches it — the same signal an export gets. A jam listener hears
+    // the mix, not this engineer's dim, mono or monitor inserts. The write is
+    // atomics into a preallocated ring, and it costs one relaxed load when
+    // nothing is published.
+    if shared.jam_bus.has_publishes() && channels >= 2 {
+        if let Some(slot) = shared
+            .jam_bus
+            .publish_slot_for(crate::jam_bus::PUBLISH_KEY_MASTER)
+            .and_then(|index| shared.jam_bus.publish(index))
+        {
+            slot.write_interleaved(data, channels, runtime.sample_rate);
+        }
     }
 
     // ── Control Room ────────────────────────────────────────────────────────

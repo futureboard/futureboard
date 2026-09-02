@@ -889,6 +889,7 @@ pub fn render_project_block_interleaved(
         loop_bounds,
         None,
         None,
+        None,
     )
 }
 
@@ -921,6 +922,44 @@ pub fn render_project_block_interleaved_with_live_input(
         loop_bounds,
         Some((input_l, input_r)),
         None,
+        None,
+    )
+}
+
+/// Realtime variant that additionally lets tracks routed to an Audio Jam stream
+/// draw from the jam bus.
+///
+/// `live_input` and `jam` are separate on purpose: they are different sources
+/// with different clocks, and a track is routed to exactly one of them. Passing
+/// both here is normal — one session can have a guitarist on the interface and
+/// a second guitarist over the network at the same time.
+#[allow(clippy::too_many_arguments)]
+pub fn render_project_block_interleaved_with_inputs(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    master_volume: f32,
+    output: &mut [f32],
+    channels: usize,
+    transport_active: bool,
+    time_sig_num: u32,
+    time_sig_den: u32,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+    live_input: Option<(&[f32], &[f32])>,
+    jam: Option<&crate::jam_bus::JamAudioBus>,
+) -> u64 {
+    render_project_block_interleaved_core(
+        runtime,
+        base_sample,
+        master_volume,
+        output,
+        channels,
+        transport_active,
+        time_sig_num,
+        time_sig_den,
+        loop_bounds,
+        live_input,
+        None,
+        jam,
     )
 }
 
@@ -952,6 +991,7 @@ pub fn render_project_block_interleaved_with_taps(
         loop_bounds,
         None,
         track_taps,
+        None,
     )
 }
 
@@ -968,6 +1008,7 @@ fn render_project_block_interleaved_core(
     loop_bounds: Option<crate::transport::LoopBounds>,
     live_input: Option<(&[f32], &[f32])>,
     mut track_taps: Option<&mut [Vec<f32>]>,
+    jam: Option<&crate::jam_bus::JamAudioBus>,
 ) -> u64 {
     if channels < 2 {
         return 0;
@@ -1046,13 +1087,42 @@ fn render_project_block_interleaved_core(
 
     if let Some((input_l, input_r)) = live_input {
         let input_frames = frames.min(input_l.len()).min(input_r.len());
+        // A jam-routed track is fed from the jam bus below, not from the
+        // hardware input bus. Without this filter a remote performer would
+        // double with whatever is plugged into the interface.
         for track in runtime.tracks.iter_mut().filter(|track| {
-            track.track_type == "audio" && track.monitor_enabled && track.input_source.is_routable()
+            track.track_type == "audio"
+                && track.monitor_enabled
+                && track.input_source.is_routable()
+                && !track.input_source.is_jam()
         }) {
             for frame in 0..input_frames {
                 track.block_l[frame] += input_l[frame];
                 track.block_r[frame] += input_r[frame];
             }
+        }
+    }
+
+    // Audio Jam input. One relaxed load skips the whole branch for a project
+    // that is not in a jam, and each slot read is atomics only — no allocation,
+    // no lock, and never a wait on the network.
+    if let Some(bus) = jam.filter(|bus| bus.has_inputs()) {
+        for track in runtime.tracks.iter_mut().filter(|track| {
+            track.track_type == "audio" && track.monitor_enabled && track.input_source.is_jam()
+        }) {
+            let crate::runtime::RuntimeTrackInputSource::Jam { slot, mode } = track.input_source
+            else {
+                continue;
+            };
+            let Some(slot) = bus.input(slot as usize) else {
+                continue;
+            };
+            slot.mix_into(
+                mode,
+                &mut track.block_l[..frames],
+                &mut track.block_r[..frames],
+                frames,
+            );
         }
     }
 
@@ -2773,6 +2843,265 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
         (1.0, 1.0 + pan)
     } else {
         (1.0 - pan, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod jam_input_tests {
+    use super::render_project_block_interleaved_with_inputs;
+    use crate::jam_bus::{jam_device_id, JamAudioBus};
+    use crate::runtime::{RuntimeProject, RuntimeTrackInputSource};
+    use crate::types::{
+        EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackInputSourceSnapshot,
+        EngineTrackSnapshot,
+    };
+    use std::collections::HashMap;
+
+    const FRAMES: usize = 64;
+    const STREAM: &str = "str_guitar";
+
+    fn track(
+        id: &str,
+        track_type: &str,
+        input: EngineTrackInputSourceSnapshot,
+    ) -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: id.to_string(),
+            track_type: track_type.to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: track_type == "audio",
+            input_source: input,
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
+            solfege_engine: None,
+        }
+    }
+
+    fn snapshot(input: EngineTrackInputSourceSnapshot) -> EngineProjectSnapshot {
+        EngineProjectSnapshot {
+            project_id: "jam-test".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks: vec![
+                track("audio-1", "audio", input),
+                track("master", "master", Default::default()),
+            ],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            },
+        }
+    }
+
+    fn jam_route() -> EngineTrackInputSourceSnapshot {
+        EngineTrackInputSourceSnapshot {
+            device_id: Some(jam_device_id(STREAM)),
+            channels: vec![0, 1],
+        }
+    }
+
+    fn build(snapshot: &EngineProjectSnapshot, bus: &JamAudioBus) -> RuntimeProject {
+        let mut runtime = RuntimeProject::build(snapshot, 48_000, &mut HashMap::new(), None, true)
+            .expect("jam runtime");
+        runtime.resolve_jam_inputs(snapshot, bus);
+        runtime
+    }
+
+    fn render(
+        runtime: &mut RuntimeProject,
+        bus: &JamAudioBus,
+        live_input: Option<(&[f32], &[f32])>,
+    ) -> (f32, f32) {
+        let mut output = [0.0f32; FRAMES * 2];
+        render_project_block_interleaved_with_inputs(
+            runtime,
+            0,
+            1.0,
+            &mut output,
+            2,
+            false,
+            4,
+            4,
+            None,
+            live_input,
+            Some(bus),
+        );
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        for frame in output.chunks(2) {
+            peak_l = peak_l.max(frame[0].abs());
+            peak_r = peak_r.max(frame[1].abs());
+        }
+        (peak_l, peak_r)
+    }
+
+    fn remote_block(left: f32, right: f32) -> Vec<f32> {
+        (0..FRAMES).flat_map(|_| [left, right]).collect()
+    }
+
+    /// The first milestone in one test: a remote stream lands in the bus and is
+    /// audible on a track routed to it.
+    #[test]
+    fn a_remote_stream_is_heard_on_the_track_routed_to_it() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+
+        let slot_index = bus
+            .input_slot_for(STREAM)
+            .expect("the route claimed a slot");
+        assert!(matches!(
+            runtime.tracks[0].input_source,
+            RuntimeTrackInputSource::Jam { .. }
+        ));
+
+        // Silence first: nothing has arrived from the network yet.
+        assert_eq!(render(&mut runtime, &bus, None), (0.0, 0.0));
+
+        // One block of remote audio, captured at a session tick of its own.
+        bus.input(slot_index).expect("in range").write_interleaved(
+            &remote_block(0.5, -0.25),
+            2,
+            20_000_000,
+            48_000,
+        );
+
+        let (peak_l, peak_r) = render(&mut runtime, &bus, None);
+        assert!((peak_l - 0.5).abs() < 1e-6, "left was {peak_l}");
+        assert!((peak_r - 0.25).abs() < 1e-6, "right was {peak_r}");
+    }
+
+    /// A jam track must not also pick up whatever is plugged into the audio
+    /// interface: they are two different performers.
+    #[test]
+    fn a_jam_track_does_not_double_with_the_hardware_input() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let slot_index = bus.input_slot_for(STREAM).expect("bound");
+
+        bus.input(slot_index).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+
+        let hardware = [0.5f32; FRAMES];
+        let (peak_l, _) = render(&mut runtime, &bus, Some((&hardware, &hardware)));
+        assert!(
+            (peak_l - 0.5).abs() < 1e-6,
+            "the hardware input summed into the jam track: {peak_l}"
+        );
+    }
+
+    /// The inverse: a hardware-routed track is untouched by a jam that happens
+    /// to be running.
+    #[test]
+    fn a_hardware_track_is_unaffected_by_a_live_jam() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(EngineTrackInputSourceSnapshot {
+            device_id: Some("asio:test".to_string()),
+            channels: vec![0, 1],
+        });
+        let mut runtime = build(&snapshot, &bus);
+        assert!(!runtime.tracks[0].input_source.is_jam());
+
+        // Another participant's stream is arriving, bound to a slot this track
+        // does not reference.
+        let slot_index = bus.bind_input("str_other").expect("bound");
+        bus.input(slot_index).expect("in range").write_interleaved(
+            &remote_block(1.0, 1.0),
+            2,
+            0,
+            48_000,
+        );
+
+        let hardware = [0.25f32; FRAMES];
+        let (peak_l, _) = render(&mut runtime, &bus, Some((&hardware, &hardware)));
+        assert!((peak_l - 0.25).abs() < 1e-6, "left was {peak_l}");
+    }
+
+    /// A performer leaving mid-session must not leave the callback reading a
+    /// slot that has been handed to somebody else.
+    #[test]
+    fn a_released_stream_goes_silent_rather_than_playing_the_next_tenant() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let slot_index = bus.input_slot_for(STREAM).expect("bound");
+
+        bus.input(slot_index).expect("in range").write_interleaved(
+            &remote_block(1.0, 1.0),
+            2,
+            0,
+            48_000,
+        );
+        assert!(render(&mut runtime, &bus, None).0 > 0.5);
+
+        bus.release_input(STREAM);
+        // The runtime snapshot still points at the old index for one block.
+        assert_eq!(render(&mut runtime, &bus, None), (0.0, 0.0));
+    }
+
+    /// A jam route with no slot left captures nothing rather than being pointed
+    /// at an unrelated stream.
+    #[test]
+    fn a_route_that_cannot_be_bound_resolves_to_no_input() {
+        let bus = JamAudioBus::new();
+        for index in 0..crate::jam_bus::MAX_JAM_INPUT_SLOTS {
+            bus.bind_input(&format!("filler_{index}"));
+        }
+        let snapshot = snapshot(jam_route());
+        let runtime = build(&snapshot, &bus);
+        assert_eq!(
+            runtime.tracks[0].input_source,
+            RuntimeTrackInputSource::None
+        );
+    }
+
+    /// An unmonitored track is silent whatever is arriving for it, exactly as a
+    /// hardware input would be.
+    #[test]
+    fn an_unmonitored_jam_track_stays_silent() {
+        let bus = JamAudioBus::new();
+        let mut snapshot = snapshot(jam_route());
+        snapshot.tracks[0].input_monitor = false;
+        let mut runtime = build(&snapshot, &bus);
+        let slot_index = bus.input_slot_for(STREAM).expect("bound");
+
+        bus.input(slot_index).expect("in range").write_interleaved(
+            &remote_block(1.0, 1.0),
+            2,
+            0,
+            48_000,
+        );
+        assert_eq!(render(&mut runtime, &bus, None), (0.0, 0.0));
     }
 }
 

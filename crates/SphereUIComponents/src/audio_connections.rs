@@ -1624,7 +1624,11 @@ pub fn current_available_ports() -> AvailablePorts {
             device.channels,
         ));
     }
-    ports
+    // Audio Jam streams are input ports too. Routing a remote performer to a
+    // track therefore goes through this same layer — stable ids, non-destructive
+    // loss when they leave, one place that maps logical to physical — instead of
+    // a second routing model living beside it.
+    ports.merge(crate::jam::available_ports())
 }
 
 // ── Structured mutation API ─────────────────────────────────────────────────

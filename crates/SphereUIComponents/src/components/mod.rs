@@ -29,6 +29,7 @@ pub mod form;
 mod icon;
 mod icon_button;
 pub mod inspector;
+pub mod jam_window;
 pub mod key_recorder;
 pub mod keymap_window;
 pub mod knob;
@@ -142,6 +143,7 @@ pub use inspector::{
     inspector_select, inspector_value, InspectorNumericChangeCb, InspectorNumericGestureCb,
     InspectorSelectOption,
 };
+pub use jam_window::{open_jam_window, CreateTrackFromStream, JamWindow};
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;

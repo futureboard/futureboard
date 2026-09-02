@@ -1,0 +1,44 @@
+[package]
+name = "sphere-jam-client"
+version = "0.1.0"
+edition = "2021"
+description = "Futureboard Audio Jam client — control plane, media plane, session clock"
+license.workspace = true
+
+[lib]
+name = "sphere_jam_client"
+path = "src/lib.rs"
+
+[dependencies]
+# Wire types. The signaling plane is JSON; the media plane is hand-rolled binary
+# (see `packet.rs`) and never touches serde.
+serde.workspace = true
+serde_json.workspace = true
+
+# REST control plane. The blocking client is deliberate: the jam worker owns a
+# dedicated OS thread, so Studio gains no async runtime from this crate.
+reqwest = { workspace = true, features = ["blocking", "json"] }
+
+# Blocking WebSocket signaling.
+tungstenite.workspace = true
+http.workspace = true
+
+# Endpoint validation. A malformed API base has to fail at config load, not at
+# the first request.
+url.workspace = true
+
+thiserror.workspace = true
+
+# The media plane's TLS fallback transport. This is a raw framed socket, not
+# HTTP, so it opens its own rustls connection rather than borrowing one from
+# reqwest. Certificate verification is never relaxed.
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pki-types.workspace = true
+
+# Reconnect backoff jitter and device-id generation. Nothing here is a secret,
+# so the thread RNG is enough.
+rand.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

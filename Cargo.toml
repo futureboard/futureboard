@@ -27,6 +27,7 @@ members = [
     "crates/SphereDiscordRPC",
     "crates/SpherePlatform",
     "crates/SphereWebView",
+    "crates/SphereJamClient",
     "crates/SphereAraHost",
 
     # Vendored ARA 2 bindings, trimmed to the host-side crates Futureboard uses.
@@ -110,6 +111,10 @@ sphere-video-player = { path = "crates/SphereVideoPlayer" }
 sphere-discord-rpc = { path = "crates/SphereDiscordRPC", package = "SphereDiscordRPC" }
 sphere-platform = { path = "crates/SpherePlatform", package = "SpherePlatform" }
 sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
+# Futureboard Audio Jam client: control plane (REST + signaling), media plane
+# (UDP/TCP/TLS), session clock and jitter buffering. Network only — it owns no
+# audio device and no GPUI state.
+sphere-jam-client = { path = "crates/SphereJamClient", package = "sphere-jam-client" }
 # ARA 2 host runtime. Real implementation on Windows/macOS, stub elsewhere.
 sphere-ara-host = { path = "crates/SphereAraHost", package = "SphereAraHost" }
 
@@ -496,6 +501,17 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
 rustls = { version = "0.23.26" }
+# Platform trust store for the Jam media plane's TLS fallback transport.
+# Already in the graph through reqwest/tungstenite; declared here because the
+# jam client opens its own raw TLS socket rather than an HTTP one.
+rustls-native-certs = "0.8"
+rustls-pki-types = "1"
+# Blocking WebSocket client for the Jam signaling plane. Sync on purpose: the
+# jam worker owns a dedicated thread, so the studio gains no async runtime.
+tungstenite = { version = "0.30", default-features = false, features = [
+    "handshake",
+    "rustls-tls-native-roots",
+] }
 rustls-platform-verifier = "0.5.0"
 url = "2.2"
 

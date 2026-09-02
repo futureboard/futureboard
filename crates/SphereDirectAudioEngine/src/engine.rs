@@ -554,6 +554,13 @@ pub struct SharedState {
     /// nothing is auditioning. Integer microseconds keep this a single relaxed
     /// store with no float-bit dance on the realtime path.
     pub audition_position_us: AtomicU64,
+
+    /// Audio Jam bridge. Remote streams are written into it by the jam receive
+    /// thread and read by the render pass; publish taps go the other way. It
+    /// lives here so the audio callback reaches it through the `Arc` it already
+    /// holds, and so the engine keeps owning the device a jam would otherwise
+    /// try to open for itself.
+    pub jam_bus: crate::jam_bus::JamAudioBus,
 }
 
 /// Sentinel stored in [`SharedState::audition_position_us`] when no Browser
@@ -639,6 +646,7 @@ impl Default for SharedState {
             latency_graph_version: AtomicU64::new(1),
             audition_request_token: AtomicU64::new(0),
             audition_position_us: AtomicU64::new(AUDITION_POSITION_IDLE),
+            jam_bus: crate::jam_bus::JamAudioBus::new(),
         }
     }
 }
@@ -1112,7 +1120,10 @@ impl EngineInner {
                         None,
                         self.pdc_enabled(),
                     ) {
-                        Ok(runtime) => runtime,
+                        Ok(mut runtime) => {
+                            runtime.resolve_jam_inputs(snapshot, &self.shared.jam_bus);
+                            runtime
+                        }
                         Err(e) => {
                             eprintln!(
                                 "[SphereAudio] open_device: invalid routing graph ({e}), keeping previous runtime"
@@ -2052,8 +2063,10 @@ impl EngineInner {
             )));
         }
         #[cfg(all(target_os = "windows", feature = "asio"))]
-        if let Some(caps) = self.asio_caps.lock().clone() {
-            self.validate_asio_input_source(track_id, &input_source, &caps)?;
+        if !input_source.is_jam() {
+            if let Some(caps) = self.asio_caps.lock().clone() {
+                self.validate_asio_input_source(track_id, &input_source, &caps)?;
+            }
         }
 
         let old_armed = snapshot.tracks[track_index].armed;
@@ -2071,7 +2084,10 @@ impl EngineInner {
             return Err(error);
         }
 
-        let next_runtime_source = RuntimeTrackInputSource::from_channels(&input_source.channels);
+        let next_runtime_source = RuntimeTrackInputSource::from_route(
+            &input_source.channels,
+            self.jam_slot_for(&input_source),
+        );
         self.runtime.lock().update_track_input_state(
             track_index,
             record_armed,
@@ -2097,7 +2113,10 @@ impl EngineInner {
                     track_index,
                     old_armed,
                     old_monitor,
-                    RuntimeTrackInputSource::from_channels(&old_source.channels),
+                    RuntimeTrackInputSource::from_route(
+                        &old_source.channels,
+                        self.jam_slot_for(&old_source),
+                    ),
                 );
                 let _ = self.sync_live_input_stream(snapshot);
                 Err(error)
@@ -2533,6 +2552,11 @@ impl EngineInner {
                 }
             }
         };
+        // Jam routes resolve against the live bus, which `RuntimeProject::build`
+        // has no access to. Doing it here rather than inside the build keeps the
+        // offline exporter free of live network audio.
+        runtime.resolve_jam_inputs(&snapshot, &self.shared.jam_bus);
+
         // Processors left in existing_vst3 had no matching insert in the new
         // snapshot — they are dropped here with reason="replaced-by-load-project".
         drop(existing_vst3);
@@ -3399,15 +3423,35 @@ impl EngineInner {
         }
     }
 
+    /// Claim (or find) the jam bus slot a track's route names.
+    ///
+    /// Binding here rather than when the stream is first seen means a route
+    /// restored from a project file reserves its slot immediately, so a
+    /// performer who joins later lands in the slot the track is already
+    /// pointing at. `None` for a hardware route, and also when every slot is
+    /// taken — in which case the track resolves to no input and reports
+    /// silence rather than being routed to somebody else's stream.
+    fn jam_slot_for(&self, source: &EngineTrackInputSourceSnapshot) -> Option<u32> {
+        let stream_id = source.jam_stream_id()?;
+        self.shared
+            .jam_bus
+            .bind_input(stream_id)
+            .map(|index| index as u32)
+    }
+
     fn sync_live_input_stream(
         &self,
         snapshot: &EngineProjectSnapshot,
     ) -> Result<(), SphereAudioError> {
+        // Jam-routed tracks are excluded throughout: they take no hardware
+        // input, so they must not open a capture stream, must not pin a device,
+        // and must not count as a conflicting route against a track that does.
         let mut monitored_route: Option<(&str, &EngineTrackInputSourceSnapshot)> = None;
         for track in snapshot.tracks.iter().filter(|track| {
             track.track_type == "audio"
                 && track.input_monitor
                 && !track.input_source.channels.is_empty()
+                && !track.input_source.is_jam()
         }) {
             if let Some((other_track_id, other_source)) = monitored_route {
                 if other_source.device_id != track.input_source.device_id
@@ -3449,6 +3493,7 @@ impl EngineInner {
             track.track_type == "audio"
                 && (track.armed || track.input_monitor)
                 && !track.input_source.channels.is_empty()
+                && !track.input_source.is_jam()
         });
 
         let wants_live_input = desired_track.is_some();
@@ -3459,6 +3504,7 @@ impl EngineInner {
             track.track_type == "audio"
                 && track.input_monitor
                 && !track.input_source.channels.is_empty()
+                && !track.input_source.is_jam()
         });
         self.shared
             .monitor_enabled_any
@@ -3712,6 +3758,7 @@ impl EngineInner {
                 track.track_type == "audio"
                     && (track.armed || track.input_monitor)
                     && !track.input_source.channels.is_empty()
+                    && !track.input_source.is_jam()
             })
         };
         for track in active_tracks() {
@@ -3732,6 +3779,7 @@ impl EngineInner {
             track.track_type == "audio"
                 && track.input_monitor
                 && !track.input_source.channels.is_empty()
+                && !track.input_source.is_jam()
         });
         self.shared
             .monitor_enabled_any
@@ -4132,7 +4180,10 @@ impl EngineInner {
             .map(|snapshot| {
                 let mut audio_cache = self.audio_cache.lock();
                 match RuntimeProject::build(snapshot, sr, &mut audio_cache, None, self.pdc_enabled()) {
-                    Ok(runtime) => runtime,
+                    Ok(mut runtime) => {
+                        runtime.resolve_jam_inputs(snapshot, &self.shared.jam_bus);
+                        runtime
+                    }
                     Err(e) => {
                         eprintln!(
                             "[SphereAudio] get_initial_runtime: invalid routing graph ({e}), keeping previous runtime"
@@ -5808,7 +5859,6 @@ mod bridge_insert_tests {
                 bridge_sink: None,
                 dsp: InsertDspState::default(),
                 vst3: None,
-                cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 cpu_us: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 callback_process_log_done: false,
                 silent_process_blocks: 0,

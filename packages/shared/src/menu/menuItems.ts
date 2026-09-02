@@ -606,6 +606,14 @@ export const APP_MENUS: AppMenuGroup[] = [
           "Preview the Video track's reference video against the playhead",
       },
       {
+        id: "window.audio_jam",
+        label: "Audio Jam",
+        icon: "radio",
+        action: "window:audio-jam",
+        description:
+          "Play with other Futureboard accounts over the network, and route their streams to tracks",
+      },
+      {
         type: "separator",
         id: "window.sep.extensions",
       },

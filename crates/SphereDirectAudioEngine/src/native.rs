@@ -945,6 +945,16 @@ impl AudioEngine {
             .find(|d| d.is_default)
     }
 
+    /// The Audio Jam bridge belonging to this engine.
+    ///
+    /// Handed to the jam client so remote audio is written into the engine that
+    /// already owns the device, instead of the jam opening a second one. The
+    /// bus lives inside the shared state the audio callback already holds, so
+    /// nothing new reaches the realtime path by handing this out.
+    pub fn jam_bus(&self) -> std::sync::Arc<crate::engine::SharedState> {
+        self.inner.jam_bus()
+    }
+
     /// Polling snapshot for status bar / diagnostics.
     pub fn stats(&self) -> EngineStats {
         let st = self.inner.get_status();
@@ -1360,5 +1370,15 @@ impl EngineInner {
     /// Whether the transport is advancing. Used by [`AudioEngine::stats`].
     pub fn shared_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Relaxed)
+    }
+
+    /// The Audio Jam bridge for this engine.
+    ///
+    /// Handed out so the jam client can write remote audio into the same
+    /// engine that owns the device, instead of opening a second one. The bus is
+    /// inside the shared state the audio callback already holds, so nothing new
+    /// is published to the realtime path by handing this out.
+    pub fn jam_bus(&self) -> Arc<crate::engine::SharedState> {
+        Arc::clone(&self.shared)
     }
 }

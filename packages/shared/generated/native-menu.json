@@ -1186,6 +1186,21 @@
           "children": []
         },
         {
+          "id": "window.audio_jam",
+          "kind": "normal",
+          "label": "Audio Jam",
+          "icon": "radio",
+          "shortcut": null,
+          "command": "window:audio-jam",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Play with other Futureboard accounts over the network, and route their streams to tracks",
+          "children": []
+        },
+        {
           "id": "window.sep.extensions",
           "kind": "separator",
           "enabled": true,

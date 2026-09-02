@@ -820,8 +820,25 @@ pub struct RuntimeTrack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTrackInputSource {
     None,
-    Mono { channel: usize },
-    Stereo { left: usize, right: usize },
+    Mono {
+        channel: usize,
+    },
+    Stereo {
+        left: usize,
+        right: usize,
+    },
+    /// An Audio Jam stream, resolved to a slot in the engine's
+    /// [`crate::jam_bus::JamAudioBus`].
+    ///
+    /// The slot index is resolved on the control thread and baked into the
+    /// runtime snapshot, so the callback never does a string lookup. A track
+    /// bound to a jam stream takes no hardware input: the two are different
+    /// sources, and mixing both into one track would make a remote performer
+    /// double with whatever is plugged into the interface.
+    Jam {
+        slot: u32,
+        mode: crate::jam_bus::JamChannelMode,
+    },
 }
 
 impl RuntimeTrackInputSource {
@@ -838,15 +855,42 @@ impl RuntimeTrackInputSource {
         }
     }
 
+    /// Build the runtime source from a resolved route.
+    ///
+    /// `jam_slot` is `Some` only when the Audio Connection behind this track
+    /// bound a jam device and the bus had a slot for it. An unresolved jam
+    /// route yields [`Self::None`] — the track captures nothing and says so,
+    /// rather than falling back to an unrelated hardware input.
+    pub(crate) fn from_route(channels: &[u32], jam_slot: Option<u32>) -> Self {
+        match jam_slot {
+            Some(slot) => Self::Jam {
+                slot,
+                mode: crate::jam_bus::JamChannelMode::from_channels(channels),
+            },
+            None => Self::from_channels(channels),
+        }
+    }
+
     #[inline]
     pub fn is_routable(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Whether this route reads a remote jam stream rather than the hardware
+    /// input bus.
+    #[inline]
+    pub fn is_jam(&self) -> bool {
+        matches!(self, Self::Jam { .. })
     }
 
     #[inline]
     pub fn sample_from_latest(&self, latest_l: f32, latest_r: f32) -> (f32, f32) {
         match self {
             Self::None => (0.0, 0.0),
+            // A jam track is not fed by the hardware input bus, so the live
+            // input meter has nothing to show for it. Its level comes from the
+            // jam slot's own peak instead.
+            Self::Jam { .. } => (0.0, 0.0),
             Self::Mono { .. } => (latest_l, latest_l),
             Self::Stereo { .. } => (latest_l, latest_r),
         }
@@ -870,7 +914,7 @@ impl RuntimeTrackInputSource {
             }
         };
         match self {
-            Self::None => (0.0, 0.0),
+            Self::None | Self::Jam { .. } => (0.0, 0.0),
             Self::Mono { channel } => {
                 let mono = pick(*channel);
                 (mono, mono)
@@ -1713,6 +1757,38 @@ pub struct RuntimeProject {
 }
 
 impl RuntimeProject {
+    /// Bind every jam-routed track to its slot in the engine's jam bus.
+    ///
+    /// Called on the live path only, immediately after [`Self::build`]. The
+    /// offline exporter deliberately does not call it: a bounce is a render of
+    /// the project, and a remote performer playing at the moment somebody hit
+    /// Export is not part of it.
+    pub fn resolve_jam_inputs(
+        &mut self,
+        snapshot: &EngineProjectSnapshot,
+        bus: &crate::jam_bus::JamAudioBus,
+    ) {
+        for (index, track) in snapshot.tracks.iter().enumerate() {
+            let Some(runtime_track) = self.tracks.get_mut(index) else {
+                break;
+            };
+            let Some(stream_id) = track.input_source.jam_stream_id() else {
+                continue;
+            };
+            runtime_track.input_source = match bus.bind_input(stream_id) {
+                Some(slot) => RuntimeTrackInputSource::Jam {
+                    slot: slot as u32,
+                    mode: crate::jam_bus::JamChannelMode::from_channels(
+                        &track.input_source.channels,
+                    ),
+                },
+                // Every slot is taken. The track captures nothing and says so,
+                // rather than being pointed at somebody else's stream.
+                None => RuntimeTrackInputSource::None,
+            };
+        }
+    }
+
     /// Resolve every cross-entity id reference (clip→track, send→track,
     /// track→output, MIDI track→track) to an index. Called once at build time
     /// on the worker thread; track order is fixed for the life of a runtime
@@ -2513,7 +2589,16 @@ impl RuntimeProject {
                 solo: t.solo,
                 record_armed: t.armed,
                 monitor_enabled: t.input_monitor,
-                input_source: RuntimeTrackInputSource::from_channels(&t.input_source.channels),
+                // A jam route resolves to a bus slot, which `build` has no
+                // access to; the live engine fills it in through
+                // `resolve_jam_inputs` right after this. Leaving it unroutable
+                // until then is what stops a jam track from picking up the
+                // hardware channels its route happens to name.
+                input_source: if t.input_source.is_jam() {
+                    RuntimeTrackInputSource::None
+                } else {
+                    RuntimeTrackInputSource::from_channels(&t.input_source.channels)
+                },
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
                 output_track_index: None, // resolved below in resolve_indices

@@ -36,6 +36,9 @@ pub mod forensic_trace;
 mod graph;
 mod graveyard;
 pub mod input_ring;
+/// Audio Jam bridge: lock-free rings between the jam network threads and
+/// the realtime callback. See [`jam_bus`] for why the engine owns them.
+pub mod jam_bus;
 mod latency_graph;
 pub mod monitor;
 pub mod native;
@@ -81,6 +84,10 @@ pub use crate::export::{
     render_offline_tracks, ArrangementExportRequest, ArrangementExportSummary, ExportCancelToken,
     ExportError, ExportNormalizeMode, ExportProgress, ExportStage, ExportTailMode,
     OfflineRenderRequest, OfflineRenderSummary, TrackExportTarget,
+};
+pub use crate::jam_bus::{
+    is_jam_device, jam_device_id, jam_stream_id, JamAudioBus, JamChannelMode, JamInputSlot,
+    JamPublishSlot, JAM_DEVICE_PREFIX,
 };
 pub use crate::latency_graph::{
     apply_pdc_delay_block, plan_runtime_latency_graph, strip_plugin_latency_samples,

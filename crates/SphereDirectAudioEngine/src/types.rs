@@ -487,6 +487,28 @@ pub struct EngineTrackInputSourceSnapshot {
     pub channels: Vec<u32>,
 }
 
+impl EngineTrackInputSourceSnapshot {
+    /// Whether this route names an Audio Jam stream rather than a hardware
+    /// device.
+    ///
+    /// A jam route must never reach the capture-stream logic: there is no
+    /// device to open, no channel count to validate against a driver, and no
+    /// reason for two tracks on two different remote performers to be treated
+    /// as a routing conflict.
+    pub fn is_jam(&self) -> bool {
+        self.device_id
+            .as_deref()
+            .is_some_and(crate::jam_bus::is_jam_device)
+    }
+
+    /// The remote stream this route names, if any.
+    pub fn jam_stream_id(&self) -> Option<&str> {
+        self.device_id
+            .as_deref()
+            .and_then(crate::jam_bus::jam_stream_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineInsertSnapshot {

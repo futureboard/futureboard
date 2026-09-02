@@ -54,6 +54,9 @@ pub mod forensic_trace;
 pub mod frame_scheduler;
 pub mod i18n;
 pub mod input_routing;
+/// Audio Jam: the client, the bridge into the audio engine, and the routing
+/// glue that makes a remote performer selectable as a track input.
+pub mod jam;
 pub mod keymap;
 pub mod layout;
 pub mod loading_session;

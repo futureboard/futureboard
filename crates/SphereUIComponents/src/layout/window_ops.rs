@@ -232,6 +232,8 @@ pub(crate) struct ExternalWindows {
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
     /// About Futureboard Studio window.
     pub about: Option<gpui::WindowHandle<crate::components::about_window::AboutWindow>>,
+    /// Audio Jam — the room, its participants, and their streams.
+    pub jam: Option<gpui::WindowHandle<crate::components::jam_window::JamWindow>>,
     /// Project Settings — tempo, meter, and sample rate for the open project.
     pub project_settings: Option<
         gpui::WindowHandle<crate::components::project_settings_window::ProjectSettingsWindow>,
@@ -1479,6 +1481,143 @@ impl StudioLayout {
             Ok(handle) => self.external_windows.keymap = Some(handle),
             Err(err) => eprintln!("[keymap] failed to open window: {err}"),
         }
+    }
+
+    /// Open (or re-focus) the Audio Jam window.
+    pub(super) fn open_jam_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.jam.clone() {
+            if handle
+                .update(cx, |_jam, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.jam = None;
+        }
+
+        // The jam controller needs the engine's shared state to reach the audio
+        // bus. Installing it here rather than at startup means a Studio that
+        // never opens this window never starts a jam subsystem at all.
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            if let Err(error) = crate::jam::install(engine.jam_bus()) {
+                eprintln!("[jam] {error}");
+            }
+        } else {
+            eprintln!("[jam] the audio engine is not running; Audio Jam needs it for routing");
+        }
+
+        let layout = cx.entity().clone();
+        let on_create_track: crate::components::jam_window::CreateTrackHandler =
+            std::sync::Arc::new(move |request, app| {
+                let _ = layout.update(app, |this, cx| {
+                    this.create_track_from_jam_stream(request, cx);
+                });
+            });
+
+        match crate::components::jam_window::open_jam_window(owner_bounds, on_create_track, cx) {
+            Ok(handle) => self.external_windows.jam = Some(handle),
+            Err(error) => eprintln!("[jam] failed to open window: {error}"),
+        }
+    }
+
+    /// Turn one remote jam stream into an audio track.
+    ///
+    /// Three steps, in the order the rest of Studio does them: mint an Audio
+    /// Connections input bus bound to the stream's channels, create an audio
+    /// track, point the track at that bus. Nothing here is jam-specific except
+    /// the device id — which is exactly the point, because it means the track
+    /// survives, is saved, and is re-routed by the same code every other input
+    /// uses.
+    pub(crate) fn create_track_from_jam_stream(
+        &mut self,
+        request: crate::components::jam_window::CreateTrackFromStream,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::audio_connections::{AudioConnectionDirection, AudioPortId, ChannelLayout};
+        use timeline_state::CreateTrackOptions;
+
+        let ports = crate::audio_connections::current_available_ports();
+        if !ports.has_device(&request.device_id) {
+            // The publisher left between the panel rendering and the click.
+            eprintln!(
+                "[jam] stream {} is no longer published; no track was created",
+                request.stream_id
+            );
+            return;
+        }
+        let layout_kind = if request.channels >= 2 {
+            ChannelLayout::Stereo
+        } else {
+            ChannelLayout::Mono
+        };
+
+        let mutation = self.timeline.update(cx, |timeline, cx| {
+            let (connection_id, mut mutation) = timeline.state.audio_connections.add_connection(
+                AudioConnectionDirection::Input,
+                layout_kind,
+                &ports,
+            );
+            timeline
+                .state
+                .audio_connections
+                .update_name(&connection_id, &request.track_name);
+            timeline
+                .state
+                .audio_connections
+                .set_device(&connection_id, &request.device_id, &ports);
+            for channel in 0..layout_kind.channel_count() {
+                let port_name = request
+                    .channel_labels
+                    .get(channel)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Ch {}", channel + 1));
+                let bound = timeline.state.audio_connections.update_port_binding(
+                    &connection_id,
+                    channel,
+                    Some(AudioPortId::new(
+                        request.device_id.clone(),
+                        port_name,
+                        channel as u32,
+                    )),
+                    &ports,
+                );
+                // Binding a channel is a routing change like any other; the
+                // warnings ride along so a partially bound bus still explains
+                // itself in the Audio Connections window.
+                mutation.needs_routing_rebuild |= bound.needs_routing_rebuild;
+                mutation.warnings.extend(bound.warnings);
+            }
+
+            let index = timeline.state.tracks.len();
+            let track_id = timeline.state.create_track(CreateTrackOptions {
+                track_type: timeline_state::TrackType::Audio,
+                name: request.track_name.clone(),
+                color: timeline.state.track_color_for_index(index),
+                volume: timeline_state::volume::db_to_norm(0.0),
+                pan: 0.0,
+                // Not armed: a remote performer is being monitored, not
+                // recorded, until somebody deliberately arms the track.
+                armed: false,
+                // Monitoring on, because a track routed to a performer that
+                // cannot be heard is indistinguishable from a broken one.
+                input_monitor: timeline_state::InputMonitorMode::Always,
+            });
+            timeline
+                .state
+                .set_track_audio_input_connection(&track_id, Some(connection_id));
+            cx.notify();
+            mutation
+        });
+
+        self.mark_dirty();
+        if mutation.needs_routing_rebuild {
+            self.publish_audio_connection_routing(cx);
+        }
+        self.refresh_audio_connections_window(cx);
     }
 
     pub(super) fn open_about_window(

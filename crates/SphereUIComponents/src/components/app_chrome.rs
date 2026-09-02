@@ -1286,10 +1286,42 @@ pub(crate) fn account_chip() -> Option<impl IntoElement> {
     })
 }
 
-/// Compact circular avatar badge showing the user's first initial. A remote
-/// profile image is intentionally deferred (needs async download/decode); the
-/// URL is already carried in the session for that follow-up.
+/// Compact circular avatar badge.
+///
+/// Shows the identity provider's profile picture once it has been downloaded,
+/// and the user's first initial until then — which is also what a provider that
+/// serves no picture, or one that failed to fetch, keeps showing. The badge
+/// never changes size between the two, so the chrome does not reflow when the
+/// image lands.
 fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElement {
+    account_avatar_sized(snapshot, AVATAR_SIZE)
+}
+
+/// The badge at an explicit diameter. The menu draws it larger than the chip,
+/// and used to draw its own initial-only version that never showed the
+/// downloaded picture.
+fn account_avatar_sized(snapshot: &crate::account::AccountSnapshot, size: f32) -> gpui::AnyElement {
+    let frame = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .rounded(px(crate::theme::radius::PILL))
+        .overflow_hidden();
+
+    if let Some(image) = crate::account::account_avatar_image() {
+        return frame
+            .child(
+                gpui::img(image)
+                    .w(px(size))
+                    .h(px(size))
+                    .rounded(px(crate::theme::radius::PILL)),
+            )
+            .into_any_element();
+    }
+
     let initial = snapshot
         .username
         .as_deref()
@@ -1298,18 +1330,160 @@ fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElemen
         .map(|character| character.to_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string());
 
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(18.0))
-        .h(px(18.0))
-        .rounded(px(crate::theme::radius::PILL))
+    frame
         .bg(Colors::accent_muted())
-        .text_size(px(10.0))
+        .text_size(px(size * 0.55))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::accent_primary())
         .child(initial)
+        .into_any_element()
+}
+
+/// Diameter of the account badge. One constant so the picture and the initial
+/// fallback cannot drift apart and reflow the titlebar between them.
+const AVATAR_SIZE: f32 = 18.0;
+/// Diameter of the same badge inside the account menu, where there is room for
+/// the picture to be legible.
+const AVATAR_SIZE_MENU: f32 = 28.0;
+/// Width of the account menu panel.
+const ACCOUNT_MENU_WIDTH: f32 = 232.0;
+/// Gap between the titlebar's lower edge and the menu.
+const ACCOUNT_MENU_DROP: f32 = 4.0;
+/// Paints above the menu bar's own dropdown, which is the only other overlay
+/// the chrome can have open at the same time.
+const ACCOUNT_MENU_PRIORITY: usize = 130;
+
+/// The account menu, as an in-window overlay.
+///
+/// Rendered by whichever window draws the chip — the Studio's chrome and the
+/// Welcome window's own header both do — from an element whose origin is the
+/// window's top-left. That anchor is what lets the dismiss backdrop cover the
+/// window rather than the strip the chip sits in. `deferred` paints it after
+/// every sibling, so the host needs to be neither a scroll nor a clip owner.
+///
+/// `anchor_top` is the distance from that origin down to the bottom of the bar
+/// holding the chip; `anchor_right` is that bar's own right padding, so the
+/// menu lines up with the chip instead of the window edge.
+pub(crate) fn account_menu_overlay(
+    window: &gpui::Window,
+    anchor_top: f32,
+    anchor_right: f32,
+) -> Option<gpui::AnyElement> {
+    if !crate::account::account_menu_open() {
+        return None;
+    }
+    let snapshot = crate::account::current_account()?;
+    if !snapshot.signed_in {
+        // Signed out between the click and this frame; nothing to show.
+        crate::account::set_account_menu_open(false);
+        return None;
+    }
+    let name = snapshot
+        .username
+        .clone()
+        .or_else(|| snapshot.email.clone())
+        .unwrap_or_else(|| "Account".to_string());
+    let email = snapshot.email.clone().unwrap_or_default();
+    let viewport = window.bounds().size;
+
+    let backdrop = div()
+        .id("account-menu-backdrop")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+            crate::account::set_account_menu_open(false);
+            cx.refresh_windows();
+        });
+
+    let panel = div()
+        .absolute()
+        .top(px(anchor_top + ACCOUNT_MENU_DROP))
+        .right(px(anchor_right))
+        .w(px(ACCOUNT_MENU_WIDTH))
+        .flex()
+        .flex_col()
+        .p(px(crate::theme::space::BASE))
+        .gap(px(crate::theme::space::BASE))
+        .rounded(px(crate::theme::radius::SURFACE))
+        // `surface_overlay` is the modal scrim (65% alpha), not a popover
+        // plane — the RECENT list read straight through the menu. This is
+        // the surface the select menus already raise onto.
+        .bg(Colors::surface_panel_raised())
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .shadow(crate::theme::elevation::shadow(
+            crate::theme::elevation::OVERLAY,
+        ))
+        // Clicks inside the menu must not reach the backdrop behind it.
+        .occlude()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(crate::theme::space::BASE))
+                .child(account_avatar_sized(&snapshot, AVATAR_SIZE_MENU))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(crate::theme::typography::UI_SM))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(Colors::text_primary())
+                                .child(name),
+                        )
+                        .children((!email.is_empty()).then(|| {
+                            div()
+                                .truncate()
+                                .text_size(px(crate::theme::typography::UI_XS))
+                                .text_color(Colors::text_muted())
+                                .child(email)
+                        })),
+                ),
+        )
+        .child(div().h(px(1.0)).w_full().bg(Colors::border_subtle()))
+        .child(crate::components::controls::fb_button(
+            "account-menu-sign-out",
+            "Sign out",
+            crate::components::controls::FbButtonKind::Default,
+            true,
+            |_, window, cx| {
+                crate::account::dispatch_account_action(
+                    crate::account::AccountAction::SignOut,
+                    window,
+                    cx,
+                );
+                cx.refresh_windows();
+            },
+        ));
+
+    Some(
+        gpui::deferred(
+            // Sized to the window, not left to collapse: the panel is placed
+            // with `right`, which resolves against *this* box. A zero-width
+            // wrapper put the menu at `-width` — off the left edge, with only
+            // the transparent backdrop still hit-testing, which is why the chip
+            // appeared to do nothing at all.
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(viewport.width)
+                .h(viewport.height)
+                .child(backdrop)
+                .child(panel),
+        )
+        .with_priority(ACCOUNT_MENU_PRIORITY)
+        .into_any_element(),
+    )
 }
 
 fn window_controls(
@@ -1536,6 +1710,14 @@ pub fn app_chrome(
         .h(px(app_chrome_drawn_height()))
         .child(chrome)
         .child(transport_bar(transport, viewport_width, i18n))
+        // Anchored here rather than in the titlebar row: this element starts at
+        // the window's top-left, which is what lets the dismiss backdrop cover
+        // the window instead of a 32px strip.
+        .children(account_menu_overlay(
+            window,
+            policy.titlebar_height_px,
+            crate::theme::space::BASE,
+        ))
 }
 
 /// Drawn height of the whole chrome: the titlebar band plus the transport bar

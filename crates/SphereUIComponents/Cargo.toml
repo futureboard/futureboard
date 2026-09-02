@@ -64,6 +64,12 @@ sphere_directaudioengine.workspace = true
 sphere-audio-processor.workspace = true
 sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
+# Audio Jam: control plane, media plane and session clock. Network only — the
+# bridge in `src/jam` is what connects it to the engine's own audio bus.
+sphere-jam-client.workspace = true
+# High-quality streaming sample-rate conversion for the jam branch only. The
+# project rate never follows the jam; the jam tap converts into and out of it.
+rubato.workspace = true
 # ARA 2 host runtime. Real on Windows/macOS, a reporting stub elsewhere, so no
 # call site in this crate needs a `cfg`.
 sphere-ara-host.workspace = true

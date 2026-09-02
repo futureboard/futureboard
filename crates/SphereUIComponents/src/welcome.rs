@@ -533,6 +533,13 @@ impl Render for WelcomeWindow {
             })
             .child(startup_titlebar(window))
             .child(self.render_welcome(window, cx, project_name_callbacks, i18n))
+            // The account menu belongs to the window that draws the chip, and
+            // Welcome draws its own header rather than the Studio chrome.
+            .children(crate::components::app_chrome::account_menu_overlay(
+                window,
+                PlatformChromePolicy::current().titlebar_height_px + WELCOME_HEADER_HEIGHT,
+                WELCOME_HEADER_PADDING,
+            ))
     }
 }
 
@@ -684,6 +691,12 @@ fn start_rows() -> Vec<StartRow> {
     ]
 }
 
+/// Height of Welcome's own brand header, below the titlebar. Named because the
+/// account menu anchors under it and a literal in two files drifts.
+const WELCOME_HEADER_HEIGHT: f32 = 44.0;
+/// That header's side padding, which the account chip sits inside.
+const WELCOME_HEADER_PADDING: f32 = 16.0;
+
 fn startup_titlebar(window: &Window) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
 
@@ -738,8 +751,8 @@ fn welcome_header() -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap(px(16.0))
-        .h(px(44.0))
-        .px(px(16.0))
+        .h(px(WELCOME_HEADER_HEIGHT))
+        .px(px(WELCOME_HEADER_PADDING))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
