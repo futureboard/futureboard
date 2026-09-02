@@ -32,6 +32,11 @@ fn main() {
     // builds may opt in with `--features allow_elevated_for_testing`.
     platform::abort_if_elevated();
 
+    // A Futureboard account is not an entitlement, so sign-in is installed for
+    // every edition. Runs before the Professional install so a licensed build
+    // layers licensing on top of the same identity rather than a second one.
+    sphere_ui_components::account::install_default_account_provider();
+
     #[cfg(feature = "professional")]
     professional_edition::install().expect("failed to install Professional Edition providers");
 

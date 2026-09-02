@@ -404,7 +404,14 @@ impl StudioLayout {
         self.invalidate_mixer_tree_model_cache();
     }
 
-    pub(crate) fn mixer_tree_model_for_render(&mut self, cx: &mut Context<Self>) -> MixerTreeModel {
+    /// Bring [`MixerViewState::cached_tree_model`] up to date.
+    ///
+    /// Split out of `mixer_tree_model_for_render` so the paths that only *read*
+    /// the tree — expanding a channel's ancestors on selection, expand-all —
+    /// can share the cache instead of rebuilding the model from every track and
+    /// insert. Selecting a strip did the full build, which is what made
+    /// clicking around the mixer feel heavy on a large session.
+    fn refresh_mixer_tree_model_cache(&mut self, cx: &mut Context<Self>) {
         let output_channels = self.mixer_tree_output_channels(cx);
         let filter = self.mixer_tree_filter_input.value.clone();
         let tracks_gen = self.audio_bridge.route_graph_version;
@@ -443,7 +450,10 @@ impl StudioLayout {
             self.mixer_view.tree_cache_show_only = show_only;
             self.mixer_view.tree_cache_selected_id = selected_id;
         }
+    }
 
+    pub(crate) fn mixer_tree_model_for_render(&mut self, cx: &mut Context<Self>) -> MixerTreeModel {
+        self.refresh_mixer_tree_model_cache(cx);
         self.mixer_view
             .cached_tree_model
             .as_ref()
@@ -501,6 +511,12 @@ impl StudioLayout {
         });
     }
 
+    /// Build the tree model from scratch, ignoring the cache.
+    ///
+    /// Prefer [`Self::refresh_mixer_tree_model_cache`] + reading
+    /// `cached_tree_model`: this walks every track and insert, and calling it
+    /// per interaction is what made mixer selection lag.
+    #[allow(dead_code)]
     pub(crate) fn build_mixer_tree_model(
         &self,
         cx: &gpui::App,
@@ -542,11 +558,13 @@ impl StudioLayout {
             self.mixer_view.scroll_x =
                 mixer_scroll_x_for_strip_index(index, viewport_width, strip_count);
         }
-        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
-        self.timeline.update(cx, |timeline, _cx| {
-            expand_ancestors_for_channel(&mut timeline.state.mixer_tree, &model, channel_id);
-            timeline.state.select_track(channel_id);
-        });
+        self.refresh_mixer_tree_model_cache(cx);
+        if let Some(model) = self.mixer_view.cached_tree_model.as_ref() {
+            self.timeline.update(cx, |timeline, _cx| {
+                expand_ancestors_for_channel(&mut timeline.state.mixer_tree, model, channel_id);
+                timeline.state.select_track(channel_id);
+            });
+        }
         self.mixer_view.focus_channel_id = Some(channel_id.to_string());
         self.mark_dirty_view_only();
         self.push_mixer_snapshot_to_window(cx);
@@ -578,12 +596,15 @@ impl StudioLayout {
     }
 
     pub(crate) fn mixer_expand_all_tree(&mut self, cx: &mut Context<Self>) {
-        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
+        self.refresh_mixer_tree_model_cache(cx);
+        let expandable = self
+            .mixer_view
+            .cached_tree_model
+            .as_ref()
+            .map(|model| model.all_expandable_ids.clone())
+            .unwrap_or_default();
         self.timeline.update(cx, |timeline, _cx| {
-            timeline
-                .state
-                .mixer_tree
-                .expand_all(model.all_expandable_ids.clone());
+            timeline.state.mixer_tree.expand_all(expandable);
             timeline.state.mixer_tree.set_expanded(
                 crate::components::mixer_tree_model::MIXER_TREE_ROOT_ID,
                 true,
@@ -628,10 +649,12 @@ impl StudioLayout {
         else {
             return;
         };
-        let model = self.build_mixer_tree_model(cx, self.mixer_tree_output_channels(cx));
-        self.timeline.update(cx, |timeline, _cx| {
-            expand_ancestors_for_channel(&mut timeline.state.mixer_tree, &model, &channel_id);
-        });
+        self.refresh_mixer_tree_model_cache(cx);
+        if let Some(model) = self.mixer_view.cached_tree_model.as_ref() {
+            self.timeline.update(cx, |timeline, _cx| {
+                expand_ancestors_for_channel(&mut timeline.state.mixer_tree, model, &channel_id);
+            });
+        }
         self.notify_mixer_tree_sidebar_only(cx);
     }
 

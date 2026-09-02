@@ -24,6 +24,7 @@ pub mod timeline_state;
 pub mod timeline_surface;
 pub mod track_header;
 pub mod track_lane;
+pub mod track_lane_view;
 pub mod track_list;
 pub mod track_resize;
 pub mod video_clip;

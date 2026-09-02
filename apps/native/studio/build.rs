@@ -283,8 +283,6 @@ fn stage_professional_sources() {
 
     stage_professional_source(&source_dir, &output_dir, "license.rs");
     stage_professional_source(&source_dir, &output_dir, "license_activation_dialog.rs");
-    stage_professional_source(&source_dir, &output_dir, "auth.rs");
-    stage_professional_source(&source_dir, &output_dir, "auth_dialog.rs");
     stage_professional_source(&source_dir, &output_dir, "eula.rs");
     stage_professional_source(&source_dir, &output_dir, "eula_dialog.rs");
     stage_professional_source(&source_dir, &output_dir, "updates.rs");
@@ -359,9 +357,9 @@ fn bake_service_config() {
             .filter(|value| !value.is_empty())
     };
 
-    if let Some(url) = resolve("FUTUREBOARD_AUTH_API_URL", "AUTH_API_URL") {
-        println!("cargo:rustc-env=FUTUREBOARD_AUTH_API_URL={url}");
-    }
+    // FUTUREBOARD_AUTH_API_URL is baked by `sphere_ui_components`'s own build
+    // script now: `option_env!` resolves in the crate that compiles the code,
+    // and the account layer moved there.
 
     // The activation service. Without it `license::activation_endpoint()` is
     // `None`, the dialog disables Activate, and a paying customer is told

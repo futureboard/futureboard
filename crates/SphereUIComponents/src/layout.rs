@@ -72,6 +72,7 @@ mod recording_ops;
 pub(crate) mod routing_warnings;
 mod sample_rate_ops;
 mod session_load;
+mod shell_regions;
 mod stretch_tempo_ops;
 mod studio_render;
 mod studio_state;
@@ -376,8 +377,12 @@ pub(crate) fn build_and_warm_audio_engine(
             stats
         }
         Err(error) => {
-            let message = format!("warm-up failed; will retry on first Play: {error}");
-            eprintln!("[audio] {message}");
+            // Not fatal to the session: the device is often only briefly busy
+            // (an in-studio project switch closes the previous one just before
+            // this opens). `StudioLayout::retry_audio_stream_warm` re-attempts
+            // on the control poll, so the stream comes up on its own instead of
+            // waiting for the user to press Play.
+            eprintln!("[audio] warm-up failed; the session poll will retry: {error}");
             engine.stats()
         }
     };
@@ -568,6 +573,14 @@ pub struct StudioLayout {
     lyric_display_panel: gpui::Entity<components::SongTextPanelView>,
     lyric_editor_panel: gpui::Entity<components::SongTextPanelView>,
     status_bar: gpui::Entity<components::StatusBarView>,
+    /// Browser sidebar, hosted as a cached sibling view so transport
+    /// frames stop rebuilding it. See `shell_regions`.
+    browser_sidebar: gpui::Entity<shell_regions::BrowserSidebarView>,
+    /// Right dock, cached for the same reason as the browser.
+    right_dock: gpui::Entity<shell_regions::RightDockView>,
+    /// Title/transport chrome, cached and repainted on its own for the
+    /// bar.beat readout.
+    app_chrome: gpui::Entity<shell_regions::AppChromeView>,
     effect_editor_tab: gpui::Entity<components::EffectEditorTabView>,
 
     // ── Project file system ───────────────────────────────────────────────────
@@ -748,6 +761,20 @@ impl StudioLayout {
         let effect_editor_tab = cx
             .new(|_| components::EffectEditorTabView::new(studio_entity.clone(), timeline.clone()));
         let status_bar = cx.new(|_| components::StatusBarView::new(studio_entity.clone()));
+        let browser_sidebar = cx
+            .new(|cx| shell_regions::BrowserSidebarView::new(studio_entity.clone(), &settings, cx));
+        let right_dock = cx.new(|cx| {
+            shell_regions::RightDockView::new(
+                studio_entity.clone(),
+                &timeline,
+                &solfege_editor,
+                &settings,
+                cx,
+            )
+        });
+        let app_chrome = cx.new(|cx| {
+            shell_regions::AppChromeView::new(studio_entity.clone(), &timeline, &settings, cx)
+        });
         let chord_display_panel = cx.new(|cx| {
             components::SongTextPanelView::new(
                 timeline.clone(),
@@ -769,12 +796,13 @@ impl StudioLayout {
                 cx,
             )
         });
-        let bottom_panel_shell = cx.new(|_| {
+        let bottom_panel_shell = cx.new(|cx| {
             components::BottomPanelShell::new(
                 studio_entity.clone(),
                 mixer_panel.clone(),
                 clip_editor_panel.clone(),
                 effect_editor_tab.clone(),
+                cx,
             )
         });
         let virtual_keyboard = cx.new(components::VirtualKeyboardPanel::new);
@@ -1147,6 +1175,9 @@ impl StudioLayout {
             mixer_panel,
             bottom_panel_shell,
             status_bar,
+            browser_sidebar,
+            right_dock,
+            app_chrome,
             effect_editor_tab,
             paths,
             project_session: crate::project::ProjectSession::default(),

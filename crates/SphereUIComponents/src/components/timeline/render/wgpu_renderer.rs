@@ -786,9 +786,9 @@ impl TimelineRenderer for WgpuTimelineRenderer {
         "wgpu-offscreen"
     }
 
-    fn render_arrangement(&mut self, snapshot: &TimelineRenderSnapshot) -> TimelineRenderOutput {
+    fn render_arrangement(&mut self, snapshot: TimelineRenderSnapshot) -> TimelineRenderOutput {
         let _s = crate::perf::PerfScope::enter("WgpuTimelineRenderer");
-        match self.render_offscreen(snapshot) {
+        match self.render_offscreen(&snapshot) {
             Ok(frame) => TimelineRenderOutput::WgpuOffscreen(frame),
             Err(error) => {
                 eprintln!("[gpu-renderer] offscreen render failed: {error}");

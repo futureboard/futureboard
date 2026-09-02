@@ -1,14 +1,19 @@
 //! Process-global account state surfaced to shared UI (the titlebar user chip
 //! and its dropdown).
 //!
-//! Like [`crate::edition`], this is a dependency-free hand-off point: the shared
-//! crate never depends on the private Professional Edition crate. The Exclusive
-//! build installs a **snapshot provider** (for display) and an **action
-//! handler** (to open the sign-in dialog / sign out) here; the shared titlebar
-//! reads the snapshot each render and routes clicks back through the handler.
+//! Like [`crate::edition`], this is a hand-off point: a **snapshot provider**
+//! (for display) and an **action handler** (to open the sign-in dialog / sign
+//! out). The shared titlebar reads the snapshot each render and routes clicks
+//! back through the handler.
 //!
-//! Both slots are empty in a Community build, so the titlebar shows no account
-//! chip at all there.
+//! [`install_default_account_provider`] wires both slots to this crate's own
+//! [`crate::auth`] / [`crate::auth_dialog`], so a Community build signs in like
+//! any other. The slots stay overridable: a build that wants a different account
+//! layer can install its own instead.
+//!
+//! An account is not an entitlement. What a license grants is a separate
+//! provider ([`crate::edition`]) and stays behind the Professional Edition's
+//! verified license token.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -123,5 +128,54 @@ mod tests {
         let snapshot = current_account().expect("provider installed");
         assert!(snapshot.signed_in);
         assert_eq!(snapshot.username.as_deref(), Some("Jane"));
+    }
+}
+
+/// Wire the titlebar chip to this crate's own account layer.
+///
+/// Loads any stored session (refreshing it in the background) and installs the
+/// snapshot provider + action handler. A build with no account endpoint baked in
+/// installs nothing, so the chip stays absent rather than offering a sign-in
+/// that cannot work.
+pub fn install_default_account_provider() {
+    if !crate::auth::auth_configured() {
+        return;
+    }
+    crate::auth::init_session();
+    set_account_provider(Arc::new(default_account_snapshot));
+    set_account_action_handler(Arc::new(default_account_action));
+}
+
+fn default_account_snapshot() -> AccountSnapshot {
+    match crate::auth::current_profile() {
+        Some(profile) => AccountSnapshot {
+            signed_in: true,
+            username: profile.username,
+            email: profile.email,
+            avatar_url: profile.avatar_url,
+        },
+        None => AccountSnapshot::default(),
+    }
+}
+
+fn default_account_action(action: AccountAction, window: &mut Window, cx: &mut App) {
+    let owner_bounds = Some(window.bounds());
+    match action {
+        AccountAction::SignIn => {
+            if let Err(error) = crate::auth_dialog::open_login_window(owner_bounds, cx) {
+                eprintln!("[Account] failed to open sign-in window: {error}");
+            }
+        }
+        AccountAction::OpenMenu => {
+            if let Err(error) = crate::auth_dialog::open_account_menu_window(owner_bounds, cx) {
+                eprintln!("[Account] failed to open account menu: {error}");
+            }
+        }
+        AccountAction::SignOut => {
+            crate::auth::sign_out();
+            // The chip reads the snapshot during render, so the titlebar has to
+            // be told the identity it drew is gone.
+            cx.refresh_windows();
+        }
     }
 }

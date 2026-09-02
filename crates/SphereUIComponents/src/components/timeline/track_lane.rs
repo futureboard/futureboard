@@ -197,27 +197,35 @@ pub fn track_lane(
                         window,
                         cx,
                     );
-                } else if active_tool == TimelineTool::Pointer && midi_lane {
-                    // Instant MIDI clip creation without switching tools:
-                    // empty-lane drag / double-click creates a clip; plain
-                    // single-click stays a no-op (see ClipDrawPreview::commit_on_click).
-                    on_select(&track_id_select, window, cx);
-                    on_add(
-                        &(track_id_add.clone(), snapped_beat, click_count, bypass_snap),
-                        window,
-                        cx,
-                    );
                 } else if active_tool == TimelineTool::Pointer {
+                    // Ctrl/Cmd is the marquee modifier, and it has to be read
+                    // before the MIDI lane's instant-create gesture. Testing
+                    // `midi_lane` first meant an instrument or MIDI track could
+                    // never rubber-band at all: every Pointer press on its empty
+                    // lane — modifier or not — took the create path, so the drag
+                    // poked a new clip into existence instead of selecting.
                     let additive = event.modifiers.control || event.modifiers.platform;
-                    if !additive {
+                    if midi_lane && !additive {
+                        // Instant MIDI clip creation without switching tools:
+                        // empty-lane drag / double-click creates a clip; plain
+                        // single-click stays a no-op (see ClipDrawPreview::commit_on_click).
                         on_select(&track_id_select, window, cx);
-                    }
-                    if let Some(start_range) = on_range_start.as_ref() {
-                        start_range(
-                            &(track_id_select.clone(), snapped_beat, additive),
+                        on_add(
+                            &(track_id_add.clone(), snapped_beat, click_count, bypass_snap),
                             window,
                             cx,
                         );
+                    } else {
+                        if !additive {
+                            on_select(&track_id_select, window, cx);
+                        }
+                        if let Some(start_range) = on_range_start.as_ref() {
+                            start_range(
+                                &(track_id_select.clone(), snapped_beat, additive),
+                                window,
+                                cx,
+                            );
+                        }
                     }
                 } else {
                     on_select(&track_id_select, window, cx);

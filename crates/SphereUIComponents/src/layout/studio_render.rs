@@ -25,7 +25,6 @@ impl Render for StudioLayout {
 
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
         let i18n = crate::i18n::I18n::from_app(cx);
-        self.browser_search_input.placeholder = Some(i18n.tr("search.browser.placeholder"));
         self.project_switcher_search_input.placeholder =
             Some(i18n.tr("search.projects.placeholder"));
         // Frame pacing tick. See FrameDiagnostics docs — only counts
@@ -65,466 +64,13 @@ impl Render for StudioLayout {
             self.last_window_title = Some(title.clone());
         }
 
-        // Pull a render-only track snapshot and current selection from the
-        // Timeline. Do not clone every clip here: MIDI clips can contain tens of
-        // thousands of notes/controllers, and a mixer selection clears clip
-        // selection anyway. Cloning the whole project made a strip click block
-        // the UI for seconds. The Inspector only needs the selected clip, so add
-        // that one back to the otherwise clip-free track snapshot.
-        let (tracks, selected_track_id, selected_clip_id, project_bpm) = {
-            let t = self.timeline.read(cx);
-            let selected_clip_id = t.state.selection.selected_clip_ids.first().cloned();
-            let selected_clip = selected_clip_id.as_deref().and_then(|clip_id| {
-                t.state.tracks.iter().find_map(|track| {
-                    track
-                        .clips
-                        .iter()
-                        .find(|clip| clip.id == clip_id)
-                        .map(|clip| (track.id.clone(), clip.clone()))
-                })
-            });
-            let mut tracks: Vec<_> = t
-                .state
-                .tracks
-                .iter()
-                .map(|track| {
-                    let mut cloned = super::mixer_ops::clone_track_for_mixer(track);
-                    let display_volume = t.state.display_track_volume(track);
-                    cloned.volume = display_volume;
-                    cloned.volume_effective = display_volume;
-                    cloned
-                })
-                .collect();
-            if let Some((track_id, clip)) = selected_clip {
-                if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
-                    track.clips.push(clip);
-                }
-            }
-            (
-                tracks,
-                t.state.selection.selected_track_id.clone(),
-                selected_clip_id,
-                t.state.bpm as f64,
-            )
-        };
-
-        let inspector_callbacks = self.build_inspector_callbacks(cx.entity().clone());
-
-        // The audio-input combo lists logical connections, so no device
-        // enumeration happens for it at all. The port inventory is read only
-        // while the combo is open, and only to describe the selected bus.
-        let audio_input_ports = if self.overlay.inspector_routing_combo
-            == Some(crate::components::panel::InspectorRoutingCombo::AudioInput)
-        {
-            crate::audio_connections::current_available_ports()
-        } else {
-            crate::audio_connections::AvailablePorts::default()
-        };
-        let audio_output_buses: Vec<(String, String)> = if self.overlay.inspector_routing_combo
-            == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
-        {
-            tracks
-                .iter()
-                .filter(|track| {
-                    crate::components::timeline::timeline_state::is_project_routing_track(track)
-                })
-                .map(|track| (track.id.clone(), track.name.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let audio_output_device = if self.overlay.inspector_routing_combo
-            == Some(crate::components::panel::InspectorRoutingCombo::AudioOutput)
-        {
-            self.selected_output_device_channels(cx)
-        } else {
-            None
-        };
-        let instrument_targets: Vec<(String, String)> = if self.overlay.inspector_routing_combo
-            == Some(crate::components::panel::InspectorRoutingCombo::MidiOut)
-        {
-            tracks
-                .iter()
-                .filter(|track| {
-                    track.track_type
-                        == crate::components::timeline::timeline_state::TrackType::Instrument
-                })
-                .map(|track| (track.id.clone(), track.name.clone()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        // Real MIDI hardware/virtual ports, enabled in Preferences → MIDI —
-        // the same cached registry Settings renders from (`device_registry`),
-        // not a mocked/empty placeholder. Only enabled ports are offered as
-        // routing targets, matching the Preferences toggle the user set.
-        let (detected_midi_inputs, detected_midi_outputs): (Vec<String>, Vec<String>) = if matches!(
-            self.overlay.inspector_routing_combo,
-            Some(crate::components::panel::InspectorRoutingCombo::MidiInput)
-                | Some(crate::components::panel::InspectorRoutingCombo::MidiOut)
-        ) {
-            let saved = self.settings.read(cx).current.hardware.midi.devices.clone();
-            let detected = crate::device_registry::cached_midi_devices();
-            let resolved = sphere_midi_service::resolve_midi_devices(&saved, &detected);
-            let inputs = resolved
-                .iter()
-                .filter(|d| {
-                    d.enabled
-                        && matches!(
-                            d.direction,
-                            crate::settings::MidiDeviceDirection::Input
-                                | crate::settings::MidiDeviceDirection::InputOutput
-                        )
-                })
-                .map(|d| d.name.clone())
-                .collect();
-            let outputs = resolved
-                .iter()
-                .filter(|d| {
-                    d.enabled
-                        && matches!(
-                            d.direction,
-                            crate::settings::MidiDeviceDirection::Output
-                                | crate::settings::MidiDeviceDirection::InputOutput
-                        )
-                })
-                .map(|d| d.name.clone())
-                .collect();
-            (inputs, outputs)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let inspector_routing_combo_overlay: Option<gpui::AnyElement> =
-            if let (Some(combo), Some(anchor)) = (
-                self.overlay.inspector_routing_combo,
-                self.overlay.inspector_routing_combo_anchor,
-            ) {
-                selected_track_id.as_deref().and_then(|tid| {
-                    tracks.iter().find(|t| t.id == tid).map(|track| {
-                        let combo_audio_connections =
-                            self.timeline.read(cx).state.audio_connections.clone();
-                        let close = Arc::new({
-                            let this = cx.entity().clone();
-                            move |cx: &mut gpui::App| {
-                                let _ = this.update(cx, |layout, cx| {
-                                    layout.overlay.inspector_routing_combo = None;
-                                    layout.overlay.inspector_routing_combo_anchor = None;
-                                    cx.notify();
-                                });
-                            }
-                        });
-                        crate::components::panel::inspector_routing_combo_overlay(
-                            track,
-                            &combo_audio_connections,
-                            combo,
-                            anchor,
-                            window,
-                            &inspector_callbacks,
-                            close,
-                            audio_input_ports.clone(),
-                            audio_output_buses.clone(),
-                            audio_output_device.clone(),
-                            instrument_targets.clone(),
-                            detected_midi_inputs.clone(),
-                            detected_midi_outputs.clone(),
-                        )
-                        .into_any_element()
-                    })
-                })
-            } else {
-                None
-            };
-
-        // Reconcile the Inspector name field with the current track selection.
-        // Only reload when the bound track actually changes, so typing into the
-        // field for the *selected* track is never clobbered mid-edit.
-        if self.inspector_name_edit.name_bound.as_deref() != selected_track_id.as_deref() {
-            match selected_track_id
-                .as_deref()
-                .and_then(|tid| tracks.iter().find(|t| t.id == tid))
-            {
-                Some(t) => {
-                    self.inspector_name_edit
-                        .name_input
-                        .set_value(t.name.clone());
-                    self.inspector_name_edit.name_bound = Some(t.id.clone());
-                }
-                None => {
-                    self.inspector_name_edit.name_input.set_value("");
-                    self.inspector_name_edit.name_bound = None;
-                }
-            }
-        }
-        let inspector_name_focused = self.inspector_name_edit.name_input.is_focused(window);
-        if self.inspector_name_edit.clip_name_bound.as_deref() != selected_clip_id.as_deref() {
-            match selected_clip_id.as_deref().and_then(|cid| {
-                tracks
-                    .iter()
-                    .find_map(|t| t.clips.iter().find(|c| c.id == cid))
-            }) {
-                Some(c) => {
-                    self.inspector_name_edit
-                        .clip_name_input
-                        .set_value(c.name.clone());
-                    self.inspector_name_edit.clip_name_bound = Some(c.id.clone());
-                }
-                None => {
-                    self.inspector_name_edit.clip_name_input.set_value("");
-                    self.inspector_name_edit.clip_name_bound = None;
-                }
-            }
-        }
-        if self.panels.inspector {
-            if let Some(target) = self.overlay.pending_text_focus.take() {
-                match target {
-                    TextMenuTarget::InspectorName => {
-                        self.inspector_name_edit.name_input.select_all();
-                        self.inspector_name_edit
-                            .name_input
-                            .focus_handle
-                            .focus(window, cx);
-                    }
-                    TextMenuTarget::InspectorClipName => {
-                        self.inspector_name_edit.clip_name_input.select_all();
-                        self.inspector_name_edit
-                            .clip_name_input
-                            .focus_handle
-                            .focus(window, cx);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let inspector_clip_name_focused =
-            self.inspector_name_edit.clip_name_input.is_focused(window);
-        let inspector_name_callbacks = crate::components::text_input::bind_mouse_selection(
-            cx.entity().clone(),
-            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.name_input,
-        );
-        let inspector_clip_name_callbacks = crate::components::text_input::bind_mouse_selection(
-            cx.entity().clone(),
-            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.clip_name_input,
-        );
-        let inspector_color_hex_focused = self
-            .inspector_name_edit
-            .color_picker
-            .hex_input
-            .is_focused(window);
-        let inspector_color_hex_callbacks = crate::components::text_input::bind_mouse_selection(
-            cx.entity().clone(),
-            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.color_picker.hex_input,
-        );
-        let inspector_color_hex_context: Arc<
-            dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            Arc::new(move |(x, y): &(f32, f32), _window, cx| {
-                let x = *x;
-                let y = *y;
-                let _ = this.update(cx, |this, cx| {
-                    this.overlay.text_context_menu = Some(TextContextMenu {
-                        target: TextMenuTarget::InspectorColorHex,
-                        x,
-                        y,
-                    });
-                    cx.notify();
-                });
-            })
-        };
-        let inspector_color_hex_callbacks = TextInputCallbacks {
-            on_context_command: None,
-            on_context_menu: Some(inspector_color_hex_context),
-            on_mouse: inspector_color_hex_callbacks.on_mouse,
-        };
-        let inspector_color_callbacks = self
-            .build_inspector_color_picker_callbacks(cx.entity().clone(), selected_track_id.clone());
+        // The Inspector's own state lives in the cached right-dock region
+        // now (`shell_regions`). What stays here is what the *shell* draws:
+        // the routing combo, which anchors over the whole window, and the
+        // colour picker's click-outside backdrop.
+        let inspector_routing_combo_overlay =
+            self.inspector_routing_combo_overlay_element(window, cx);
         let inspector_color_open = self.inspector_name_edit.color_picker.open;
-
-        crate::perf::count("tracks", tracks.len() as u64);
-
-        // ── File browser callbacks ──────────────────────────────────────
-        let on_browser_search_context: std::sync::Arc<
-            dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |(x, y): &(f32, f32), _w, cx| {
-                let x = *x;
-                let y = *y;
-                let _ = this.update(cx, |this, cx| {
-                    this.menu_bar.open_menu_id = None;
-                    this.menu_bar.submenu_path.clear();
-                    this.project_switcher.is_open = false;
-                    this.overlay.text_context_menu = Some(TextContextMenu {
-                        target: TextMenuTarget::BrowserSearch,
-                        x,
-                        y,
-                    });
-                    cx.notify();
-                });
-            })
-        };
-        let browser_search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
-            cx.entity().clone(),
-            |layout: &mut StudioLayout| &mut layout.browser_search_input,
-        );
-        let browser_search_callbacks = TextInputCallbacks {
-            on_context_command: None,
-            on_context_menu: Some(on_browser_search_context),
-            on_mouse: browser_search_mouse_callbacks.on_mouse,
-        };
-
-        let on_browser_toggle: std::sync::Arc<
-            dyn Fn(&(String, Option<PathBuf>), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |(id, path): &(String, Option<PathBuf>), _w, cx| {
-                let id = id.clone();
-                let path = path.clone();
-                let _ = this.update(cx, |this, cx| {
-                    let expanded = this.file_browser.toggle_node(&id, path.as_deref());
-                    if expanded {
-                        // Drain any newly-expanded paths whose contents
-                        // haven't been indexed yet and kick off a
-                        // background load for each.
-                        let pending = this.file_browser.paths_needing_load();
-                        for p in pending {
-                            this.file_browser.mark_loading(p.clone());
-                            this.spawn_directory_load(cx, p);
-                        }
-                    }
-                    cx.notify();
-                });
-            })
-        };
-        let on_browser_select: std::sync::Arc<
-            dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
-                let path = path.clone();
-                this.update(cx, |this, cx| {
-                    this.file_browser.select(path.clone());
-                    if crate::components::file_browser::is_audio_path(&path) {
-                        // Visual mini-waveform preview always decodes on select.
-                        this.ensure_browser_waveform(path.clone(), cx);
-                        // Browser selection is also a real audible audition;
-                        // decode happens off-thread in the engine, so this UI
-                        // event only queues work and never blocks rendering.
-                        if this.file_browser.preview_enabled {
-                            let _ = this.audition_browser_file(&path);
-                        }
-                    }
-                    cx.notify();
-                });
-            })
-        };
-        // Double-click on an audio file imports it onto the timeline using the
-        // existing waveform-cache + import_audio_at path.
-        let on_browser_activate: std::sync::Arc<
-            dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let timeline = self.timeline.clone();
-            let layout = cx.entity().clone();
-            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
-                // Filter on extension before mutating timeline state so
-                // double-clicking a non-audio file (e.g. .txt, .png) does
-                // not create a phantom clip with the 8-bar fallback
-                // duration that never resolves to real metadata.
-                let ext = path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
-                if !is_supported_audio_ext(&ext) {
-                    eprintln!(
-                        "[import] ignoring non-audio activation: ext='{}' path={}",
-                        ext,
-                        path.display()
-                    );
-                    return;
-                }
-
-                let path = path.clone();
-                let path_for_decode = path.clone();
-                let timeline_for_decode = timeline.clone();
-                timeline.update(cx, |t, cx| {
-                    let path_key = path.to_string_lossy().to_string();
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "Imported Audio".to_string());
-                    t.state
-                        .import_audio_to_selected_or_new_track(path_key, name);
-                    cx.notify();
-                });
-                let _ = layout.update(cx, |this, cx| {
-                    this.mark_dirty();
-                    this.mark_engine_media_dirty();
-                    this.schedule_audio_project_sync(cx, false, "timeline_audio_import");
-                });
-                let path_key = path_for_decode.to_string_lossy().to_string();
-                let _ = layout.update(cx, move |this, cx| {
-                    this.spawn_timeline_audio_import_jobs(
-                        cx,
-                        timeline_for_decode,
-                        path_for_decode,
-                        path_key,
-                    );
-                });
-            })
-        };
-        let on_browser_context: std::sync::Arc<
-            dyn Fn(&(Option<PathBuf>, f32, f32), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(
-                move |(path, x, y): &(Option<PathBuf>, f32, f32), window, cx| {
-                    let path = path.clone();
-                    let x = *x;
-                    let y = *y;
-                    let window_id = window.window_handle().window_id();
-                    StudioLayout::defer_update(&this, cx, move |this, cx| {
-                        this.try_open_context_menu(
-                            ContextMenuRequest::new(
-                                window_id,
-                                x,
-                                y,
-                                ContextMenuTarget::Extended(ContextTarget::Browser(path)),
-                            ),
-                            cx,
-                        );
-                    });
-                },
-            )
-        };
-
-        // Toolbar: collapse every expanded folder in one click.
-        let on_browser_collapse_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.file_browser.collapse_all();
-                    cx.notify();
-                });
-            })
-        };
-        // Toolbar: drop cached listings for expanded folders and re-scan them.
-        let on_browser_rescan: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let paths = this.file_browser.invalidate_expanded();
-                    for p in paths {
-                        this.file_browser.mark_loading(p.clone());
-                        this.spawn_directory_load(cx, p);
-                    }
-                    cx.notify();
-                });
-            })
-        };
-        let file_browser = self.file_browser.clone();
-        let browser_scroll = self.browser_scroll.clone();
 
         let on_timeline_context: components::timeline::timeline::TimelineContextMenuCb = {
             let this = cx.entity().clone();
@@ -694,27 +240,7 @@ impl Render for StudioLayout {
         });
 
         // ── Top-menu callbacks ─────────────────────────────────────────────
-        let on_open_menu: std::sync::Arc<
-            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |(id, anchor_x): &(String, f32), _w, cx| {
-                let id = id.clone();
-                let anchor_x = *anchor_x;
-                this.update(cx, |this, cx| {
-                    if this.menu_bar.open_menu_id.as_deref() == Some(id.as_str()) {
-                        this.menu_bar.open_menu_id = None;
-                    } else {
-                        this.menu_bar.open_menu_id = Some(id);
-                        this.menu_bar.anchor = titlebar_label_anchor(anchor_x);
-                    }
-                    this.menu_bar.submenu_path.clear();
-                    this.overlay.open_popover = None;
-                    this.project_switcher.is_open = false;
-                    cx.notify();
-                });
-            })
-        };
+        let on_open_menu = self.menu_open_callback(cx);
         let on_close_menu: std::sync::Arc<dyn Fn(&(), &mut Window, &mut gpui::App) + 'static> = {
             let this = cx.entity().clone();
             std::sync::Arc::new(move |_: &(), _w, cx| {
@@ -759,32 +285,6 @@ impl Render for StudioLayout {
                 });
             })
         };
-        let on_project_open: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static> = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |anchor_x: &f32, w, cx| {
-                let anchor_x = *anchor_x;
-                let _ = this.update(cx, |this, cx| {
-                    this.menu_bar.open_menu_id = None;
-                    this.menu_bar.submenu_path.clear();
-                    this.overlay.open_popover = None;
-                    this.overlay.text_context_menu = None;
-                    this.project_switcher.is_open = !this.project_switcher.is_open;
-                    this.project_switcher.anchor = project_title_anchor(anchor_x);
-                    if this.project_switcher.is_open {
-                        this.project_switcher.query.clear();
-                        this.project_switcher_search_input.set_value("");
-                        this.project_switcher_search_input.focus_handle.focus(w, cx);
-                        this.project_switcher.selected_index = 0;
-                        // Refresh which recents still exist on disk — off the UI
-                        // thread, so opening the switcher never blocks on per-entry
-                        // filesystem stats (a multi-hundred-ms stall on OneDrive).
-                        this.spawn_refresh_recent_missing(cx);
-                    }
-                    cx.notify();
-                });
-            })
-        };
-
         let open_menu_id = self.menu_bar.open_menu_id.clone();
         let menu_anchor = self.menu_bar.anchor;
         let submenu_path = self.menu_bar.submenu_path.clone();
@@ -1296,8 +796,6 @@ impl Render for StudioLayout {
         self.prune_mixer_window(cx);
         self.prune_midi_editor_window(cx);
 
-        let transport_chrome = self.transport_chrome_state(cx);
-        let panel_chrome = self.panel_chrome_state(cx);
         let show_browser = self.panels.browser;
         let show_inspector = self.panels.inspector;
         // A plug-in view is a native child window, outside the GPUI tree, so
@@ -1307,11 +805,6 @@ impl Render for StudioLayout {
         let show_bottom_docked = self.panels.bottom_docked;
         let active_panel = self.active_panel;
 
-        let project_chrome = components::ProjectChromeState {
-            name: self.project_session.display_name().to_string(),
-            is_dirty: self.project_session.is_dirty,
-            on_open_project_menu: on_project_open,
-        };
         let shortcut_target = cx.entity().clone();
         // Docked MIDI editor — consulted in the key handler so Ctrl+A/C/V/X and
         // Delete route to the piano roll (its own `on_key_down`) when it holds
@@ -1705,28 +1198,13 @@ impl Render for StudioLayout {
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&focus_holder))
             // Non-visual, non-interactive OS-IME bridge for the focused field.
             .children(ime_bridge)
-            .child({
-                let _s = crate::perf::PerfScope::enter("AppChrome");
-                let close_target = cx.entity().clone();
-                let on_window_close: components::ChromeActionCb = std::sync::Arc::new(
-                    move |_: &(), window: &mut Window, cx: &mut gpui::App| {
-                        let owner_bounds = Some(window.bounds());
-                        let _ = close_target.update(cx, |studio, cx| {
-                            studio.request_close(PendingCloseAction::QuitApp, owner_bounds, cx);
-                        });
-                    },
-                );
-                components::app_chrome(
-                    window,
-                    open_menu_id.as_deref(),
-                    on_open_menu,
-                    project_chrome,
-                    transport_chrome,
-                    panel_chrome,
-                    Some(on_window_close),
-                    i18n,
-                )
-            })
+            // Cached: the chrome carries the bar.beat readout, so the
+            // transport poll repaints it directly instead of notifying the
+            // shell. See `shell_regions`.
+            .child(
+                gpui::AnyView::from(self.app_chrome.clone())
+                    .cached(shell_regions::AppChromeView::cached_style()),
+            )
             .child({
                 let mut main_row = div()
                     .flex()
@@ -1734,31 +1212,12 @@ impl Render for StudioLayout {
                     .flex_1()
                     .min_h_0();
                 if show_browser {
-                    main_row = main_row.child({
-                        let _s = crate::perf::PerfScope::enter("Sidebar");
-                        let owner = cx.entity().clone();
-                        div()
-                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
-                                let _ = owner.update(cx, |layout, cx| {
-                                    layout.set_active_panel(WorkspaceActivePanel::Browser, cx);
-                                });
-                            })
-                            .child(components::sidebar(
-                            &file_browser,
-                            browser_scroll,
-                            &self.browser_search_input,
-                            self.browser_search_input.is_focused(window),
-                            active_panel == WorkspaceActivePanel::Browser,
-                            browser_search_callbacks,
-                            on_browser_toggle,
-                            on_browser_select,
-                            on_browser_activate,
-                            on_browser_context,
-                            on_browser_collapse_all,
-                            on_browser_rescan,
-                            i18n,
-                        ))
-                    });
+                    // Cached: the browser only rebuilds when the shell
+                    // itself changes, not on every playhead/meter frame.
+                    main_row = main_row.child(
+                        gpui::AnyView::from(self.browser_sidebar.clone())
+                            .cached(shell_regions::BrowserSidebarView::cached_style()),
+                    );
                 }
                 main_row = main_row.child({
                     let owner = cx.entity().clone();
@@ -1774,80 +1233,27 @@ impl Render for StudioLayout {
                         .child(self.timeline.clone())
                 });
                 if show_inspector {
-                    main_row = main_row.child({
-                        let _s = crate::perf::PerfScope::enter("RightDock");
-                        let right_tab = self.right_dock_tab;
-                        let owner = cx.entity().clone();
-                        let content = match right_tab {
-                            RightDockTab::Inspector => {
-                                let inspector_audio_connections =
-                                    self.timeline.read(cx).state.audio_connections.clone();
-                                let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
-                                    let (start, end) = range.as_f32_range();
-                                    let duration = (end - start).abs();
-                                    (duration > 0.0001).then_some(duration)
-                                });
-                                let stretch_tempo = selected_clip_id.as_deref().map(|clip_id| {
-                                    self.stretch_tempo_snapshot(clip_id)
-                                });
-                                crate::components::panel::inspector_panel(
-                                    &tracks,
-                                    &inspector_audio_connections,
-                                    selected_track_id.as_deref(),
-                                    selected_clip_id.as_deref(),
-                                    find_clip_summary(
-                                        &tracks,
-                                        selected_clip_id.as_deref(),
-                                        project_bpm,
-                                        selection_duration_beats,
-                                    ),
-                                    stretch_tempo,
-                                    &self.inspector_name_edit.name_input,
-                                    inspector_name_focused,
-                                    inspector_name_callbacks,
-                                    &self.inspector_name_edit.clip_name_input,
-                                    inspector_clip_name_focused,
-                                    inspector_clip_name_callbacks,
-                                    crate::components::panel::InspectorColorPicker {
-                                        state: &self.inspector_name_edit.color_picker,
-                                        hex_focused: inspector_color_hex_focused,
-                                        hex_callbacks: inspector_color_hex_callbacks,
-                                        callbacks: inspector_color_callbacks,
-                                    },
-                                    active_panel == WorkspaceActivePanel::Inspector,
-                                    &inspector_callbacks,
-                                    i18n,
-                                ).into_any_element()
-                            }
-                            RightDockTab::Solfege => crate::components::panel::solfege_panel(
-                                &tracks,
-                                selected_track_id.as_deref(),
-                                active_panel == WorkspaceActivePanel::Solfege,
-                                self.solfege_editor.read(cx).selected_pitch_summary(cx),
-                            )
-                            .into_any_element(),
-                            RightDockTab::ChordDisplay => self.chord_display_panel.clone().into_any_element(),
-                            RightDockTab::LyricDisplay => self.lyric_display_panel.clone().into_any_element(),
-                            RightDockTab::LyricEditor => self.lyric_editor_panel.clone().into_any_element(),
-                        };
-                        div()
-                            .w(px(crate::components::panel::INSPECTOR_WIDTH))
-                            .h_full()
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_col()
-                            .min_h_0()
-                            .border_l(px(1.0))
-                            .border_color(Colors::border_subtle())
-                            .child(right_dock_tab_bar(right_tab, owner))
-                            .child(div().flex_1().min_h_0().overflow_hidden().child(content))
-                    });
+                    // Cached: the dock rebuilds when the shell changes, not
+                    // when the playhead or a meter moves.
+                    main_row = main_row.child(
+                        gpui::AnyView::from(self.right_dock.clone())
+                            .cached(shell_regions::RightDockView::cached_style()),
+                    );
                 }
                 main_row
             })
             .children(if show_bottom_docked {
                 let _s = crate::perf::PerfScope::enter("BottomPanel");
-                Some(self.bottom_panel_shell.clone().into_any_element())
+                // Cached like the other shell regions. The docked editors
+                // (piano roll, mixer, effect editor) live under here, so a
+                // playhead or meter frame must not rebuild them.
+                Some(
+                    gpui::AnyView::from(self.bottom_panel_shell.clone())
+                        .cached(shell_regions::bottom_panel_cached_style(
+                            self.bottom_panel_state().height_px,
+                        ))
+                        .into_any_element(),
+                )
             } else {
                 None
             })
@@ -1918,7 +1324,18 @@ impl Render for StudioLayout {
     }
 }
 
-fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl IntoElement {
+/// Dock tab strip height. The tabs sit flush against the bottom divider so the
+/// selected indicator can share that edge.
+const RIGHT_DOCK_TAB_STRIP_HEIGHT: f32 = crate::theme::size::COMFORTABLE;
+/// Tab height inside the strip.
+const RIGHT_DOCK_TAB_HEIGHT: f32 = RIGHT_DOCK_TAB_STRIP_HEIGHT;
+/// Tab glyph. One step below the section icon so the label leads.
+const RIGHT_DOCK_TAB_ICON: f32 = 12.0;
+
+pub(super) fn right_dock_tab_bar(
+    active: RightDockTab,
+    owner: Entity<StudioLayout>,
+) -> impl IntoElement {
     let popout_kind = match active {
         RightDockTab::Inspector | RightDockTab::Solfege => None,
         RightDockTab::ChordDisplay => Some(components::SongTextPanelKind::ChordDisplay),
@@ -1929,12 +1346,12 @@ fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl
         .id("right-dock-tabs")
         .role(Role::TabList)
         .aria_label("Right panel")
-        .h(px(28.0))
+        .h(px(RIGHT_DOCK_TAB_STRIP_HEIGHT))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .px(px(4.0))
-        .gap(px(2.0))
+        .px(px(crate::theme::space::TIGHT))
+        .gap(px(crate::theme::space::HAIR))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel());
@@ -1979,12 +1396,35 @@ fn right_dock_tab_button(
     owner: Entity<StudioLayout>,
 ) -> impl IntoElement {
     let selected = tab == active;
-    let label = match tab {
-        RightDockTab::Inspector => "Inspect",
-        RightDockTab::Solfege => "Solfege",
-        RightDockTab::ChordDisplay => "Chords",
-        RightDockTab::LyricDisplay => "Lyrics",
-        RightDockTab::LyricEditor => "Edit",
+    let (icon, label) = match tab {
+        RightDockTab::Inspector => (crate::assets::ICON_SLIDERS_HORIZONTAL_PATH, "Inspect"),
+        RightDockTab::Solfege => (crate::assets::ICON_AUDIO_LINES_PATH, "Solfege"),
+        RightDockTab::ChordDisplay => (crate::assets::ICON_MUSIC_PATH, "Chords"),
+        RightDockTab::LyricDisplay => (crate::assets::ICON_NEWSPAPER_PATH, "Lyrics"),
+        RightDockTab::LyricEditor => (crate::assets::ICON_PENCIL_PATH, "Edit"),
+    };
+    // A tab is a text target with an indicator, not a button-shaped block: the
+    // five of them sit in a 4 px strip, and five filled pills there read as a
+    // toolbar rather than as one control that picks a view. Selection is carried
+    // on two channels — accent text *and* the underline — so it survives a theme
+    // where the accent is low-contrast.
+    //
+    // Only the selected tab spells its name. Five labelled tabs plus the pop-out
+    // button need about 320 px and the dock is `INSPECTOR_WIDTH` (292), so the
+    // last one was pushed off the panel edge. Collapsing the rest to their glyph
+    // both fits and makes the current view unmistakable; the name stays
+    // reachable through the tooltip and the accessible label.
+    let text = if selected {
+        Colors::accent_primary()
+    } else {
+        Colors::tab_text_muted()
+    };
+    // Hover is attached unconditionally and resolves to the tab's own colour
+    // while it is selected, so the selected tab simply has nothing to lift to.
+    let hover_text = if selected {
+        text
+    } else {
+        Colors::text_primary()
     };
     div()
         .id(("right-dock-tab", tab as u32))
@@ -1993,29 +1433,28 @@ fn right_dock_tab_button(
         .aria_selected(selected)
         .focusable()
         .tab_stop(true)
-        .focus_visible(|style| style.bg(Colors::tab_bg_hover()))
-        .h(px(22.0))
-        .px(px(6.0))
-        .flex()
-        .items_center()
-        .rounded(px(crate::theme::radius::CONTROL))
-        .bg(if selected {
-            Colors::tab_bg_active()
-        } else {
-            Colors::surface_panel()
+        .focus_visible(|style| {
+            style.shadow(crate::theme::elevation::focus_ring(
+                Colors::state_focus_ring(),
+            ))
         })
-        .text_size(px(10.0))
+        .relative()
+        .h(px(RIGHT_DOCK_TAB_HEIGHT))
+        .px(px(crate::theme::space::SNUG))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(crate::theme::space::TIGHT))
+        .rounded(px(crate::theme::radius::CONTROL_SM))
+        .text_size(px(crate::theme::typography::UI_XS))
         .font_weight(if selected {
             gpui::FontWeight::SEMIBOLD
         } else {
-            gpui::FontWeight::NORMAL
+            gpui::FontWeight::MEDIUM
         })
-        .text_color(if selected {
-            Colors::tab_text_active()
-        } else {
-            Colors::tab_text_muted()
-        })
+        .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
+        .hover(move |style| style.text_color(hover_text))
         .on_click(move |_, _, cx| {
             let _ = owner.update(cx, |layout, cx| {
                 layout.panels.inspector = true;
@@ -2023,7 +1462,28 @@ fn right_dock_tab_button(
                 layout.set_active_panel(tab.active_panel(), cx);
             });
         })
-        .child(label)
+        .tooltip(components::fb_tooltip(label))
+        .child(
+            gpui::svg()
+                .path(icon)
+                .w(px(RIGHT_DOCK_TAB_ICON))
+                .h(px(RIGHT_DOCK_TAB_ICON))
+                .flex_shrink_0()
+                .text_color(text),
+        )
+        .children(selected.then(|| div().flex_shrink_0().child(label)))
+        // Indicator sits on the strip's bottom edge, flush with the divider, so
+        // selecting a tab never reflows the row.
+        .children(selected.then(|| {
+            div()
+                .absolute()
+                .left(px(crate::theme::space::SNUG))
+                .right(px(crate::theme::space::SNUG))
+                .bottom_0()
+                .h(px(2.0))
+                .rounded(px(crate::theme::radius::MICRO))
+                .bg(Colors::accent_primary())
+        }))
 }
 
 #[cfg(target_os = "windows")]

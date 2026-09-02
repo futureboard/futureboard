@@ -14,9 +14,9 @@ use crate::components::timeline::timeline_state::{
     AutomationHover, AutomationMarquee, TimelineGestureContext, TimelineState, TrackRowLayout,
     AUTOMATION_CONTROL_LANE_HEIGHT, AUTOMATION_SUBLANE_HEIGHT, DEFAULT_TRACK_HEIGHT, HEADER_WIDTH,
 };
-use crate::components::timeline::timeline_surface::timeline_surface;
 use crate::components::timeline::track_header::{track_header, TrackHeaderCallbacks};
 use crate::components::timeline::track_lane::track_lane;
+use crate::components::timeline::track_lane_view::{TrackLaneView, TrackLaneViews};
 use crate::components::timeline::track_resize::{
     track_row_resize_handle, visible_track_row_range, TrackHeightResizeArmCb,
     TrackHeightResizeResetCb,
@@ -82,13 +82,21 @@ pub fn track_list(
     on_automation_control: Option<AutomationControlCallback>,
     automation_marquee: Option<&AutomationMarquee>,
     automation_hover: Option<&AutomationHover>,
+    // The arrangement grid layer, built by `Timeline` so it can be a cached
+    // view. Passed in rather than built here because a free function has no
+    // entity to cache against.
+    arrangement_surface: gpui::AnyElement,
+    // This frame's gesture snapshot, built once by `Timeline::render` and
+    // shared with the cached lane views so it is not derived twice.
+    gesture: &std::rc::Rc<TimelineGestureContext>,
+    // One cached view per track lane, for the same reason as the grid. Empty on
+    // the very first render, which falls back to the inline build below.
+    lane_views: &TrackLaneViews,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackList");
     // One per-frame coordinate/snap snapshot shared by every lane and automation
     // sub-lane gesture closure. Previously each of those cloned the entire
     // `TimelineState` (all tracks, clips, and MIDI notes) to satisfy `'static`.
-    let gesture = std::rc::Rc::new(TimelineGestureContext::from_state(state));
-    let grid_width = state.viewport.viewport_width.max(1.0);
     let grid_height = state.viewport.viewport_height.max(DEFAULT_TRACK_HEIGHT);
     let total_tracks_height = row_layout.total_height;
     let tail_start_y = (total_tracks_height - state.viewport.scroll_y).max(0.0);
@@ -182,7 +190,7 @@ pub fn track_list(
                         lane_y,
                         AUTOMATION_SUBLANE_HEIGHT,
                         state,
-                        &gesture,
+                        gesture,
                         on_automation_down.clone(),
                         on_automation_lane_action.clone(),
                         on_automation_hover.clone(),
@@ -224,26 +232,34 @@ pub fn track_list(
                                 header_callbacks.clone(),
                                 meters,
                             ))
-                            .child(track_lane(
-                                track,
-                                index,
-                                state,
-                                &gesture,
-                                row_height,
-                                on_select_track.clone(),
-                                on_select_clip.clone(),
-                                on_add_clip.clone(),
-                                on_track_context_menu.clone(),
-                                on_clip_context_menu.clone(),
-                                on_open_editor.clone(),
-                                on_range_start.clone(),
-                                on_erase_start.clone(),
-                                on_erase_clip.clone(),
-                                on_cut_clip.clone(),
-                                erase_preview_ids,
-                                on_audio_clip_process_preview.clone(),
-                                on_audio_clip_process_commit.clone(),
-                            )),
+                            .child(match lane_views.get(track.id.as_str()) {
+                                // Cached: a playhead or meter frame reuses the
+                                // clips instead of rebuilding them.
+                                Some(view) => gpui::AnyView::from(view.clone())
+                                    .cached(TrackLaneView::cached_style(row_height))
+                                    .into_any_element(),
+                                None => track_lane(
+                                    track,
+                                    index,
+                                    state,
+                                    gesture,
+                                    row_height,
+                                    on_select_track.clone(),
+                                    on_select_clip.clone(),
+                                    on_add_clip.clone(),
+                                    on_track_context_menu.clone(),
+                                    on_clip_context_menu.clone(),
+                                    on_open_editor.clone(),
+                                    on_range_start.clone(),
+                                    on_erase_start.clone(),
+                                    on_erase_clip.clone(),
+                                    on_cut_clip.clone(),
+                                    erase_preview_ids,
+                                    on_audio_clip_process_preview.clone(),
+                                    on_audio_clip_process_commit.clone(),
+                                )
+                                .into_any_element(),
+                            }),
                     )
                     .child(track_row_resize_handle(
                         row_entry,
@@ -319,7 +335,7 @@ pub fn track_list(
                         .bottom_0()
                         .bg(Colors::timeline_empty_body_background())
                 }))
-                .child(timeline_surface(state, row_layout, grid_width, grid_height)),
+                .child(arrangement_surface),
         )
         .child(
             div()

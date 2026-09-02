@@ -191,13 +191,20 @@ fn render_voice(
     transport: DirectAudio::vst3_processor::RuntimeTransportContext,
 ) {
     let mut state = midi.lock();
-    let events = std::mem::take(&mut state.pending_events);
     let mut processor = processor.clone();
     // Real transport ProcessContext immediately before process() — same thread,
     // no race. The clone shares the same C++ processor via Arc.
     processor.set_process_context(&transport);
-    let _ = processor.process_stereo_block_with_midi(in_l, in_r, out_l, out_r, &events);
-    if events.is_empty() && state.active_notes.is_empty() {
+    let _ =
+        processor.process_stereo_block_with_midi(in_l, in_r, out_l, out_r, &state.pending_events);
+    // Borrowed and cleared rather than `mem::take`n: taking handed the buffer
+    // to this frame and dropped it at the end of the block, so the next MIDI
+    // push allocated a fresh `Vec` — a malloc/free pair per block on the audio
+    // producer thread for as long as any note is held. Clearing keeps the
+    // capacity the voice already grew to.
+    let had_events = !state.pending_events.is_empty();
+    state.pending_events.clear();
+    if !had_events && state.active_notes.is_empty() {
         state.tail_blocks = state.tail_blocks.saturating_sub(1);
     } else {
         state.tail_blocks = PREVIEW_TAIL_BLOCKS;
@@ -214,14 +221,23 @@ fn render_voice_interleaved(
     transport: DirectAudio::vst3_processor::RuntimeTransportContext,
 ) -> usize {
     let mut state = midi.lock();
-    let events = std::mem::take(&mut state.pending_events);
     let mut processor = processor.clone();
     processor.set_process_context(&transport);
     let channels = output_channels.clamp(1, MAX_CHANNELS);
     let got_channels = processor
-        .process_main_output_block_with_midi(in_l, in_r, out_interleaved, channels, &events)
+        .process_main_output_block_with_midi(
+            in_l,
+            in_r,
+            out_interleaved,
+            channels,
+            &state.pending_events,
+        )
         .unwrap_or(0);
-    if events.is_empty() && state.active_notes.is_empty() {
+    // See `render_voice`: clear, never `mem::take` — the taken buffer was
+    // dropped every block and reallocated by the next MIDI push.
+    let had_events = !state.pending_events.is_empty();
+    state.pending_events.clear();
+    if !had_events && state.active_notes.is_empty() {
         state.tail_blocks = state.tail_blocks.saturating_sub(1);
     } else {
         state.tail_blocks = PREVIEW_TAIL_BLOCKS;

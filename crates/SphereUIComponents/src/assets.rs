@@ -5,6 +5,14 @@ pub struct SvgIcon {
 
 pub mod icons {
     pub const PLAY: &str = include_str!("../../../packages/shared/lucide/icons/play.svg");
+    pub const LAYERS: &str = include_str!("../../../packages/shared/lucide/icons/layers.svg");
+    pub const PALETTE: &str = include_str!("../../../packages/shared/lucide/icons/palette.svg");
+    pub const MOVE_HORIZONTAL: &str =
+        include_str!("../../../packages/shared/lucide/icons/move-horizontal.svg");
+    pub const TYPE: &str = include_str!("../../../packages/shared/lucide/icons/type.svg");
+    pub const LIST_MUSIC: &str =
+        include_str!("../../../packages/shared/lucide/icons/list-music.svg");
+    pub const GAUGE: &str = include_str!("../../../packages/shared/lucide/icons/gauge.svg");
     pub const PAUSE: &str = include_str!("../../../packages/shared/lucide/icons/pause.svg");
     pub const SQUARE: &str = include_str!("../../../packages/shared/lucide/icons/square.svg");
     pub const CIRCLE: &str = include_str!("../../../packages/shared/lucide/icons/circle.svg");
@@ -148,6 +156,12 @@ pub const ICON_MEMORY_STICK_PATH: &str = "icons/memory-stick.svg";
 pub const ICON_AUDIO_LINES_PATH: &str = "icons/audio-lines.svg";
 pub const ICON_HARD_DRIVE_PATH: &str = "icons/hard-drive.svg";
 pub const ICON_MUSIC_PATH: &str = "icons/music.svg";
+pub const ICON_LAYERS_PATH: &str = "icons/layers.svg";
+pub const ICON_PALETTE_PATH: &str = "icons/palette.svg";
+pub const ICON_MOVE_HORIZONTAL_PATH: &str = "icons/move-horizontal.svg";
+pub const ICON_TYPE_PATH: &str = "icons/type.svg";
+pub const ICON_LIST_MUSIC_PATH: &str = "icons/list-music.svg";
+pub const ICON_GAUGE_PATH: &str = "icons/gauge.svg";
 pub const ICON_GIT_MERGE_PATH: &str = "icons/git-merge.svg";
 pub const ICON_GIT_FORK_PATH: &str = "icons/git-fork.svg";
 pub const ICON_CORNER_DOWN_LEFT_PATH: &str = "icons/corner-down-left.svg";

@@ -17,11 +17,11 @@ thread_local! {
 }
 
 fn render_arrangement_with(
-    snapshot: &TimelineRenderSnapshot,
+    snapshot: TimelineRenderSnapshot,
     renderer: &mut dyn TimelineRenderer,
     backend: TimelineRendererBackend,
 ) -> gpui::AnyElement {
-    gpui_paint::log_snapshot_stats(snapshot, backend.label());
+    gpui_paint::log_snapshot_stats(&snapshot, backend.label());
     match renderer.render_arrangement(snapshot) {
         TimelineRenderOutput::Gpui(element) => element,
         #[cfg(feature = "gpu-renderer")]
@@ -36,7 +36,7 @@ fn render_arrangement_with(
     }
 }
 
-fn with_renderer(snapshot: &TimelineRenderSnapshot) -> gpui::AnyElement {
+fn with_renderer(snapshot: TimelineRenderSnapshot) -> gpui::AnyElement {
     if TIMELINE_RENDERER.try_with(|_| ()).is_err() {
         let preferred = TimelineRendererBackend::from_env();
         let (mut renderer, backend) = create_timeline_renderer_with_fallback(preferred);
@@ -52,6 +52,58 @@ fn with_renderer(snapshot: &TimelineRenderSnapshot) -> gpui::AnyElement {
         let (backend, renderer) = slot.as_mut().expect("renderer slot");
         render_arrangement_with(snapshot, renderer.as_mut(), *backend)
     })
+}
+
+/// The arrangement grid as its own view, so the studio can cache it.
+///
+/// The grid is a pure function of the timeline state — no callbacks, no
+/// interaction — and it is a *sibling* of both the track rows and the playhead
+/// overlay. That is exactly the shape `AnyView::cached` isolates: a playhead
+/// frame or a meter tick dirties `Timeline` (GPUI marks a notified view's
+/// ancestors), but not this view, so the snapshot build and the per-line
+/// `paint_quad` pass are skipped entirely on those frames.
+pub struct TimelineSurfaceView {
+    timeline: gpui::WeakEntity<crate::components::timeline::Timeline>,
+    /// The grid follows scroll, zoom, tempo, clips and track heights — all
+    /// `Timeline` state, so a `Timeline` notify is the invalidation signal.
+    _observer: gpui::Subscription,
+}
+
+impl TimelineSurfaceView {
+    pub fn new(
+        timeline: &gpui::Entity<crate::components::timeline::Timeline>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let _observer = cx.observe(timeline, |_, _, cx| cx.notify());
+        Self {
+            timeline: timeline.downgrade(),
+            _observer,
+        }
+    }
+
+    /// Matches the renderer's own root: an absolutely-positioned layer filling
+    /// the arrangement body.
+    pub fn cached_style() -> gpui::StyleRefinement {
+        gpui::StyleRefinement::default()
+            .absolute()
+            .left_0()
+            .top_0()
+            .right_0()
+            .bottom_0()
+    }
+}
+
+impl gpui::Render for TimelineSurfaceView {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let Some(timeline) = self.timeline.upgrade() else {
+            return div().into_any_element();
+        };
+        timeline.read(cx).render_arrangement_surface()
+    }
 }
 
 /// Eagerly construct the thread-local timeline renderer — and, for the WGPU
@@ -104,5 +156,5 @@ pub fn timeline_surface(
     snapshot.viewport.width = grid_width.max(1.0);
     snapshot.viewport.height = grid_height.max(1.0);
 
-    with_renderer(&snapshot)
+    with_renderer(snapshot)
 }

@@ -21,7 +21,12 @@ pub trait TimelineRenderer: Send {
     fn backend_name(&self) -> &'static str;
 
     /// Render the scrollable arrangement body (grid region width × height).
-    fn render_arrangement(&mut self, snapshot: &TimelineRenderSnapshot) -> TimelineRenderOutput;
+    ///
+    /// Takes the snapshot by value: it is built fresh for this frame and used
+    /// once, and the GPUI path has to own it to move it into the canvas
+    /// closure. Passing a reference meant cloning every grid line, clip and
+    /// lane on every arrangement repaint.
+    fn render_arrangement(&mut self, snapshot: TimelineRenderSnapshot) -> TimelineRenderOutput;
 }
 
 /// Active backend for arrangement rendering.

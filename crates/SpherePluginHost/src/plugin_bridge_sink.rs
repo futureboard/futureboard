@@ -5,7 +5,9 @@
 //! and calls these methods per block to read the host's produced output and
 //! request the next one. Methods only touch the lock-free shared region
 //! (atomics + raw buffer copies), never allocate or lock. Output reads use a
-//! hard-bounded 1 ms handoff grace to absorb cross-process scheduler jitter.
+//! handoff grace bounded by a fraction of the *current* block period to absorb
+//! cross-process scheduler jitter without spending the device callback's own
+//! budget — see [`output_handoff_grace`].
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -52,13 +54,44 @@ pub struct SharedRegionSink {
     output_channel_peaks: [AtomicU32; MAX_CHANNELS],
 }
 
+/// Share of one block period the sink may spend waiting for a block the host
+/// has not published yet.
+///
 /// Cross-process scheduling can publish the previous block a few microseconds
-/// after the device callback begins. A single non-blocking probe turned that
-/// harmless scheduler jitter into a full block of silence. Give the already
-/// requested block a small, hard-bounded grace period; this remains well below
-/// a 256-frame / 48 kHz ASIO period (5.33 ms), never replays stale output, and
-/// still returns immediately when the host met its deadline.
-const OUTPUT_HANDOFF_GRACE: Duration = Duration::from_millis(1);
+/// after the device callback begins, and a single non-blocking probe turned
+/// that harmless jitter into a full block of silence. The wait that absorbs it
+/// runs *on the device callback*, though, so it spends the same budget the rest
+/// of the mix has to fit into — and it is paid per bridged instance.
+///
+/// This used to be a flat 1 ms, justified against a 256-frame / 48 kHz period
+/// (5.33 ms). That justification does not survive the buffer sizes people
+/// actually play instruments at: 1 ms is 37% of a 128-frame period and 75% of a
+/// 64-frame one, so two bridged instruments stalling in the same callback
+/// overrun the period outright. A plug-in stall then stops being one silent
+/// plug-in block and becomes a device xrun that cuts the whole mix — and the
+/// spin actively works against itself, burning the core the host's producer
+/// thread needs to finish that very block.
+///
+/// Deriving it from the live block period keeps the original intent ("well
+/// below the period") true at every buffer size instead of only at 256+.
+const OUTPUT_HANDOFF_GRACE_DIVISOR: u32 = 8;
+
+/// Ceiling for the grace, so a large buffer does not turn an eighth of its
+/// period into many milliseconds of spinning.
+const OUTPUT_HANDOFF_GRACE_MAX: Duration = Duration::from_millis(1);
+
+/// Grace for one block at `frames` / `sample_rate`. Pure, so the bound can be
+/// checked without a device or a second process.
+#[inline]
+fn output_handoff_grace(frames: u32, sample_rate: u32) -> Duration {
+    if frames == 0 || sample_rate == 0 {
+        // No published block geometry yet — nothing to size a wait against.
+        return Duration::ZERO;
+    }
+    let period_nanos = (frames as u64).saturating_mul(1_000_000_000) / sample_rate as u64;
+    Duration::from_nanos(period_nanos / OUTPUT_HANDOFF_GRACE_DIVISOR as u64)
+        .min(OUTPUT_HANDOFF_GRACE_MAX)
+}
 
 impl std::fmt::Debug for SharedRegionSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -99,10 +132,16 @@ impl SharedRegionSink {
         // Request 0 means no host block has ever been kicked (startup), so
         // there is nothing useful to wait for yet.
         if done == last && bridge.request_seq.load(Ordering::Acquire) != 0 {
-            let deadline = Instant::now() + OUTPUT_HANDOFF_GRACE;
-            while done == last && Instant::now() < deadline {
-                std::hint::spin_loop();
-                done = bridge.done_seq.load(Ordering::Acquire);
+            let grace = output_handoff_grace(
+                bridge.block_frames.load(Ordering::Relaxed),
+                bridge.sample_rate.load(Ordering::Relaxed),
+            );
+            if !grace.is_zero() {
+                let deadline = Instant::now() + grace;
+                while done == last && Instant::now() < deadline {
+                    std::hint::spin_loop();
+                    done = bridge.done_seq.load(Ordering::Acquire);
+                }
             }
         }
 
@@ -340,6 +379,41 @@ impl PluginBridgeSink for SharedRegionSink {
 mod tests {
     use super::*;
     use crate::audio_bridge::SharedAudioRegion;
+
+    /// The wait runs on the device callback, so it must stay a small slice of
+    /// the block period at *every* buffer size — a flat millisecond was 75% of
+    /// a 64-frame period, which is how one stalled plug-in took the whole mix
+    /// down with it.
+    #[test]
+    fn handoff_grace_stays_a_small_slice_of_the_block_period() {
+        for frames in [32u32, 64, 128, 256, 512] {
+            let period = Duration::from_nanos(frames as u64 * 1_000_000_000 / 48_000);
+            let grace = output_handoff_grace(frames, 48_000);
+            assert!(
+                grace * (OUTPUT_HANDOFF_GRACE_DIVISOR / 2) < period,
+                "grace {grace:?} is not well below the {frames}-frame period {period:?}"
+            );
+        }
+    }
+
+    /// A large buffer must not turn an eighth of its period into milliseconds
+    /// of spinning.
+    #[test]
+    fn handoff_grace_is_capped_for_large_buffers() {
+        assert_eq!(
+            output_handoff_grace(4096, 48_000),
+            OUTPUT_HANDOFF_GRACE_MAX,
+            "an eighth of an 85ms period must clamp to the ceiling"
+        );
+    }
+
+    /// Before the first block is published there is no geometry to size a wait
+    /// against, and spinning on nothing would just burn the callback.
+    #[test]
+    fn handoff_grace_is_zero_without_block_geometry() {
+        assert!(output_handoff_grace(0, 48_000).is_zero());
+        assert!(output_handoff_grace(128, 0).is_zero());
+    }
 
     /// The engine-side sink reads exactly what the host produced into `audio_out`
     /// (deinterleaved), and `request_block` drives the handshake — validates the

@@ -53,6 +53,7 @@ pub use mixer_tree_sidebar_view::MixerTreeSidebar;
 mod mixer_window;
 pub(crate) use mixer_window::{external_mixer_debug, external_mixer_debug_enabled};
 pub mod gpu_editor_diagnostics;
+pub mod inspector_kit;
 pub mod native_editor_shell;
 pub mod numeric_edit;
 pub mod panel;
@@ -99,9 +100,9 @@ pub use add_track_dialog::{
     AddTrackWindow,
 };
 pub use app_chrome::{
-    app_chrome, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb, BpmDragCb, BpmDragSample,
-    BpmMenuCb, ChromeActionCb, PanelChromeState, ProjectChromeState, TransportChromeState,
-    BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
+    app_chrome, app_chrome_drawn_height, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb,
+    BpmDragCb, BpmDragSample, BpmMenuCb, ChromeActionCb, PanelChromeState, ProjectChromeState,
+    TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
 };
 pub use ara_editor_host::AraEditorHost;
 pub use audio_editor_host::AudioEditorHost;
@@ -127,7 +128,7 @@ pub use command_palette::{
 };
 pub use controls::{
     fb_button, fb_checkbox, fb_color_swatch, fb_field_label, fb_form_row, fb_section_header,
-    fb_section_label, fb_segmented_button, fb_stepper_button, FbButtonKind,
+    fb_section_label, fb_segmented_button, fb_stepper_button, fb_tooltip, FbButtonKind,
 };
 pub use editor_panel::ClipEditorPanel;
 pub(crate) use effect_editor_tab_view::EffectEditorTabView;
@@ -193,7 +194,7 @@ pub use settings_dialog::{
     open_settings_window, settings_dialog, HardwareCombo, OnSettingUpdate, SettingsDialogCallbacks,
     SettingsDialogState, SettingsTab, SettingsWindow,
 };
-pub use sidebar::sidebar;
+pub use sidebar::{sidebar, SIDEBAR_WIDTH};
 pub use slider::slider;
 pub use solfege_editor::{SolfegeEditorPanel, SolfegeEditorTab};
 pub use song_text_panel::{

@@ -24,20 +24,6 @@ mod license_activation_dialog {
     ));
 }
 
-mod auth {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/futureboard-professional/auth.rs"
-    ));
-}
-
-mod auth_dialog {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/futureboard-professional/auth_dialog.rs"
-    ));
-}
-
 mod eula {
     include!(concat!(
         env!("OUT_DIR"),
@@ -83,8 +69,6 @@ pub fn open_license_activation(
         eprintln!("[LicenseActivation] failed to open dialog: {error}");
     }
 }
-
-use sphere_ui_components::account::{AccountAction, AccountSnapshot};
 
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,16 +141,9 @@ pub fn install() -> Result<(), String> {
         },
     ));
 
-    // Account/auth is available only on a Supabase-configured build. When it is,
-    // load any stored session (refreshing it in the background) and register the
-    // titlebar account provider + action handler.
-    if auth::auth_configured() {
-        auth::init_session();
-        sphere_ui_components::account::set_account_provider(std::sync::Arc::new(account_snapshot));
-        sphere_ui_components::account::set_account_action_handler(std::sync::Arc::new(
-            handle_account_action,
-        ));
-    }
+    // Account sign-in is not an entitlement and is installed for every edition
+    // by `sphere_ui_components::account::install_default_account_provider`. A
+    // Professional build only adds licensing on top of that identity.
 
     install_licensed_providers()?;
     license::spawn_renewal_if_due();
@@ -206,42 +183,6 @@ fn install_staged_update(
     staged: &std::path::Path,
 ) -> Result<sphere_ui_components::update_service::InstallOutcome, String> {
     crate::updater::install_update(staged, &crate::updater::cache_root())
-}
-
-/// Snapshot of the signed-in user for the titlebar chip. Reads the in-memory
-/// session each call, so sign-in / sign-out reflect without extra wiring.
-fn account_snapshot() -> AccountSnapshot {
-    match auth::current_profile() {
-        Some(profile) => AccountSnapshot {
-            signed_in: true,
-            username: profile.username,
-            email: profile.email,
-            avatar_url: profile.avatar_url,
-        },
-        None => AccountSnapshot::default(),
-    }
-}
-
-/// Route a titlebar account action to the sign-in dialog / account menu / sign
-/// out. Opening windows and refreshing chrome both need the live `App`.
-fn handle_account_action(action: AccountAction, window: &mut gpui::Window, cx: &mut gpui::App) {
-    let owner = Some(window.bounds());
-    match action {
-        AccountAction::SignIn => {
-            if let Err(error) = auth_dialog::open_login_window(owner, cx) {
-                eprintln!("[Auth] failed to open sign-in dialog: {error}");
-            }
-        }
-        AccountAction::OpenMenu => {
-            if let Err(error) = auth_dialog::open_account_menu_window(owner, cx) {
-                eprintln!("[Auth] failed to open account menu: {error}");
-            }
-        }
-        AccountAction::SignOut => {
-            auth::sign_out();
-            cx.refresh_windows();
-        }
-    }
 }
 
 /// Build the edition/license snapshot the shared About panel renders. Re-reads

@@ -244,6 +244,17 @@ pub(crate) struct AudioBridgeState {
     /// One aggregated surface for Audio Connections / routing warnings. See
     /// [`crate::layout::routing_warnings`] — never one dialog per track.
     pub routing_warnings: crate::layout::routing_warnings::RoutingWarningState,
+    /// Earliest instant the control poll may re-attempt opening a stream whose
+    /// warm-up failed. `None` = attempt on the next poll.
+    pub stream_warm_retry_at: Option<Instant>,
+    /// Current retry spacing. Doubles per failed attempt up to
+    /// [`STREAM_WARM_MAX_BACKOFF`]; `AudioEngine::start` opens the device on
+    /// this thread, so a tight retry would stutter the UI while a device is
+    /// genuinely missing.
+    pub stream_warm_backoff: Option<Duration>,
+    /// Last failure text logged for a retry, so a device that stays missing
+    /// reports once instead of once per attempt.
+    pub stream_warm_last_error: Option<String>,
 }
 
 impl Default for AudioBridgeState {
@@ -288,6 +299,9 @@ impl Default for AudioBridgeState {
             sample_rate_notice_until: None,
             sample_rate_notice_text: String::new(),
             routing_warnings: Default::default(),
+            stream_warm_retry_at: None,
+            stream_warm_backoff: None,
+            stream_warm_last_error: None,
         }
     }
 }
@@ -859,6 +873,15 @@ impl StudioLayout {
             .unwrap_or(true);
         self.audio_bridge.running = stats.running;
         self.audio_bridge.last_error = stats.last_error.clone();
+        // The session's normal state is an open stream, whether or not the
+        // transport is moving: input monitoring, instrument preview and
+        // metering all depend on it. Re-assert it here rather than leaving a
+        // failed warm-up waiting for the user to press Play.
+        if stats.stream_open && stats.running {
+            self.clear_stream_warm_retry();
+        } else {
+            self.retry_audio_stream_warm();
+        }
 
         let engine_beat = stats.position_beats.max(0.0) as f32;
         let sync_changed = (engine_beat - self.engine_sync.playhead_beat).abs() > 0.0001
@@ -998,10 +1021,15 @@ impl StudioLayout {
         // playhead motion.
         //
         // While playing, the only root-visible thing the playhead changes is
-        // the chrome's bar.beat readout, so that is the trigger. The playhead
+        // the chrome's bar.beat readout — and the chrome is now its own cached
+        // region, so the beat repaints *it* rather than the shell. The playhead
         // line, auto-scroll, meters, and the status footer all reach their own
-        // isolated entities above and repaint without the shell.
-        state_changed || transport_display_changed || preview_playhead_moved
+        // isolated entities above and repaint without the shell too.
+        if transport_display_changed {
+            crate::perf::record_notify("transport-readout");
+            self.notify_app_chrome(cx);
+        }
+        state_changed || preview_playhead_moved
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's
@@ -1770,6 +1798,78 @@ impl StudioLayout {
     pub(crate) fn mark_engine_media_dirty(&mut self) {
         self.audio_bridge.project_dirty = true;
         self.audio_bridge.media_dirty = true;
+    }
+
+    /// First retry spacing after a failed warm-up. Short, because the usual
+    /// cause is transient: an in-studio project switch closes the previous
+    /// device and the replacement engine opens before the driver released it.
+    const STREAM_WARM_FIRST_RETRY: Duration = Duration::from_millis(300);
+    /// Ceiling for the retry spacing once a device is persistently unavailable.
+    const STREAM_WARM_MAX_BACKOFF: Duration = Duration::from_secs(3);
+
+    /// Bring the session back to its normal state — an open, running stream —
+    /// after a warm-up that failed at install.
+    ///
+    /// `build_and_warm_audio_engine` deliberately does not fail the session
+    /// when `AudioEngine::start` fails; it logs "will retry on first Play" and
+    /// hands back an engine whose stream is closed. But the only caller of
+    /// [`Self::ensure_audio_stream_warm`] was the transport, so the retry
+    /// waited on a *user gesture*: nothing was audible — no input monitoring,
+    /// no instrument preview, no metering — until someone pressed Play. The
+    /// retry belongs on the session's own control poll.
+    ///
+    /// Control thread only, and never from the audio callback.
+    fn retry_audio_stream_warm(&mut self) {
+        if crate::shutdown::ShutdownState::global().is_shutting_down() {
+            return;
+        }
+        // A session still installing owns the device handoff; opening one here
+        // would race the loader's own engine.
+        if !self.session_install_status.is_ready() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .audio_bridge
+            .stream_warm_retry_at
+            .is_some_and(|next| now < next)
+        {
+            return;
+        }
+        let backoff = self
+            .audio_bridge
+            .stream_warm_backoff
+            .map(|previous| (previous * 2).min(Self::STREAM_WARM_MAX_BACKOFF))
+            .unwrap_or(Self::STREAM_WARM_FIRST_RETRY);
+        self.audio_bridge.stream_warm_backoff = Some(backoff);
+        self.audio_bridge.stream_warm_retry_at = Some(now + backoff);
+
+        if self.ensure_audio_stream_warm() {
+            eprintln!("[audio] stream opened by session retry after a failed warm-up");
+            self.clear_stream_warm_retry();
+            return;
+        }
+        // Report a device that stays unavailable once, not once per attempt.
+        if self.audio_bridge.last_error != self.audio_bridge.stream_warm_last_error {
+            self.audio_bridge
+                .stream_warm_last_error
+                .clone_from(&self.audio_bridge.last_error);
+            eprintln!(
+                "[audio] stream still closed after retry: {}",
+                self.audio_bridge
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("unknown error")
+            );
+        }
+    }
+
+    /// Called once the stream is confirmed open, so the next session (or the
+    /// next device loss) retries promptly instead of inheriting a long backoff.
+    fn clear_stream_warm_retry(&mut self) {
+        self.audio_bridge.stream_warm_retry_at = None;
+        self.audio_bridge.stream_warm_backoff = None;
+        self.audio_bridge.stream_warm_last_error = None;
     }
 
     pub(super) fn ensure_audio_stream_warm(&mut self) -> bool {

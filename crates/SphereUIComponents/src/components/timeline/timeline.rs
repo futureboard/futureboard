@@ -191,8 +191,9 @@ pub struct Timeline {
     pen_clip_draw: Option<ClipDrawPreview>,
     /// Pointer-tool empty-lane marquee. Rule: Pointer + empty lane drag starts
     /// replace-marquee; Ctrl/Cmd + Pointer + empty lane drag starts additive
-    /// marquee. Clips, rulers, toolbar controls, and non-pointer tools never
-    /// start this gesture.
+    /// marquee. Ctrl/Cmd wins over a MIDI or instrument lane's instant-create
+    /// gesture, so those tracks can rubber-band too. Clips, rulers, toolbar
+    /// controls, and non-pointer tools never start this gesture.
     range_select_drag: Option<RangeSelectDrag>,
     /// Right-drag erase: clip ids already queued for deletion this gesture.
     erase_clip_drag: Option<HashSet<String>>,
@@ -271,6 +272,18 @@ pub struct Timeline {
     /// instead of the arrangement. Built and pruned by `render`, fed by the
     /// audio poll.
     track_meters: crate::components::timeline::vu_meter::TrackMeterViews,
+    /// The arrangement grid's own entity, built on first render and rendered
+    /// through `AnyView::cached`. Keeps the grid out of playhead and meter
+    /// frames; see `timeline_surface::TimelineSurfaceView`.
+    arrangement_surface:
+        Option<gpui::Entity<crate::components::timeline::timeline_surface::TimelineSurfaceView>>,
+    /// One cached view per track clip lane. Built and pruned by `render` next
+    /// to the meters; see `track_lane_view`.
+    track_lanes: crate::components::timeline::track_lane_view::TrackLaneViews,
+    /// This frame's lane inputs, published by `render` for the lane views to
+    /// render through. `None` before the first render.
+    frame_lane_ctx:
+        Option<std::rc::Rc<crate::components::timeline::track_lane_view::LaneFrameContext>>,
     /// Absolute root folder of the saved project, pushed by `StudioLayout` each
     /// render. `None` for an Untitled (unsaved) project. Used to eagerly copy
     /// dropped audio into the project's `Assets/Audio` folder.

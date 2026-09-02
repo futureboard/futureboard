@@ -3,6 +3,8 @@ name = "sphere_ui_components"
 version = "0.1.0"
 edition = "2021"
 autobins = false
+# Bakes FUTUREBOARD_AUTH_API_URL for `auth.rs`; see build.rs.
+build = "build.rs"
 license.workspace = true
 
 [lib]
@@ -98,6 +100,7 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 base64.workspace = true
+rand.workspace = true
 pollster = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }

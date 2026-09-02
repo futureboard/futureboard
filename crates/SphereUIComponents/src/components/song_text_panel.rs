@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::components::edit::EditCommand;
+use crate::components::inspector_kit;
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputState,
 };
@@ -27,6 +28,16 @@ pub enum SongTextPanelKind {
 }
 
 impl SongTextPanelKind {
+    /// Header glyph. Matches the dock tab so a popped-out window and the docked
+    /// tab read as the same view.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::ChordDisplay => crate::assets::ICON_MUSIC_PATH,
+            Self::LyricDisplay => crate::assets::ICON_NEWSPAPER_PATH,
+            Self::LyricEditor => crate::assets::ICON_PENCIL_PATH,
+        }
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Self::ChordDisplay => "Chords",
@@ -607,7 +618,7 @@ impl Render for SongTextPanelView {
                         Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                 });
             })
-            .child(panel_header(kind.title()));
+            .child(panel_header(kind.icon(), kind.title()));
 
         match kind {
             SongTextPanelKind::ChordDisplay | SongTextPanelKind::LyricDisplay => {
@@ -889,20 +900,32 @@ impl Render for SongTextPanelView {
     }
 }
 
-fn panel_header(title: &'static str) -> impl IntoElement {
+fn panel_header(icon: &'static str, title: &'static str) -> impl IntoElement {
     div()
-        .h(px(28.0))
+        .h(px(crate::theme::size::PROMINENT))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .px(px(9.0))
+        .gap(px(crate::theme::space::SNUG))
+        .px(px(crate::theme::space::BASE))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
-        .text_size(px(10.5))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(Colors::tab_text())
-        .child(title)
+        .child(
+            gpui::svg()
+                .path(icon)
+                .w(px(inspector_kit::ICON))
+                .h(px(inspector_kit::ICON))
+                .flex_shrink_0()
+                .text_color(Colors::text_muted()),
+        )
+        .child(
+            div()
+                .text_size(px(crate::theme::typography::UI_XS))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_secondary())
+                .child(title),
+        )
 }
 
 fn active_summary(
@@ -928,19 +951,27 @@ fn active_summary(
         .bg(Colors::surface_panel_alt())
         .child(
             div()
-                .text_size(px(18.0))
-                .font_weight(gpui::FontWeight::BOLD)
+                .text_size(px(if active.is_some() {
+                    18.0
+                } else {
+                    crate::theme::typography::UI_SM
+                }))
+                .font_weight(if active.is_some() {
+                    gpui::FontWeight::BOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                })
                 .text_color(if active.is_some() {
                     Colors::text_primary()
                 } else {
-                    Colors::text_faint()
+                    Colors::text_muted()
                 })
                 .truncate()
                 .child(active.map(SongTextEvent::text).unwrap_or(empty).to_string()),
         )
         .child(
             div()
-                .text_size(px(9.0))
+                .text_size(px(crate::theme::typography::UI_XS))
                 .text_color(Colors::text_muted())
                 .child(format!("Playhead {playhead_label}")),
         )
@@ -966,11 +997,11 @@ fn song_text_row(
     };
     div()
         .id(("song-text-row", row_id))
-        .h(px(28.0))
+        .h(px(crate::theme::size::ROW))
         .flex()
         .items_center()
-        .gap(px(7.0))
-        .px(px(8.0))
+        .gap(px(crate::theme::space::SNUG))
+        .px(px(crate::theme::space::BASE))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(if selected {
@@ -984,16 +1015,18 @@ fn song_text_row(
         .hover(|style| style.bg(Colors::surface_hover()))
         .child(
             div()
-                .w(px(72.0))
-                .text_size(px(9.5))
+                .w(px(inspector_kit::LABEL_COL))
+                .flex_shrink_0()
+                .text_size(px(crate::theme::typography::UI_XS))
                 .text_color(Colors::text_muted())
                 .child(position_label.to_string()),
         )
         .child(
             div()
-                .w(px(42.0))
-                .text_size(px(8.5))
-                .font_weight(gpui::FontWeight::BOLD)
+                .w(px(38.0))
+                .flex_shrink_0()
+                .text_size(px(crate::theme::typography::DENSE_LABEL))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(type_color)
                 .child(event_type.label()),
         )
@@ -1002,7 +1035,7 @@ fn song_text_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(10.5))
+                .text_size(px(crate::theme::typography::UI_SM))
                 .font_weight(if event_type == SongTextEventType::Chord {
                     gpui::FontWeight::SEMIBOLD
                 } else {
@@ -1020,8 +1053,8 @@ fn song_text_row(
 fn info_value(label: &'static str, value: &str) -> impl IntoElement {
     div()
         .flex()
-        .gap(px(5.0))
-        .text_size(px(9.5))
+        .gap(px(crate::theme::space::TIGHT))
+        .text_size(px(crate::theme::typography::UI_XS))
         .child(div().text_color(Colors::text_muted()).child(label))
         .child(
             div()
@@ -1033,30 +1066,33 @@ fn info_value(label: &'static str, value: &str) -> impl IntoElement {
 
 fn field_label(label: &'static str) -> impl IntoElement {
     div()
-        .text_size(px(9.0))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(Colors::text_muted())
+        .text_size(px(crate::theme::typography::UI_XS))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_secondary())
         .child(label)
 }
 
 fn empty_state(message: &'static str) -> impl IntoElement {
     div()
         .absolute()
-        .inset_0()
+        .left_0()
+        .top_0()
+        .right_0()
+        .bottom_0()
         .flex()
-        .items_center()
-        .justify_center()
-        .px(px(18.0))
-        .text_size(px(10.5))
-        .text_color(Colors::text_faint())
-        .child(message)
+        .min_w_0()
+        .child(inspector_kit::ins_empty(
+            crate::assets::ICON_LIST_MUSIC_PATH,
+            "Nothing here yet",
+            message,
+        ))
 }
 
 fn action_button(label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(label)
-        .h(px(23.0))
-        .px(px(7.0))
+        .h(px(crate::theme::size::DEFAULT))
+        .px(px(crate::theme::space::BASE))
         .flex()
         .items_center()
         .justify_center()

@@ -25,15 +25,14 @@ use crate::components::color_picker::{
     ColorPickerState,
 };
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
-use crate::components::controls::{
-    fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
-};
+use crate::components::controls::{fb_button, fb_checkbox, fb_form_row, FbButtonKind};
 use crate::components::inspector::{
     inspector_checkbox as shared_inspector_checkbox, inspector_hint_text, inspector_mini_button,
     inspector_numeric_stepper, inspector_numeric_stepper_with_drag_callbacks,
     inspector_row as shared_inspector_row, inspector_section as shared_inspector_section,
     inspector_select, inspector_value, InspectorSelectOption,
 };
+use crate::components::inspector_kit;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::slider::slider_with_drag_callbacks;
 use crate::components::solfege_editor::SolfegePitchSummary;
@@ -535,7 +534,10 @@ fn no_selection(track_count: usize, i18n: I18n) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(fb_section_header("PROJECT"))
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_FILE_PATH,
+                    "PROJECT",
+                ))
                 .child(kv_row(
                     i18n.tr("wizard.summary.tracks"),
                     track_count.to_string(),
@@ -544,33 +546,21 @@ fn no_selection(track_count: usize, i18n: I18n) -> impl IntoElement {
 }
 
 fn kv_row(key: impl Into<String>, value: impl Into<String>) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .justify_between()
-        .items_center()
-        .gap(px(8.0))
-        .py(px(3.0))
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_size(px(10.5))
-                .text_color(Colors::text_muted())
-                .child(key.into()),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(11.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_primary())
-                .child(value.into()),
-        )
+    inspector_kit::ins_kv_row(key, value)
 }
 
 /// Header strip shown at the top of every populated inspector: color chip,
 /// title, and a type badge.
+fn inspector_header_icon(
+    icon: &'static str,
+    accent: gpui::Rgba,
+    title: impl Into<String>,
+    badge: impl Into<String>,
+) -> impl IntoElement {
+    inspector_kit::ins_header(icon, accent, title, badge)
+}
+
+#[allow(dead_code)]
 fn inspector_header(
     accent: gpui::Rgba,
     title: impl Into<String>,
@@ -1319,11 +1309,9 @@ fn routing_section(
     instrument_targets: &[(String, String)],
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(fb_section_header("ROUTING"));
+    let mut section = inspector_kit::ins_section_container().child(
+        inspector_kit::ins_section_header(assets::ICON_ROUTE_PATH, "ROUTING"),
+    );
 
     match track.track_type {
         TrackType::Audio => {
@@ -1611,11 +1599,11 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
     } else {
         plugin_slot_name(slot, "No Instrument")
     };
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(fb_section_header("INSTRUMENT"))
+    let mut section = inspector_kit::ins_section_container()
+        .child(inspector_kit::ins_section_header(
+            assets::ICON_MUSIC_PATH,
+            "INSTRUMENT",
+        ))
         .child(kv_row("Plugin", slot_name))
         .child(kv_row(
             "Format",
@@ -1691,33 +1679,13 @@ pub fn solfege_panel(
             .child(solfege_instrument_section(track, solfege))
             .children(pitch.map(solfege_note_pitch_section))
     } else {
-        scroll_body()
-            .child(fb_section_header("SOLFEGE ENGINE"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(7.0))
-                    .px(px(16.0))
-                    .py(px(24.0))
-                    .text_center()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::text_secondary())
-                            .child("Select a Solfege Engine track"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(Colors::text_faint())
-                            .child(
-                                "FBMX model, voice, preset, and performance details appear here.",
-                            ),
-                    ),
-            )
+        // The dock-wide empty state, so Solfege reads like Inspect and Chords
+        // when it has nothing to show rather than like a third design.
+        scroll_body().child(inspector_kit::ins_empty(
+            assets::ICON_AUDIO_LINES_PATH,
+            "Select a Solfege Engine track",
+            "FBMX model, voice, preset, and performance details appear here.",
+        ))
     };
 
     div()
@@ -1742,18 +1710,22 @@ pub fn solfege_panel(
 /// dock keeps a single type scale.
 fn solfege_note_pitch_section(pitch: SolfegePitchSummary) -> impl IntoElement {
     let (low, high) = pitch.range_cents;
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .child(fb_section_header("NOTE"))
+    let mut note = inspector_kit::ins_section_container()
+        .child(inspector_kit::ins_section_header(
+            assets::ICON_MUSIC_PATH,
+            "NOTE",
+        ))
         .child(kv_row("Pitch", pitch.name.clone()))
         .child(kv_row("Start", format!("{:.3}", pitch.start_beats)))
         .child(kv_row("Length", format!("{:.3}", pitch.length_beats)));
     if let Some(articulation) = pitch.articulation {
-        section = section.child(kv_row("Artic.", articulation));
+        note = note.child(kv_row("Artic.", articulation));
     }
-    section = section
-        .child(fb_section_header("PITCH"))
+    let mut section = inspector_kit::ins_section_container()
+        .child(inspector_kit::ins_section_header(
+            assets::ICON_AUDIO_LINES_PATH,
+            "PITCH",
+        ))
         .child(kv_row(
             "Deviation",
             format!("{:+.0} ct", pitch.deviation_cents),
@@ -1766,7 +1738,15 @@ fn solfege_note_pitch_section(pitch: SolfegePitchSummary) -> impl IntoElement {
     } else {
         section = section.child(kv_row("Curve", format!("{} points", pitch.point_count)));
     }
-    section
+    // Two cards, stacked: NOTE and PITCH answer different questions and used to
+    // share one container, which is why the second header read as a divider
+    // rather than as a section of its own.
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(inspector_kit::SECTION_GAP))
+        .child(note)
+        .child(section)
 }
 
 fn solfege_instrument_section(
@@ -1785,11 +1765,11 @@ fn solfege_instrument_section(
         .map(std::path::Path::new)
         .map(crate::solfege::model_load_state);
 
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(fb_section_header("SOLFEGE ENGINE"))
+    let mut section = inspector_kit::ins_section_container()
+        .child(inspector_kit::ins_section_header(
+            assets::ICON_AUDIO_LINES_PATH,
+            "SOLFEGE ENGINE",
+        ))
         .child(kv_row("Instrument", solfege.instrument.clone()))
         .child(kv_row("Voice", solfege.voice.clone()))
         .child(kv_row("Preset", solfege.preset.clone()))
@@ -1908,7 +1888,10 @@ fn solfege_instrument_section(
     }
 
     section
-        .child(fb_section_header("PERFORMANCE PARAMETERS"))
+        .child(inspector_kit::ins_section_header(
+            assets::ICON_GAUGE_PATH,
+            "PERFORMANCE PARAMETERS",
+        ))
         .child(kv_row(
             "Bow Pressure",
             format!("{:.0}%", solfege.bow_pressure * 100.0),
@@ -2073,11 +2056,9 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
     } else {
         0
     };
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .child(fb_section_header("INSERT EFFECTS"));
+    let mut section = inspector_kit::ins_section_container().child(
+        inspector_kit::ins_section_header(assets::ICON_PLUG_PATH, "INSERT EFFECTS"),
+    );
 
     let effects = track.effect_inserts();
     if effects.is_empty() {
@@ -2343,11 +2324,11 @@ fn track_inspector(
         ))
         // ── Basic ────────────────────────────────────────────────────────
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(fb_section_header(i18n.tr("inspector.section.track")))
+            inspector_kit::ins_section_container()
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_SLIDERS_HORIZONTAL_PATH,
+                    i18n.tr("inspector.section.track"),
+                ))
                 .child(kv_row(i18n.tr("inspector.field.type"), type_label))
                 .child(fb_form_row(
                     "Name",
@@ -2373,11 +2354,11 @@ fn track_inspector(
         )
         // ── Contents counts ────────────────────────────────────────────────
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(fb_section_header("CONTENTS"))
+            inspector_kit::ins_section_container()
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_LAYERS_PATH,
+                    "CONTENTS",
+                ))
                 .child(kv_row(
                     i18n.tr("inspector.field.clips"),
                     track.clips.len().to_string(),
@@ -2392,45 +2373,30 @@ fn track_inspector(
         )
 }
 
+/// Section card. Sections without a more specific glyph use the sliders mark,
+/// which is the panel's own icon — see `inspector_section_icon` for the ones
+/// that carry their own semantics (routing, effects, contents).
 fn inspector_section(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(5.0))
-        .child(fb_section_header(label))
-        .child(child)
+    inspector_section_icon(assets::ICON_SLIDERS_HORIZONTAL_PATH, label, child)
+}
+
+fn inspector_section_icon(
+    icon: &'static str,
+    label: impl Into<String>,
+    child: impl IntoElement,
+) -> impl IntoElement {
+    inspector_kit::ins_section(icon, label, child)
 }
 
 fn compact_property_row(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .min_h(px(26.0))
-        .child(
-            div()
-                .w(px(66.0))
-                .flex_shrink_0()
-                .text_size(px(10.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_muted())
-                .child(label.into()),
-        )
-        .child(div().flex_1().min_w_0().child(child))
+    inspector_kit::ins_row(label, child)
 }
 
 fn readonly_value(text: impl Into<String>) -> impl IntoElement {
-    div()
-        .h(px(26.0))
-        .flex()
-        .items_center()
-        .justify_end()
-        .pr(px(64.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_secondary())
-        .child(text.into())
+    // The old version reserved 64 px of right padding to dodge a stepper that
+    // is not in every row, which pulled the value away from the column every
+    // other readout aligns on.
+    inspector_kit::ins_value(text)
 }
 
 fn beat_stepper(
@@ -3660,11 +3626,11 @@ fn clip_inspector(
             "Clip",
         ))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(fb_section_header(i18n.tr("inspector.section.clip")))
+            inspector_kit::ins_section_container()
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_LIST_MUSIC_PATH,
+                    i18n.tr("inspector.section.clip"),
+                ))
                 .child(kv_row(i18n.tr("inspector.clip.type"), clip_type_label))
                 .child(kv_row(
                     i18n.tr("inspector.clip.track"),
@@ -3714,11 +3680,11 @@ fn clip_inspector(
     if clip.kind == "MIDI" {
         let bottom_id = clip_id.clone();
         body = body.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(fb_section_header("MIDI CLIP"))
+            inspector_kit::ins_section_container()
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_MUSIC_PATH,
+                    "MIDI CLIP",
+                ))
                 .child(kv_row(
                     "Notes",
                     clip.note_count.unwrap_or_default().to_string(),
@@ -3749,11 +3715,11 @@ fn clip_inspector(
         );
     } else {
         body = body.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(fb_section_header("AUDIO CLIP"))
+            inspector_kit::ins_section_container()
+                .child(inspector_kit::ins_section_header(
+                    assets::ICON_AUDIO_LINES_PATH,
+                    "AUDIO CLIP",
+                ))
                 .child(kv_row(
                     "File",
                     clip.source_path

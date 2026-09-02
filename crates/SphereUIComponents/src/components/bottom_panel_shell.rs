@@ -34,6 +34,11 @@ pub struct BottomPanelShell {
     clip_editor: Entity<ClipEditorPanel>,
     effect_editor: Entity<EffectEditorTabView>,
     last_shell_key: u64,
+    /// The shell renders from `StudioLayout` state, and the studio root caches
+    /// this view, so every studio change has to reach it directly. The explicit
+    /// `notify_bottom_panel_shell` calls stay: this is the backstop for the
+    /// paths that only notify the studio.
+    _owner_observer: gpui::Subscription,
 }
 
 impl BottomPanelShell {
@@ -42,13 +47,16 @@ impl BottomPanelShell {
         mixer_panel: Entity<MixerPanelView>,
         clip_editor: Entity<ClipEditorPanel>,
         effect_editor: Entity<EffectEditorTabView>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let _owner_observer = cx.observe(&owner, |_, _, cx| cx.notify());
         Self {
             owner,
             mixer_panel,
             clip_editor,
             effect_editor,
             last_shell_key: u64::MAX,
+            _owner_observer,
         }
     }
 

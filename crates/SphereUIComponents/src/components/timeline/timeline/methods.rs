@@ -230,6 +230,9 @@ impl Timeline {
             )),
             playhead_overlay: None,
             track_meters: Default::default(),
+            arrangement_surface: None,
+            track_lanes: Default::default(),
+            frame_lane_ctx: None,
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -295,6 +298,9 @@ impl Timeline {
             )),
             playhead_overlay: None,
             track_meters: Default::default(),
+            arrangement_surface: None,
+            track_lanes: Default::default(),
+            frame_lane_ctx: None,
             project_root: None,
             focus_lost_subscription: None,
         }
@@ -732,6 +738,88 @@ impl Timeline {
     ///
     /// A no-op before the first render, which is when the overlay is built —
     /// the arrangement has not been laid out yet, so there is no x to publish.
+    /// Build the arrangement grid layer.
+    ///
+    /// Lives here rather than in `render` so the cached
+    /// [`crate::components::timeline::timeline_surface::TimelineSurfaceView`]
+    /// can rebuild it on its own. The row layout is recomputed instead of
+    /// borrowed from the frame: it is O(track_count) and only runs when the
+    /// grid is actually dirty, which is far less often than every frame.
+    /// Build one track's clip lane from this frame's published context.
+    ///
+    /// Called by the cached [`crate::components::timeline::track_lane_view::TrackLaneView`],
+    /// which renders during the prepaint of the tree `render` just returned —
+    /// so `frame_lane_ctx` is always this frame's.
+    pub(crate) fn render_track_lane(&self, track_id: &str) -> gpui::AnyElement {
+        use gpui::{IntoElement, ParentElement, Styled};
+        let Some(ctx) = self.frame_lane_ctx.as_ref() else {
+            return gpui::div().into_any_element();
+        };
+        let Some(index) = self.state.tracks.iter().position(|t| t.id == track_id) else {
+            return gpui::div().into_any_element();
+        };
+        let Some(row) = ctx.row_layout.row_for_index(index) else {
+            return gpui::div().into_any_element();
+        };
+        // Anchored in a self-sizing wrapper: `AnyView::cached` lays this out as
+        // a *root* with the cached bounds as available space, so the element it
+        // renders has no flex context to grow into. `track_lane`'s own root is
+        // `flex_1`, which as a root means nothing and leaves the lane at auto
+        // width. See `render_arrangement_surface` for the same trap.
+        gpui::div()
+            .size_full()
+            .child(crate::components::timeline::track_lane::track_lane(
+                &self.state.tracks[index],
+                index,
+                &self.state,
+                &ctx.gesture,
+                row.height,
+                ctx.on_select_track.clone(),
+                ctx.on_select_clip.clone(),
+                ctx.on_add_clip.clone(),
+                ctx.on_track_context_menu.clone(),
+                ctx.on_clip_context_menu.clone(),
+                ctx.on_open_editor.clone(),
+                ctx.on_range_start.clone(),
+                ctx.on_erase_start.clone(),
+                ctx.on_erase_clip.clone(),
+                ctx.on_cut_clip.clone(),
+                Some(&self.erase_preview_ids),
+                ctx.on_audio_clip_process_preview.clone(),
+                ctx.on_audio_clip_process_commit.clone(),
+            ))
+            .into_any_element()
+    }
+
+    pub(crate) fn render_arrangement_surface(&self) -> gpui::AnyElement {
+        use gpui::{IntoElement, ParentElement, Styled};
+        let mut row_layout = self.state.track_row_layout();
+        row_layout.scroll_y = self.state.viewport.scroll_y;
+        let grid_width = self.state.viewport.viewport_width.max(1.0);
+        let grid_height = self
+            .state
+            .viewport
+            .viewport_height
+            .max(crate::components::timeline::timeline_state::DEFAULT_TRACK_HEIGHT);
+        // The renderer's element is `absolute; inset: 0`, which needs a
+        // containing block. `AnyView::cached` lays a view's element out as a
+        // root, where there is none — the canvas then measures zero and the
+        // grid silently stops drawing. The wrapper is that containing block,
+        // and it sizes itself from the available space.
+        gpui::div()
+            .relative()
+            .size_full()
+            .child(
+                crate::components::timeline::timeline_surface::timeline_surface(
+                    &self.state,
+                    &row_layout,
+                    grid_width,
+                    grid_height,
+                ),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn publish_playhead(&self, cx: &mut gpui::App) -> bool {
         let Some(overlay) = self.playhead_overlay.as_ref() else {
             return false;

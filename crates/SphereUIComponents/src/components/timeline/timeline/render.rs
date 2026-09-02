@@ -51,6 +51,24 @@ impl Render for Timeline {
                     cx.new(|_| crate::components::timeline::vu_meter::TrackMeterView::new());
                 self.track_meters.insert(id, meter);
             }
+            // Same lifecycle for the cached lane views: one per track that has
+            // a row, pruned in the same pass so a deleted track does not leave
+            // its view behind.
+            self.track_lanes.retain(|id, _| ids.contains(id.as_str()));
+            let timeline = cx.entity();
+            for index in 0..self.state.tracks.len() {
+                let id = self.state.tracks[index].id.clone();
+                if self.track_lanes.contains_key(&id) {
+                    continue;
+                }
+                let lane_id = id.clone();
+                let lane = cx.new(|cx| {
+                    crate::components::timeline::track_lane_view::TrackLaneView::new(
+                        &timeline, lane_id, cx,
+                    )
+                });
+                self.track_lanes.insert(id, lane);
+            }
         }
         if self.playhead_overlay.is_none() {
             // Built on first render for the same reason the focus subscription
@@ -61,6 +79,14 @@ impl Render for Timeline {
                     frame,
                     RULER_HEIGHT,
                     HEADER_WIDTH,
+                )
+            }));
+        }
+        if self.arrangement_surface.is_none() {
+            let timeline = cx.entity();
+            self.arrangement_surface = Some(cx.new(|cx| {
+                crate::components::timeline::timeline_surface::TimelineSurfaceView::new(
+                    &timeline, cx,
                 )
             }));
         }
@@ -1545,6 +1571,34 @@ impl Render for Timeline {
             on_context_menu: on_track_context_menu.clone(),
         };
 
+        // Shared with the cached lane views, so the row geometry and the
+        // gesture snapshot are derived once per frame rather than once here and
+        // again inside every lane that has to rebuild.
+        let row_layout = std::rc::Rc::new(row_layout);
+        let lane_gesture = std::rc::Rc::new(
+            crate::components::timeline::timeline_state::TimelineGestureContext::from_state(
+                &self.state,
+            ),
+        );
+        self.frame_lane_ctx = Some(std::rc::Rc::new(
+            crate::components::timeline::track_lane_view::LaneFrameContext {
+                gesture: lane_gesture.clone(),
+                row_layout: row_layout.clone(),
+                on_select_track: on_select_track.clone(),
+                on_select_clip: on_select_clip.clone(),
+                on_add_clip: on_add_clip.clone(),
+                on_track_context_menu: on_track_context_menu.clone(),
+                on_clip_context_menu: on_clip_context_menu.clone(),
+                on_open_editor: self.on_open_editor.clone(),
+                on_range_start: Some(on_range_start.clone()),
+                on_erase_start: Some(on_erase_start.clone()),
+                on_erase_clip: Some(on_erase_clip.clone()),
+                on_cut_clip: Some(on_cut_clip.clone()),
+                on_audio_clip_process_preview: on_audio_clip_process_preview.clone(),
+                on_audio_clip_process_commit: on_audio_clip_process_commit.clone(),
+            },
+        ));
+
         let state = &self.state;
         let tempo_h = state.tempo_track_height();
         let ts_h = state.time_signature_track_height();
@@ -2385,6 +2439,16 @@ impl Render for Timeline {
                 on_automation_control.clone(),
                 self.automation_marquee.as_ref(),
                 self.automation_hover.as_ref(),
+                match self.arrangement_surface.as_ref() {
+                    Some(surface) => gpui::AnyView::from(surface.clone())
+                        .cached(
+                            crate::components::timeline::timeline_surface::TimelineSurfaceView::cached_style(),
+                        )
+                        .into_any_element(),
+                    None => self.render_arrangement_surface(),
+                },
+                &lane_gesture,
+                &self.track_lanes,
             )))
             .children(timeline_marker_region_overlay(state).map(|overlay| {
                 div()

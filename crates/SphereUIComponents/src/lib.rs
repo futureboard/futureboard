@@ -38,6 +38,8 @@ pub mod assets;
 pub mod audio_connections;
 pub mod audio_routing;
 pub mod audio_routing_compile;
+pub mod auth;
+pub mod auth_dialog;
 pub mod boot;
 pub mod color;
 pub mod components;

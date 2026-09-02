@@ -1529,6 +1529,22 @@ pub fn app_chrome(
         .flex_col()
         .w_full()
         .flex_none()
+        // Sized explicitly rather than by its two children: a cached
+        // `AppChromeView` lays out from a style with no children at all, so an
+        // implicit height there silently collapsed the transport row out of the
+        // window. Stating it here means the two paths cannot disagree.
+        .h(px(app_chrome_drawn_height()))
         .child(chrome)
         .child(transport_bar(transport, viewport_width, i18n))
+}
+
+/// Drawn height of the whole chrome: the titlebar band plus the transport bar
+/// under it.
+///
+/// Deliberately *not* `shell_metrics::APP_CHROME_HEIGHT`. That constant is the
+/// timeline's hit-test origin and carries a hand-tuned titlebar band (36) that
+/// is a few pixels taller than the one actually drawn (32); using it here would
+/// leave a gap under the transport bar.
+pub fn app_chrome_drawn_height() -> f32 {
+    PlatformChromePolicy::current().titlebar_height_px + crate::shell_metrics::TRANSPORT_BAR_HEIGHT
 }
