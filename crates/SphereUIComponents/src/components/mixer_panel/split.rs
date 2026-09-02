@@ -26,6 +26,14 @@ pub(crate) const LOWER_CONTROL_MIN_H: f32 = SEC_PAN_H + SEC_FADER_MIN_H + SEC_BU
 pub(crate) const SEC_SPLITTER_H: f32 = 6.0;
 const SECTION_VIEWPORT_MIN_H: f32 = 42.0;
 const SECTION_VIEWPORT_MAX_H: f32 = 180.0;
+/// Default height of the inserts viewport.
+///
+/// A fresh session has no inserts, so this reserves a visible gap between
+/// INSERTS and SENDS — but it cannot simply be lowered. The Monitor strip's
+/// Source selector deliberately occupies this same slot to keep the two pinned
+/// strips on matching baselines (`monitor_strip`), and shortening it collapses
+/// that selector to an ellipsis. Tightening the empty bay needs the Monitor's
+/// routing block decoupled from the inserts height first.
 pub const MIXER_INSERT_SECTION_DEFAULT_PX: f32 = 72.0;
 pub const MIXER_SEND_SECTION_DEFAULT_PX: f32 = 54.0;
 

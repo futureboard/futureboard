@@ -48,15 +48,23 @@ impl Render for FaderDrag {
 
 /// dB tick marks. Used by [`db_scale_column`] and the fader rail so the scale
 /// tape lines up with the shared `volume::db_to_norm` mapping.
-pub const SCALE_MARKS: [(f32, &str); 8] = [
-    (volume::MAX_DB, "+6"),
-    (0.0, "0"),
-    (-6.0, "6"),
-    (-12.0, "12"),
-    (-24.0, "24"),
-    (-36.0, "36"),
-    (-48.0, "48"),
-    (volume::MIN_DB, "∞"),
+///
+/// The third field is whether the mark is *named* in the scale column. Every
+/// mark still draws its tick on the rail — the tape has to stay complete — but
+/// printing all eight numbers beside every strip turned a wall of eight-and-a-
+/// half-point digits into the loudest thing in the mixer, competing with the
+/// faders and meters it exists to annotate. Naming the anchors a mix engineer
+/// actually reads against (unity, −12, −24, −∞) keeps the scale legible and
+/// gives the level itself the attention.
+pub const SCALE_MARKS: [(f32, &str, bool); 8] = [
+    (volume::MAX_DB, "+6", false),
+    (0.0, "0", true),
+    (-6.0, "6", false),
+    (-12.0, "12", true),
+    (-24.0, "24", true),
+    (-36.0, "36", false),
+    (-48.0, "48", false),
+    (volume::MIN_DB, "∞", true),
 ];
 
 /// Fraction down from the top of the rail for a dB mark (0.0 = top, 1.0 = bot).
@@ -124,22 +132,37 @@ fn fader_map_debug_enabled() -> bool {
 /// negative `mt` centers each ~7px label vertically on its tick.
 pub fn db_scale_column() -> gpui::Div {
     let mut col = div().relative().w(px(15.0)).h_full();
-    for &(db, label) in SCALE_MARKS.iter() {
+    for &(db, label, named) in SCALE_MARKS.iter() {
         let pct = db_to_top_fraction(db);
-        col = col.child(
-            div()
-                .absolute()
-                .top(relative(pct))
-                .right(px(0.0))
-                .mt(-px(4.0))
-                .text_size(px(7.5))
-                .text_color(if db == 0.0 || db == volume::MAX_DB {
-                    Colors::text_primary()
-                } else {
-                    Colors::text_muted()
-                })
-                .child(label),
-        );
+        if named {
+            col = col.child(
+                div()
+                    .absolute()
+                    .top(relative(pct))
+                    .right(px(0.0))
+                    .mt(-px(4.0))
+                    .text_size(px(crate::theme::typography::DENSE_CAPTION))
+                    .text_color(if db == 0.0 {
+                        // Unity is the one value the eye returns to.
+                        Colors::text_secondary()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .child(label),
+            );
+        } else {
+            // Unnamed marks keep their position on the tape as a hairline, so
+            // the scale still reads as continuous.
+            col = col.child(
+                div()
+                    .absolute()
+                    .top(relative(pct))
+                    .right(px(0.0))
+                    .w(px(4.0))
+                    .h(px(1.0))
+                    .bg(Colors::border_subtle()),
+            );
+        }
     }
     col
 }
@@ -176,7 +199,7 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
     );
 
     // Tick marks (absolute, layered) at fractional positions on the rail.
-    for &(db, _) in SCALE_MARKS.iter() {
+    for &(db, _, _) in SCALE_MARKS.iter() {
         let pct = db_to_top_fraction(db);
         let w = if db == 0.0 || db == volume::MAX_DB {
             14.0_f32
@@ -260,7 +283,7 @@ fn horizontal_fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
             .rounded(px(crate::theme::radius::PILL)),
     );
 
-    for &(db, _) in SCALE_MARKS.iter() {
+    for &(db, _, _) in SCALE_MARKS.iter() {
         let pct = volume::db_to_norm(db);
         let h = if db == 0.0 || db == volume::MAX_DB {
             14.0_f32

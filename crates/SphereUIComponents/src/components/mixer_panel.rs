@@ -195,9 +195,12 @@ fn section_header(
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(crate::theme::typography::DENSE_CAPTION))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(Colors::text_faint())
+                        .text_size(px(crate::theme::typography::DENSE_LABEL))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        // Was `text_faint` at caption size, which left the only
+                        // labels telling INSERTS from SENDS below the strip's
+                        // own borders in contrast.
+                        .text_color(Colors::text_secondary())
                         .child(label),
                 )
                 .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle())),
@@ -457,16 +460,13 @@ fn strip_header(
         .items_center()
         .gap(px(4.0))
         .h(px(SEC_HEADER_H))
-        .px(px(5.0))
+        .pr(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(
-            div()
-                .w(px(2.0))
-                .h(px(20.0))
-                .rounded(px(crate::theme::radius::PILL))
-                .bg(track.color),
-        )
+        // Full-height colour edge rather than a floating 20 px pill. At 88 px
+        // wide a channel's identity has to be findable while scanning a row of
+        // strips, and a continuous edge does that without spending width.
+        .child(div().w(px(3.0)).h_full().flex_shrink_0().bg(track.color))
         .child(
             div()
                 .flex()
@@ -478,7 +478,7 @@ fn strip_header(
                         .min_w(px(0.0))
                         .flex_1()
                         .truncate()
-                        .text_size(px(typography::DENSE_LABEL))
+                        .text_size(px(typography::UI_XS))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child(track.name.clone()),
@@ -491,16 +491,16 @@ fn strip_header(
                         .gap(px(3.0))
                         .child(
                             div()
-                                .text_size(px(7.5))
+                                .text_size(px(typography::DENSE_CAPTION))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_secondary())
+                                .text_color(Colors::text_muted())
                                 .child(type_label),
                         )
                         .child(
                             div()
-                                .text_size(px(7.5))
+                                .text_size(px(typography::DENSE_CAPTION))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_secondary())
+                                .text_color(Colors::text_muted())
                                 .child(channel_label),
                         ),
                 ),
@@ -1577,13 +1577,24 @@ fn output_button(
                     s.bg(Colors::surface_control_hover())
                         .border_color(Colors::border_strong())
                 })
+                // A bare "None" at the foot of a strip names nothing. The
+                // route glyph identifies the pill as the channel's output
+                // without spending any of the 88 px on a word.
+                .child(
+                    svg()
+                        .path(assets::ICON_ROUTE_PATH)
+                        .w(px(9.0))
+                        .h(px(9.0))
+                        .flex_shrink_0()
+                        .text_color(Colors::text_faint()),
+                )
                 .child(
                     div()
                         .min_w(px(0.0))
                         .truncate()
                         .text_size(px(typography::DENSE_CAPTION))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_muted())
+                        .text_color(Colors::text_secondary())
                         .child(label),
                 )
                 .child(
@@ -2365,6 +2376,12 @@ fn control_room_output_button(
 /// Two-line pinned-strip header (name + bus caption). Both lines truncate and
 /// carry explicit line heights: the captions are 7.5 px, and scripts with tall
 /// marks (Thai, Lao) otherwise collide with the name above them.
+/// Master / Monitor header.
+///
+/// Deliberately the same construction as [`strip_header`] — full-bleed colour
+/// edge, name, then a quieter second line. The pinned strips sit against the
+/// channel strips and used a floating pill and a 7.5 px sub-label, so the two
+/// halves of one mixer did not read as the same instrument.
 fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> impl IntoElement {
     div()
         .flex()
@@ -2372,16 +2389,10 @@ fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> i
         .items_center()
         .gap(px(4.0))
         .h(px(SEC_HEADER_H))
-        .px(px(5.0))
+        .pr(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::border_default())
-        .child(
-            div()
-                .w(px(2.0))
-                .h(px(20.0))
-                .rounded(px(crate::theme::radius::PILL))
-                .bg(accent),
-        )
+        .child(div().w(px(3.0)).h_full().flex_shrink_0().bg(accent))
         .child(
             div()
                 .flex()
@@ -2394,7 +2405,7 @@ fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> i
                         .w_full()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(typography::DENSE_LABEL))
+                        .text_size(px(typography::UI_XS))
                         .line_height(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
@@ -2405,10 +2416,10 @@ fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> i
                         .w_full()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(7.5))
+                        .text_size(px(typography::DENSE_CAPTION))
                         .line_height(px(10.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_secondary())
+                        .text_color(Colors::text_muted())
                         .child(bus_label),
                 ),
         )
