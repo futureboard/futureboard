@@ -46,7 +46,7 @@ use sphere_jam_client::ids::{JamId, StreamId, UserId};
 use sphere_jam_client::protocol::{ParticipantSummary, StreamSummary};
 use sphere_jam_client::session::{JamEvent, JamSession, JamSessionOptions, JamSnapshot, JamState};
 use DirectAudio::engine::SharedState;
-use DirectAudio::jam_bus::{jam_device_id, PUBLISH_KEY_MASTER};
+use DirectAudio::jam_bus::{jam_device_id, publish_key_track, PUBLISH_KEY_MASTER};
 
 use crate::audio_connections::{AudioConnectionDirection, AvailablePort, AvailablePorts};
 
@@ -234,14 +234,14 @@ fn controller() -> &'static Mutex<Option<JamController>> {
 /// published state current whether or not the panel is open: tracks routed to a
 /// remote performer keep playing after the window is closed, and the routing
 /// layer reads the same snapshot to decide what is still selectable.
-pub fn install(shared: Arc<SharedState>) -> Result<()> {
+pub fn install(shared: Arc<SharedState>, engine: Option<DirectAudio::AudioEngine>) -> Result<()> {
     let mut guard = controller()
         .lock()
         .map_err(|_| JamError::Session("the jam controller lock was poisoned".to_string()))?;
     if guard.is_some() {
         return Ok(());
     }
-    let created = JamController::new(shared)?;
+    let created = JamController::new(shared, engine)?;
     created.publish_ui_state();
     *guard = Some(created);
     drop(guard);
@@ -338,6 +338,9 @@ pub struct JamController {
     config: JamConfig,
     credentials: SharedCredentials,
     shared: Arc<SharedState>,
+    /// The engine, for the control-plane half of a track publish. `None` in a
+    /// build with no engine running, where sharing a track is simply refused.
+    engine: Option<DirectAudio::AudioEngine>,
     clock: Arc<Mutex<SessionClock>>,
     sink: Arc<JamEngineSink>,
     api: JamApiClient,
@@ -352,7 +355,7 @@ pub struct JamController {
 }
 
 impl JamController {
-    fn new(shared: Arc<SharedState>) -> Result<Self> {
+    fn new(shared: Arc<SharedState>, engine: Option<DirectAudio::AudioEngine>) -> Result<Self> {
         let config = JamConfig::from_env()?;
         let credentials: SharedCredentials = Arc::new(StudioCredentials);
         let clock = Arc::new(Mutex::new(SessionClock::default()));
@@ -362,6 +365,7 @@ impl JamController {
             config,
             credentials,
             shared,
+            engine,
             clock,
             sink,
             api,
@@ -481,6 +485,67 @@ impl JamController {
             JamPublishRequest::stereo(name.to_string(), JamPublishSourceKind::Master),
             source,
         )
+    }
+
+    /// Share one track or bus over the jam.
+    ///
+    /// The engine claims the publish slot and starts writing that track's
+    /// post-fader block into it; the jam client pulls from the other side. The
+    /// two halves are deliberately separate calls, because the engine owns the
+    /// slot and the jam owns the stream, and a failure in either must not leave
+    /// the other half running.
+    pub fn publish_track(&mut self, track_id: &str, name: &str) -> Result<()> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(JamError::Session("not in a jam".to_string()));
+        };
+        let Some(engine) = self.engine.as_ref() else {
+            return Err(JamError::Audio(
+                "the audio engine is not running".to_string(),
+            ));
+        };
+        engine
+            .set_track_jam_publish(track_id, true)
+            .map_err(|error| JamError::Audio(error.to_string()))?;
+
+        let key = publish_key_track(track_id);
+        let source = Arc::new(JamEngineSource::new(
+            Arc::clone(&self.shared),
+            Arc::clone(&self.clock),
+            key.clone(),
+            PUBLISH_SAMPLE_RATE,
+        ));
+        match session.publish(
+            JamPublishRequest::stereo(
+                name.to_string(),
+                JamPublishSourceKind::Track {
+                    track_id: track_id.to_string(),
+                },
+            ),
+            source,
+        ) {
+            Ok(()) => {
+                self.published_keys.push(key);
+                Ok(())
+            }
+            Err(error) => {
+                // The engine is already writing into a slot nothing will read.
+                // Stop it rather than leaving a tap running for a stream that
+                // was never announced.
+                let _ = engine.set_track_jam_publish(track_id, false);
+                Err(error)
+            }
+        }
+    }
+
+    /// Stop sharing a track.
+    pub fn unpublish_track(&mut self, track_id: &str) -> Result<()> {
+        if let Some(engine) = self.engine.as_ref() {
+            let _ = engine.set_track_jam_publish(track_id, false);
+        }
+        let key = publish_key_track(track_id);
+        self.published_keys.retain(|held| held != &key);
+        self.shared.jam_bus.release_publish(&key);
+        Ok(())
     }
 
     /// Leave the jam, release every bus slot, and stop the worker.

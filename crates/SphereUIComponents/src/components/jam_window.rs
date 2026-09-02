@@ -59,22 +59,36 @@ pub struct CreateTrackFromStream {
 /// What the shell hands the window so a Create Track button can reach it.
 pub type CreateTrackHandler = Arc<dyn Fn(CreateTrackFromStream, &mut App) + Send + Sync>;
 
+/// Share the selected track, or stop sharing it.
+///
+/// The window has no view of the project, and should not grow one: which track
+/// is selected is the shell's state, and the shell is what knows the track's
+/// name. `true` starts sharing, `false` stops.
+pub type PublishTrackHandler = Arc<dyn Fn(bool, &mut App) + Send + Sync>;
+
+/// The two things the shell does on the window's behalf.
+#[derive(Clone)]
+pub struct JamWindowHandlers {
+    pub create_track: CreateTrackHandler,
+    pub publish_track: PublishTrackHandler,
+}
+
 pub struct JamWindow {
     focus_handle: FocusHandle,
     state: JamUiState,
-    on_create_track: CreateTrackHandler,
+    handlers: JamWindowHandlers,
     /// What the user typed for a new jam's name.
     jam_name: String,
     busy: Option<String>,
 }
 
 impl JamWindow {
-    fn new(on_create_track: CreateTrackHandler, cx: &mut Context<Self>) -> Self {
+    fn new(handlers: JamWindowHandlers, cx: &mut Context<Self>) -> Self {
         Self::spawn_refresh(cx);
         Self {
             focus_handle: cx.focus_handle(),
             state: jam::snapshot(),
-            on_create_track,
+            handlers,
             jam_name: default_jam_name(),
             busy: None,
         }
@@ -165,8 +179,17 @@ impl JamWindow {
             .detach();
     }
 
+    fn publish_selected_track(&mut self, share: bool, cx: &mut App) {
+        self.busy = Some(if share {
+            "Sharing track…".to_string()
+        } else {
+            "Stopping…".to_string()
+        });
+        (self.handlers.publish_track)(share, cx);
+    }
+
     fn create_track(&mut self, stream: &JamStreamView, cx: &mut App) {
-        (self.on_create_track)(
+        (self.handlers.create_track)(
             CreateTrackFromStream {
                 stream_id: stream.stream_id.clone(),
                 track_name: track_name_for(stream),
@@ -457,7 +480,8 @@ impl JamWindow {
 
     fn footer(&self, state: &JamUiState, cx: &mut Context<Self>) -> impl IntoElement {
         let connected = state.connected;
-        let publishing = !state.publishing.is_empty();
+        let publishing = state.publishing.iter().any(|key| key == "master");
+        let sharing_track = state.publishing.iter().any(|key| key.starts_with("track:"));
 
         div()
             .flex()
@@ -495,6 +519,20 @@ impl JamWindow {
                         connected && !publishing,
                         cx.listener(|this, _event, _window, cx| {
                             this.publish_master(cx);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(fb_button(
+                        "jam-publish-track",
+                        if sharing_track {
+                            "Stop Sharing Track"
+                        } else {
+                            "Share Selected Track"
+                        },
+                        FbButtonKind::Default,
+                        connected,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.publish_selected_track(!sharing_track, cx);
                             cx.notify();
                         }),
                     ))
@@ -630,7 +668,7 @@ fn default_jam_name() -> String {
 
 pub fn open_jam_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
-    on_create_track: CreateTrackHandler,
+    handlers: JamWindowHandlers,
     cx: &mut App,
 ) -> Result<WindowHandle<JamWindow>, String> {
     let window_bounds = centered_window_bounds(
@@ -646,7 +684,7 @@ pub fn open_jam_window(
     apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| JamWindow::new(on_create_track, cx))
+        cx.new(|cx| JamWindow::new(handlers, cx))
     })
     .map_err(|error| error.to_string())
 }

@@ -143,7 +143,7 @@ pub use inspector::{
     inspector_select, inspector_value, InspectorNumericChangeCb, InspectorNumericGestureCb,
     InspectorSelectOption,
 };
-pub use jam_window::{open_jam_window, CreateTrackFromStream, JamWindow};
+pub use jam_window::{open_jam_window, CreateTrackFromStream, JamWindow, JamWindowHandlers};
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;

@@ -728,6 +728,12 @@ pub struct RuntimeTrack {
     pub record_armed: bool,
     pub monitor_enabled: bool,
     pub input_source: RuntimeTrackInputSource,
+    /// Audio Jam publish slot this track's post-fader output feeds, if any.
+    ///
+    /// Resolved on the control thread and shipped as an index, so the callback
+    /// never looks a key up. `None` for every track that is not being shared,
+    /// which is almost all of them almost all of the time.
+    pub jam_publish_slot: Option<u32>,
     pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
     /// [`Self::output_track_id`] resolved at build time
@@ -2599,6 +2605,11 @@ impl RuntimeProject {
                 } else {
                     RuntimeTrackInputSource::from_channels(&t.input_source.channels)
                 },
+                // A publish is session state, not project state, so a rebuilt
+                // graph starts unshared and the control thread re-applies what
+                // is live. Carrying it in the snapshot would make reopening a
+                // project start broadcasting.
+                jam_publish_slot: None,
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
                 output_track_index: None, // resolved below in resolve_indices
@@ -3822,6 +3833,19 @@ impl RuntimeProject {
             track.monitor_enabled = monitor_enabled;
             track.input_source = input_source;
         }
+    }
+
+    /// Point a track's post-fader output at an Audio Jam publish slot.
+    #[inline]
+    pub fn update_track_jam_publish(&mut self, track_index: usize, slot: Option<u32>) {
+        if let Some(track) = self.tracks.get_mut(track_index) {
+            track.jam_publish_slot = slot;
+        }
+    }
+
+    /// Which jam publish slot a track feeds, for the control thread.
+    pub fn track_jam_publish(&self, track_index: usize) -> Option<u32> {
+        self.tracks.get(track_index)?.jam_publish_slot
     }
 
     #[inline]
@@ -5833,6 +5857,7 @@ mod midi_tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

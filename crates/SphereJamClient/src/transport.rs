@@ -21,17 +21,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tungstenite::client::IntoClientRequest;
+use tungstenite::Message;
+
 use crate::error::{JamError, Result};
 use crate::packet::{
     self, ControlType, HelloPayload, MediaErrorPayload, WelcomePayload, MAX_MEDIA_FRAME,
 };
 use crate::protocol::{TransportCandidate, TransportCapabilities, TransportKind};
 
-/// How long a blocking receive waits before returning [`RecvOutcome::Timeout`].
+/// How long a blocking datagram receive waits before reporting
+/// [`RecvOutcome::Timeout`].
 ///
 /// Short enough that a shutdown request is acted on promptly, long enough that
-/// an idle stream is not a busy loop.
+/// an idle socket is not a busy loop. A UDP socket needs no lock — both
+/// directions take `&self` — so the reader blocking here costs the sender
+/// nothing.
 const RECV_POLL: Duration = Duration::from_millis(250);
+
+/// The same, for the reliable transports.
+///
+/// Much shorter, because a stream and a WebSocket are one object that both
+/// directions have to take a lock on: TLS and WebSocket both keep state that
+/// cannot be split into independent halves. The reader therefore holds the lock
+/// for a whole poll interval, and a publish waits behind it. Twenty
+/// milliseconds is short enough that the wait stays under one audio packet on
+/// these paths, and they are the survivability paths, not the fast ones.
+const RECV_POLL_RELIABLE: Duration = Duration::from_millis(20);
 
 /// Counters for one open transport. Read by the UI at a throttled rate.
 #[derive(Debug, Default)]
@@ -149,6 +165,13 @@ impl MediaTransport {
 /// A statement about the network and about this build, not a preference list —
 /// ordering is the server's job. QUIC is false because nothing here speaks it;
 /// TURN is false because no relay is configured on the client side.
+///
+/// WebSocket is true even though this is a native client, and that is the point
+/// of it. The other reliable candidates point at the media host's own ports,
+/// which a restrictive network is exactly as likely to block as the datagram
+/// ones; `/v1/media` rides the same 443 the control plane already reached, so a
+/// network that let this client sign in cannot refuse it the audio. The server
+/// ranks it last, so it is only ever reached when nothing better survives.
 pub fn native_capabilities() -> TransportCapabilities {
     TransportCapabilities {
         udp: true,
@@ -160,7 +183,29 @@ pub fn native_capabilities() -> TransportCapabilities {
         turn_tls: false,
         webrtc: false,
         webtransport: false,
-        websocket: false,
+        websocket: true,
+        client_kind: "native".to_string(),
+    }
+}
+
+/// Capabilities for a network that permits nothing but outbound HTTPS.
+///
+/// Offered as a deliberate choice rather than a fallback the client discovers,
+/// because discovering it costs a failed connection attempt per candidate and a
+/// user who already knows their network is locked down should not have to pay
+/// for that on every join.
+pub fn reliable_only_capabilities() -> TransportCapabilities {
+    TransportCapabilities {
+        udp: false,
+        quic: false,
+        tcp: false,
+        tls: false,
+        turn_udp: false,
+        turn_tcp: false,
+        turn_tls: false,
+        webrtc: false,
+        webtransport: false,
+        websocket: true,
         client_kind: "native".to_string(),
     }
 }
@@ -169,7 +214,7 @@ pub fn native_capabilities() -> TransportCapabilities {
 pub fn can_open(kind: TransportKind) -> bool {
     matches!(
         kind,
-        TransportKind::Udp | TransportKind::Tcp | TransportKind::Tls
+        TransportKind::Udp | TransportKind::Tcp | TransportKind::Tls | TransportKind::WebSocket
     )
 }
 
@@ -232,6 +277,7 @@ pub fn connect(
         TransportKind::Udp => connect_udp(candidate, timeout, resumed),
         TransportKind::Tcp => connect_stream(candidate, timeout, resumed, false),
         TransportKind::Tls => connect_stream(candidate, timeout, resumed, true),
+        TransportKind::WebSocket => connect_websocket(candidate, timeout, resumed),
         other => Err(JamError::Transport(format!(
             "this build cannot open a {} media transport",
             other.as_str()
@@ -478,7 +524,7 @@ fn connect_stream(
     let handshake_rtt = started.elapsed();
 
     stream
-        .set_read_timeout(Some(RECV_POLL))
+        .set_read_timeout(Some(RECV_POLL_RELIABLE))
         .map_err(|error| JamError::Transport(format!("tcp read timeout: {error}")))?;
 
     let kind = if secure {
@@ -702,6 +748,218 @@ impl TransportReceiver for StreamReceiver {
     }
 }
 
+// ── WebSocket ───────────────────────────────────────────────────────────────
+
+/// The universal fallback: the media plane over the same 443 the control plane
+/// already reached.
+///
+/// It exists for the network that permits a web page to load and nothing else.
+/// A browser has no other route to the audio at all; a native client lands here
+/// only when every datagram path and the media host's own TLS port have failed,
+/// which is why the server ranks it last of everything it offers.
+///
+/// Framing is free: a WebSocket message already has boundaries, so one media
+/// frame is one binary message with no length prefix.
+fn connect_websocket(
+    candidate: &TransportCandidate,
+    timeout: Duration,
+    resumed: bool,
+) -> Result<MediaTransport> {
+    let scheme = if candidate.secure { "wss" } else { "ws" };
+    let path = if candidate.path.is_empty() {
+        "/v1/media".to_string()
+    } else if candidate.path.starts_with('/') {
+        candidate.path.clone()
+    } else {
+        format!("/{}", candidate.path)
+    };
+    let url = format!("{scheme}://{}:{}{path}", candidate.host, candidate.port);
+
+    let request = url.as_str().into_client_request().map_err(|error| {
+        JamError::Transport(format!("could not build the media upgrade: {error}"))
+    })?;
+    let started = Instant::now();
+    let (mut socket, response) = tungstenite::connect(request)
+        .map_err(|error| JamError::Transport(format!("could not open {url} for media: {error}")))?;
+    if response.status().as_u16() != 101 {
+        return Err(JamError::Transport(format!(
+            "the media endpoint answered the upgrade with {}",
+            response.status().as_u16()
+        )));
+    }
+
+    // The handshake runs before the read timeout is shortened, so a slow server
+    // has the caller's whole connect budget to answer rather than one poll.
+    set_ws_read_timeout(&socket, Some(timeout))?;
+    socket
+        .send(Message::Binary(hello_frame(candidate, resumed)?.into()))
+        .map_err(|error| JamError::Transport(format!("media hello failed: {error}")))?;
+
+    let welcome = loop {
+        match socket.read() {
+            Ok(Message::Binary(frame)) => break read_welcome(&frame)?,
+            // The media socket is binary. Anything else here is a client
+            // pointed at the signaling endpoint by mistake.
+            Ok(Message::Text(_)) => {
+                return Err(JamError::Transport(
+                    "the media endpoint answered the handshake with text".to_string(),
+                ))
+            }
+            Ok(Message::Close(_)) => {
+                return Err(JamError::Transport(
+                    "the media endpoint closed before answering the handshake".to_string(),
+                ))
+            }
+            Ok(_) => continue,
+            Err(tungstenite::Error::Io(error)) if is_timeout(&error) => {
+                return Err(JamError::Transport(
+                    "the media endpoint did not answer the handshake".to_string(),
+                ))
+            }
+            Err(error) => {
+                return Err(JamError::Transport(format!(
+                    "media handshake read failed: {error}"
+                )))
+            }
+        }
+    };
+    let handshake_rtt = started.elapsed();
+    set_ws_read_timeout(&socket, Some(RECV_POLL_RELIABLE))?;
+
+    let stats = Arc::new(TransportStats::default());
+    let shared = Arc::new(Mutex::new(socket));
+    Ok(MediaTransport {
+        kind: TransportKind::WebSocket,
+        candidate_id: candidate.id.clone(),
+        welcome,
+        handshake_rtt,
+        sender: Arc::new(WebSocketSender {
+            socket: Arc::clone(&shared),
+            stats: Arc::clone(&stats),
+        }),
+        receiver: Box::new(WebSocketReceiver {
+            socket: shared,
+            stats: Arc::clone(&stats),
+        }),
+        stats,
+    })
+}
+
+type MediaSocket = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>;
+
+fn set_ws_read_timeout(socket: &MediaSocket, timeout: Option<Duration>) -> Result<()> {
+    use tungstenite::stream::MaybeTlsStream;
+    let result = match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(timeout),
+        // A stream type this build was not compiled with. Leaving the timeout
+        // unset would make the receive loop block forever, so say so.
+        _ => {
+            return Err(JamError::Transport(
+                "the media socket type does not support a read timeout".to_string(),
+            ))
+        }
+    };
+    result.map_err(|error| JamError::Transport(format!("media read timeout: {error}")))
+}
+
+struct WebSocketSender {
+    socket: Arc<Mutex<MediaSocket>>,
+    stats: Arc<TransportStats>,
+}
+
+impl TransportSender for WebSocketSender {
+    fn kind(&self) -> TransportKind {
+        TransportKind::WebSocket
+    }
+
+    fn send_frame(&self, frame: &[u8]) -> Result<()> {
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|_| JamError::Transport("the media socket lock was poisoned".to_string()))?;
+        let sent = socket
+            .send(Message::Binary(frame.to_vec().into()))
+            .and_then(|()| socket.flush());
+        match sent {
+            Ok(()) => {
+                self.stats.packets_out.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_out
+                    .fetch_add(frame.len() as u64, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error) => {
+                self.stats.send_errors.fetch_add(1, Ordering::Relaxed);
+                Err(JamError::Transport(format!(
+                    "media websocket send failed: {error}"
+                )))
+            }
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut socket) = self.socket.lock() {
+            let _ = socket.close(None);
+            let _ = socket.flush();
+        }
+    }
+}
+
+struct WebSocketReceiver {
+    socket: Arc<Mutex<MediaSocket>>,
+    stats: Arc<TransportStats>,
+}
+
+impl TransportReceiver for WebSocketReceiver {
+    fn recv_frame(&mut self, out: &mut Vec<u8>) -> Result<RecvOutcome> {
+        let mut socket = self
+            .socket
+            .lock()
+            .map_err(|_| JamError::Transport("the media socket lock was poisoned".to_string()))?;
+        // Anything tungstenite queued in reply to a server ping goes out here;
+        // without it a healthy but silent client eventually looks dead.
+        let _ = socket.flush();
+
+        match socket.read() {
+            Ok(Message::Binary(frame)) => {
+                out.clear();
+                out.extend_from_slice(&frame);
+                self.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .bytes_in
+                    .fetch_add(frame.len() as u64, Ordering::Relaxed);
+                Ok(RecvOutcome::Frame)
+            }
+            Ok(Message::Close(_)) => {
+                out.clear();
+                Ok(RecvOutcome::Closed)
+            }
+            // Text, ping and pong on the media socket. Counted so an operator
+            // can see them, never fatal.
+            Ok(_) => {
+                out.clear();
+                self.stats.malformed_in.fetch_add(1, Ordering::Relaxed);
+                Ok(RecvOutcome::Timeout)
+            }
+            Err(tungstenite::Error::Io(error)) if is_timeout(&error) => {
+                out.clear();
+                Ok(RecvOutcome::Timeout)
+            }
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => {
+                out.clear();
+                Ok(RecvOutcome::Closed)
+            }
+            Err(error) => {
+                out.clear();
+                Err(JamError::Transport(format!(
+                    "media websocket receive failed: {error}"
+                )))
+            }
+        }
+    }
+}
+
 fn is_timeout(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -732,14 +990,41 @@ mod tests {
     #[test]
     fn the_client_claims_only_what_it_can_open() {
         let caps = native_capabilities();
-        assert!(caps.udp && caps.tcp && caps.tls);
+        assert!(caps.udp && caps.tcp && caps.tls && caps.websocket);
         assert!(!caps.quic, "QUIC is in the protocol but not in this client");
-        assert!(!caps.websocket && !caps.webrtc);
+        assert!(!caps.webrtc, "WebRTC is the browser SFU, not this one");
         assert_eq!(caps.client_kind, "native");
 
-        assert!(can_open(TransportKind::Udp));
+        for kind in [
+            TransportKind::Udp,
+            TransportKind::Tcp,
+            TransportKind::Tls,
+            TransportKind::WebSocket,
+        ] {
+            assert!(can_open(kind), "{kind:?} is claimed but cannot be opened");
+        }
         assert!(!can_open(TransportKind::Quic));
-        assert!(!can_open(TransportKind::WebSocket));
+        assert!(!can_open(TransportKind::WebRtc));
+    }
+
+    #[test]
+    fn every_capability_set_keeps_a_path_that_survives_a_443_only_network() {
+        // The server refuses a client with no reliable fallback rather than
+        // letting it join and go silent the first time a firewall drops UDP.
+        for caps in [native_capabilities(), reliable_only_capabilities()] {
+            assert!(
+                caps.tls || caps.websocket || caps.turn_tls,
+                "no fallback in {caps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_locked_down_set_offers_only_the_path_that_rides_443() {
+        let caps = reliable_only_capabilities();
+        assert!(caps.websocket);
+        assert!(!caps.udp && !caps.quic && !caps.tcp && !caps.tls);
+        assert!(!caps.turn_udp && !caps.turn_tcp && !caps.turn_tls);
     }
 
     #[test]
@@ -768,12 +1053,26 @@ mod tests {
     fn candidates_this_build_cannot_open_are_dropped_rather_than_attempted() {
         let offered = vec![
             candidate("quic", TransportKind::Quic, 9),
-            candidate("ws", TransportKind::WebSocket, 1),
+            candidate("webrtc", TransportKind::WebRtc, 8),
             candidate("udp", TransportKind::Udp, 5),
         ];
         let ordered = ordered_candidates(&offered);
         assert_eq!(ordered.len(), 1);
         assert_eq!(ordered[0].kind, TransportKind::Udp);
+    }
+
+    #[test]
+    fn the_websocket_fallback_is_tried_last_and_only_last() {
+        // The server's own ranking puts it at the bottom; the client must not
+        // reorder it upwards just because it is the one that always works.
+        let offered = vec![
+            candidate("ws", TransportKind::WebSocket, 1),
+            candidate("tls", TransportKind::Tls, 3),
+            candidate("udp", TransportKind::Udp, 10),
+        ];
+        let ordered = ordered_candidates(&offered);
+        let ids: Vec<&str> = ordered.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["udp", "tls", "ws"]);
     }
 
     #[test]

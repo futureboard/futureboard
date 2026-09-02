@@ -32,7 +32,9 @@ use sphere_jam_client::bridge::{
 use sphere_jam_client::config::{EnvSource, JamConfig};
 use sphere_jam_client::credentials::{SharedCredentials, StaticToken};
 use sphere_jam_client::ids::{JamId, StreamId};
+use sphere_jam_client::protocol::TransportKind;
 use sphere_jam_client::session::{JamSession, JamSessionOptions, JamState};
+use sphere_jam_client::transport;
 
 const API: &str = "http://127.0.0.1:8090";
 const WS: &str = "ws://127.0.0.1:8090/v1/realtime";
@@ -200,6 +202,318 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(50));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// The survivability claim, tested rather than asserted in a comment.
+///
+/// A client that reports it can open nothing but a WebSocket is the shape of a
+/// laptop on a corporate network that permits outbound HTTPS and nothing else.
+/// The server is required to offer it a path anyway, and audio is required to
+/// arrive on it — slower and head-of-line blocked, but present. A jam that
+/// silently produced nothing here would be worse than one that refused to join.
+#[test]
+fn a_client_that_can_only_open_443_still_receives_audio() {
+    if !enabled() {
+        eprintln!("skipping the 443-only jam test: set FUTUREBOARD_JAM_E2E=1");
+        return;
+    }
+
+    let config = config();
+    let host_api =
+        JamApiClient::new(config.clone(), credentials("hachi224")).expect("the API client starts");
+    let created = host_api
+        .create_jam(&CreateJamRequest {
+            name: "Locked Down".to_string(),
+            max_participants: 4,
+            ..Default::default()
+        })
+        .expect("a jam is created");
+    let jam_id = JamId::new(created.jam.id.clone());
+
+    // The publisher takes whatever path is best; only the receiver is
+    // constrained, which is the real-world shape of this.
+    let host_sink = Arc::new(RecordingSink::new());
+    let mut host_options = JamSessionOptions::new(
+        "e2e-ws-host",
+        Arc::clone(&host_sink) as Arc<dyn JamAudioSink>,
+    );
+    host_options.publish_sample_rate = PUBLISH_RATE as i32;
+    let host = JamSession::spawn(config.clone(), credentials("hachi224"), host_options)
+        .expect("the host worker starts");
+    host.join(jam_id.clone(), "").expect("the host joins");
+    wait_for("the host to connect", || {
+        host.state() == JamState::Connected
+    });
+
+    let tone = Arc::new(ToneSource::new());
+    host.publish(
+        JamPublishRequest::stereo("Guitar", JamPublishSourceKind::Master),
+        Arc::clone(&tone) as Arc<dyn JamPublishSource>,
+    )
+    .expect("the publish is queued");
+    wait_for("the stream to be published", || {
+        !host.snapshot().streams.is_empty()
+    });
+
+    let invite = host_api
+        .create_invite(
+            jam_id.as_str(),
+            &CreateInviteRequest {
+                role: "performer".to_string(),
+                max_uses: 4,
+                ..Default::default()
+            },
+        )
+        .expect("an invite is minted");
+    let guest_api =
+        JamApiClient::new(config.clone(), credentials("mina")).expect("the API client starts");
+    let admitted = guest_api
+        .exchange_invite(&invite.secret, &created.jam.public_id)
+        .expect("the invite is exchanged");
+
+    let guest_sink = Arc::new(RecordingSink::new());
+    let mut guest_options = JamSessionOptions::new(
+        "e2e-ws-guest",
+        Arc::clone(&guest_sink) as Arc<dyn JamAudioSink>,
+    );
+    guest_options.device_name = "Behind a firewall".to_string();
+    guest_options.transport = transport::reliable_only_capabilities();
+
+    let guest = JamSession::spawn(config.clone(), credentials("mina"), guest_options)
+        .expect("the guest worker starts");
+    guest
+        .join(jam_id.clone(), admitted.access_token.clone())
+        .expect("the guest joins");
+    wait_for("the 443-only guest to connect", || {
+        guest.state() == JamState::Connected
+    });
+
+    let transport_used = guest.snapshot().transport;
+    eprintln!("the locked-down guest landed on {transport_used:?}");
+    assert_eq!(
+        transport_used,
+        Some(TransportKind::WebSocket),
+        "a client offering nothing else must land on the 443 fallback"
+    );
+
+    wait_for("audio to reach the 443-only guest", || {
+        let heard = guest_sink.snapshot();
+        heard.frames > 4_800 && heard.peak > 0.1
+    });
+    let heard = guest_sink.snapshot();
+    eprintln!(
+        "the locked-down guest heard {} packets / {} frames, peak {:.3}",
+        heard.packets, heard.frames, heard.peak
+    );
+    assert!(
+        (heard.peak - TONE_AMPLITUDE).abs() < 0.02,
+        "the tone arrived at {:.3} over the fallback",
+        heard.peak
+    );
+    assert_eq!(heard.sample_rate, PUBLISH_RATE);
+    assert_eq!(heard.channels, 2);
+
+    guest.leave().expect("the guest leaves");
+    host.leave().expect("the host leaves");
+    host_api
+        .close_jam(jam_id.as_str())
+        .expect("the host closes the jam");
+}
+
+/// Reconnect, from the receiving side's point of view.
+///
+/// A Studio that drops and comes back is the common case in a realtime system,
+/// not an edge case: networks fail, laptops sleep, and a transport migrates from
+/// UDP to the 443 fallback when a firewall changes its mind. The server
+/// re-attaches a join from the same (account, device) to the participant that
+/// is already there, keeping its id and its published streams and bumping the
+/// connection generation.
+///
+/// Two things have to hold across that, and both are easy to get wrong:
+///
+///  * the room must still show **one** guitar, not one per reconnect — which
+///    means the returning client adopts the stream it already has rather than
+///    publishing a second one;
+///  * audio must resume, with the receiver's jitter buffer discarding the old
+///    generation rather than interleaving it with the new one.
+#[test]
+fn a_reconnecting_publisher_keeps_its_stream_instead_of_duplicating_it() {
+    if !enabled() {
+        eprintln!("skipping the reconnect test: set FUTUREBOARD_JAM_E2E=1");
+        return;
+    }
+
+    let config = config();
+    let host_api =
+        JamApiClient::new(config.clone(), credentials("hachi224")).expect("the API client starts");
+    let created = host_api
+        .create_jam(&CreateJamRequest {
+            name: "Reconnect".to_string(),
+            max_participants: 4,
+            ..Default::default()
+        })
+        .expect("a jam is created");
+    let jam_id = JamId::new(created.jam.id.clone());
+
+    // One device id, used by both the original session and the one that takes
+    // over from it. That pair is what the server re-attaches on.
+    const DEVICE: &str = "e2e-reconnecting-studio";
+
+    let make_publisher = || {
+        let sink = Arc::new(RecordingSink::new());
+        let mut options =
+            JamSessionOptions::new(DEVICE, Arc::clone(&sink) as Arc<dyn JamAudioSink>);
+        options.publish_sample_rate = PUBLISH_RATE as i32;
+        JamSession::spawn(config.clone(), credentials("hachi224"), options)
+            .expect("the publisher worker starts")
+    };
+
+    let first = make_publisher();
+    first
+        .join(jam_id.clone(), "")
+        .expect("the first session joins");
+    wait_for("the first session to connect", || {
+        first.state() == JamState::Connected
+    });
+    first
+        .publish(
+            JamPublishRequest::stereo("Guitar", JamPublishSourceKind::Master),
+            Arc::new(ToneSource::new()) as Arc<dyn JamPublishSource>,
+        )
+        .expect("the publish is queued");
+    wait_for("the first session to publish", || {
+        !first.snapshot().streams.is_empty()
+    });
+    let original = first.snapshot().streams[0].clone();
+    let original_participant = first
+        .snapshot()
+        .self_participant
+        .expect("the first session knows its participant")
+        .id;
+    eprintln!(
+        "first session: participant {original_participant}, stream {} alias {}",
+        original.id, original.media_alias
+    );
+
+    // A guest, so there is somebody for the audio to reach.
+    let invite = host_api
+        .create_invite(
+            jam_id.as_str(),
+            &CreateInviteRequest {
+                role: "performer".to_string(),
+                max_uses: 4,
+                ..Default::default()
+            },
+        )
+        .expect("an invite is minted");
+    let guest_api =
+        JamApiClient::new(config.clone(), credentials("mina")).expect("the API client starts");
+    let admitted = guest_api
+        .exchange_invite(&invite.secret, &created.jam.public_id)
+        .expect("the invite is exchanged");
+    let guest_sink = Arc::new(RecordingSink::new());
+    let guest_options = JamSessionOptions::new(
+        "e2e-reconnect-guest",
+        Arc::clone(&guest_sink) as Arc<dyn JamAudioSink>,
+    );
+    let guest = JamSession::spawn(config.clone(), credentials("mina"), guest_options)
+        .expect("the guest worker starts");
+    guest
+        .join(jam_id.clone(), admitted.access_token.clone())
+        .expect("the guest joins");
+    wait_for("the guest to hear the first session", || {
+        guest_sink.snapshot().frames > 2_400
+    });
+    let before = guest_sink.snapshot();
+    eprintln!("guest heard {} frames before the reconnect", before.frames);
+
+    // The reconnect: a second session on the same account and device, with the
+    // same publish armed. That is what a returning Studio looks like — the
+    // publish is arranged before the join and restored once the session is up,
+    // which is the path `restore_publications` runs on every reconnect.
+    let second = make_publisher();
+    second
+        .publish(
+            JamPublishRequest::stereo("Guitar", JamPublishSourceKind::Master),
+            Arc::new(ToneSource::new()) as Arc<dyn JamPublishSource>,
+        )
+        .expect("the publish is armed before joining");
+    second
+        .join(jam_id.clone(), "")
+        .expect("the returning session joins");
+    wait_for("the returning session to connect", || {
+        second.state() == JamState::Connected
+    });
+
+    let resumed = second
+        .snapshot()
+        .self_participant
+        .expect("the returning session knows its participant");
+    assert_eq!(
+        resumed.id, original_participant,
+        "a re-attach keeps the participant, so the room never sees a departure"
+    );
+
+    wait_for("the returning session to take its stream back", || {
+        !second.snapshot().streams.is_empty()
+    });
+    let adopted = second.snapshot().streams[0].clone();
+    eprintln!(
+        "returning session: stream {} alias {}",
+        adopted.id, adopted.media_alias
+    );
+    assert_eq!(
+        adopted.id, original.id,
+        "the returning session adopted its own stream rather than minting a second"
+    );
+    assert_eq!(adopted.media_alias, original.media_alias);
+
+    // And the room agrees: one guitar, not two.
+    let room = guest_api
+        .streams(jam_id.as_str())
+        .expect("the room lists its streams");
+    let guitars = room.iter().filter(|stream| stream.name == "Guitar").count();
+    assert_eq!(
+        guitars, 1,
+        "a reconnect must not leave a second guitar behind"
+    );
+
+    // Audio resumes on the new generation.
+    let resume_mark = guest_sink.snapshot().frames;
+    wait_for("audio to resume after the reconnect", || {
+        guest_sink.snapshot().frames > resume_mark + 2_400
+    });
+    let after = guest_sink.snapshot();
+    eprintln!(
+        "guest heard {} frames total, peak {:.3}",
+        after.frames, after.peak
+    );
+    assert!(
+        (after.peak - TONE_AMPLITUDE).abs() < 0.02,
+        "the tone survived the reconnect at {:.3}",
+        after.peak
+    );
+
+    guest.leave().expect("the guest leaves");
+    second.leave().expect("the returning session leaves");
+    host_api
+        .close_jam(jam_id.as_str())
+        .expect("the host closes the jam");
+}
+
+/// The compiled production defaults have to match where the service actually
+/// lives, because a release build with no environment uses exactly these.
+#[test]
+fn the_compiled_defaults_point_at_the_deployed_service() {
+    let defaults = JamConfig::default();
+    assert_eq!(defaults.api_url.as_str(), "https://jam.futureboard.studio/");
+    assert_eq!(
+        defaults.websocket_url.as_str(),
+        "wss://jam.futureboard.studio/v1/realtime"
+    );
+    // The media plane is a different hostname, and the client never needs to
+    // know it: every media address arrives as a signed candidate.
+    assert!(!defaults.api_url.as_str().contains("media."));
 }
 
 #[test]

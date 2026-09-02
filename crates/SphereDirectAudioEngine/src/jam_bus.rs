@@ -41,7 +41,7 @@
 //! the publisher's capture instant — never the moment the packet arrived.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// Ring capacity per slot, in frames. Power of two so the wrap is a mask.
@@ -472,11 +472,41 @@ impl JamPublishSlot {
     /// unpublished engine pays one atomic load per block.
     #[inline]
     pub fn write_interleaved(&self, interleaved: &[f32], channels: usize, sample_rate: u32) {
-        if !self.active.load(Ordering::Acquire) || channels == 0 || interleaved.is_empty() {
+        if channels == 0 || interleaved.is_empty() {
             return;
         }
         let frames = interleaved.len() / channels;
-        if frames == 0 {
+        self.write_frames_with(frames, sample_rate, |frame| {
+            let at = frame * channels;
+            let left = interleaved[at];
+            let right = if channels >= 2 {
+                interleaved[at + 1]
+            } else {
+                left
+            };
+            (left, right)
+        });
+    }
+
+    /// The same, from the separate left and right buffers the mixer works in.
+    ///
+    /// The engine renders planar, so an interleaving pass on the way out would
+    /// be a copy the callback does not otherwise need, into a scratch buffer
+    /// every track would have to carry.
+    #[inline]
+    pub fn write_planar(&self, left: &[f32], right: &[f32], frames: usize, sample_rate: u32) {
+        let frames = frames.min(left.len()).min(right.len());
+        self.write_frames_with(frames, sample_rate, |frame| (left[frame], right[frame]));
+    }
+
+    #[inline]
+    fn write_frames_with(
+        &self,
+        frames: usize,
+        sample_rate: u32,
+        mut sample: impl FnMut(usize) -> (f32, f32),
+    ) {
+        if !self.active.load(Ordering::Acquire) || frames == 0 {
             return;
         }
         self.sample_rate.store(sample_rate, Ordering::Relaxed);
@@ -490,13 +520,7 @@ impl JamPublishSlot {
             self.overruns.fetch_add(1, Ordering::Relaxed);
         }
         for frame in 0..frames {
-            let at = frame * channels;
-            let left = interleaved[at];
-            let right = if channels >= 2 {
-                interleaved[at + 1]
-            } else {
-                left
-            };
+            let (left, right) = sample(frame);
             let index = ((write as usize).wrapping_add(frame)) & MASK;
             self.left[index].store(left.to_bits(), Ordering::Relaxed);
             self.right[index].store(right.to_bits(), Ordering::Relaxed);
@@ -595,6 +619,12 @@ pub struct JamAudioBus {
     /// the whole jam branch with one relaxed load.
     any_input: AtomicBool,
     any_publish: AtomicBool,
+    /// The master bus's publish slot, or `-1`.
+    ///
+    /// Resolved here rather than looked up by key in the callback: the key map
+    /// is a `RwLock<HashMap<String, _>>`, and taking a lock and hashing a string
+    /// once per block is exactly the kind of work the realtime path must not do.
+    master_publish: AtomicI32,
 }
 
 impl std::fmt::Debug for JamAudioBus {
@@ -621,6 +651,7 @@ impl Default for JamAudioBus {
             publish_keys: RwLock::new(HashMap::new()),
             any_input: AtomicBool::new(false),
             any_publish: AtomicBool::new(false),
+            master_publish: AtomicI32::new(-1),
         }
     }
 }
@@ -651,6 +682,19 @@ impl JamAudioBus {
     #[inline]
     pub fn publish(&self, index: usize) -> Option<&JamPublishSlot> {
         self.publishes.get(index)
+    }
+
+    /// The master bus's publish slot, if one is bound.
+    ///
+    /// One relaxed load, so the render callback can reach it without touching
+    /// the key map.
+    #[inline]
+    pub fn master_publish(&self) -> Option<&JamPublishSlot> {
+        let index = self.master_publish.load(Ordering::Acquire);
+        if index < 0 {
+            return None;
+        }
+        self.publishes.get(index as usize)
     }
 
     /// Bind a remote stream to a slot, or return the slot it already holds.
@@ -703,6 +747,9 @@ impl JamAudioBus {
             .position(|slot| !slot.active.load(Ordering::Acquire))?;
         self.publishes[index].claim();
         keys.insert(key.to_string(), index);
+        if key == PUBLISH_KEY_MASTER {
+            self.master_publish.store(index as i32, Ordering::Release);
+        }
         self.any_publish.store(true, Ordering::Release);
         Some(index)
     }
@@ -717,6 +764,9 @@ impl JamAudioBus {
         };
         if let Some(index) = keys.remove(key) {
             self.publishes[index].release();
+        }
+        if key == PUBLISH_KEY_MASTER {
+            self.master_publish.store(-1, Ordering::Release);
         }
         self.any_publish.store(!keys.is_empty(), Ordering::Release);
     }
@@ -738,6 +788,7 @@ impl JamAudioBus {
         }
         self.any_input.store(false, Ordering::Release);
         self.any_publish.store(false, Ordering::Release);
+        self.master_publish.store(-1, Ordering::Release);
     }
 
     pub fn bound_input_count(&self) -> usize {
@@ -995,6 +1046,53 @@ mod tests {
             0
         );
         assert_eq!(left, vec![0.0]);
+    }
+
+    #[test]
+    fn the_master_publish_slot_is_reachable_without_touching_the_key_map() {
+        let bus = JamAudioBus::new();
+        assert!(bus.master_publish().is_none());
+
+        let index = bus.bind_publish(PUBLISH_KEY_MASTER).expect("bound");
+        let slot = bus.master_publish().expect("resolved");
+        slot.write_interleaved(&[0.5, -0.5], 2, 48_000);
+        assert_eq!(bus.publish(index).expect("in range").write_head(), 1);
+
+        bus.release_publish(PUBLISH_KEY_MASTER);
+        assert!(bus.master_publish().is_none());
+    }
+
+    #[test]
+    fn a_planar_write_produces_the_same_frames_as_an_interleaved_one() {
+        let planar = JamPublishSlot::default();
+        planar.claim();
+        planar.write_planar(&[0.25, 0.5], &[-0.25, -0.5], 2, 48_000);
+
+        let interleaved = JamPublishSlot::default();
+        interleaved.claim();
+        interleaved.write_interleaved(&[0.25, -0.25, 0.5, -0.5], 2, 48_000);
+
+        let mut from_planar = Vec::new();
+        let mut from_interleaved = Vec::new();
+        planar
+            .read_interleaved(&mut from_planar, 8)
+            .expect("frames ready");
+        interleaved
+            .read_interleaved(&mut from_interleaved, 8)
+            .expect("frames ready");
+        assert_eq!(from_planar, from_interleaved);
+    }
+
+    #[test]
+    fn a_planar_write_is_bounded_by_the_shorter_buffer() {
+        let slot = JamPublishSlot::default();
+        slot.claim();
+        // A caller that passes a frame count longer than its buffers must not
+        // read past them; the shorter side wins.
+        slot.write_planar(&[0.25], &[0.25, 0.5], 8, 48_000);
+        let mut out = Vec::new();
+        let (frames, _) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        assert_eq!(frames, 1);
     }
 
     #[test]

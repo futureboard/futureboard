@@ -771,6 +771,9 @@ pub fn drain_commands(
                 monitor_enabled,
                 input_source,
             ),
+            EngineCommand::SetTrackJamPublish { track_index, slot } => {
+                runtime.update_track_jam_publish(track_index, slot);
+            }
             EngineCommand::SetTrackPreviewMode { track_id, value } => {
                 runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
             }
@@ -1370,12 +1373,8 @@ fn fill_output_f32_inner(
     // the mix, not this engineer's dim, mono or monitor inserts. The write is
     // atomics into a preallocated ring, and it costs one relaxed load when
     // nothing is published.
-    if shared.jam_bus.has_publishes() && channels >= 2 {
-        if let Some(slot) = shared
-            .jam_bus
-            .publish_slot_for(crate::jam_bus::PUBLISH_KEY_MASTER)
-            .and_then(|index| shared.jam_bus.publish(index))
-        {
+    if channels >= 2 {
+        if let Some(slot) = shared.jam_bus.master_publish() {
             slot.write_interleaved(data, channels, runtime.sample_rate);
         }
     }

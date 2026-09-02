@@ -2010,6 +2010,69 @@ impl EngineInner {
         )
     }
 
+    /// Start or stop sharing one track or bus over Audio Jam.
+    ///
+    /// Returns the bus slot the track now feeds, or `None` when sharing was
+    /// stopped. The caller hands that slot to the jam client, which pulls from
+    /// it on its own thread; the audio callback only ever writes into it.
+    ///
+    /// A publish is session state rather than project state: reopening a
+    /// project does not resume broadcasting, and starting one does not rebuild
+    /// the graph.
+    pub fn set_track_jam_publish(
+        &self,
+        track_id: &str,
+        enabled: bool,
+    ) -> Result<Option<u32>, SphereAudioError> {
+        let track_index = {
+            let project = self.project.lock();
+            let snapshot = project.as_ref().ok_or_else(|| {
+                SphereAudioError::InvalidConfig("no project is loaded".to_string())
+            })?;
+            snapshot
+                .tracks
+                .iter()
+                .position(|track| track.id == track_id)
+                .ok_or_else(|| {
+                    SphereAudioError::InvalidConfig(format!("track '{track_id}' was not found"))
+                })?
+        };
+
+        let key = crate::jam_bus::publish_key_track(track_id);
+        let slot = if enabled {
+            match self.shared.jam_bus.bind_publish(&key) {
+                Some(index) => Some(index as u32),
+                None => {
+                    return Err(SphereAudioError::InvalidConfig(
+                        "every Audio Jam publish slot is in use".to_string(),
+                    ))
+                }
+            }
+        } else {
+            self.shared.jam_bus.release_publish(&key);
+            None
+        };
+
+        self.runtime
+            .lock()
+            .update_track_jam_publish(track_index, slot);
+        match self.send_command(EngineCommand::SetTrackJamPublish { track_index, slot }) {
+            // A closed engine is not a failure here: the runtime mirror already
+            // carries the binding, and the next graph the callback receives will
+            // have it.
+            Ok(()) | Err(SphereAudioError::EngineNotOpen) => Ok(slot),
+            Err(error) => {
+                if enabled {
+                    self.shared.jam_bus.release_publish(&key);
+                    self.runtime
+                        .lock()
+                        .update_track_jam_publish(track_index, None);
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub fn update_track_input_flags(
         &self,
         track_id: &str,
@@ -4234,6 +4297,7 @@ impl EngineInner {
                 EngineCommand::SetTrackMute { .. } => "SetTrackMute",
                 EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
                 EngineCommand::SetTrackInputState { .. } => "SetTrackInputState",
+                EngineCommand::SetTrackJamPublish { .. } => "SetTrackJamPublish",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
                 EngineCommand::SetMonitorSource { .. } => "SetMonitorSource",
@@ -4928,6 +4992,9 @@ where
                             monitor_enabled,
                             input_source,
                         ),
+                        EngineCommand::SetTrackJamPublish { track_index, slot } => {
+                            runtime.update_track_jam_publish(track_index, slot);
+                        }
                         EngineCommand::SetTrackPreviewMode { track_id, value } => {
                             runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
                         }
@@ -5844,6 +5911,7 @@ mod bridge_insert_tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6338,6 +6406,7 @@ mod bridge_insert_tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6481,6 +6550,7 @@ mod bridge_insert_tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6578,6 +6648,7 @@ mod routing_tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

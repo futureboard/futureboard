@@ -1503,7 +1503,7 @@ impl StudioLayout {
         // bus. Installing it here rather than at startup means a Studio that
         // never opens this window never starts a jam subsystem at all.
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
-            if let Err(error) = crate::jam::install(engine.jam_bus()) {
+            if let Err(error) = crate::jam::install(engine.jam_bus(), Some(engine.clone())) {
                 eprintln!("[jam] {error}");
             }
         } else {
@@ -1511,16 +1511,66 @@ impl StudioLayout {
         }
 
         let layout = cx.entity().clone();
-        let on_create_track: crate::components::jam_window::CreateTrackHandler =
-            std::sync::Arc::new(move |request, app| {
-                let _ = layout.update(app, |this, cx| {
+        let create_layout = layout.clone();
+        let handlers = crate::components::jam_window::JamWindowHandlers {
+            create_track: std::sync::Arc::new(move |request, app| {
+                let _ = create_layout.update(app, |this, cx| {
                     this.create_track_from_jam_stream(request, cx);
                 });
-            });
+            }),
+            publish_track: std::sync::Arc::new(move |share, app| {
+                let _ = layout.update(app, |this, cx| {
+                    this.share_selected_track_over_jam(share, cx);
+                });
+            }),
+        };
 
-        match crate::components::jam_window::open_jam_window(owner_bounds, on_create_track, cx) {
+        match crate::components::jam_window::open_jam_window(owner_bounds, handlers, cx) {
             Ok(handle) => self.external_windows.jam = Some(handle),
             Err(error) => eprintln!("[jam] failed to open window: {error}"),
+        }
+    }
+
+    /// Share the selected track over Audio Jam, or stop sharing it.
+    ///
+    /// Which track is selected is the shell's own state, which is why the panel
+    /// asks rather than deciding. Sharing nothing is not an error the user needs
+    /// a dialog for — the panel's button is simply about a selection they can
+    /// see is empty.
+    pub(crate) fn share_selected_track_over_jam(&mut self, share: bool, cx: &mut Context<Self>) {
+        let selected = {
+            let timeline = self.timeline.read(cx);
+            timeline
+                .state
+                .selection
+                .selected_track_id
+                .clone()
+                .and_then(|id| {
+                    timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .find(|track| track.id == id)
+                        .map(|track| (track.id.clone(), track.name.clone()))
+                })
+        };
+        let Some((track_id, track_name)) = selected else {
+            eprintln!("[jam] no track is selected to share");
+            return;
+        };
+
+        let result = crate::jam::with_controller(|controller| {
+            if share {
+                controller.publish_track(&track_id, &track_name)
+            } else {
+                controller.unpublish_track(&track_id)
+            }
+        });
+        if let Err(error) = result {
+            eprintln!(
+                "[jam] sharing '{track_name}' failed: {}",
+                error.user_message()
+            );
         }
     }
 

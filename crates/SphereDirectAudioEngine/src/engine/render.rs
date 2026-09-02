@@ -1390,6 +1390,10 @@ fn render_project_block_interleaved_core(
                 tap[frame * 2 + 1] = runtime.tracks[track_index].block_r[frame];
             }
         }
+        // Audio Jam publish tap: this track's post-fader signal, the same one
+        // an export would capture. Atomics into a preallocated ring, and one
+        // `Option` check for every track that is not being shared.
+        publish_track_to_jam(runtime, track_index, frames, jam);
     }
     runtime.audio_graph.pass1_source_indices = pass1_indices;
 
@@ -1439,6 +1443,10 @@ fn render_project_block_interleaved_core(
                 tap[frame * 2 + 1] = runtime.tracks[track_index].block_r[frame];
             }
         }
+        // Audio Jam publish tap: this track's post-fader signal, the same one
+        // an export would capture. Atomics into a preallocated ring, and one
+        // `Option` check for every track that is not being shared.
+        publish_track_to_jam(runtime, track_index, frames, jam);
         if is_vsti_output_child_track_id(&runtime.tracks[track_index].id)
             && (runtime.tracks[track_index]
                 .meter_peak_l
@@ -2836,6 +2844,32 @@ pub fn apply_insert_block(
     }
 }
 
+/// Feed one track's post-fader block to its Audio Jam publish slot.
+///
+/// Realtime-safe by construction: no allocation, no lock, no key lookup — the
+/// slot index was resolved on the control thread and shipped as a command.
+#[inline]
+fn publish_track_to_jam(
+    runtime: &RuntimeProject,
+    track_index: usize,
+    frames: usize,
+    jam: Option<&crate::jam_bus::JamAudioBus>,
+) {
+    let Some(bus) = jam else {
+        return;
+    };
+    let Some(track) = runtime.tracks.get(track_index) else {
+        return;
+    };
+    let Some(slot) = track.jam_publish_slot else {
+        return;
+    };
+    let Some(slot) = bus.publish(slot as usize) else {
+        return;
+    };
+    slot.write_planar(&track.block_l, &track.block_r, frames, runtime.sample_rate);
+}
+
 #[inline]
 pub fn pan_gains(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
@@ -3082,6 +3116,92 @@ mod jam_input_tests {
         assert_eq!(
             runtime.tracks[0].input_source,
             RuntimeTrackInputSource::None
+        );
+    }
+
+    /// The publish half: a track's post-fader block reaches the jam bus slot it
+    /// was bound to, and only that one.
+    #[test]
+    fn a_shared_track_writes_its_post_fader_block_to_its_publish_slot() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let input_slot = bus.input_slot_for(STREAM).expect("bound");
+
+        // Feed the track from the jam input so it has something post-fader.
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+
+        // Nothing bound yet: the tap must not run.
+        render(&mut runtime, &bus, None);
+        assert!(bus.publish_slot_for("track:audio-1").is_none());
+
+        let publish_slot = bus.bind_publish("track:audio-1").expect("a slot is free");
+        runtime.update_track_jam_publish(0, Some(publish_slot as u32));
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+        render(&mut runtime, &bus, None);
+
+        let mut out = Vec::new();
+        let (frames, _) = bus
+            .publish(publish_slot)
+            .expect("in range")
+            .read_interleaved(&mut out, FRAMES)
+            .expect("the tap wrote frames");
+        assert_eq!(frames, FRAMES);
+        let peak = out
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!((peak - 0.5).abs() < 1e-6, "the tap captured {peak}");
+    }
+
+    /// Unsharing stops the tap. A slot that keeps filling after a publish ends
+    /// would hold audio nobody drains until the ring wrapped.
+    #[test]
+    fn unsharing_a_track_stops_the_tap() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let input_slot = bus.input_slot_for(STREAM).expect("bound");
+        let publish_slot = bus.bind_publish("track:audio-1").expect("a slot is free");
+        runtime.update_track_jam_publish(0, Some(publish_slot as u32));
+
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+        render(&mut runtime, &bus, None);
+        let mut out = Vec::new();
+        assert!(bus
+            .publish(publish_slot)
+            .expect("in range")
+            .read_interleaved(&mut out, FRAMES)
+            .is_some());
+
+        runtime.update_track_jam_publish(0, None);
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+        render(&mut runtime, &bus, None);
+        assert!(
+            bus.publish(publish_slot)
+                .expect("in range")
+                .read_interleaved(&mut out, FRAMES)
+                .is_none(),
+            "the tap kept writing after the publish ended"
         );
     }
 

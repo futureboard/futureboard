@@ -403,6 +403,7 @@ mod tests {
             record_armed: false,
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
+            jam_publish_slot: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

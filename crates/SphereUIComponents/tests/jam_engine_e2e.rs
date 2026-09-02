@@ -91,6 +91,210 @@ fn feed_master(shared: &SharedState, slot_index: usize, phase: &mut f32, frames:
         .write_interleaved(&block, 2, ENGINE_RATE);
 }
 
+/// Where a remote take belongs on the timeline, across two different project
+/// rates.
+///
+/// This is the claim recording alignment rests on, and it is the one that is
+/// easy to get subtly wrong: the jam counts time in 48 kHz session ticks, the
+/// receiving project counts it in its own samples, and the number that has to
+/// survive the trip is *when the publisher played the note* — not when the
+/// packet turned up. A 96 kHz session must place a 48 kHz performer at twice
+/// the sample index, and network delay must not move it.
+#[test]
+fn a_remote_take_lands_where_it_was_played_even_at_a_different_project_rate() {
+    if !enabled() {
+        eprintln!("skipping the alignment test: set FUTUREBOARD_JAM_E2E=1");
+        return;
+    }
+
+    const RECEIVER_RATE: u32 = 96_000;
+    let config = config();
+
+    let publisher_engine = Arc::new(SharedState::default());
+    publisher_engine
+        .sample_rate
+        .store(ENGINE_RATE, Ordering::Relaxed);
+    let publisher_clock = Arc::new(Mutex::new(SessionClock::default()));
+    let publisher_sink = Arc::new(JamEngineSink::new(
+        Arc::clone(&publisher_engine),
+        Arc::clone(&publisher_clock),
+    ));
+
+    let api = JamApiClient::new(config.clone(), credentials("hachi224")).expect("api client");
+    let created = api
+        .create_jam(&CreateJamRequest {
+            name: "Alignment".to_string(),
+            max_participants: 4,
+            ..Default::default()
+        })
+        .expect("a jam is created");
+    let jam_id = JamId::new(created.jam.id.clone());
+
+    let mut options = JamSessionOptions::new(
+        "align-a",
+        Arc::clone(&publisher_sink) as Arc<dyn JamAudioSink>,
+    );
+    options.publish_sample_rate = ENGINE_RATE as i32;
+    let publisher = JamSession::spawn_with_clock(
+        config.clone(),
+        credentials("hachi224"),
+        options,
+        Arc::clone(&publisher_clock),
+    )
+    .expect("the publisher worker starts");
+    publisher
+        .join(jam_id.clone(), "")
+        .expect("the publisher joins");
+    wait_for("the publisher to connect", || {
+        publisher.state() == JamState::Connected
+    });
+
+    let slot_index = publisher_engine
+        .jam_bus
+        .bind_publish(PUBLISH_KEY_MASTER)
+        .expect("a publish slot is free");
+    publisher
+        .publish(
+            JamPublishRequest::stereo("Guitar", JamPublishSourceKind::Master),
+            Arc::new(JamEngineSource::new(
+                Arc::clone(&publisher_engine),
+                Arc::clone(&publisher_clock),
+                PUBLISH_KEY_MASTER,
+                ENGINE_RATE,
+            )),
+        )
+        .expect("the publish is queued");
+    wait_for("the stream to be published", || {
+        !publisher.snapshot().streams.is_empty()
+    });
+    let published = publisher.snapshot().streams[0].clone();
+
+    // The receiving Studio runs at twice the rate. Nothing about the jam is
+    // allowed to change that, and nothing about that is allowed to change where
+    // the remote performance lands.
+    let invite = api
+        .create_invite(
+            jam_id.as_str(),
+            &CreateInviteRequest {
+                role: "performer".to_string(),
+                max_uses: 4,
+                ..Default::default()
+            },
+        )
+        .expect("an invite is minted");
+    let guest_api = JamApiClient::new(config.clone(), credentials("mina")).expect("api client");
+    let admitted = guest_api
+        .exchange_invite(&invite.secret, &created.jam.public_id)
+        .expect("the invite is exchanged");
+
+    let receiver_engine = Arc::new(SharedState::default());
+    receiver_engine
+        .sample_rate
+        .store(RECEIVER_RATE, Ordering::Relaxed);
+    let receiver_clock = Arc::new(Mutex::new(SessionClock::default()));
+    let receiver_sink = Arc::new(JamEngineSink::new(
+        Arc::clone(&receiver_engine),
+        Arc::clone(&receiver_clock),
+    ));
+    let guest_options = JamSessionOptions::new(
+        "align-b",
+        Arc::clone(&receiver_sink) as Arc<dyn JamAudioSink>,
+    );
+    let receiver = JamSession::spawn_with_clock(
+        config.clone(),
+        credentials("mina"),
+        guest_options,
+        Arc::clone(&receiver_clock),
+    )
+    .expect("the receiver worker starts");
+    receiver
+        .join(jam_id.clone(), admitted.access_token.clone())
+        .expect("the receiver joins");
+    wait_for("the receiver to connect", || {
+        receiver.state() == JamState::Connected
+    });
+    wait_for("the receiver to be given a format", || {
+        !receiver.snapshot().formats.is_empty()
+    });
+
+    let stream_id = StreamId::new(published.id.clone());
+    let mut phase = 0.0f32;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut bound = None;
+    while Instant::now() < deadline {
+        feed_master(&publisher_engine, slot_index, &mut phase, 256);
+        std::thread::sleep(Duration::from_millis(5));
+        if bound.is_none() {
+            bound = receiver_sink.slot_for(&stream_id);
+        }
+        if let Some(index) = bound {
+            let slot = receiver_engine.jam_bus.input(index).expect("in range");
+            // Wait for the receiving clock to lock too: before it does, the
+            // slot correctly reports no position rather than a guess.
+            if slot.available() >= 9_600 && slot.next_capture_position().is_some() {
+                break;
+            }
+        }
+    }
+
+    let index = bound.expect("the receiving engine bound a slot");
+    let slot = receiver_engine.jam_bus.input(index).expect("in range");
+    let start = slot
+        .next_capture_position()
+        .expect("the take has a position on the receiving timeline");
+
+    // 1. The position is in the receiving project's own samples, and it advances
+    //    one per frame consumed — so a recorder can write frames straight down
+    //    from it.
+    const DRAIN: usize = 4_096;
+    let mut left = vec![0.0f32; DRAIN];
+    let mut right = vec![0.0f32; DRAIN];
+    let read = slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, DRAIN);
+    assert_eq!(read, DRAIN, "the callback drained a full block");
+    let after = slot
+        .next_capture_position()
+        .expect("the position survives a drain");
+    assert_eq!(
+        after - start,
+        DRAIN as i64,
+        "the capture position must advance exactly one per frame at the project rate"
+    );
+
+    // 2. The position is in the right units and the right epoch. Converted back
+    //    into session ticks it has to sit close to the jam's own clock — within
+    //    a couple of seconds, which is loose enough not to be flaky and tight
+    //    enough to catch a rate factor of two or a wrong epoch.
+    let (now_ticks, rate) = {
+        let clock = receiver_clock.lock().expect("clock");
+        (
+            clock
+                .session_ticks_at(sphere_jam_client::clock::client_nanos())
+                .expect("the receiving clock is locked"),
+            clock.rate(),
+        )
+    };
+    let ticks_at_start = start * rate as i64 / RECEIVER_RATE as i64;
+    let behind_ms = (now_ticks - ticks_at_start) as f64 * 1000.0 / rate as f64;
+    eprintln!(
+        "receiver at {RECEIVER_RATE} Hz: take starts at sample {start} \
+         ({ticks_at_start} ticks), {behind_ms:.0} ms behind the session clock"
+    );
+    assert!(
+        behind_ms.abs() < 2_000.0,
+        "the take is {behind_ms:.0} ms from the session clock — wrong epoch or wrong rate"
+    );
+    // It must be *behind* rather than ahead: audio that has arrived was played
+    // in the past. A position in the future would mean the mapping is inverted.
+    assert!(
+        behind_ms > -50.0,
+        "the take claims to have been captured in the future"
+    );
+
+    receiver.leave().expect("the receiver leaves");
+    publisher.leave().expect("the publisher leaves");
+    api.close_jam(jam_id.as_str()).expect("the jam is closed");
+}
+
 #[test]
 fn studio_publishes_its_master_and_hears_a_remote_stream_on_its_own_bus() {
     if !enabled() {

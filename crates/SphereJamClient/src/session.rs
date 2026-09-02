@@ -37,8 +37,8 @@ use crate::protocol::{
     ChannelMetadata, ClockSyncRequest, ClockSyncResponse, CodecCapability, JamClosed,
     JamJoinRequest, JamJoined, JamLeaveRequest, JamParticipantEvent, JamParticipantState,
     ParticipantSummary, RegionSummary, SampleFormat, StreamEvent, StreamPublishRequest,
-    StreamPublished, StreamSummary, StreamUnpublishRequest, TransportCandidates, TransportKind,
-    TransportSelect, TransportSelected, UserSummary,
+    StreamPublished, StreamSummary, StreamUnpublishRequest, TransportCandidates,
+    TransportCapabilities, TransportKind, TransportSelect, TransportSelected, UserSummary,
 };
 use crate::registry::JamRegistry;
 use crate::signaling::SignalingClient;
@@ -181,6 +181,13 @@ pub struct JamSessionOptions {
     /// The rates and formats this host can actually handle. Sent verbatim as
     /// `audio.capabilities`; the server picks from it per stream.
     pub capabilities: AudioCapabilities,
+    /// What this client offers to open for media.
+    ///
+    /// Defaults to everything this build implements. A user who already knows
+    /// their network permits nothing but outbound HTTPS can narrow it to
+    /// [`transport::reliable_only_capabilities`] and skip a failed connection
+    /// attempt per datagram candidate on every join.
+    pub transport: TransportCapabilities,
     /// Frame length to ask for when publishing, in samples per channel.
     pub publish_frame_samples: i32,
     /// Sample rate to publish at. Independent of the project rate: the jam
@@ -219,6 +226,7 @@ impl JamSessionOptions {
             device_name: "Futureboard Studio".to_string(),
             sink,
             capabilities: Self::studio_capabilities(),
+            transport: transport::native_capabilities(),
             // Overridden by the smallest advertised frame size at publish time;
             // this is only the fallback for a caller that supplies capabilities
             // with no frame sizes at all.
@@ -513,7 +521,16 @@ impl Worker {
                 JamState::Connecting
             });
 
-            match self.run_session() {
+            let outcome = self.run_session();
+            // Whatever happened, the transport that was open belongs to the
+            // attempt that just ended. Left running it would keep sending on a
+            // connection generation the server has already superseded, and keep
+            // a socket and two threads alive through the whole backoff.
+            if !matches!(outcome, Ok(SessionEnd::Left) | Ok(SessionEnd::Shutdown)) {
+                self.teardown_media();
+            }
+
+            match outcome {
                 Ok(SessionEnd::Left) | Ok(SessionEnd::Shutdown) => return,
                 Ok(SessionEnd::JamClosed(reason)) => {
                     self.emit(JamEvent::Closed(reason));
@@ -715,7 +732,7 @@ impl Worker {
 
         let candidates: TransportCandidates = signaling.request(
             message::TRANSPORT_CAPABILITIES,
-            &transport::native_capabilities(),
+            &self.options.transport,
             message::TRANSPORT_CANDIDATES,
             self.config.connect_timeout,
         )?;
@@ -787,6 +804,21 @@ impl Worker {
         Ok(())
     }
 
+    /// A stream this participant already publishes under the same name.
+    ///
+    /// After a resumed join the participant keeps its streams — that is the
+    /// point of resuming — so the snapshot already lists them. Publishing again
+    /// would mint a second stream with a second alias and leave the room
+    /// showing one guitar per reconnect, each one silent except the newest.
+    fn adoptable_stream(&self, name: &str) -> Option<StreamSummary> {
+        let mine = self.participant_id.as_ref()?;
+        self.registry
+            .streams()
+            .into_iter()
+            .find(|stream| &stream.participant_id == mine && stream.name == name)
+            .map(|stream| stream.summary.clone())
+    }
+
     fn publish_one(
         &mut self,
         signaling: &mut SignalingClient,
@@ -798,6 +830,14 @@ impl Worker {
         };
         let channels = pending.request.channels.clamp(1, 2) as i32;
         let labels = pending.request.channel_labels.clone();
+
+        // Re-attach to the stream this participant already has, if it kept one
+        // across the reconnect.
+        if let Some(existing) = self.adoptable_stream(&pending.request.name) {
+            self.attach_publication(index, &existing);
+            self.emit(JamEvent::Published(existing));
+            return Ok(());
+        }
         let request = StreamPublishRequest {
             jam_id: jam_id.as_str().to_string(),
             name: pending.request.name.clone(),
@@ -826,21 +866,42 @@ impl Worker {
             self.config.connect_timeout,
         )?;
 
-        let stream_id = StreamId::new(published.stream.id.clone());
+        self.attach_publication(index, &published.stream);
+        self.emit(JamEvent::Published(published.stream));
+        Ok(())
+    }
+
+    /// Point a publish source at a stream and start feeding it.
+    ///
+    /// Shared by a fresh publish and a re-attach, so both paths install exactly
+    /// the same media-plane state: the same alias, the same format, and a
+    /// sequence counter that starts again. Restarting the sequence is correct
+    /// because a re-attach comes with a new connection generation, and a
+    /// receiver's jitter buffer discards everything from the old one.
+    fn attach_publication(&mut self, index: usize, stream: &StreamSummary) {
+        let Some(source) = self
+            .publications
+            .get(index)
+            .map(|pending| Arc::clone(&pending.source))
+        else {
+            return;
+        };
+        let stream_id = StreamId::new(stream.id.clone());
         let format = AudioFormat {
             codec: AudioCodec::Pcm,
             sample_rate: self.options.publish_sample_rate,
-            channels,
+            channels: stream.channels.clamp(1, 2),
             format: SampleFormat::F32Le,
             bitrate: 0,
             frame_samples: self.publish_frame_samples(),
         };
         if let Ok(mut guard) = self.media_shared.publications.lock() {
+            guard.retain(|publication| publication.stream_id != stream_id);
             guard.push(Publication::new(
                 stream_id.clone(),
-                published.stream.media_alias,
+                stream.media_alias,
                 format,
-                Arc::clone(&self.publications[index].source),
+                source,
             ));
         }
         self.published_ids[index] = Some(stream_id);
@@ -848,11 +909,8 @@ impl Worker {
         // The room broadcast for a new stream excludes its own publisher, so
         // without this a client would never see what it is itself publishing.
         // The panel needs it, and so does anything that asks "am I live".
-        self.registry.upsert_stream(published.stream.clone());
+        self.registry.upsert_stream(stream.clone());
         self.publish_registry_snapshot();
-
-        self.emit(JamEvent::Published(published.stream));
-        Ok(())
     }
 
     /// The frame length to actually send, in samples per channel.

@@ -66,6 +66,17 @@ pub enum EngineCommand {
         monitor_enabled: bool,
         input_source: crate::runtime::RuntimeTrackInputSource,
     },
+    /// Route a track or bus into an Audio Jam publish slot, or stop.
+    ///
+    /// A publish is a session-scoped decision, not project state, so it arrives
+    /// as its own command rather than through a graph rebuild — a performer
+    /// starting to share a bus must not cost the room a reload. The control
+    /// thread resolves both the track id and the slot before enqueueing, so the
+    /// callback only ever writes to an index.
+    SetTrackJamPublish {
+        track_index: usize,
+        slot: Option<u32>,
+    },
     /// Set non-destructive stereo/mono/mid/side monitoring preview.
     SetTrackPreviewMode { track_id: String, value: f32 },
     /// Set a plugin/insert parameter.

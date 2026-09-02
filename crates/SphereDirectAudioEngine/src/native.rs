@@ -1156,6 +1156,19 @@ impl AudioEngine {
             .update_track_input_state(track_id, record_armed, monitor_enabled, input_source)
     }
 
+    /// Start or stop sharing one track or bus over Audio Jam.
+    ///
+    /// Returns the publish slot the track now feeds, for the jam client to pull
+    /// from. A publish is session state: it never reaches the project file and
+    /// reopening a project does not resume it.
+    pub fn set_track_jam_publish(
+        &self,
+        track_id: &str,
+        enabled: bool,
+    ) -> Result<Option<u32>, SphereAudioError> {
+        self.inner.set_track_jam_publish(track_id, enabled)
+    }
+
     pub fn set_insert_param(
         &self,
         track_id: String,
