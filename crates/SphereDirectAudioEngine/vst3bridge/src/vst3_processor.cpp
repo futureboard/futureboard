@@ -49,8 +49,22 @@
 #include "vst3_processor_internal.hpp"
 
 // Only for `kARAMainFactoryClass`. ARA hosting itself lives in
-// `crates/SphereAraHost`; this file just locates the ARA entry points.
+// `crates/SphereAraHost`, which is a Windows/macOS-only dependency; this file
+// just locates the ARA entry points and is built on every platform.
+//
+// The ARA SDK is an optional submodule (CI initializes it only where ARA is
+// actually hosted — see `.github/workflows/submodules-init.sh`), so take the
+// header when it is checked out and otherwise define the one thing used from
+// it. The value is the category string an ARA-capable VST3 registers its main
+// factory under; `ARAVST3.h` guards the same macro with `#if !defined`, so the
+// two definitions can never disagree.
+#if __has_include("ARAVST3.h")
 #include "ARAVST3.h"
+#else
+#if !defined(kARAMainFactoryClass)
+#define kARAMainFactoryClass "ARA Main Factory Class"
+#endif
+#endif
 
 // IPlugFrame is a GUI-layer interface whose class IID is not emitted by the
 // SDK IID TUs we compile (coreiids.cpp / vstinitiids.cpp). Our IPlugFrame

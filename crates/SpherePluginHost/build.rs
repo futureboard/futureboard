@@ -79,12 +79,6 @@ fn main() {
         .include(sdk_root.join("public.sdk/source"))
         .include(clap_root.join("include"))
         .include(clap_helpers_root.join("include"))
-        // Header-only ARA API, for `kARAMainFactoryClass` in the VST3 scanner.
-        // Nothing here links the ARA SDK — the scanner only needs the published
-        // class-category string so it can flag ARA-capable plug-ins without
-        // instantiating them. Taking it from the header instead of copying the
-        // literal keeps the two from drifting.
-        .include(ara_root.join("ARA_API"))
         // Shared VST2 ABI header — same file the runtime bridge uses, so the
         // scanner and the host can never disagree about the AEffect layout.
         .include(manifest_dir.join("../SphereDirectAudioEngine/vst2bridge/include"))
@@ -99,6 +93,7 @@ fn main() {
         .file(sdk_root.join("public.sdk/source/vst/hosting/pluginterfacesupport.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/hosting/module.cpp"));
 
+    add_optional_ara_include(&mut build, &ara_root);
     apply_vst3_platform_config(&mut build, &sdk_root, &backend_root);
 
     if target_os_for_au() == "macos" {
@@ -126,6 +121,29 @@ fn main() {
 
 fn target_os_for_au() -> String {
     std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
+}
+
+/// Add the header-only ARA API include path, but only when the SDK submodule is
+/// actually checked out.
+///
+/// `external/ARA_SDK` is optional: ARA *hosting* is a Windows/macOS feature
+/// (`SphereAraHost` is a per-target dependency) and CI does not initialize the
+/// submodule, while this scanner builds on every platform. The C++ takes
+/// `kARAMainFactoryClass` from the header when this path resolves and falls
+/// back to the same published literal when it does not, so a missing submodule
+/// changes nothing about what the scanner reports — it must not fail the build.
+fn add_optional_ara_include(build: &mut cc::Build, ara_root: &std::path::Path) {
+    let api = ara_root.join("ARA_API");
+    println!("cargo:rerun-if-changed={}", api.join("ARAVST3.h").display());
+    if api.join("ARAVST3.h").is_file() {
+        build.include(api);
+    } else {
+        println!(
+            "cargo:warning=ARA SDK not checked out at {}; building without it \
+             (ARA-capable plug-ins are still detected by class category)",
+            ara_root.display()
+        );
+    }
 }
 
 fn apply_vst3_platform_config(

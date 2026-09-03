@@ -46,10 +46,6 @@ fn main() {
         .include(&sdk_root)
         .include(sdk_root.join("pluginterfaces"))
         .include(sdk_root.join("public.sdk/source"))
-        // Header-only ARA API, for `kARAMainFactoryClass` in the ARA entry
-        // points. Nothing here links or implements ARA — the host runtime lives
-        // in `crates/SphereAraHost`.
-        .include(ara_root.join("ARA_API"))
         .file(bridge_root.join("src/vst3_processor.cpp"))
         .file(bridge_root.join("src/editor_windows.cpp"))
         .file(sdk_root.join("pluginterfaces/base/coreiids.cpp"))
@@ -63,6 +59,7 @@ fn main() {
         .file(sdk_root.join("public.sdk/source/vst/hosting/pluginterfacesupport.cpp"))
         .file(sdk_root.join("public.sdk/source/vst/hosting/module.cpp"));
 
+    add_optional_ara_include(&mut build, &ara_root);
     apply_vst3_platform_config(&mut build, &sdk_root, &bridge_root);
 
     build.compile("sphere_daux_vst3_processor");
@@ -71,6 +68,30 @@ fn main() {
     build_clap_bridge(&manifest_dir, &bridge_root);
 
     napi_build::setup();
+}
+
+/// Add the header-only ARA API include path, but only when the SDK submodule is
+/// actually checked out.
+///
+/// `external/ARA_SDK` is optional: ARA *hosting* is a Windows/macOS feature
+/// (`SphereAraHost` is a per-target dependency) and CI does not initialize the
+/// submodule, while this bridge builds on every platform. The C++ takes
+/// `kARAMainFactoryClass` from the header when this path resolves and falls
+/// back to the same published literal when it does not, so a missing submodule
+/// changes nothing about how ARA entry points are located — it must not fail
+/// the build.
+fn add_optional_ara_include(build: &mut cc::Build, ara_root: &std::path::Path) {
+    let api = ara_root.join("ARA_API");
+    println!("cargo:rerun-if-changed={}", api.join("ARAVST3.h").display());
+    if api.join("ARAVST3.h").is_file() {
+        build.include(api);
+    } else {
+        println!(
+            "cargo:warning=ARA SDK not checked out at {}; building without it \
+             (ARA entry points are still located by class category)",
+            ara_root.display()
+        );
+    }
 }
 
 /// CLAP runtime bridge. Like the VST2 bridge it is its own static lib: it

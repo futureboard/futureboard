@@ -8,7 +8,19 @@
 // factory class in this category alongside its audio-module class, so ARA
 // capability is visible from `getClassInfo` alone — no instantiation, and
 // therefore no change to this scanner's crash-isolation model.
+//
+// The ARA SDK is an optional submodule (CI initializes it only where ARA is
+// actually hosted — see `.github/workflows/submodules-init.sh`), while this
+// scanner is built on every platform. Take the header when it is checked out
+// and otherwise define the one thing used from it; `ARAVST3.h` guards the same
+// macro with `#if !defined`, so the two definitions can never disagree.
+#if __has_include("ARAVST3.h")
 #include "ARAVST3.h"
+#else
+#if !defined(kARAMainFactoryClass)
+#define kARAMainFactoryClass "ARA Main Factory Class"
+#endif
+#endif
 
 #include "clap/clap.h"
 #include "clap/factory/plugin-factory.h"
