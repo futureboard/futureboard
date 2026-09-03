@@ -80,7 +80,7 @@ exclude = [
 
 
 [workspace.package]
-version = "2026.9.1-beta1.2"
+version = "2026.9.3-beta1.2"
 edition = "2024"
 license = "MIT"
 publish = false
