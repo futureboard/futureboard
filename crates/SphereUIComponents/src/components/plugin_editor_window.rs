@@ -976,6 +976,11 @@ impl PluginEditorWindow {
         let Some(processor) = self.processor.clone() else {
             return;
         };
+        // VST2 editors repaint and animate only while the host calls
+        // effEditIdle; VST3 and CLAP run their own timers and this is a no-op
+        // for them. Runs before the embed check so an editor that is still
+        // materializing its child window keeps getting ticked.
+        processor.view_idle();
         if self.embed_handle.is_none() || !processor.embed_is_valid() {
             return;
         }

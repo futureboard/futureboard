@@ -10,16 +10,6 @@ pub struct TempoPointDrag {
 
 // ── Tempo map ─────────────────────────────────────────────────────────────────
 
-/// How the timeline maps musical time to horizontal pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TimelineTimebase {
-    /// Beat positions are spaced uniformly; tempo affects playback only.
-    #[default]
-    MusicalBeats,
-    /// Beat positions map through TempoMap seconds; faster sections shrink.
-    AbsoluteSeconds,
-}
-
 /// Interpolation shape between a tempo point and the next one. Mirrors the
 /// audio engine's tempo concept. `Smooth` is stored/round-tripped even though
 /// it currently evaluates as `Linear` until the curve math lands engine-side.
@@ -483,6 +473,11 @@ impl TimelineState {
     /// cache-invalidation counter, not part of the value) and a selection that
     /// no longer names a live marker is dropped.
     pub fn restore_tempo_state(&mut self, points: Vec<TempoPoint>, bpm: f32) {
+        // Where the Linear-timebase clips sit on the clock, read under the map
+        // that is about to be replaced. Not carried in the snapshot for the same
+        // reason clip lengths are not: it is a function of the position and the
+        // tempo, and a second stored copy is how the two drift apart.
+        let linear_anchors = self.capture_linear_clip_anchors();
         self.tempo_map.restore_points(points);
         self.bpm = bpm;
         // Audio clip lengths are derived from the tempo, so undoing the tempo
@@ -490,6 +485,10 @@ impl TimelineState {
         // same reason: the value is a function of the source window and the
         // tempo, and storing a second copy is how the two drift apart.
         self.reconcile_audio_clip_lengths();
+        // Linear tracks hold wall-clock time, so their clips move in beats to
+        // stay where they were on the clock. Runs after the length pass, which
+        // owns audio clip durations.
+        self.reapply_linear_clip_anchors(&linear_anchors);
         if let Some(id) = self.selected_tempo_point_id.clone() {
             if !self.tempo_map.points.iter().any(|p| p.id == id) {
                 self.selected_tempo_point_id = None;

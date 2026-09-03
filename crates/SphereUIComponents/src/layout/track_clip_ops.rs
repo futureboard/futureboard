@@ -803,6 +803,43 @@ impl StudioLayout {
         self.set_track_heights_with_undo(vec![(track_id, height)], cx);
     }
 
+    /// Set the context track's timebase — what its clips hold onto when the
+    /// tempo changes.
+    ///
+    /// Nothing moves here: the switch only decides what a *future* tempo change
+    /// preserves. The clips stay exactly where they are, at the beat and the
+    /// second they already occupy.
+    pub(super) fn set_context_track_timebase(
+        &mut self,
+        timebase: timeline_state::TrackTimebase,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(super::ContextTarget::Track(track_id)) = self.context_target_for_open_menu()
+        else {
+            return;
+        };
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let Some(track) = timeline
+                .state
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+            else {
+                return false;
+            };
+            if track.timebase == timebase {
+                return false;
+            }
+            track.timebase = timebase;
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            cx.notify();
+        }
+    }
+
     pub(super) fn reset_context_track_height(&mut self, cx: &mut Context<Self>) {
         let Some(super::ContextTarget::Track(track_id)) = self.context_target_for_open_menu()
         else {

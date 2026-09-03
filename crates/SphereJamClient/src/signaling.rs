@@ -49,6 +49,7 @@ impl SignalingClient {
     /// Authentication happens before the upgrade, so a bad credential is an
     /// HTTP status here rather than a socket that opens and immediately closes.
     pub fn connect(url: &Url, token: &str, timeout: Duration) -> Result<(Self, AuthReady)> {
+        crate::crypto::ensure_crypto_provider();
         if token.trim().is_empty() {
             return Err(JamError::Auth(
                 "no Futureboard account token was available for the jam".to_string(),

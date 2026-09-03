@@ -27,12 +27,13 @@ use gpui::{
 use crate::components::app_chrome::{next_bpm_drag_id, BpmDrag, BpmDragSample};
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::form::{select, select_dismiss_backdrop, SelectOption};
+use crate::components::timeline::timeline_state::{TimeDisplayFormat, TimecodeRate};
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
 
 pub const PROJECT_SETTINGS_WINDOW_WIDTH: f32 = 460.0;
-pub const PROJECT_SETTINGS_WINDOW_HEIGHT: f32 = 470.0;
+pub const PROJECT_SETTINGS_WINDOW_HEIGHT: f32 = 580.0;
 
 /// Sample rates the project can be worked at. Same list the audio settings
 /// offer, because this control routes through the same engine-restart flow.
@@ -70,6 +71,10 @@ pub struct ProjectSettingsSnapshot {
     pub sample_rate: u32,
     /// Rate the audio engine is actually running at, when a stream is open.
     pub engine_sample_rate: Option<u32>,
+    /// Unit the ruler and every position readout are shown in.
+    pub time_display_format: TimeDisplayFormat,
+    /// Frame rate Timecode is counted at.
+    pub timecode_rate: TimecodeRate,
     pub track_count: usize,
 }
 
@@ -85,6 +90,8 @@ impl Default for ProjectSettingsSnapshot {
             has_time_signature_markers: false,
             sample_rate: 48_000,
             engine_sample_rate: None,
+            time_display_format: TimeDisplayFormat::default(),
+            timecode_rate: TimecodeRate::default(),
             track_count: 0,
         }
     }
@@ -101,6 +108,8 @@ pub struct ProjectSettingsCallbacks {
     pub on_bpm_drag_end: Arc<dyn Fn(&mut App) + Send + Sync>,
     pub on_set_time_signature: Arc<dyn Fn(u32, u32, &mut App) + Send + Sync>,
     pub on_set_sample_rate: Arc<dyn Fn(u32, &mut App) + Send + Sync>,
+    pub on_set_time_display_format: Arc<dyn Fn(TimeDisplayFormat, &mut App) + Send + Sync>,
+    pub on_set_timecode_rate: Arc<dyn Fn(TimecodeRate, &mut App) + Send + Sync>,
     pub on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
 }
 
@@ -109,6 +118,8 @@ pub struct ProjectSettingsCallbacks {
 enum OpenMenu {
     TimeSignature,
     SampleRate,
+    TimeDisplayFormat,
+    TimecodeRate,
 }
 
 pub struct ProjectSettingsWindow {
@@ -194,6 +205,7 @@ impl Render for ProjectSettingsWindow {
                     .py(px(12.0))
                     .child(project_identity(&snapshot))
                     .child(self.tempo_section(&snapshot, cx))
+                    .child(self.timebase_section(&snapshot, cx))
                     .child(self.audio_section(&snapshot, cx)),
             )
             .child(footer(self.callbacks.on_close.clone()));
@@ -277,6 +289,109 @@ impl ProjectSettingsWindow {
                                 this.callbacks.on_set_time_signature.clone()
                             });
                             apply(num, den, cx);
+                        }),
+                    ))
+                    .into_any_element(),
+            ))
+    }
+
+    /// Timebase — the unit the ruler and every position readout are shown in.
+    ///
+    /// Display only. The arrangement stays in musical coordinates whatever is
+    /// picked here, so switching timebase never moves a clip; the subtitle says
+    /// so rather than leaving the user to find out.
+    fn timebase_section(
+        &self,
+        snapshot: &ProjectSettingsSnapshot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let format_toggle = cx.entity().clone();
+        let format_change = cx.entity().clone();
+        let rate_toggle = cx.entity().clone();
+        let rate_change = cx.entity().clone();
+        let selected_format = snapshot.time_display_format.label();
+        let selected_rate = snapshot.timecode_rate.label();
+        let shows_timecode = snapshot.time_display_format == TimeDisplayFormat::Timecode;
+
+        settings_section("TIMEBASE")
+            .child(settings_row(
+                "Timebase",
+                "Ruler and position readouts",
+                div()
+                    .w(px(150.0))
+                    .child(select(
+                        "project-settings-timebase",
+                        Some(selected_format),
+                        "-",
+                        TimeDisplayFormat::ALL
+                            .iter()
+                            .map(|format| {
+                                SelectOption::new(format.label().to_string(), format.label())
+                            })
+                            .collect(),
+                        self.open_menu == Some(OpenMenu::TimeDisplayFormat),
+                        false,
+                        Arc::new(move |_: &(), _w, cx| {
+                            let _ = format_toggle.update(cx, |this, cx| {
+                                this.toggle_menu(OpenMenu::TimeDisplayFormat, cx)
+                            });
+                        }),
+                        Arc::new(move |value: &String, _w, cx| {
+                            let Some(format) = TimeDisplayFormat::ALL
+                                .iter()
+                                .copied()
+                                .find(|candidate| candidate.label() == value.as_str())
+                            else {
+                                return;
+                            };
+                            let apply = format_change.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                                this.callbacks.on_set_time_display_format.clone()
+                            });
+                            apply(format, cx);
+                        }),
+                    ))
+                    .into_any_element(),
+            ))
+            .child(settings_row(
+                "Frame rate",
+                if shows_timecode {
+                    "Counting Timecode frames"
+                } else {
+                    "Used when Timebase is Timecode"
+                },
+                div()
+                    .w(px(150.0))
+                    .child(select(
+                        "project-settings-timecode-rate",
+                        Some(selected_rate),
+                        "-",
+                        TimecodeRate::ALL
+                            .iter()
+                            .map(|rate| SelectOption::new(rate.label().to_string(), rate.label()))
+                            .collect(),
+                        self.open_menu == Some(OpenMenu::TimecodeRate),
+                        false,
+                        Arc::new(move |_: &(), _w, cx| {
+                            let _ = rate_toggle.update(cx, |this, cx| {
+                                this.toggle_menu(OpenMenu::TimecodeRate, cx)
+                            });
+                        }),
+                        Arc::new(move |value: &String, _w, cx| {
+                            let Some(rate) = TimecodeRate::ALL
+                                .iter()
+                                .copied()
+                                .find(|candidate| candidate.label() == value.as_str())
+                            else {
+                                return;
+                            };
+                            let apply = rate_change.update(cx, |this, cx| {
+                                this.open_menu = None;
+                                cx.notify();
+                                this.callbacks.on_set_timecode_rate.clone()
+                            });
+                            apply(rate, cx);
                         }),
                     ))
                     .into_any_element(),

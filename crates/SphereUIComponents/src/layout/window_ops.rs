@@ -1512,6 +1512,7 @@ impl StudioLayout {
 
         let layout = cx.entity().clone();
         let create_layout = layout.clone();
+        let multitrack_layout = layout.clone();
         let handlers = crate::components::jam_window::JamWindowHandlers {
             create_track: std::sync::Arc::new(move |request, app| {
                 let _ = create_layout.update(app, |this, cx| {
@@ -1522,6 +1523,9 @@ impl StudioLayout {
                 let _ = layout.update(app, |this, cx| {
                     this.share_selected_track_over_jam(share, cx);
                 });
+            }),
+            multitrack_tracks: std::sync::Arc::new(move |app| {
+                multitrack_layout.read_with(app, |this, cx| this.jam_multitrack_tracks(cx))
             }),
         };
 
@@ -1571,6 +1575,54 @@ impl StudioLayout {
                 "[jam] sharing '{track_name}' failed: {}",
                 error.user_message()
             );
+        }
+    }
+
+    /// The tracks a multitrack jam stream would carry, in channel-pair order.
+    ///
+    /// Every channel that holds or produces audio of its own — audio, MIDI and
+    /// instrument tracks — and nothing that is a sum of them. Sending Master,
+    /// a bus or a return alongside the tracks feeding it would put the same
+    /// signal in the stream twice, which is not a multitrack take; it is a
+    /// multitrack take plus a duplicate mix of itself.
+    ///
+    /// The list is capped rather than refused when a project has more tracks
+    /// than the layout holds: sharing the first eight is useful, and a project
+    /// with nine tracks should not simply be unable to share.
+    pub(crate) fn jam_multitrack_tracks(&self, cx: &App) -> Vec<(String, String)> {
+        use crate::components::timeline::state::TrackType;
+
+        self.timeline
+            .read(cx)
+            .state
+            .tracks
+            .iter()
+            .filter(|track| {
+                matches!(
+                    track.track_type,
+                    TrackType::Audio | TrackType::Midi | TrackType::Instrument
+                )
+            })
+            .take(DirectAudio::jam_bus::MAX_MULTITRACK_PAIRS)
+            .map(|track| (track.id.clone(), track.name.clone()))
+            .collect()
+    }
+
+    /// Share the arrangement as one multitrack jam stream, or stop.
+    pub(crate) fn share_multitrack_over_jam(&mut self, share: bool, cx: &mut Context<Self>) {
+        let tracks = if share {
+            self.jam_multitrack_tracks(cx)
+        } else {
+            Vec::new()
+        };
+        if share && tracks.is_empty() {
+            eprintln!("[jam] this project has no tracks to share");
+            return;
+        }
+        let result =
+            crate::jam::with_controller(|controller| controller.publish_multitrack(&tracks));
+        if let Err(error) = result {
+            eprintln!("[jam] multitrack share failed: {}", error.user_message());
         }
     }
 
@@ -1719,6 +1771,8 @@ impl StudioLayout {
             has_time_signature_markers: timeline.state.time_signature_has_markers(),
             sample_rate: timeline.state.project_sample_rate,
             engine_sample_rate,
+            time_display_format: timeline.state.time_display_format,
+            timecode_rate: timeline.state.timecode_rate,
             track_count: timeline.state.tracks.len(),
         }
     }
@@ -1795,6 +1849,24 @@ impl StudioLayout {
                     });
                 })
             },
+            on_set_time_display_format: {
+                let owner = owner.clone();
+                Arc::new(move |format, cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.set_project_time_display_format(format, cx);
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
+            on_set_timecode_rate: {
+                let owner = owner.clone();
+                Arc::new(move |rate, cx| {
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.set_project_timecode_rate(rate, cx);
+                        this.push_project_settings_snapshot_to_window(cx);
+                    });
+                })
+            },
             on_close: {
                 let owner = owner.clone();
                 Arc::new(move |window, cx| {
@@ -1844,6 +1916,53 @@ impl StudioLayout {
             },
             cx,
         );
+    }
+
+    /// Set the project timebase — the unit the ruler and every position readout
+    /// are shown in.
+    ///
+    /// Display state, so there is nothing to push to the engine and nothing to
+    /// undo: no musical position changes, only how it is written. It is project
+    /// state rather than a preference, so it marks the project dirty and travels
+    /// in the project file.
+    fn set_project_time_display_format(
+        &mut self,
+        format: crate::components::timeline::timeline_state::TimeDisplayFormat,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.time_display_format == format {
+                return false;
+            }
+            timeline.state.time_display_format = format;
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            cx.notify();
+        }
+    }
+
+    /// Set the frame rate Timecode is counted at. Same contract as
+    /// [`Self::set_project_time_display_format`].
+    fn set_project_timecode_rate(
+        &mut self,
+        rate: crate::components::timeline::timeline_state::TimecodeRate,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            if timeline.state.timecode_rate == rate {
+                return false;
+            }
+            timeline.state.timecode_rate = rate;
+            cx.notify();
+            true
+        });
+        if changed {
+            self.mark_dirty();
+            cx.notify();
+        }
     }
 
     /// Builds the routing-matrix view-model from the current timeline tracks.

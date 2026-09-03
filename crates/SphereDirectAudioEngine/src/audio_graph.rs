@@ -441,6 +441,7 @@ mod tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: crate::runtime::RuntimePreviewMode::Stereo,
             output_track_id: output.map(str::to_string),
             output_track_index: None,

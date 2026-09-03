@@ -774,6 +774,9 @@ pub fn drain_commands(
             EngineCommand::SetTrackJamPublish { track_index, slot } => {
                 runtime.update_track_jam_publish(track_index, slot);
             }
+            EngineCommand::SetJamMultitrackPairs { pairs } => {
+                runtime.apply_jam_multitrack_pairs(&pairs);
+            }
             EngineCommand::SetTrackPreviewMode { track_id, value } => {
                 runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
             }
@@ -1194,6 +1197,18 @@ fn fill_output_f32_inner(
         false
     };
 
+    // Whether the metronome reaches the Audio Jam master stream.
+    //
+    // It does by default. When it is switched off, the click is mixed *after*
+    // the publish tap instead of before it, so the stream carries the mix
+    // exactly as it would have been without a metronome and the engineer still
+    // hears the count. Deferring it costs nothing and, unlike subtracting the
+    // click back out at the tap, stays exact when the master is clipping.
+    let defer_click = channels >= 2
+        && shared.jam_bus.master_publish().is_some()
+        && !shared.jam_bus.master_click_published();
+    let mut click_deferred = false;
+
     if channels >= 2 && (transport_playing || preview_render_active) {
         frames = if !transport_playing && !graph_wake_active {
             // Audition-only block: the graph would render silence, so hand the
@@ -1248,39 +1263,22 @@ fn fill_output_f32_inner(
                 frame[1] = (frame[1] + tone_r).clamp(-1.0, 1.0);
             }
         }
-        let mut segment_sample = base_sample;
-        let mut callback_offset = 0usize;
-        let mut remaining = frames;
-        while remaining > 0 {
-            let segment_frames =
-                transport::segment_frames_until_loop_wrap(segment_sample, remaining, loop_bounds);
-            for i in 0..segment_frames as usize {
-                let frame = &mut data
-                    [(callback_offset + i) * channels..(callback_offset + i) * channels + channels];
-                let click = local.metronome_sample(
-                    segment_sample + i as u64,
-                    (callback_offset + i) as u64,
-                    runtime.sample_rate,
-                    transport_playing,
-                    metronome_graph_max_samples,
-                    metronome_delay_samples,
-                );
-                if click != 0.0 {
-                    frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
-                    frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
-                }
-            }
-            callback_offset += segment_frames as usize;
-            remaining -= segment_frames;
-            if remaining == 0 {
-                break;
-            }
-            let (next_sample, wrapped) =
-                transport::advance_loop_position(segment_sample, segment_frames, loop_bounds);
-            if wrapped {
-                local.reset_metronome_schedule(next_sample, runtime.sample_rate);
-            }
-            segment_sample = next_sample;
+        if defer_click {
+            click_deferred = true;
+        } else {
+            mix_metronome_block(
+                data,
+                channels,
+                frames,
+                base_sample,
+                loop_bounds,
+                transport_playing,
+                master_vol,
+                metronome_graph_max_samples,
+                metronome_delay_samples,
+                runtime,
+                local,
+            );
         }
         // Live monitoring is mixed below via the input ring (single, clean
         // path) — the old per-block sample-and-hold monitor was removed because
@@ -1377,6 +1375,25 @@ fn fill_output_f32_inner(
         if let Some(slot) = shared.jam_bus.master_publish() {
             slot.write_interleaved(data, channels, runtime.sample_rate);
         }
+    }
+
+    // The click the stream was not meant to carry. It still reaches the device
+    // and the Control Room below; it simply arrives after the tap has taken its
+    // copy of the mix.
+    if click_deferred {
+        mix_metronome_block(
+            data,
+            channels,
+            frames,
+            base_sample,
+            loop_bounds,
+            transport_playing,
+            master_vol,
+            metronome_graph_max_latency_samples(runtime),
+            metronome_compensation_delay_samples(runtime),
+            runtime,
+            local,
+        );
     }
 
     // ── Control Room ────────────────────────────────────────────────────────
@@ -1841,6 +1858,67 @@ fn monitor_resync_limit_frames(target: u64, output_block_frames: u64, shared_clo
 /// samples).
 ///
 /// Realtime-safe: atomics + arithmetic only, no allocation or locking.
+/// Sum the metronome click into a rendered block, following the loop.
+///
+/// Split out of the callback because the click is mixed at one of two points
+/// depending on whether the Audio Jam master stream is meant to carry it — see
+/// `defer_click` at the call sites. The loop walk is part of the work rather
+/// than around it: crossing a loop boundary re-bases the click schedule, and a
+/// mix that ignored that would drift a beat every pass.
+///
+/// Realtime-safe: no allocation, and nothing but arithmetic over a caller-owned
+/// buffer.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn mix_metronome_block(
+    data: &mut [f32],
+    channels: usize,
+    frames: u64,
+    base_sample: u64,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+    transport_playing: bool,
+    master_vol: f32,
+    graph_max_samples: u32,
+    delay_samples: u32,
+    runtime: &RuntimeProject,
+    local: &mut LocalAudioState,
+) {
+    let mut segment_sample = base_sample;
+    let mut callback_offset = 0usize;
+    let mut remaining = frames;
+    while remaining > 0 {
+        let segment_frames =
+            transport::segment_frames_until_loop_wrap(segment_sample, remaining, loop_bounds);
+        for i in 0..segment_frames as usize {
+            let frame = &mut data
+                [(callback_offset + i) * channels..(callback_offset + i) * channels + channels];
+            let click = local.metronome_sample(
+                segment_sample + i as u64,
+                (callback_offset + i) as u64,
+                runtime.sample_rate,
+                transport_playing,
+                graph_max_samples,
+                delay_samples,
+            );
+            if click != 0.0 {
+                frame[0] = (frame[0] + click * master_vol).clamp(-1.0, 1.0);
+                frame[1] = (frame[1] + click * master_vol).clamp(-1.0, 1.0);
+            }
+        }
+        callback_offset += segment_frames as usize;
+        remaining -= segment_frames;
+        if remaining == 0 {
+            break;
+        }
+        let (next_sample, wrapped) =
+            transport::advance_loop_position(segment_sample, segment_frames, loop_bounds);
+        if wrapped {
+            local.reset_metronome_schedule(next_sample, runtime.sample_rate);
+        }
+        segment_sample = next_sample;
+    }
+}
+
 fn read_monitor_input(
     frames: usize,
     shared: &Arc<SharedState>,
@@ -2040,6 +2118,91 @@ mod tests {
         assert!(
             local.metronome_click_remaining > 0,
             "Play must re-arm clicks even when scrub-end was missed"
+        );
+    }
+}
+
+/// Where the metronome sits relative to the Audio Jam publish tap.
+///
+/// The whole feature is an ordering, so the tests are about ordering: the click
+/// reaches the device either way, and the only question is whether the copy the
+/// jam took already had it in.
+#[cfg(test)]
+mod jam_master_click_tests {
+    use super::*;
+    use crate::jam_bus::PUBLISH_KEY_MASTER;
+
+    const FRAMES: usize = 256;
+
+    /// A callback with the transport running, the metronome on, and an empty
+    /// project — so every non-zero sample in the block is the click.
+    fn render_one_block(include_click: bool) -> (Vec<f32>, Vec<f32>) {
+        let mut runtime = RuntimeProject::default();
+        runtime.sample_rate = 48_000;
+        let shared = Arc::new(SharedState::default());
+        shared.sample_rate.store(48_000, Ordering::Relaxed);
+        shared.engine_state.store(
+            crate::engine::AudioEngineState::Running as u8,
+            Ordering::Relaxed,
+        );
+        shared
+            .jam_bus
+            .bind_publish(PUBLISH_KEY_MASTER)
+            .expect("free");
+        shared.jam_bus.set_master_click_published(include_click);
+
+        let mut local = LocalAudioState::new(48_000.0);
+        // `playing_local` is the callback's own copy of the transport, set by
+        // the StartTransport command; the test sets it directly rather than
+        // pumping a command queue that has nothing else in it.
+        local.playing_local = true;
+        local.set_metronome_enabled(true, 0, 48_000);
+
+        let mut data = vec![0.0f32; FRAMES * 2];
+        fill_output_f32(&mut data, 2, &mut runtime, &shared, &mut local);
+
+        let mut published = Vec::new();
+        let taken = shared
+            .jam_bus
+            .master_publish()
+            .expect("bound")
+            .read_interleaved(&mut published, FRAMES)
+            .map(|(frames, _, _)| frames)
+            .unwrap_or(0);
+        assert!(taken > 0, "the tap captured nothing at all");
+        (data, published)
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    /// The default, and what a jam wants: everyone in the room hears the count.
+    #[test]
+    fn the_published_master_carries_the_click_by_default() {
+        let (device, published) = render_one_block(true);
+        assert!(peak(&device) > 0.0, "the click never reached the device");
+        assert!(
+            peak(&published) > 0.0,
+            "the click was not in the published mix"
+        );
+    }
+
+    /// Switched off, the stream is the mix as it would have been with no
+    /// metronome at all — and the engineer still hears the count locally.
+    #[test]
+    fn switching_the_click_off_removes_it_from_the_stream_and_not_the_room() {
+        let (device, published) = render_one_block(false);
+        assert!(
+            peak(&device) > 0.0,
+            "the engineer lost their own count, which is not the trade"
+        );
+        assert_eq!(
+            peak(&published),
+            0.0,
+            "the click leaked into the stream it was excluded from"
         );
     }
 }

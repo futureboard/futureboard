@@ -487,6 +487,9 @@ pub struct ProjectTrack {
     /// ARA plug-in processing this track (v42+). `None` for older projects and
     /// for tracks no plug-in owns.
     pub ara: Option<AraTrackBinding>,
+    /// What the track's clips hold constant across a tempo change (v43+),
+    /// as the stable `TrackTimebase` tag. Older projects are all Musical.
+    pub timebase: u8,
     /// Arrangement group membership (v30+). Independent from audio routing.
     pub parent_group_id: Option<String>,
     /// Arrangement folder collapse state (v31+).
@@ -786,6 +789,11 @@ pub struct ProjectSettings {
     pub time_sig_den: u32,
     pub sample_rate: u32,
     pub bit_depth: u32,
+    /// Project timebase — the unit the ruler and position readouts are shown in.
+    /// Stored as the stable `TimeDisplayFormat` tag.
+    pub time_display_format: u8,
+    /// Frame rate Timecode is counted at, as the stable `TimecodeRate` tag.
+    pub timecode_rate: u8,
 }
 
 impl Default for ProjectSettings {
@@ -801,6 +809,10 @@ impl Default for ProjectSettings {
             time_sig_den: 4,
             sample_rate: 48000,
             bit_depth: 24,
+            time_display_format:
+                crate::components::timeline::timeline_state::TimeDisplayFormat::default().to_tag(),
+            timecode_rate: crate::components::timeline::timeline_state::TimecodeRate::default()
+                .to_tag(),
         }
     }
 }
@@ -1255,6 +1267,7 @@ impl From<&TimelineState> for FutureboardProject {
                     name: t.name.clone(),
                     track_type,
                     ara: t.ara.clone(),
+                    timebase: t.timebase.to_tag(),
                     parent_group_id: t.parent_group_id.clone(),
                     group_collapsed: t.group_collapsed,
                     color_hex: rgba_to_hex(t.color),
@@ -1338,6 +1351,8 @@ impl From<&TimelineState> for FutureboardProject {
         let mut project = FutureboardProject::new("Untitled Project");
         project.settings.bpm = tl.bpm as f64;
         project.settings.sample_rate = tl.project_sample_rate;
+        project.settings.time_display_format = tl.time_display_format.to_tag();
+        project.settings.timecode_rate = tl.timecode_rate.to_tag();
         project.settings.tempo_points = tl
             .tempo_map
             .points
@@ -1528,6 +1543,15 @@ pub fn apply_to_timeline(
         44_100 | 48_000 | 88_200 | 96_000 | 192_000 => project.settings.sample_rate,
         _ => 48_000,
     };
+    // Unknown tags fall back to the defaults rather than to whichever variant
+    // happens to be first, so a project written by a newer build opens readable.
+    tl.time_display_format =
+        crate::components::timeline::timeline_state::TimeDisplayFormat::from_tag(
+            project.settings.time_display_format,
+        );
+    tl.timecode_rate = crate::components::timeline::timeline_state::TimecodeRate::from_tag(
+        project.settings.timecode_rate,
+    );
     tl.tempo_map = crate::components::timeline::timeline_state::TempoMap::with_points(
         project
             .settings
@@ -1959,6 +1983,9 @@ pub fn apply_to_timeline(
                 name: pt.name.clone(),
                 track_type,
                 ara: pt.ara.clone(),
+                timebase: crate::components::timeline::timeline_state::TrackTimebase::from_tag(
+                    pt.timebase,
+                ),
                 parent_group_id: pt.parent_group_id.clone(),
                 group_collapsed: pt.group_collapsed,
                 color: hex_to_rgba(&pt.color_hex),
@@ -2877,10 +2904,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v42"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v43"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 42);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 42);
+        assert_eq!(version, 43);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 43);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────
@@ -3436,6 +3463,39 @@ mod project_settings_persistence_tests {
 
         assert_eq!(decoded.settings.sample_rate, 96_000);
         assert_eq!(restored.project_sample_rate, 96_000);
+    }
+
+    #[test]
+    fn project_timebase_survives_save_decode_and_timeline_restore() {
+        use crate::components::timeline::timeline_state::{TimeDisplayFormat, TimecodeRate};
+
+        let mut timeline = TimelineState::default();
+        timeline.time_display_format = TimeDisplayFormat::Timecode;
+        timeline.timecode_rate = TimecodeRate::Fps25;
+
+        let encoded = crate::project::format::encode_project(&FutureboardProject::from(&timeline));
+        let decoded = crate::project::format::decode_project(&encoded).expect("decode project");
+        let mut restored = TimelineState::default();
+        let _ = apply_to_timeline(&decoded, &mut restored);
+
+        assert_eq!(restored.time_display_format, TimeDisplayFormat::Timecode);
+        assert_eq!(restored.timecode_rate, TimecodeRate::Fps25);
+    }
+
+    #[test]
+    fn a_project_without_a_stored_timebase_opens_in_bars_and_beats() {
+        use crate::components::timeline::timeline_state::{TimeDisplayFormat, TimecodeRate};
+
+        // What a pre-v43 file decodes to: the settings carry the defaults
+        // because the body simply ended before the timebase block.
+        let project = FutureboardProject::new("legacy");
+        let mut restored = TimelineState::default();
+        restored.time_display_format = TimeDisplayFormat::Samples;
+        restored.timecode_rate = TimecodeRate::Fps24;
+        let _ = apply_to_timeline(&project, &mut restored);
+
+        assert_eq!(restored.time_display_format, TimeDisplayFormat::BarsBeats);
+        assert_eq!(restored.timecode_rate, TimecodeRate::Fps30);
     }
 
     #[test]

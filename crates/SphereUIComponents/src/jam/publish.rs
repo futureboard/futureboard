@@ -42,6 +42,11 @@ struct SourceState {
     converted: Vec<f32>,
     /// The engine rate the current resampler was built for.
     engine_rate: u32,
+    /// The channel count it was built for. A slot's layout is fixed for the
+    /// life of a claim, so this changes only when a stream is republished —
+    /// at which point the converter has to be rebuilt, because `rubato` fixes
+    /// its channel count at construction.
+    channels: usize,
     /// Whether the next block starts a take.
     take_start: bool,
     drift_ppm: f64,
@@ -64,6 +69,7 @@ impl JamEngineSource {
                 raw: Vec::new(),
                 converted: Vec::new(),
                 engine_rate: 0,
+                channels: 0,
                 take_start: true,
                 drift_ppm: 0.0,
             }),
@@ -114,10 +120,24 @@ impl JamPublishSource for JamEngineSource {
         let slot = self.shared.jam_bus.publish(slot_index)?;
         let engine_rate = self.engine_rate();
 
+        let channels = slot.channels().max(1);
+
         let mut state = self.state.lock().ok()?;
-        if state.resampler.is_none() || state.engine_rate != engine_rate {
-            state.resampler = Some(JamResampler::new(engine_rate, self.publish_rate));
+        if state.resampler.is_none()
+            || state.engine_rate != engine_rate
+            || state.channels != channels
+        {
+            state.resampler = Some(JamResampler::with_channels(
+                engine_rate,
+                self.publish_rate,
+                channels,
+            ));
             state.engine_rate = engine_rate;
+            state.channels = channels;
+            // A rebuilt converter is a new take: its history is gone, so the
+            // first block after it is genuinely the start of one and marking it
+            // is what tells a receiver to re-anchor rather than splice.
+            state.take_start = true;
         }
 
         // Follow the measured drift, so a Studio that runs a few parts per
@@ -143,8 +163,12 @@ impl JamPublishSource for JamEngineSource {
 
         let position = {
             let raw = &mut state.raw;
-            let (frames, position) = slot.read_interleaved(raw, wanted)?;
-            if frames == 0 {
+            let (frames, read_channels, position) = slot.read_interleaved(raw, wanted)?;
+            if frames == 0 || read_channels != channels {
+                // The layout changed between the two reads, which only happens
+                // across a republish. Dropping this block is right: converting
+                // it against the old layout would interleave the wrong channels
+                // into every frame of it.
                 return None;
             }
             position
@@ -164,7 +188,7 @@ impl JamPublishSource for JamEngineSource {
 
         out.clear();
         out.extend_from_slice(converted);
-        let produced = converted.len() / 2;
+        let produced = converted.len() / channels;
 
         let take_start = state.take_start;
         state.take_start = false;

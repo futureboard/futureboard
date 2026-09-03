@@ -373,6 +373,11 @@ void SphereDauxVst2Processor::close_embed_editor(const char *reason) {
     editor_attached = false;
   }
   editor_attach_hwnd = nullptr;
+  // The host-owned view path borrows the caller's window. Drop the borrow so a
+  // later attach starts clean; the window itself is never touched from here.
+  view_host_attached = false;
+  view_host_parent = nullptr;
+  view_host_resize_pending.store(false, std::memory_order_release);
 
   if (daux_editor_is_window_valid(&editor_window)) {
     HWND shell = reinterpret_cast<HWND>(editor_window.shell_hwnd);
@@ -521,6 +526,259 @@ int sphere_daux_vst2_focus_editor(SphereDauxVst2Processor *p) {
   if (!p || !daux_editor_is_window_valid(&p->editor_window))
     return 0;
   return daux_editor_show_and_focus(&p->editor_window) ? 1 : 0;
+}
+
+} // extern "C"
+
+// ── Host-owned view host ────────────────────────────────────────────────────
+//
+// Everything above this line creates windows. Nothing below it does.
+//
+// The host — GPUI — owns the window a plug-in editor lives in: it creates the
+// child HWND, positions it, paints the surround, and decides when it goes away.
+// This side is reduced to the part of the VST2 editor contract that has to be
+// here: effEditOpen into the HWND it was given, effEditGetRect for the size,
+// effEditIdle to keep it painting, and effEditClose to let it go. There is no
+// shell, no titlebar and no window procedure of ours on this path, which is
+// what makes the host the single owner of the editor geometry.
+//
+// audioMasterSizeWindow is the one callback that would otherwise need a window
+// here. It is recorded instead (`view_host_resize_*`): the host polls the
+// request, resizes its own surface to whatever it can give, and reports back
+// through `sphere_daux_vst2_view_set_size`.
+
+namespace {
+
+/// Smallest and largest content size this host will hand a plug-in. Matches the
+/// VST3 view host so a bad rect cannot drag the shell to an absurd size.
+constexpr int kViewHostMinSide = 64;
+constexpr int kViewHostMaxSide = 8192;
+
+void view_host_clamp(int *width, int *height) {
+  if (width)
+    *width = std::clamp(*width, kViewHostMinSide, kViewHostMaxSide);
+  if (height)
+    *height = std::clamp(*height, kViewHostMinSide, kViewHostMaxSide);
+}
+
+/// Current editor size straight from the plug-in, or false when it reports
+/// nothing usable.
+bool view_host_plugin_rect(SphereDauxVst2Processor *p, int *out_width,
+                           int *out_height) {
+  if (!p || !p->effect)
+    return false;
+  ERect *rect = nullptr;
+  p->dispatch(effEditGetRect, 0, 0, &rect);
+  if (!rect)
+    return false;
+  const int width = rect->right - rect->left;
+  const int height = rect->bottom - rect->top;
+  if (width <= 0 || height <= 0)
+    return false;
+  if (out_width)
+    *out_width = width;
+  if (out_height)
+    *out_height = height;
+  return true;
+}
+
+/// Lay the plug-in's own child window out over the parent client area. VST2 has
+/// no host-to-plug-in size opcode, so this is the entire notification a
+/// resizable editor gets.
+void view_host_fit_child(HWND parent, int width, int height) {
+  if (!parent || !IsWindow(parent))
+    return;
+  HWND child = GetWindow(parent, GW_CHILD);
+  if (!child)
+    return;
+  SetWindowPos(child, nullptr, 0, 0, width, height,
+               SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+/// Closes the editor. Touches no window: the parent belongs to the host, which
+/// decides on its own terms when it goes away.
+void view_host_release(SphereDauxVst2Processor *p, const char *reason) {
+  if (!p)
+    return;
+  if (p->effect && p->view_host_attached)
+    p->dispatch(effEditClose);
+  p->view_host_attached = false;
+  if (p->editor_attach_hwnd == p->view_host_parent) {
+    // Only clear the borrowed handle, never destroy it.
+    p->editor_attach_hwnd = nullptr;
+  }
+  p->view_host_parent = nullptr;
+  p->view_host_resize_pending.store(false, std::memory_order_release);
+  p->editor_attached = false;
+  std::fprintf(stderr, "[vst2-view-host] released reason=%s\n",
+               reason ? reason : "unknown");
+}
+
+} // namespace
+
+extern "C" {
+
+int sphere_daux_vst2_view_attach(SphereDauxVst2Processor *p,
+                                 unsigned long long parent_hwnd, int width,
+                                 int height, int *out_width, int *out_height) {
+  if (!p || !p->effect) {
+    vst2_set_last_error("view host: no VST2 plug-in instance");
+    return 0;
+  }
+  if (!p->has_editor) {
+    vst2_set_last_error("view host: VST2 plug-in has no editor");
+    return 0;
+  }
+  HWND parent =
+      reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  if (!parent || !IsWindow(parent)) {
+    vst2_set_last_error("view host: invalid parent HWND");
+    return 0;
+  }
+  // Editors that create COM/WebView controls inside effEditOpen never finish
+  // initializing without an STA on the thread that owns the parent window.
+  ensure_com_initialized();
+
+  // Re-attaching to the same window is the host asking for the size again, not
+  // a request to tear a live editor down and open another.
+  if (p->view_host_attached && p->view_host_parent == parent) {
+    int current_w = p->embed_content_w;
+    int current_h = p->embed_content_h;
+    view_host_plugin_rect(p, &current_w, &current_h);
+    if (out_width)
+      *out_width = current_w;
+    if (out_height)
+      *out_height = current_h;
+    return 1;
+  }
+  if (p->view_host_attached)
+    view_host_release(p, "reattach-to-new-parent");
+
+  std::fprintf(
+      stderr,
+      "[vst2-view-host] attach begin parent=0x%p request=%dx%d tid=%lu\n",
+      static_cast<void *>(parent), width, height, GetCurrentThreadId());
+
+  const auto result = p->dispatch(effEditOpen, 0, 0, parent);
+  HWND child = GetWindow(parent, GW_CHILD);
+  // Plug-ins are inconsistent here: some return 0 on success, and some create
+  // their child window only on the first effEditIdle rather than inside
+  // effEditOpen. Failing on "no child yet" would lose those editors entirely,
+  // so only a plug-in that both declined AND created nothing counts as failed —
+  // the caller's ready probe polls `embed_has_visible_ui` for the rest.
+  if (result == 0 && !child) {
+    p->dispatch(effEditClose);
+    vst2_set_last_error("view host: effEditOpen declined and created no view");
+    return 0;
+  }
+
+  // effEditGetRect is the source of truth for the content size. The requested
+  // region is only a starting point: a fixed editor gets the size it asks for,
+  // and the host lays out around whatever comes back.
+  int content_w = width > 0 ? width : 0;
+  int content_h = height > 0 ? height : 0;
+  view_host_plugin_rect(p, &content_w, &content_h);
+  if (content_w <= 0 || content_h <= 0) {
+    content_w = 900;
+    content_h = 600;
+  }
+  view_host_clamp(&content_w, &content_h);
+
+  p->view_host_parent = parent;
+  p->view_host_attached = true;
+  p->editor_attached = true;
+  // Published so the shared "is the editor really showing anything" and focus
+  // helpers keep working on this path. It is only ever read here: the window
+  // belongs to the host, and `embed_mode` stays false, which is what keeps the
+  // shell teardown from ever destroying it.
+  p->editor_attach_hwnd = parent;
+  p->embed_content_w = content_w;
+  p->embed_content_h = content_h;
+  p->view_host_resize_pending.store(false, std::memory_order_release);
+  view_host_fit_child(parent, content_w, content_h);
+
+  if (out_width)
+    *out_width = content_w;
+  if (out_height)
+    *out_height = content_h;
+  std::fprintf(
+      stderr,
+      "[vst2-view-host] attached instance=%s parent=0x%p content=%dx%d "
+      "child=0x%p\n",
+      p->embed_instance_label.empty() ? "<unknown>"
+                                      : p->embed_instance_label.c_str(),
+      static_cast<void *>(parent), content_w, content_h,
+      static_cast<void *>(GetWindow(parent, GW_CHILD)));
+  return 1;
+}
+
+void sphere_daux_vst2_view_detach(SphereDauxVst2Processor *p) {
+  if (!p || !p->view_host_attached)
+    return;
+  view_host_release(p, "host-detach");
+}
+
+int sphere_daux_vst2_view_is_attached(SphereDauxVst2Processor *p) {
+  return (p && p->view_host_attached) ? 1 : 0;
+}
+
+int sphere_daux_vst2_view_set_size(SphereDauxVst2Processor *p, int width,
+                                   int height) {
+  if (!p || !p->view_host_attached || width <= 0 || height <= 0)
+    return 0;
+  view_host_clamp(&width, &height);
+  p->embed_content_w = width;
+  p->embed_content_h = height;
+  view_host_fit_child(p->view_host_parent, width, height);
+  return 1;
+}
+
+int sphere_daux_vst2_view_get_size(SphereDauxVst2Processor *p, int *out_width,
+                                   int *out_height) {
+  if (!p || !out_width || !out_height)
+    return 0;
+  return view_host_plugin_rect(p, out_width, out_height) ? 1 : 0;
+}
+
+int sphere_daux_vst2_view_can_resize(SphereDauxVst2Processor *p) {
+  return (p && p->editor_resizable) ? 1 : 0;
+}
+
+int sphere_daux_vst2_view_constrain(SphereDauxVst2Processor *p, int *io_width,
+                                    int *io_height) {
+  if (!p || !io_width || !io_height)
+    return 0;
+  view_host_clamp(io_width, io_height);
+  if (p->editor_resizable)
+    return 1;
+  // Fixed editor: it only ever has the one size it reported.
+  int fixed_w = p->embed_content_w;
+  int fixed_h = p->embed_content_h;
+  if (!view_host_plugin_rect(p, &fixed_w, &fixed_h) &&
+      (fixed_w <= 0 || fixed_h <= 0)) {
+    return 0;
+  }
+  *io_width = fixed_w;
+  *io_height = fixed_h;
+  view_host_clamp(io_width, io_height);
+  return 1;
+}
+
+int sphere_daux_vst2_view_take_resize_request(SphereDauxVst2Processor *p,
+                                              int *out_width, int *out_height) {
+  if (!p || !out_width || !out_height)
+    return 0;
+  if (!p->view_host_resize_pending.exchange(false, std::memory_order_acq_rel))
+    return 0;
+  *out_width = p->view_host_resize_w;
+  *out_height = p->view_host_resize_h;
+  return 1;
+}
+
+void sphere_daux_vst2_view_idle(SphereDauxVst2Processor *p) {
+  if (!p || !p->view_host_attached || !p->effect)
+    return;
+  p->dispatch(effEditIdle);
 }
 
 } // extern "C"

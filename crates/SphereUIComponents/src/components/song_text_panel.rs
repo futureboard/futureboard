@@ -126,7 +126,7 @@ impl SongTextPanelView {
         self.cached_position_labels = std::sync::Arc::new(
             events
                 .iter()
-                .map(|event| format!("[{}]", state.format_bar_beat_at(event.beat)))
+                .map(|event| format!("[{}]", state.format_position_at(event.beat)))
                 .collect(),
         );
         self.cached_events = std::sync::Arc::new(events);
@@ -582,10 +582,10 @@ impl Render for SongTextPanelView {
         let state = &timeline.state;
         let kind = self.kind;
         let selected_ids = state.selection.selected_song_text_event_ids.clone();
-        let playhead_label = state.format_bar_beat_at(state.transport.playhead_beats as f64);
+        let playhead_label = state.format_position_at(state.transport.playhead_beats as f64);
         let selected_label = state
             .selected_song_text_event()
-            .map(|event| state.format_bar_beat_at(event.beat));
+            .map(|event| state.format_position_at(event.beat));
         let active_chord = state
             .active_song_text_event(SongTextEventType::Chord)
             .cloned();

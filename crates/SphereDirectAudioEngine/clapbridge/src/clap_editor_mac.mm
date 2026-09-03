@@ -354,4 +354,38 @@ int sphere_daux_clap_focus_editor(SphereDauxClapProcessor *p) {
   return clap_focus_editor_mac(p);
 }
 
+// ── Host-owned view host ────────────────────────────────────────────────────
+//
+// Windows-only, exactly like the VST3 bridge's: the macOS GUI is hosted in the
+// bridge-owned NSWindow above. These exist so the shared C surface links.
+
+int sphere_daux_clap_view_attach(SphereDauxClapProcessor *, unsigned long long,
+                                 int, int, int *, int *) {
+  clap_set_last_error("host-owned CLAP view is Windows-only");
+  return 0;
+}
+
+void sphere_daux_clap_view_detach(SphereDauxClapProcessor *) {}
+
+int sphere_daux_clap_view_is_attached(SphereDauxClapProcessor *) { return 0; }
+
+int sphere_daux_clap_view_set_size(SphereDauxClapProcessor *, int, int) {
+  return 0;
+}
+
+int sphere_daux_clap_view_get_size(SphereDauxClapProcessor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_clap_view_can_resize(SphereDauxClapProcessor *) { return 0; }
+
+int sphere_daux_clap_view_constrain(SphereDauxClapProcessor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_clap_view_take_resize_request(SphereDauxClapProcessor *, int *,
+                                              int *) {
+  return 0;
+}
+
 } // extern "C"

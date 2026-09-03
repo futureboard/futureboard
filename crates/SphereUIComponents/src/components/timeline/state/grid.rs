@@ -475,4 +475,218 @@ impl TimelineState {
         let bb = self.time_signature_map.bar_beat_at_beat(beats);
         format!("{}.{}", bb.bar, bb.beat_in_bar)
     }
+
+    /// Real elapsed seconds at a musical beat, through the project's tempo map.
+    ///
+    /// Not `beat * seconds_per_beat`: with tempo automation the two disagree,
+    /// and only the tempo map knows where the clock actually is.
+    pub fn seconds_at_beat(&self, beats: f64) -> f64 {
+        super::time_display::seconds_at_beat(&self.tempo_map, beats, self.bpm as f64)
+    }
+
+    /// Musical beat at a real elapsed time. Inverse of [`Self::seconds_at_beat`].
+    pub fn beat_at_seconds(&self, seconds: f64) -> f64 {
+        super::time_display::beat_at_seconds(&self.tempo_map, seconds, self.bpm as f64)
+    }
+
+    /// A position rendered in the project's timebase.
+    ///
+    /// This is what every ruler label, transport readout, and position hint goes
+    /// through, so one setting moves all of them together and none of them can
+    /// disagree about where the playhead is.
+    pub fn format_position_at(&self, beats: f64) -> String {
+        match self.time_display_format {
+            TimeDisplayFormat::BarsBeats => self.format_bar_beat_at(beats),
+            TimeDisplayFormat::Seconds => {
+                super::time_display::format_seconds(self.seconds_at_beat(beats))
+            }
+            TimeDisplayFormat::Timecode => super::time_display::format_timecode(
+                self.seconds_at_beat(beats),
+                self.timecode_rate,
+            ),
+            TimeDisplayFormat::Samples => super::time_display::format_samples(
+                self.seconds_at_beat(beats),
+                self.project_sample_rate,
+            ),
+        }
+    }
+
+    pub fn format_position(&self, beats: f32) -> String {
+        self.format_position_at(beats as f64)
+    }
+
+    /// Wall-clock positions of every clip on a Linear-timebase track.
+    ///
+    /// Call this *before* mutating the tempo map, then
+    /// [`Self::reapply_linear_clip_anchors`] after: the pair is what makes a
+    /// Linear track hold its place on the clock while a Musical one holds its
+    /// bar. Returns empty — and costs one pass over the tracks — when no track
+    /// is Linear, which is the default project.
+    pub fn capture_linear_clip_anchors(&self) -> Vec<LinearClipAnchor> {
+        let mut anchors = Vec::new();
+        for track in &self.tracks {
+            if track.timebase != TrackTimebase::Linear {
+                continue;
+            }
+            for clip in &track.clips {
+                let start = self.seconds_at_beat(clip.start_beat as f64);
+                let is_audio = matches!(clip.clip_type, ClipType::Audio { .. });
+                let duration_seconds = (!is_audio).then(|| {
+                    self.seconds_at_beat((clip.start_beat + clip.duration_beats) as f64) - start
+                });
+                anchors.push(LinearClipAnchor {
+                    track_id: track.id.clone(),
+                    clip_id: clip.id.clone(),
+                    start_seconds: start,
+                    duration_seconds,
+                });
+            }
+        }
+        anchors
+    }
+
+    /// Put the captured wall-clock positions back under the *current* tempo map.
+    ///
+    /// Exactly inverts [`Self::capture_linear_clip_anchors`] when the tempo map
+    /// is unchanged, which is what makes undo of a tempo edit land back on the
+    /// original beats without a second snapshot: undo restores the old map and
+    /// re-anchoring the same seconds under it reproduces the old beats.
+    ///
+    /// Returns `true` when anything actually moved.
+    pub fn reapply_linear_clip_anchors(&mut self, anchors: &[LinearClipAnchor]) -> bool {
+        if anchors.is_empty() {
+            return false;
+        }
+        // Resolve every beat against the new map first: the borrow of `self`
+        // for `beat_at_seconds` cannot overlap the mutable walk below.
+        let resolved: Vec<(&LinearClipAnchor, f32, Option<f32>)> = anchors
+            .iter()
+            .map(|anchor| {
+                let start = self.beat_at_seconds(anchor.start_seconds).max(0.0) as f32;
+                let duration = anchor.duration_seconds.map(|seconds| {
+                    (self.beat_at_seconds(anchor.start_seconds + seconds) as f32 - start)
+                        .max(MIN_AUDIO_CLIP_BEATS)
+                });
+                (anchor, start, duration)
+            })
+            .collect();
+
+        let mut changed = false;
+        for (anchor, start_beats, duration_beats) in resolved {
+            let Some(track) = self
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == anchor.track_id)
+            else {
+                continue;
+            };
+            let Some(clip) = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == anchor.clip_id)
+            else {
+                continue;
+            };
+            if (clip.start_beat - start_beats).abs() > 1.0e-6 {
+                clip.start_beat = start_beats;
+                changed = true;
+            }
+            if let Some(duration_beats) = duration_beats {
+                if (clip.duration_beats - duration_beats).abs() > 1.0e-6 {
+                    clip.duration_beats = duration_beats;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Ruler ticks for the current timebase.
+    ///
+    /// Bars+Beats reuses the arrangement grid, so the ruler and the grid behind
+    /// the clips stay the same lines. A time-based timebase gets its own ticks
+    /// at round clock intervals instead — labelling musical bar positions with
+    /// timecode would put the numbers at arbitrary places and read as noise.
+    ///
+    /// The *grid* is untouched either way: snapping, clip layout and hit-testing
+    /// stay musical whatever the ruler is showing.
+    pub fn ruler_grid_lines(&self, viewport_width: f32) -> std::rc::Rc<Vec<GridLine>> {
+        if !self.time_display_format.is_time_based() {
+            return self.arrangement_grid_lines(viewport_width);
+        }
+        std::rc::Rc::new(self.get_time_ruler_lines(viewport_width))
+    }
+
+    /// Tick generation for a time-based ruler. Positions are resolved in real
+    /// seconds and mapped back through the tempo map, so a tempo change bends
+    /// the spacing exactly as it bends playback.
+    pub fn get_time_ruler_lines(&self, viewport_width: f32) -> Vec<GridLine> {
+        const MAX_TIME_RULER_LINES: usize = 1200;
+        // Widest label any format produces ("00:00:00:00", a long sample index)
+        // plus breathing room, so labels never touch at any zoom.
+        const MIN_TIME_LABEL_PX: f64 = 68.0;
+
+        let viewport_width = viewport_width.max(1.0);
+        let (start_beat, end_beat) = self.visible_beat_range(viewport_width);
+        let start_beat = start_beat.max(0.0) as f64;
+        let end_beat = (end_beat.max(0.0) as f64).max(start_beat);
+
+        let start_seconds = self.seconds_at_beat(start_beat);
+        let end_seconds = self.seconds_at_beat(end_beat);
+        let span_seconds = end_seconds - start_seconds;
+        if !span_seconds.is_finite() || span_seconds <= 0.0 {
+            return Vec::new();
+        }
+        let pixels_per_second = viewport_width as f64 / span_seconds;
+
+        let frame_seconds = matches!(self.time_display_format, TimeDisplayFormat::Timecode)
+            .then(|| 1.0 / self.timecode_rate.fps());
+        let step = super::time_display::resolve_time_ruler_step(
+            pixels_per_second,
+            MIN_TIME_LABEL_PX,
+            frame_seconds,
+        );
+
+        // Walk minor ticks and promote every one that lands on a major
+        // division, so the two can never drift apart by a rounding step.
+        let minor = step.minor.max(1.0e-6);
+        let per_major = (step.major / minor).round().max(1.0) as i64;
+        let first_slot = (start_seconds / minor).floor() as i64;
+        let last_slot = (end_seconds / minor).ceil() as i64;
+
+        let mut lines: Vec<GridLine> = Vec::new();
+        let mut last_label_x = f32::NEG_INFINITY;
+        for slot in first_slot..=last_slot {
+            if lines.len() >= MAX_TIME_RULER_LINES {
+                break;
+            }
+            let seconds = slot as f64 * minor;
+            if seconds < 0.0 {
+                continue;
+            }
+            let beat = self.beat_at_seconds(seconds);
+            let x = self.beat_to_x(beat as f32).round();
+            if x < -1.0 || x > viewport_width + 1.0 {
+                continue;
+            }
+            let is_major = slot.rem_euclid(per_major) == 0;
+            // Same rule as the musical ruler: a label only survives if it clears
+            // its neighbour.
+            let show_label = is_major && (x as f64 - last_label_x as f64) >= MIN_TIME_LABEL_PX;
+            if show_label {
+                last_label_x = x;
+            }
+            lines.push(GridLine {
+                x,
+                beat: beat as f32,
+                level: if is_major {
+                    GridLineLevel::Bar
+                } else {
+                    GridLineLevel::Beat
+                },
+                show_label,
+            });
+        }
+        lines
+    }
 }

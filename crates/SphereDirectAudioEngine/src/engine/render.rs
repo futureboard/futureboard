@@ -1518,6 +1518,11 @@ fn render_project_block_interleaved_core(
             out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
         }
     }
+    // Audio Jam multitrack tap. Last, so every shared track — source, bus and
+    // master alike — has its post-fader block for this instant, and the whole
+    // stream advances on one head.
+    publish_multitrack_to_jam(runtime, frames, jam);
+
     if crate::forensic_trace::forensic_trace_enabled() {
         static MASTER_INPUT_LOG_SEQ: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
@@ -2870,6 +2875,40 @@ fn publish_track_to_jam(
     slot.write_planar(&track.block_l, &track.block_r, frames, runtime.sample_rate);
 }
 
+/// Assemble one block of the Audio Jam multitrack stream.
+///
+/// Every shared track has already rendered its post-fader block by the time
+/// this runs, so the whole stream is staged and published in one pass at the
+/// end of the graph rather than a pair at a time as each track finishes. That
+/// ordering is the point: one head advance means one capture base and one
+/// sequence for the whole arrangement, which is what lets a receiving Studio
+/// drop the take onto its timeline as a single aligned multitrack recording.
+///
+/// Realtime-safe: bounds-checked indexing and atomic stores into rings that
+/// were allocated when the bus was built. Pairs nobody staged are zeroed by
+/// [`crate::jam_bus::JamPublishSlot::commit`], so a track that stopped sharing
+/// leaves silence rather than a repeating block.
+#[inline]
+fn publish_multitrack_to_jam(
+    runtime: &RuntimeProject,
+    frames: usize,
+    jam: Option<&crate::jam_bus::JamAudioBus>,
+) {
+    let Some(bus) = jam else {
+        return;
+    };
+    let Some(slot) = bus.multitrack_publish() else {
+        return;
+    };
+    for track in runtime.tracks.iter() {
+        let Some(pair) = track.jam_multitrack_pair else {
+            continue;
+        };
+        slot.stage_pair(pair as usize, &track.block_l, &track.block_r, frames);
+    }
+    slot.commit(frames, runtime.sample_rate);
+}
+
 #[inline]
 pub fn pan_gains(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(-1.0, 1.0);
@@ -3151,7 +3190,7 @@ mod jam_input_tests {
         render(&mut runtime, &bus, None);
 
         let mut out = Vec::new();
-        let (frames, _) = bus
+        let (frames, _channels, _) = bus
             .publish(publish_slot)
             .expect("in range")
             .read_interleaved(&mut out, FRAMES)
@@ -3161,6 +3200,88 @@ mod jam_input_tests {
             .iter()
             .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
         assert!((peak - 0.5).abs() < 1e-6, "the tap captured {peak}");
+    }
+
+    /// The multitrack half: every shared track lands in its own channel pair of
+    /// one stream, and the whole stream advances on a single head — which is
+    /// what makes the arriving take alignable as one recording.
+    #[test]
+    fn a_multitrack_stream_carries_each_shared_track_in_its_own_pair() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let input_slot = bus.input_slot_for(STREAM).expect("bound");
+
+        bus.bind_multitrack_publish(4)
+            .expect("the wide slot is free");
+        // Only one track exists in this fixture, so it takes pair 0 and pair 1
+        // is left for a track that is not sharing.
+        runtime.update_jam_multitrack_pairs(&[0]);
+
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+        render(&mut runtime, &bus, None);
+
+        let mut out = Vec::new();
+        let (frames, channels, _) = bus
+            .multitrack_publish()
+            .expect("claimed")
+            .read_interleaved(&mut out, FRAMES)
+            .expect("the tap wrote frames");
+        assert_eq!((frames, channels), (FRAMES, 4));
+
+        let peak_first = out
+            .chunks(channels)
+            .fold(0.0f32, |peak, frame| peak.max(frame[0].abs()));
+        let peak_second = out
+            .chunks(channels)
+            .fold(0.0f32, |peak, frame| peak.max(frame[2].abs()));
+        assert!(
+            (peak_first - 0.5).abs() < 1e-6,
+            "pair 0 captured {peak_first}"
+        );
+        assert_eq!(
+            peak_second, 0.0,
+            "an unassigned pair is silence, not the neighbouring track"
+        );
+    }
+
+    /// Clearing the assignment stops the tap, the same way unsharing one track
+    /// does. A stream that kept advancing would fill a ring nobody drains.
+    #[test]
+    fn clearing_the_multitrack_assignment_stops_the_stream() {
+        let bus = JamAudioBus::new();
+        let snapshot = snapshot(jam_route());
+        let mut runtime = build(&snapshot, &bus);
+        let input_slot = bus.input_slot_for(STREAM).expect("bound");
+        bus.bind_multitrack_publish(2).expect("free");
+        runtime.update_jam_multitrack_pairs(&[0]);
+
+        bus.input(input_slot).expect("in range").write_interleaved(
+            &remote_block(0.5, 0.5),
+            2,
+            0,
+            48_000,
+        );
+        render(&mut runtime, &bus, None);
+        let mut out = Vec::new();
+        assert!(bus
+            .multitrack_publish()
+            .expect("claimed")
+            .read_interleaved(&mut out, FRAMES)
+            .is_some());
+
+        bus.release_publish(crate::jam_bus::PUBLISH_KEY_MULTITRACK);
+        runtime.update_jam_multitrack_pairs(&[]);
+        render(&mut runtime, &bus, None);
+        assert!(
+            bus.multitrack_publish().is_none(),
+            "the released slot is not reachable, so nothing can be written to it"
+        );
     }
 
     /// Unsharing stops the tap. A slot that keeps filling after a publish ends

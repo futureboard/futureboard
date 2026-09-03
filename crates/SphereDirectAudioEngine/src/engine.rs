@@ -2073,6 +2073,90 @@ impl EngineInner {
         }
     }
 
+    /// Share a set of tracks as one Audio Jam multitrack stream, or stop.
+    ///
+    /// `track_ids` is the layout, in order: the first fills channels 1-2, the
+    /// second 3-4, and so on. Passing an empty list stops the stream and
+    /// releases the slot.
+    ///
+    /// Returns the number of channels the stream carries, which is what the
+    /// caller announces to the room. The engine claims the wide publish slot
+    /// and starts assembling blocks into it; announcing the stream is the jam
+    /// client's half, and the two are separate calls so a failure in either
+    /// never leaves the other running.
+    pub fn set_multitrack_jam_publish(
+        &self,
+        track_ids: &[String],
+    ) -> Result<usize, SphereAudioError> {
+        if track_ids.len() > crate::jam_bus::MAX_MULTITRACK_PAIRS {
+            return Err(SphereAudioError::InvalidConfig(format!(
+                "an Audio Jam multitrack stream carries at most {} tracks",
+                crate::jam_bus::MAX_MULTITRACK_PAIRS
+            )));
+        }
+
+        let indices: Vec<usize> = {
+            let project = self.project.lock();
+            let snapshot = project.as_ref().ok_or_else(|| {
+                SphereAudioError::InvalidConfig("no project is loaded".to_string())
+            })?;
+            track_ids
+                .iter()
+                .map(|track_id| {
+                    snapshot
+                        .tracks
+                        .iter()
+                        .position(|track| &track.id == track_id)
+                        .ok_or_else(|| {
+                            SphereAudioError::InvalidConfig(format!(
+                                "track '{track_id}' was not found"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        // Release first, always: the layout is fixed for the life of a claim,
+        // so changing which tracks are shared is a fresh claim rather than an
+        // edit of the live one.
+        self.shared
+            .jam_bus
+            .release_publish(crate::jam_bus::PUBLISH_KEY_MULTITRACK);
+
+        let mut pairs = [crate::jam_bus::NO_JAM_PAIR; crate::jam_bus::MAX_MULTITRACK_PAIRS];
+        for (pair, index) in indices.iter().enumerate() {
+            pairs[pair] = *index as u32;
+        }
+
+        let channels = indices.len() * 2;
+        if channels > 0
+            && self
+                .shared
+                .jam_bus
+                .bind_multitrack_publish(channels)
+                .is_none()
+        {
+            return Err(SphereAudioError::InvalidConfig(
+                "the Audio Jam multitrack slot is already in use".to_string(),
+            ));
+        }
+
+        self.runtime.lock().update_jam_multitrack_pairs(&indices);
+        match self.send_command(EngineCommand::SetJamMultitrackPairs { pairs }) {
+            // A closed engine is not a failure: the runtime mirror already
+            // carries the assignment, and the next graph the callback receives
+            // will have it.
+            Ok(()) | Err(SphereAudioError::EngineNotOpen) => Ok(channels),
+            Err(error) => {
+                self.shared
+                    .jam_bus
+                    .release_publish(crate::jam_bus::PUBLISH_KEY_MULTITRACK);
+                self.runtime.lock().update_jam_multitrack_pairs(&[]);
+                Err(error)
+            }
+        }
+    }
+
     pub fn update_track_input_flags(
         &self,
         track_id: &str,
@@ -4298,6 +4382,7 @@ impl EngineInner {
                 EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
                 EngineCommand::SetTrackInputState { .. } => "SetTrackInputState",
                 EngineCommand::SetTrackJamPublish { .. } => "SetTrackJamPublish",
+                EngineCommand::SetJamMultitrackPairs { .. } => "SetJamMultitrackPairs",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
                 EngineCommand::SetMonitorSource { .. } => "SetMonitorSource",
@@ -4994,6 +5079,9 @@ where
                         ),
                         EngineCommand::SetTrackJamPublish { track_index, slot } => {
                             runtime.update_track_jam_publish(track_index, slot);
+                        }
+                        EngineCommand::SetJamMultitrackPairs { pairs } => {
+                            runtime.apply_jam_multitrack_pairs(&pairs);
                         }
                         EngineCommand::SetTrackPreviewMode { track_id, value } => {
                             runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
@@ -5912,6 +6000,7 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6407,6 +6496,7 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6551,6 +6641,7 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,
@@ -6649,6 +6740,7 @@ mod routing_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

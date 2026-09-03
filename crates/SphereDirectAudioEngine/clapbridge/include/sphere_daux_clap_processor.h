@@ -172,6 +172,66 @@ sphere_daux_clap_embed_content_size(SphereDauxClapProcessor *processor,
 SPHERE_DAUX_CLAP_API int
 sphere_daux_clap_editor_resizable(SphereDauxClapProcessor *processor);
 
+// ── Host-owned view host ────────────────────────────────────────────────────
+//
+// Mirrors `sphere_daux_vst3_view_*`. The host owns the window; these drive only
+// the `clap.gui` extension. Nothing on this path creates, moves, resizes, or
+// destroys a window, so the caller stays the single owner of the editor's
+// geometry. Main/UI thread only.
+
+/// Runs the `clap.gui` create → set_scale → get_size → set_parent → show
+/// sequence against `parent_hwnd`, which the caller owns and must keep alive
+/// until `sphere_daux_clap_view_detach`.
+///
+/// `width`/`height` are the region the host has available; the size reported
+/// through `out_width`/`out_height` is the plug-in's own (`get_size`), which the
+/// host is expected to lay out around. Re-attaching to the same window is a
+/// no-op that re-reports the size. Returns 1 on success.
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_attach(SphereDauxClapProcessor *processor,
+                             unsigned long long parent_hwnd, int width,
+                             int height, int *out_width, int *out_height);
+
+/// Hides and destroys the GUI (`hide` + `destroy`). The parent window is
+/// untouched. Safe when nothing is attached.
+SPHERE_DAUX_CLAP_API void
+sphere_daux_clap_view_detach(SphereDauxClapProcessor *processor);
+
+/// 1 while a GUI is attached through the host-owned path.
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_is_attached(SphereDauxClapProcessor *processor);
+
+/// Tells the GUI the size the host has given it (`set_size`). Call after the
+/// host surface has actually been resized, never before.
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_set_size(SphereDauxClapProcessor *processor, int width,
+                               int height);
+
+/// The GUI's current content size (`get_size`).
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_get_size(SphereDauxClapProcessor *processor,
+                               int *out_width, int *out_height);
+
+/// 1 when the GUI accepts host-driven resizing (`can_resize`).
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_can_resize(SphereDauxClapProcessor *processor);
+
+/// Applies the CLAP size contract to a proposed content size in place: a fixed
+/// GUI snaps to its own size, a resizable one goes through `adjust_size`.
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_constrain(SphereDauxClapProcessor *processor,
+                                int *io_width, int *io_height);
+
+/// Reads and clears the plug-in's pending `clap_host_gui->request_resize`, if
+/// any.
+///
+/// The request is recorded rather than acted on, so the host decides what it
+/// can grant, resizes its own surface, and reports the result back through
+/// `sphere_daux_clap_view_set_size`.
+SPHERE_DAUX_CLAP_API int
+sphere_daux_clap_view_take_resize_request(SphereDauxClapProcessor *processor,
+                                          int *out_width, int *out_height);
+
 SPHERE_DAUX_CLAP_API int
 sphere_daux_clap_is_valid(SphereDauxClapProcessor *processor);
 

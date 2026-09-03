@@ -2404,6 +2404,14 @@ impl StudioLayout {
             ),
             "track:height-reset" => self.reset_context_track_height(cx),
             "track:height-reset-all" => self.reset_all_track_heights(cx),
+            "track:timebase-musical" => self.set_context_track_timebase(
+                crate::components::timeline::timeline_state::TrackTimebase::Musical,
+                cx,
+            ),
+            "track:timebase-linear" => self.set_context_track_timebase(
+                crate::components::timeline::timeline_state::TrackTimebase::Linear,
+                cx,
+            ),
             "track:mute" => self.toggle_selected_track_mute(cx),
             "track:solo" => self.toggle_selected_track_solo(cx),
             "track:arm" => self.toggle_selected_track_arm(cx),

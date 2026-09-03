@@ -20,7 +20,7 @@
 //! clock exists to prevent.
 
 use crate::ids::StreamId;
-use crate::protocol::LatencyMetadata;
+use crate::protocol::{LatencyMetadata, SampleFormat};
 
 /// How a remote stream's channels reach a track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,6 +241,17 @@ pub enum JamPublishSourceKind {
         track_id: String,
     },
     Master,
+    /// Several tracks as one wide stream, one channel pair each.
+    ///
+    /// One stream rather than one per track, because a receiving Studio is
+    /// dropping a take onto a timeline: a single stream carries one capture
+    /// base and one sequence, so every pair lands sample-aligned with the rest.
+    /// N stereo streams would arrive on N independently jittered paths and have
+    /// to be re-aligned against each other, which is the problem the session
+    /// clock exists to avoid rather than to multiply.
+    Multitrack {
+        track_ids: Vec<String>,
+    },
 }
 
 impl JamPublishSourceKind {
@@ -250,11 +261,17 @@ impl JamPublishSourceKind {
             Self::Track { .. } => "track",
             Self::Bus { .. } => "bus",
             Self::Master => "master",
+            Self::Multitrack { .. } => "multitrack",
         }
     }
 }
 
 /// A stream this client wants to publish.
+///
+/// The wire format is per stream rather than per session because the two are
+/// genuinely independent: a Studio can send its master as 24-bit stereo and its
+/// arrangement as 16-bit sixteen-channel at the same time, and the packet a
+/// receiver decodes is described by the stream it belongs to.
 #[derive(Debug, Clone)]
 pub struct JamPublishRequest {
     /// The display name other participants see, e.g. `Guitar`.
@@ -264,6 +281,19 @@ pub struct JamPublishRequest {
     /// Per-channel labels. Empty lets the server and receivers fall back to the
     /// layout convention.
     pub channel_labels: Vec<String>,
+    /// Wire sample format. Deeper is more bandwidth, not more latency.
+    pub sample_format: SampleFormat,
+    /// Rate to publish at, or `0` to take the session's.
+    ///
+    /// Independent of the project rate either way: the publish tap converts.
+    pub sample_rate: i32,
+    /// Frame sizes offered for this stream alone. Empty leaves the session's
+    /// advertised capabilities in charge.
+    ///
+    /// A wide layout has to state one: sixteen channels at 256 samples is 16 kB
+    /// of PCM, which no datagram carries, and the server would refuse the
+    /// stream rather than negotiate a size neither side offered.
+    pub frame_sizes: Vec<i32>,
 }
 
 impl JamPublishRequest {
@@ -273,6 +303,9 @@ impl JamPublishRequest {
             source,
             channels: 2,
             channel_labels: vec!["L".to_string(), "R".to_string()],
+            sample_format: SampleFormat::F32Le,
+            sample_rate: 0,
+            frame_sizes: Vec::new(),
         }
     }
 
@@ -282,8 +315,74 @@ impl JamPublishRequest {
             source,
             channels: 1,
             channel_labels: vec!["Mono".to_string()],
+            sample_format: SampleFormat::F32Le,
+            sample_rate: 0,
+            frame_sizes: Vec::new(),
         }
     }
+
+    /// A wide stream, one channel pair per entry in `pair_labels`.
+    ///
+    /// The frame size is derived rather than asked for: it is the largest
+    /// advertised size whose PCM frame still fits one datagram at this layout
+    /// and depth, which is the only choice that both negotiates and keeps the
+    /// packet rate as low as the layout allows.
+    pub fn multitrack(
+        name: impl Into<String>,
+        track_ids: Vec<String>,
+        pair_labels: &[String],
+        sample_format: SampleFormat,
+    ) -> Self {
+        let channels = track_ids.len() * 2;
+        let mut channel_labels = Vec::with_capacity(channels);
+        for pair in 0..track_ids.len() {
+            let label = pair_labels
+                .get(pair)
+                .filter(|label| !label.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("Ch {}", pair + 1));
+            channel_labels.push(format!("{label} L"));
+            channel_labels.push(format!("{label} R"));
+        }
+        Self {
+            name: name.into(),
+            source: JamPublishSourceKind::Multitrack { track_ids },
+            channels,
+            channel_labels,
+            sample_format,
+            sample_rate: 0,
+            // One size, not a list: the server takes the smallest a publisher
+            // offers, and for a wide layout the smallest that fits is already a
+            // punishing packet rate. Offering only the largest that fits is how
+            // this stream asks for the lowest packet rate its layout allows.
+            frame_sizes: datagram_frame_sizes(channels, sample_format)
+                .into_iter()
+                .take(1)
+                .collect(),
+        }
+    }
+}
+
+/// Payload bytes one datagram carries. The server's own
+/// `media.DefaultMaxPayloadBytes`, restated here because the value bounds what
+/// this client may offer before any handshake has happened.
+pub const DATAGRAM_PAYLOAD_BYTES: usize = 1200;
+
+/// Every conventional frame size whose PCM frame fits one datagram at this
+/// layout and depth, largest first.
+///
+/// Largest first because the server's negotiator takes the smallest size both
+/// sides offer, and for a wide layout the smallest that fits is already a very
+/// high packet rate — 32 samples at 48 kHz is 1500 packets a second. Listing
+/// the sizes at all is what makes the stream negotiable; the caller decides how
+/// far down the list to go.
+pub fn datagram_frame_sizes(channels: usize, format: SampleFormat) -> Vec<i32> {
+    let per_frame = channels.max(1) * format.bytes_per_sample().max(1);
+    [512, 256, 128, 64, 32]
+        .into_iter()
+        .filter(|size| (*size as usize) * per_frame <= DATAGRAM_PAYLOAD_BYTES)
+        .map(|size| size as i32)
+        .collect()
 }
 
 /// A project-persisted routing from a remote performer to a local track.

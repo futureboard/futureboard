@@ -734,6 +734,14 @@ pub struct RuntimeTrack {
     /// never looks a key up. `None` for every track that is not being shared,
     /// which is almost all of them almost all of the time.
     pub jam_publish_slot: Option<u32>,
+    /// Channel pair this track occupies inside the Audio Jam multitrack stream,
+    /// if the arrangement is being shared.
+    ///
+    /// Separate from [`Self::jam_publish_slot`] because the two are different
+    /// streams: a track can be shared on its own *and* be a pair inside the
+    /// multitrack take, and the receiver sees two independent streams. Like the
+    /// slot, the pair is resolved on the control thread and shipped as an index.
+    pub jam_multitrack_pair: Option<u32>,
     pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
     /// [`Self::output_track_id`] resolved at build time
@@ -2610,6 +2618,7 @@ impl RuntimeProject {
                 // is live. Carrying it in the snapshot would make reopening a
                 // project start broadcasting.
                 jam_publish_slot: None,
+                jam_multitrack_pair: None,
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
                 output_track_index: None, // resolved below in resolve_indices
@@ -3846,6 +3855,56 @@ impl RuntimeProject {
     /// Which jam publish slot a track feeds, for the control thread.
     pub fn track_jam_publish(&self, track_index: usize) -> Option<u32> {
         self.tracks.get(track_index)?.jam_publish_slot
+    }
+
+    /// Assign the channel pairs of the Audio Jam multitrack stream.
+    ///
+    /// `pairs[k]` is the track index that fills pair `k`; the assignment is
+    /// replaced wholesale rather than edited, because a stream's layout is
+    /// announced once and every receiver decodes against it. Sharing a
+    /// different set of tracks means republishing, and this is the control
+    /// thread's half of that.
+    pub fn update_jam_multitrack_pairs(&mut self, pairs: &[usize]) {
+        for track in self.tracks.iter_mut() {
+            track.jam_multitrack_pair = None;
+        }
+        for (pair, track_index) in pairs.iter().enumerate() {
+            if pair >= crate::jam_bus::MAX_MULTITRACK_PAIRS {
+                break;
+            }
+            if let Some(track) = self.tracks.get_mut(*track_index) {
+                track.jam_multitrack_pair = Some(pair as u32);
+            }
+        }
+    }
+
+    /// Which multitrack pair a track fills, for the control thread.
+    pub fn track_jam_multitrack_pair(&self, track_index: usize) -> Option<u32> {
+        self.tracks.get(track_index)?.jam_multitrack_pair
+    }
+
+    /// Apply the pair assignment carried by
+    /// [`crate::command::EngineCommand::SetJamMultitrackPairs`].
+    ///
+    /// The callback's half of [`Self::update_jam_multitrack_pairs`], taking the
+    /// fixed sentinel-terminated array the command carries rather than a slice
+    /// the audio thread would have to free.
+    #[inline]
+    pub fn apply_jam_multitrack_pairs(
+        &mut self,
+        pairs: &[u32; crate::jam_bus::MAX_MULTITRACK_PAIRS],
+    ) {
+        for track in self.tracks.iter_mut() {
+            track.jam_multitrack_pair = None;
+        }
+        for (pair, track_index) in pairs.iter().enumerate() {
+            if *track_index == crate::jam_bus::NO_JAM_PAIR {
+                continue;
+            }
+            if let Some(track) = self.tracks.get_mut(*track_index as usize) {
+                track.jam_multitrack_pair = Some(pair as u32);
+            }
+        }
     }
 
     #[inline]
@@ -5858,6 +5917,7 @@ mod midi_tests {
             monitor_enabled: false,
             input_source: RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

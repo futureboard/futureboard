@@ -404,6 +404,7 @@ mod tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
             output_track_index: None,

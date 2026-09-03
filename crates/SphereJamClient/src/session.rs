@@ -39,6 +39,7 @@ use crate::protocol::{
     ParticipantSummary, RegionSummary, SampleFormat, StreamEvent, StreamPublishRequest,
     StreamPublished, StreamSummary, StreamUnpublishRequest, TransportCandidates,
     TransportCapabilities, TransportKind, TransportSelect, TransportSelected, UserSummary,
+    MAX_STREAM_CHANNELS,
 };
 use crate::registry::JamRegistry;
 use crate::signaling::SignalingClient;
@@ -214,7 +215,18 @@ impl JamSessionOptions {
                     SampleFormat::S24Le,
                     SampleFormat::S16Le,
                 ],
-                channels: vec![1, 2],
+                // Every layout up to the protocol ceiling, because this client
+                // both publishes and receives multitrack takes. Listing them is
+                // what lets a receiving Studio be offered a wide stream at all;
+                // a browser listener that offers only 1 and 2 is refused one by
+                // the server rather than handed channels it cannot decode.
+                channels: (1..=MAX_STREAM_CHANNELS as i32).collect(),
+                // Sized for the stereo streams that are almost all of them: the
+                // server picks the smallest size both sides offer, so listing a
+                // very short one here would drag every ordinary stream up to a
+                // needless packet rate. A wide stream states its own shorter
+                // size per publish instead — see
+                // [`crate::bridge::JamPublishRequest::frame_sizes`].
                 frame_sizes: vec![128, 256, 512, 1024],
             }],
         }
@@ -828,8 +840,19 @@ impl Worker {
         let Some(pending) = self.publications.get(index) else {
             return Ok(());
         };
-        let channels = pending.request.channels.clamp(1, 2) as i32;
+        let channels = pending.request.channels.clamp(1, MAX_STREAM_CHANNELS) as i32;
         let labels = pending.request.channel_labels.clone();
+        let sample_format = if pending.request.sample_format == SampleFormat::None {
+            SampleFormat::F32Le
+        } else {
+            pending.request.sample_format
+        };
+        let sample_rate = if pending.request.sample_rate > 0 {
+            pending.request.sample_rate
+        } else {
+            self.options.publish_sample_rate
+        };
+        let frame_sizes = pending.request.frame_sizes.clone();
 
         // Re-attach to the stream this participant already has, if it kept one
         // across the reconnect.
@@ -843,8 +866,8 @@ impl Worker {
             name: pending.request.name.clone(),
             direction: protocol::direction::SEND.to_string(),
             codec: AudioCodec::Pcm,
-            sample_rate: self.options.publish_sample_rate,
-            sample_format: SampleFormat::F32Le,
+            sample_rate,
+            sample_format,
             channels,
             channel_metadata: labels
                 .iter()
@@ -855,6 +878,7 @@ impl Worker {
                     role: label.clone(),
                 })
                 .collect(),
+            frame_sizes,
             clock_domain: protocol::DOMAIN_SESSION.to_string(),
             latency: pending.source.latency(),
         };
@@ -886,14 +910,33 @@ impl Worker {
         else {
             return;
         };
+        // The format the packets actually carry is the one the *server*
+        // acknowledged, not the one this client asked for. They agree today,
+        // but reading it back from the summary is what keeps a header honest if
+        // the server ever normalises a field.
+        let requested = self
+            .publications
+            .get(index)
+            .map(|pending| &pending.request)
+            .map(|request| (request.sample_format, request.frame_sizes.clone()))
+            .unwrap_or((SampleFormat::F32Le, Vec::new()));
         let stream_id = StreamId::new(stream.id.clone());
+        let sample_format = if stream.sample_format == SampleFormat::None {
+            requested.0
+        } else {
+            stream.sample_format
+        };
         let format = AudioFormat {
             codec: AudioCodec::Pcm,
-            sample_rate: self.options.publish_sample_rate,
-            channels: stream.channels.clamp(1, 2),
-            format: SampleFormat::F32Le,
+            sample_rate: if stream.sample_rate > 0 {
+                stream.sample_rate
+            } else {
+                self.options.publish_sample_rate
+            },
+            channels: stream.channels.clamp(1, MAX_STREAM_CHANNELS as i32),
+            format: sample_format,
             bitrate: 0,
-            frame_samples: self.publish_frame_samples(),
+            frame_samples: self.publish_frame_samples(&requested.1),
         };
         if let Ok(mut guard) = self.media_shared.publications.lock() {
             guard.retain(|publication| publication.stream_id != stream_id);
@@ -921,22 +964,28 @@ impl Worker {
     /// different length would work — the header carries the real frame count —
     /// but it would make `audio.format_selected` a statement nobody honoured,
     /// and the first thing anybody debugging a jitter problem would check.
-    fn publish_frame_samples(&self) -> i32 {
-        let advertised = self
-            .options
-            .capabilities
-            .codecs
+    fn publish_frame_samples(&self, stream_frame_sizes: &[i32]) -> i32 {
+        // A stream that stated its own sizes overrode the capability list for
+        // negotiation, so it has to override it here too — otherwise the client
+        // would send the session's frame length for a stream the server told
+        // every receiver was much shorter.
+        let offered = if stream_frame_sizes.is_empty() {
+            self.options
+                .capabilities
+                .codecs
+                .iter()
+                .find(|capability| capability.codec == AudioCodec::Pcm)
+                .map(|capability| capability.frame_sizes.as_slice())
+                .unwrap_or_default()
+        } else {
+            stream_frame_sizes
+        };
+        offered
             .iter()
-            .find(|capability| capability.codec == AudioCodec::Pcm)
-            .and_then(|capability| {
-                capability
-                    .frame_sizes
-                    .iter()
-                    .copied()
-                    .filter(|size| *size > 0)
-                    .min()
-            });
-        advertised.unwrap_or_else(|| self.options.publish_frame_samples.max(32))
+            .copied()
+            .filter(|size| *size > 0)
+            .min()
+            .unwrap_or_else(|| self.options.publish_frame_samples.max(32))
     }
 
     fn drop_publication(&mut self, stream: &StreamId) {
@@ -1323,7 +1372,52 @@ mod tests {
         assert!(pcm.sample_rates.contains(&48000));
         assert!(pcm.sample_rates.contains(&192000));
         assert_eq!(pcm.frame_sizes.first().copied(), Some(128));
-        assert_eq!(pcm.channels, vec![1, 2]);
+        // Every layout up to the ceiling, so this client can be offered a
+        // multitrack take as well as publish one.
+        assert!(pcm.channels.contains(&1));
+        assert!(pcm.channels.contains(&2));
+        assert_eq!(
+            pcm.channels.last().copied(),
+            Some(MAX_STREAM_CHANNELS as i32)
+        );
+        // But the session-wide frame sizes stay sized for stereo: the server
+        // picks the smallest both sides offer, so a short one listed here would
+        // raise the packet rate of every ordinary stream.
+        assert!(
+            !pcm.frame_sizes.contains(&32),
+            "a wide stream states its own frame size per publish instead"
+        );
+    }
+
+    #[test]
+    fn a_wide_stream_offers_the_largest_frame_size_that_still_fits_a_datagram() {
+        use crate::bridge::{datagram_frame_sizes, JamPublishRequest};
+
+        // 16 channels of 16-bit is 32 bytes a frame: only 32 samples fit.
+        let sixteen = datagram_frame_sizes(16, SampleFormat::S16Le);
+        assert_eq!(sixteen, vec![32]);
+        // 8 channels of the same is 16 bytes, so 64 fits and is preferred.
+        assert_eq!(datagram_frame_sizes(8, SampleFormat::S16Le), vec![64, 32]);
+        // And 32-bit float at sixteen channels fits nothing at all, which is
+        // what makes the request unpublishable rather than silently oversized.
+        assert!(datagram_frame_sizes(16, SampleFormat::F32Le).is_empty());
+
+        let request = JamPublishRequest::multitrack(
+            "Studio Multitrack",
+            vec!["trk_1".to_string(), "trk_2".to_string()],
+            &["Drums".to_string(), "Bass".to_string()],
+            SampleFormat::S16Le,
+        );
+        assert_eq!(request.channels, 4);
+        assert_eq!(request.channel_labels[0], "Drums L");
+        assert_eq!(request.channel_labels[3], "Bass R");
+        // Four channels of 16-bit is 8 bytes a frame, so 128 samples is
+        // 1024 bytes and the largest of the conventional sizes that fits.
+        assert_eq!(
+            request.frame_sizes,
+            vec![128],
+            "one size only, so the server's smallest-wins rule picks it"
+        );
     }
 
     #[test]

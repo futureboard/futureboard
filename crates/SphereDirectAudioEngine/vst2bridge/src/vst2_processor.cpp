@@ -287,6 +287,11 @@ intptr_t vst2_audio_master(AEffect *effect, int32_t opcode, int32_t index,
       p->pending_main_shell_w = static_cast<int>(index);
       p->pending_main_shell_h = static_cast<int>(value);
       p->pending_main_shell_resize.store(true, std::memory_order_release);
+      // Host-owned view path has its own consumer, so it gets its own slot —
+      // whichever of the two is live drains only what belongs to it.
+      p->view_host_resize_w = static_cast<int>(index);
+      p->view_host_resize_h = static_cast<int>(value);
+      p->view_host_resize_pending.store(true, std::memory_order_release);
       return 1;
     }
     return 0;

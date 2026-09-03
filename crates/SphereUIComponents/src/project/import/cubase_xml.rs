@@ -132,8 +132,13 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
             .unwrap_or_else(|| format!("Audio {}", index + 1));
 
         let mut clips = Vec::new();
+        // Carried out of the clip loop so the imported track keeps the timebase
+        // Cubase gave it: a linear track there is a Linear track here, and a
+        // later tempo change moves its clips the same way the original did.
+        let mut track_domain = TrackTimebase::Musical;
         if let Some(node) = node {
             let timebase = track_timebase(node);
+            track_domain = timebase;
             for event in archive.list_objects(node, "Events", "MAudioEvent") {
                 if let Some(clip) = audio_clip(
                     &archive,
@@ -156,6 +161,15 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
             name: track_name,
             track_type: ProjectTrackType::Audio,
             ara: None,
+            timebase: match track_domain {
+                TrackTimebase::Musical => {
+                    crate::components::timeline::timeline_state::TrackTimebase::Musical
+                }
+                TrackTimebase::Samples => {
+                    crate::components::timeline::timeline_state::TrackTimebase::Linear
+                }
+            }
+            .to_tag(),
             parent_group_id: None,
             group_collapsed: false,
             color_hex: crate::project::rgba_to_hex(crate::color::auto_color_for_index(index)),

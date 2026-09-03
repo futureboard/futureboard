@@ -101,7 +101,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// those files keep loading; their tracks come back without ARA, which is the
 /// closest honest answer, since a v41 file could bind individual clips to
 /// different plug-ins and a track can only carry one.
-pub const PROJECT_VERSION: u32 = 42;
+/// v43 adds the project timebase (display format + timecode frame rate).
+pub const PROJECT_VERSION: u32 = 43;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -898,6 +899,9 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
         }
         None => w.write_u8(0),
     }
+    // v43: per-track timebase, at the tail of the track block for the same
+    // reason the ARA binding is — a v42 track block simply ends before it.
+    w.write_u8(t.timebase);
 }
 
 /// v28: built-in Soundfont Player instrument state. A leading flag keeps the
@@ -1374,6 +1378,12 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         w.write_str(&document.archive_id);
         w.write_bytes(&document.data);
     }
+
+    // Project timebase (v43+). Appended after the ARA documents for the same
+    // reason that block was appended after the conductor lanes: the body is
+    // positional, so a v42 file simply ends there and must decode as v42.
+    w.write_u8(project.settings.time_display_format);
+    w.write_u8(project.settings.timecode_rate);
 
     w.into_bytes()
 }
@@ -2142,11 +2152,16 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         None
     };
 
+    // v43: per-track timebase. A v42 track has none and is Musical, which is
+    // the only behaviour it could have been saved with.
+    let timebase = if version >= 43 { r.read_u8()? } else { 0 };
+
     Ok(ProjectTrack {
         id,
         name,
         track_type,
         ara,
+        timebase,
         parent_group_id,
         group_collapsed,
         color_hex,
@@ -2459,6 +2474,15 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         Vec::new()
     };
 
+    // Project timebase (v43+). A v42 file has none and opens in Bars+Beats,
+    // which is the only thing it could have been showing.
+    let (time_display_format, timecode_rate) = if version >= 43 {
+        (r.read_u8()?, r.read_u8()?)
+    } else {
+        let defaults = super::ProjectSettings::default();
+        (defaults.time_display_format, defaults.timecode_rate)
+    };
+
     Ok(FutureboardProject {
         audio_connections,
         global_lanes,
@@ -2481,6 +2505,8 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             time_sig_den,
             sample_rate,
             bit_depth,
+            time_display_format,
+            timecode_rate,
         },
         tracks,
         mixer: ProjectMixer {
@@ -2796,16 +2822,19 @@ mod tests {
         // `encode_body` ends with the Song Text count, the v34 Audio
         // Connections count, the v35 output-routing block (two absent optional
         // strings plus the bootstrap latch), the v40 conductor-lane fold block
-        // (four collapse latches plus five absent optional heights), and the v41
-        // ARA document count. A v24-v26 fixture reads none of them, so drop the
-        // whole tail before appending the legacy cue block in its place.
+        // (four collapse latches plus five absent optional heights), the v41
+        // ARA document count, and the v43 timebase pair. A v24-v26 fixture reads
+        // none of them, so drop the whole tail before appending the legacy cue
+        // block in its place.
         let v35_output_routing_bytes = 1 + 1 + 1;
         let v40_global_lane_bytes = 4 + 5;
+        let v43_timebase_bytes = 1 + 1;
         body.truncate(
             body.len()
                 - 3 * std::mem::size_of::<u32>()
                 - v35_output_routing_bytes
-                - v40_global_lane_bytes,
+                - v40_global_lane_bytes
+                - v43_timebase_bytes,
         );
 
         let mut tail = FbWriter::new();
@@ -3687,6 +3716,7 @@ mod tests {
             name: "Audio 1".to_string(),
             track_type: ProjectTrackType::Audio,
             ara: None,
+            timebase: crate::components::timeline::timeline_state::TrackTimebase::Musical.to_tag(),
             parent_group_id: None,
             group_collapsed: false,
             color_hex: "#56C7C9".to_string(),

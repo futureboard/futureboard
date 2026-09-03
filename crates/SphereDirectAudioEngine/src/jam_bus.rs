@@ -58,7 +58,38 @@ const MASK: usize = CAPACITY_FRAMES - 1;
 pub const MAX_JAM_INPUT_SLOTS: usize = 32;
 
 /// How many local sources can be published at once.
+///
+/// These are the stereo slots: the master mix, and one per individually shared
+/// track. The multitrack slot is separate and is not counted here — see
+/// [`MULTITRACK_PUBLISH_SLOT`].
 pub const MAX_JAM_PUBLISH_SLOTS: usize = 8;
+
+/// Widest layout the multitrack publish slot can carry, in channels.
+///
+/// Eight stereo pairs. The ceiling is the jam server's own
+/// `protocol.MaxStreamChannels`, and beyond it the datagram budget makes an
+/// uncompressed stream unsendable anyway: sixteen channels of 16-bit audio is
+/// 32 bytes a frame, which fits about thirty-seven frames in one packet.
+pub const MAX_MULTITRACK_CHANNELS: usize = 16;
+
+/// How many track pairs the multitrack slot carries.
+pub const MAX_MULTITRACK_PAIRS: usize = MAX_MULTITRACK_CHANNELS / 2;
+
+/// Index of the multitrack publish slot.
+///
+/// It sits after the stereo slots in the same table so the realtime path
+/// addresses every publish slot the same way — one bounds-checked index — while
+/// only this one pays for the wide ring storage.
+pub const MULTITRACK_PUBLISH_SLOT: usize = MAX_JAM_PUBLISH_SLOTS;
+
+/// Total publish slots, stereo plus the one wide slot.
+pub const TOTAL_JAM_PUBLISH_SLOTS: usize = MAX_JAM_PUBLISH_SLOTS + 1;
+
+/// The multitrack pair-assignment entry for "nobody fills this pair".
+///
+/// A sentinel rather than an `Option<u32>` so the assignment stays a plain
+/// `Copy` array the audio callback can apply without touching the heap.
+pub const NO_JAM_PAIR: u32 = u32::MAX;
 
 /// The prefix that marks an Audio Connections port as a jam stream rather than
 /// a hardware one.
@@ -81,6 +112,14 @@ pub fn jam_device_id(stream_id: &str) -> String {
 /// realtime callback and the jam bridge agree on which ring is which without
 /// sharing a counter.
 pub const PUBLISH_KEY_MASTER: &str = "master";
+
+/// Publish-slot key for the multitrack stream.
+///
+/// One key, one slot, one stream: every shared track occupies a channel pair
+/// inside it rather than a stream of its own, so a receiving Studio gets one
+/// clock, one sequence and one capture base to align the whole arrangement
+/// against instead of N independently jittered ones.
+pub const PUBLISH_KEY_MULTITRACK: &str = "multitrack";
 
 /// Publish-slot key for one track or bus.
 pub fn publish_key_track(track_id: &str) -> String {
@@ -403,9 +442,23 @@ impl JamInputSlot {
 
 /// One local source being published, written by the audio callback and drained
 /// by the jam publish thread.
+///
+/// The ring is planar: one preallocated channel ring per channel the slot can
+/// carry. A stereo slot has two and a multitrack slot has
+/// [`MAX_MULTITRACK_CHANNELS`], and neither ever grows — the widest layout a
+/// slot will ever hold is decided when the bus is built, because the audio
+/// callback cannot wait for a reallocation.
 pub struct JamPublishSlot {
-    left: Box<[AtomicU32]>,
-    right: Box<[AtomicU32]>,
+    planes: Box<[Box<[AtomicU32]>]>,
+    /// Channels in use for the current claim. Never above `planes.len()`, and
+    /// fixed for the life of a claim so a reader that asks once per block
+    /// cannot observe it changing mid-read.
+    channels: AtomicU32,
+    /// Which pairs a multitrack producer has staged into the block being
+    /// assembled. Cleared by [`JamPublishSlot::commit`], which zeroes whatever
+    /// was not staged — so a track that stops sharing mid-stream leaves silence
+    /// in its pair rather than one block repeated forever.
+    staged_pairs: AtomicU32,
     write_frames: AtomicU64,
     read_frames: AtomicU64,
     active: AtomicBool,
@@ -424,6 +477,7 @@ impl std::fmt::Debug for JamPublishSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JamPublishSlot")
             .field("active", &self.active.load(Ordering::Relaxed))
+            .field("channels", &self.channels.load(Ordering::Relaxed))
             .field("write_frames", &self.write_frames.load(Ordering::Relaxed))
             .field("read_frames", &self.read_frames.load(Ordering::Relaxed))
             .finish()
@@ -432,15 +486,30 @@ impl std::fmt::Debug for JamPublishSlot {
 
 impl Default for JamPublishSlot {
     fn default() -> Self {
-        let make = || {
-            (0..CAPACITY_FRAMES)
-                .map(|_| AtomicU32::new(0))
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-        };
+        Self::with_capacity_channels(2)
+    }
+}
+
+impl JamPublishSlot {
+    /// Allocate a slot that can carry up to `channels` channels.
+    ///
+    /// Every ring is allocated here, once, because the producer is the audio
+    /// callback. A slot claimed for a narrower layout simply leaves the rest of
+    /// its rings untouched.
+    pub fn with_capacity_channels(channels: usize) -> Self {
+        let channels = channels.clamp(1, MAX_MULTITRACK_CHANNELS);
         Self {
-            left: make(),
-            right: make(),
+            planes: (0..channels)
+                .map(|_| {
+                    (0..CAPACITY_FRAMES)
+                        .map(|_| AtomicU32::new(0))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            channels: AtomicU32::new(2.min(channels) as u32),
+            staged_pairs: AtomicU32::new(0),
             write_frames: AtomicU64::new(0),
             read_frames: AtomicU64::new(0),
             active: AtomicBool::new(false),
@@ -450,15 +519,23 @@ impl Default for JamPublishSlot {
             overruns: AtomicU64::new(0),
         }
     }
-}
 
-impl JamPublishSlot {
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate.load(Ordering::Relaxed)
+    }
+
+    /// Channels this slot is currently carrying.
+    pub fn channels(&self) -> usize {
+        self.channels.load(Ordering::Acquire) as usize
+    }
+
+    /// The widest layout this slot could ever carry.
+    pub fn capacity_channels(&self) -> usize {
+        self.planes.len()
     }
 
     pub fn overruns(&self) -> u64 {
@@ -506,12 +583,84 @@ impl JamPublishSlot {
         sample_rate: u32,
         mut sample: impl FnMut(usize) -> (f32, f32),
     ) {
+        if !self.active.load(Ordering::Acquire) || frames == 0 || self.planes.len() < 2 {
+            return;
+        }
+        let write = self.write_frames.load(Ordering::Relaxed);
+        for frame in 0..frames {
+            let (left, right) = sample(frame);
+            let index = ((write as usize).wrapping_add(frame)) & MASK;
+            self.planes[0][index].store(left.to_bits(), Ordering::Relaxed);
+            self.planes[1][index].store(right.to_bits(), Ordering::Relaxed);
+        }
+        self.channels.store(2, Ordering::Release);
+        self.advance(write, frames, sample_rate);
+    }
+
+    /// Producer: write one channel pair of the block being assembled, leaving
+    /// the head where it is.
+    ///
+    /// A multitrack block is written by several callers — one per shared track,
+    /// each from its own point in the render pass — so the head cannot advance
+    /// with the first of them. [`JamPublishSlot::commit`] closes the block once
+    /// every track has had its turn.
+    ///
+    /// Realtime-safe: bounds-checked indexing and relaxed stores, nothing else.
+    #[inline]
+    pub fn stage_pair(&self, pair: usize, left: &[f32], right: &[f32], frames: usize) {
+        if !self.active.load(Ordering::Acquire) {
+            return;
+        }
+        let (first, second) = (pair * 2, pair * 2 + 1);
+        if second >= self.channels.load(Ordering::Acquire) as usize || second >= self.planes.len() {
+            return;
+        }
+        let frames = frames.min(left.len()).min(right.len());
+        if frames == 0 {
+            return;
+        }
+        let write = self.write_frames.load(Ordering::Relaxed) as usize;
+        for frame in 0..frames {
+            let index = write.wrapping_add(frame) & MASK;
+            self.planes[first][index].store(left[frame].to_bits(), Ordering::Relaxed);
+            self.planes[second][index].store(right[frame].to_bits(), Ordering::Relaxed);
+        }
+        self.staged_pairs.fetch_or(1 << pair, Ordering::Release);
+    }
+
+    /// Producer: close the staged block and publish it.
+    ///
+    /// Every pair nobody staged is zeroed first. Without that a track that
+    /// stopped sharing would leave its last block looping in the stream, which
+    /// sounds exactly like a stuck buffer and is far harder to diagnose than
+    /// silence.
+    #[inline]
+    pub fn commit(&self, frames: usize, sample_rate: u32) {
         if !self.active.load(Ordering::Acquire) || frames == 0 {
             return;
         }
-        self.sample_rate.store(sample_rate, Ordering::Relaxed);
-
+        let staged = self.staged_pairs.swap(0, Ordering::AcqRel);
         let write = self.write_frames.load(Ordering::Relaxed);
+        let channels = (self.channels.load(Ordering::Acquire) as usize).min(self.planes.len());
+        for pair in 0..channels / 2 {
+            if staged & (1 << pair) != 0 {
+                continue;
+            }
+            for channel in [pair * 2, pair * 2 + 1] {
+                for frame in 0..frames {
+                    let index = ((write as usize).wrapping_add(frame)) & MASK;
+                    self.planes[channel][index].store(0, Ordering::Relaxed);
+                }
+            }
+        }
+        self.advance(write, frames, sample_rate);
+    }
+
+    /// Publish `frames` written at `write`, accounting for a consumer that fell
+    /// behind.
+    #[inline]
+    fn advance(&self, write: u64, frames: usize, sample_rate: u32) {
+        self.sample_rate.store(sample_rate, Ordering::Relaxed);
         let read = self.read_frames.load(Ordering::Acquire);
         if write.saturating_sub(read) + frames as u64 > CAPACITY_FRAMES as u64 {
             // The publish thread is not keeping up. Dropping the oldest frames
@@ -519,28 +668,27 @@ impl JamPublishSlot {
             // listener would rather lose a moment than hear everything late.
             self.overruns.fetch_add(1, Ordering::Relaxed);
         }
-        for frame in 0..frames {
-            let (left, right) = sample(frame);
-            let index = ((write as usize).wrapping_add(frame)) & MASK;
-            self.left[index].store(left.to_bits(), Ordering::Relaxed);
-            self.right[index].store(right.to_bits(), Ordering::Relaxed);
-        }
         self.write_frames
             .store(write.wrapping_add(frames as u64), Ordering::Release);
     }
 
-    /// Consumer: take up to `max_frames` interleaved stereo frames.
+    /// Consumer: take up to `max_frames` interleaved frames.
     ///
-    /// Returns the number of frames written into `out` and the session tick of
-    /// the first of them, when the clock base is known.
+    /// Returns how many frames were written into `out`, how many channels each
+    /// carries, and the session tick of the first of them when the clock base
+    /// is known. The channel count is returned rather than read separately so a
+    /// caller can never pair a frame count with the wrong layout.
     pub fn read_interleaved(
         &self,
         out: &mut Vec<f32>,
         max_frames: usize,
-    ) -> Option<(usize, Option<i64>)> {
+    ) -> Option<(usize, usize, Option<i64>)> {
         if !self.active.load(Ordering::Acquire) {
             return None;
         }
+        let channels = (self.channels.load(Ordering::Acquire) as usize)
+            .clamp(1, self.planes.len())
+            .max(1);
         let write = self.write_frames.load(Ordering::Acquire);
         let mut read = self.read_frames.load(Ordering::Relaxed);
         let lag = write.saturating_sub(read);
@@ -552,11 +700,12 @@ impl JamPublishSlot {
             return None;
         }
         out.clear();
-        out.reserve(ready * 2);
+        out.reserve(ready * channels);
         for offset in 0..ready {
             let index = ((read as usize).wrapping_add(offset)) & MASK;
-            out.push(f32::from_bits(self.left[index].load(Ordering::Relaxed)));
-            out.push(f32::from_bits(self.right[index].load(Ordering::Relaxed)));
+            for plane in self.planes.iter().take(channels) {
+                out.push(f32::from_bits(plane[index].load(Ordering::Relaxed)));
+            }
         }
         let tick = if self.capture_known.load(Ordering::Acquire) {
             Some(
@@ -569,7 +718,7 @@ impl JamPublishSlot {
         };
         self.read_frames
             .store(read.wrapping_add(ready as u64), Ordering::Relaxed);
-        Some((ready, tick))
+        Some((ready, channels, tick))
     }
 
     /// Publish the mapping from ring frames to session ticks.
@@ -589,12 +738,18 @@ impl JamPublishSlot {
         self.write_frames.load(Ordering::Acquire)
     }
 
-    fn claim(&self) {
+    fn claim(&self, channels: usize) {
         self.write_frames.store(0, Ordering::Relaxed);
         self.read_frames.store(0, Ordering::Relaxed);
         self.capture_base.store(0, Ordering::Relaxed);
         self.capture_known.store(false, Ordering::Relaxed);
         self.overruns.store(0, Ordering::Relaxed);
+        self.staged_pairs.store(0, Ordering::Relaxed);
+        // Even channel counts only: every producer here writes in pairs, and a
+        // stream with a dangling channel has no source to fill it.
+        let channels = (channels & !1).clamp(2, self.planes.len().max(2));
+        self.channels
+            .store(channels.min(self.planes.len()) as u32, Ordering::Relaxed);
         self.active.store(true, Ordering::Release);
     }
 
@@ -619,6 +774,19 @@ pub struct JamAudioBus {
     /// the whole jam branch with one relaxed load.
     any_input: AtomicBool,
     any_publish: AtomicBool,
+    /// Whether the metronome click is part of the published master mix.
+    ///
+    /// It is by default, and that is what almost every room wants: a jam runs
+    /// to a count, and a guest who cannot hear the click is playing to a mix
+    /// that appears to have no pulse. It is a toggle rather than a constant
+    /// because the same tap also serves an audience — someone listening to the
+    /// room over the link is not playing along, and a click over the mix is the
+    /// last thing they want.
+    ///
+    /// Read once per block on the realtime path, so it is an atomic rather than
+    /// anything that would need a lock.
+    master_click: AtomicBool,
+
     /// The master bus's publish slot, or `-1`.
     ///
     /// Resolved here rather than looked up by key in the callback: the key map
@@ -643,14 +811,25 @@ impl Default for JamAudioBus {
                 .map(|_| JamInputSlot::default())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
-            publishes: (0..MAX_JAM_PUBLISH_SLOTS)
-                .map(|_| JamPublishSlot::default())
+            // The stereo slots, then the one wide slot the multitrack stream
+            // uses. Only the last carries the extra ring storage, so a Studio
+            // that never shares an arrangement pays nothing for it beyond the
+            // allocation itself.
+            publishes: (0..TOTAL_JAM_PUBLISH_SLOTS)
+                .map(|index| {
+                    JamPublishSlot::with_capacity_channels(if index == MULTITRACK_PUBLISH_SLOT {
+                        MAX_MULTITRACK_CHANNELS
+                    } else {
+                        2
+                    })
+                })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             input_keys: RwLock::new(HashMap::new()),
             publish_keys: RwLock::new(HashMap::new()),
             any_input: AtomicBool::new(false),
             any_publish: AtomicBool::new(false),
+            master_click: AtomicBool::new(true),
             master_publish: AtomicI32::new(-1),
         }
     }
@@ -697,6 +876,31 @@ impl JamAudioBus {
         self.publishes.get(index as usize)
     }
 
+    /// Whether the published master mix carries the metronome click.
+    ///
+    /// One relaxed load per block on the render path.
+    #[inline]
+    pub fn master_click_published(&self) -> bool {
+        self.master_click.load(Ordering::Relaxed)
+    }
+
+    /// Include or exclude the metronome click in the published master mix.
+    /// Control thread; takes effect on the next block.
+    pub fn set_master_click_published(&self, included: bool) {
+        self.master_click.store(included, Ordering::Relaxed);
+    }
+
+    /// The multitrack publish slot, if the arrangement is being shared.
+    ///
+    /// Its index is a constant, so this costs one atomic load on the `active`
+    /// flag and no key lookup at all.
+    #[inline]
+    pub fn multitrack_publish(&self) -> Option<&JamPublishSlot> {
+        self.publishes
+            .get(MULTITRACK_PUBLISH_SLOT)
+            .filter(|slot| slot.is_active())
+    }
+
     /// Bind a remote stream to a slot, or return the slot it already holds.
     ///
     /// Control thread only. `None` means every slot is taken, which the caller
@@ -737,21 +941,46 @@ impl JamAudioBus {
     /// Bind a publish source keyed by its own identity, e.g. `master` or
     /// `track:trk_1`.
     pub fn bind_publish(&self, key: &str) -> Option<usize> {
+        if key == PUBLISH_KEY_MULTITRACK {
+            return self.bind_multitrack_publish(2);
+        }
         let mut keys = self.publish_keys.write().ok()?;
         if let Some(index) = keys.get(key) {
             return Some(*index);
         }
-        let index = self
-            .publishes
+        // Only the stereo slots: the wide one is claimed by key, never handed
+        // out to whatever asked for a slot first.
+        let index = self.publishes[..MAX_JAM_PUBLISH_SLOTS]
             .iter()
             .position(|slot| !slot.active.load(Ordering::Acquire))?;
-        self.publishes[index].claim();
+        self.publishes[index].claim(2);
         keys.insert(key.to_string(), index);
         if key == PUBLISH_KEY_MASTER {
             self.master_publish.store(index as i32, Ordering::Release);
         }
         self.any_publish.store(true, Ordering::Release);
         Some(index)
+    }
+
+    /// Claim the multitrack slot for `channels` channels.
+    ///
+    /// Control thread only, and the layout is fixed for the life of the claim:
+    /// the channel count goes into the stream the server announces, so changing
+    /// it mid-stream would mean every receiver decoding the new width with the
+    /// old one's layout. Sharing a different set of tracks is a republish.
+    ///
+    /// Returns `None` when the slot is already claimed, so a caller cannot
+    /// silently take over a stream that is live.
+    pub fn bind_multitrack_publish(&self, channels: usize) -> Option<usize> {
+        let mut keys = self.publish_keys.write().ok()?;
+        if keys.contains_key(PUBLISH_KEY_MULTITRACK) {
+            return None;
+        }
+        let slot = self.publishes.get(MULTITRACK_PUBLISH_SLOT)?;
+        slot.claim(channels);
+        keys.insert(PUBLISH_KEY_MULTITRACK.to_string(), MULTITRACK_PUBLISH_SLOT);
+        self.any_publish.store(true, Ordering::Release);
+        Some(MULTITRACK_PUBLISH_SLOT)
     }
 
     pub fn publish_slot_for(&self, key: &str) -> Option<usize> {
@@ -971,11 +1200,11 @@ mod tests {
     #[test]
     fn a_publish_slot_round_trips_the_callbacks_output() {
         let slot = JamPublishSlot::default();
-        slot.claim();
+        slot.claim(2);
         slot.write_interleaved(&[0.1, 0.2, 0.3, 0.4], 2, 48_000);
 
         let mut out = Vec::new();
-        let (frames, tick) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        let (frames, _channels, tick) = slot.read_interleaved(&mut out, 8).expect("frames ready");
         assert_eq!(frames, 2);
         assert_eq!(out, vec![0.1, 0.2, 0.3, 0.4]);
         assert_eq!(tick, None, "the tick is absent until the jam clock locks");
@@ -995,11 +1224,11 @@ mod tests {
     #[test]
     fn a_published_capture_base_reaches_the_reader() {
         let slot = JamPublishSlot::default();
-        slot.claim();
+        slot.claim(2);
         slot.write_interleaved(&[0.0; 4], 2, 48_000);
         slot.set_capture_base(20_000_000);
         let mut out = Vec::new();
-        let (_, tick) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        let (_, _channels, tick) = slot.read_interleaved(&mut out, 8).expect("frames ready");
         assert_eq!(tick, Some(20_000_000));
     }
 
@@ -1063,13 +1292,100 @@ mod tests {
     }
 
     #[test]
+    fn the_multitrack_slot_carries_a_pair_per_track_in_one_block() {
+        let bus = JamAudioBus::new();
+        assert!(bus.multitrack_publish().is_none());
+
+        let index = bus
+            .bind_multitrack_publish(6)
+            .expect("the wide slot is free");
+        assert_eq!(index, MULTITRACK_PUBLISH_SLOT);
+        let slot = bus.multitrack_publish().expect("claimed");
+        assert_eq!(slot.channels(), 6, "three pairs");
+
+        // Three tracks stage their post-fader blocks; one block is published.
+        slot.stage_pair(0, &[0.1, 0.1], &[0.2, 0.2], 2);
+        slot.stage_pair(1, &[0.3, 0.3], &[0.4, 0.4], 2);
+        slot.stage_pair(2, &[0.5, 0.5], &[0.6, 0.6], 2);
+        assert_eq!(
+            slot.write_head(),
+            0,
+            "staging a pair does not publish the block on its own"
+        );
+        slot.commit(2, 48_000);
+        assert_eq!(slot.write_head(), 2, "one head advance for the whole block");
+
+        let mut out = Vec::new();
+        let (frames, channels, _) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        assert_eq!((frames, channels), (2, 6));
+        assert_eq!(
+            out[..6],
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "channels are interleaved in pair order"
+        );
+
+        bus.release_publish(PUBLISH_KEY_MULTITRACK);
+        assert!(bus.multitrack_publish().is_none());
+    }
+
+    /// A track that stops sharing must leave silence in its pair, not its last
+    /// block repeating — a stuck buffer sounds like a bug in the receiver.
+    #[test]
+    fn an_unstaged_pair_is_published_as_silence_rather_than_the_previous_block() {
+        let bus = JamAudioBus::new();
+        bus.bind_multitrack_publish(4).expect("free");
+        let slot = bus.multitrack_publish().expect("claimed");
+
+        slot.stage_pair(0, &[1.0], &[1.0], 1);
+        slot.stage_pair(1, &[0.5], &[0.5], 1);
+        slot.commit(1, 48_000);
+
+        // The second track stops sharing: only pair 0 is staged this block.
+        slot.stage_pair(0, &[1.0], &[1.0], 1);
+        slot.commit(1, 48_000);
+
+        let mut out = Vec::new();
+        let (frames, channels, _) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        assert_eq!((frames, channels), (2, 4));
+        assert_eq!(out[2..4], [0.5, 0.5], "the first block is unchanged");
+        assert_eq!(out[6..8], [0.0, 0.0], "the second is silent, not repeated");
+    }
+
+    #[test]
+    fn the_wide_slot_is_never_handed_out_to_an_ordinary_publish() {
+        let bus = JamAudioBus::new();
+        // Claim every stereo slot; the wide one must still be free, because a
+        // master or track publish writing stereo into it would announce a
+        // sixteen-channel stream carrying two channels of audio.
+        for index in 0..MAX_JAM_PUBLISH_SLOTS {
+            assert!(bus.bind_publish(&format!("track:{index}")).is_some());
+        }
+        assert!(bus.bind_publish("track:overflow").is_none());
+        assert!(bus.bind_multitrack_publish(4).is_some());
+
+        // And a second claim is refused rather than taking over a live stream.
+        assert!(bus.bind_multitrack_publish(8).is_none());
+    }
+
+    #[test]
+    fn the_published_master_carries_the_click_unless_it_is_switched_off() {
+        let bus = JamAudioBus::new();
+        assert!(
+            bus.master_click_published(),
+            "a jam runs to a count, so the click is in the mix by default"
+        );
+        bus.set_master_click_published(false);
+        assert!(!bus.master_click_published());
+    }
+
+    #[test]
     fn a_planar_write_produces_the_same_frames_as_an_interleaved_one() {
         let planar = JamPublishSlot::default();
-        planar.claim();
+        planar.claim(2);
         planar.write_planar(&[0.25, 0.5], &[-0.25, -0.5], 2, 48_000);
 
         let interleaved = JamPublishSlot::default();
-        interleaved.claim();
+        interleaved.claim(2);
         interleaved.write_interleaved(&[0.25, -0.25, 0.5, -0.5], 2, 48_000);
 
         let mut from_planar = Vec::new();
@@ -1086,12 +1402,12 @@ mod tests {
     #[test]
     fn a_planar_write_is_bounded_by_the_shorter_buffer() {
         let slot = JamPublishSlot::default();
-        slot.claim();
+        slot.claim(2);
         // A caller that passes a frame count longer than its buffers must not
         // read past them; the shorter side wins.
         slot.write_planar(&[0.25], &[0.25, 0.5], 8, 48_000);
         let mut out = Vec::new();
-        let (frames, _) = slot.read_interleaved(&mut out, 8).expect("frames ready");
+        let (frames, _channels, _) = slot.read_interleaved(&mut out, 8).expect("frames ready");
         assert_eq!(frames, 1);
     }
 

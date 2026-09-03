@@ -71,6 +71,7 @@ pub mod bridge;
 pub mod clock;
 pub mod config;
 pub mod credentials;
+pub mod crypto;
 pub mod error;
 pub mod ids;
 pub mod jitter;

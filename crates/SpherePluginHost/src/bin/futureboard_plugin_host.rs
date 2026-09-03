@@ -2887,6 +2887,10 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                         user_closed.push(instance_id.clone());
                         continue;
                     }
+                    // VST2 editors repaint and animate only while the host
+                    // calls effEditIdle; VST3 and CLAP run their own timers and
+                    // this is a no-op for them. UI thread, never the producer.
+                    processor.view_idle();
                     // Safe mode: no extra per-editor pump here — the main
                     // `pump_messages` below drains the whole thread queue.
                     if !platform::editor_safe_mode() {

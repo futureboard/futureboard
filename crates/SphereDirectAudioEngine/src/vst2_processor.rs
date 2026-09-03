@@ -187,6 +187,44 @@ pub(crate) mod ffi {
         pub(crate) fn sphere_daux_vst2_editor_resizable(
             processor: *mut SphereDauxVst2Processor,
         ) -> i32;
+        // Host-owned view host: the caller owns the window, these drive only
+        // the plug-in's `effEdit*` surface.
+        pub(crate) fn sphere_daux_vst2_view_attach(
+            processor: *mut SphereDauxVst2Processor,
+            parent_hwnd: u64,
+            width: i32,
+            height: i32,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_detach(processor: *mut SphereDauxVst2Processor);
+        pub(crate) fn sphere_daux_vst2_view_is_attached(
+            processor: *mut SphereDauxVst2Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_set_size(
+            processor: *mut SphereDauxVst2Processor,
+            width: i32,
+            height: i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_get_size(
+            processor: *mut SphereDauxVst2Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_can_resize(
+            processor: *mut SphereDauxVst2Processor,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_constrain(
+            processor: *mut SphereDauxVst2Processor,
+            io_width: *mut i32,
+            io_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_take_resize_request(
+            processor: *mut SphereDauxVst2Processor,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        pub(crate) fn sphere_daux_vst2_view_idle(processor: *mut SphereDauxVst2Processor);
         pub(crate) fn sphere_daux_vst2_get_state(
             processor: *mut SphereDauxVst2Processor,
             out_component: *mut *mut u8,
@@ -252,5 +290,13 @@ pub(crate) mod ffi {
         sphere_daux_vst2_set_process_context as set_process_context,
         sphere_daux_vst2_set_state as set_state, sphere_daux_vst2_state_free as state_free,
         sphere_daux_vst2_take_pending_shell_resize as take_pending_shell_resize,
+        sphere_daux_vst2_view_attach as view_attach,
+        sphere_daux_vst2_view_can_resize as view_can_resize,
+        sphere_daux_vst2_view_constrain as view_constrain,
+        sphere_daux_vst2_view_detach as view_detach,
+        sphere_daux_vst2_view_get_size as view_get_size, sphere_daux_vst2_view_idle as view_idle,
+        sphere_daux_vst2_view_is_attached as view_is_attached,
+        sphere_daux_vst2_view_set_size as view_set_size,
+        sphere_daux_vst2_view_take_resize_request as view_take_resize_request,
     };
 }

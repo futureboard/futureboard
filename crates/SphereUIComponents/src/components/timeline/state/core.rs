@@ -141,6 +141,14 @@ pub struct TimelineState {
     pub tempo_map: TempoMap,
     /// Global time signature markers (authoritative for bar/beat layout).
     pub time_signature_map: TimeSignatureMap,
+    /// Unit the ruler and every position readout are expressed in.
+    ///
+    /// Display only: the arrangement's coordinate model stays musical whatever
+    /// this is set to, so changing it can never move a clip or a note.
+    pub time_display_format: TimeDisplayFormat,
+    /// Frame rate used when [`Self::time_display_format`] is
+    /// [`TimeDisplayFormat::Timecode`]. Ignored by every other format.
+    pub timecode_rate: TimecodeRate,
     /// Timeline markers shown on the arrangement ruler.
     pub markers: Vec<TimelineMarkerState>,
     /// Named timeline regions spanning a beat range.
@@ -268,6 +276,8 @@ impl Default for TimelineState {
             project_sample_rate: 48_000,
             tempo_map: TempoMap::new(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
+            time_display_format: TimeDisplayFormat::default(),
+            timecode_rate: TimecodeRate::default(),
             markers: Vec::new(),
             regions: Vec::new(),
             song_text_events: Vec::new(),

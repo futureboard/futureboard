@@ -176,6 +176,70 @@ SPHERE_DAUX_VST2_API int
 sphere_daux_vst2_embed_content_size(SphereDauxVst2Processor *processor,
                                     int *out_width, int *out_height);
 
+// ── Host-owned view host ────────────────────────────────────────────────────
+//
+// Mirrors `sphere_daux_vst3_view_*`. The host owns the window; these drive only
+// the plug-in's editor. Nothing on this path creates, moves, resizes, or
+// destroys a window, so the caller stays the single owner of the editor's
+// geometry. Main/UI thread only.
+
+/// Opens the plug-in's editor into `parent_hwnd` (`effEditOpen`), which the
+/// caller owns and must keep alive until `sphere_daux_vst2_view_detach`.
+///
+/// `width`/`height` are the region the host has available; the size reported
+/// through `out_width`/`out_height` is the plug-in's own (`effEditGetRect`),
+/// which the host is expected to lay out around. Re-attaching to the same
+/// window is a no-op that re-reports the size. Returns 1 on success.
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_attach(SphereDauxVst2Processor *processor,
+                             unsigned long long parent_hwnd, int width,
+                             int height, int *out_width, int *out_height);
+
+/// Closes the editor (`effEditClose`). The parent window is untouched. Safe
+/// when nothing is attached.
+SPHERE_DAUX_VST2_API void
+sphere_daux_vst2_view_detach(SphereDauxVst2Processor *processor);
+
+/// 1 while an editor is open through the host-owned path.
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_is_attached(SphereDauxVst2Processor *processor);
+
+/// Gives the plug-in's own child window the size the host applied. VST2 has no
+/// `onSize` opcode, so laying the child out is the only notification there is.
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_set_size(SphereDauxVst2Processor *processor, int width,
+                               int height);
+
+/// The editor's current content size (`effEditGetRect`).
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_get_size(SphereDauxVst2Processor *processor,
+                               int *out_width, int *out_height);
+
+/// 1 when the editor accepts host-driven resizing (`effCanDo("sizeWindow")`).
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_can_resize(SphereDauxVst2Processor *processor);
+
+/// Applies the VST2 size contract to a proposed content size in place: a fixed
+/// editor snaps to the size `effEditGetRect` reported, a resizable one takes
+/// what it is offered.
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_constrain(SphereDauxVst2Processor *processor,
+                                int *io_width, int *io_height);
+
+/// Reads and clears the plug-in's pending `audioMasterSizeWindow` request.
+///
+/// The request is recorded rather than acted on, so the host decides what it
+/// can grant, resizes its own surface, and reports the result back through
+/// `sphere_daux_vst2_view_set_size`.
+SPHERE_DAUX_VST2_API int
+sphere_daux_vst2_view_take_resize_request(SphereDauxVst2Processor *processor,
+                                          int *out_width, int *out_height);
+
+/// One `effEditIdle`. VST2 editors repaint and animate only while the host
+/// calls this, so the host ticks it on the UI thread while a view is attached.
+SPHERE_DAUX_VST2_API void
+sphere_daux_vst2_view_idle(SphereDauxVst2Processor *processor);
+
 SPHERE_DAUX_VST2_API int
 sphere_daux_vst2_is_valid(SphereDauxVst2Processor *processor);
 

@@ -500,7 +500,12 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "socks",
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
-rustls = { version = "0.23.26" }
+# `aws-lc-rs` is rustls' own default backend and is named explicitly because
+# reqwest/hyper-rustls also pull rustls' `ring` backend into the same build.
+# With both compiled in rustls refuses to pick one, so the jam client installs
+# this provider process-wide (see `SphereJamClient/src/crypto.rs`) and needs the
+# feature to stay on.
+rustls = { version = "0.23.26", features = ["aws-lc-rs"] }
 # Platform trust store for the Jam media plane's TLS fallback transport.
 # Already in the graph through reqwest/tungstenite; declared here because the
 # jam client opens its own raw TLS socket rather than an HTTP one.

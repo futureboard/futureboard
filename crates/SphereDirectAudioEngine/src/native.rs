@@ -1169,6 +1169,18 @@ impl AudioEngine {
         self.inner.set_track_jam_publish(track_id, enabled)
     }
 
+    /// Share `track_ids` as one Audio Jam multitrack stream, or stop with an
+    /// empty list. Returns the channel count the stream carries.
+    ///
+    /// Like a single-track publish this is session state: it never reaches the
+    /// project file, and reopening a project does not resume it.
+    pub fn set_multitrack_jam_publish(
+        &self,
+        track_ids: &[String],
+    ) -> Result<usize, SphereAudioError> {
+        self.inner.set_multitrack_jam_publish(track_ids)
+    }
+
     pub fn set_insert_param(
         &self,
         track_id: String,

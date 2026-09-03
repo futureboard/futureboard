@@ -50,4 +50,35 @@ void sphere_daux_clap_close_editor(SphereDauxClapProcessor *) {}
 
 int sphere_daux_clap_focus_editor(SphereDauxClapProcessor *) { return 0; }
 
+// ── Host-owned view host ────────────────────────────────────────────────────
+
+int sphere_daux_clap_view_attach(SphereDauxClapProcessor *, unsigned long long,
+                                 int, int, int *, int *) {
+  clap_set_last_error("CLAP editors are not supported on this platform");
+  return 0;
+}
+
+void sphere_daux_clap_view_detach(SphereDauxClapProcessor *) {}
+
+int sphere_daux_clap_view_is_attached(SphereDauxClapProcessor *) { return 0; }
+
+int sphere_daux_clap_view_set_size(SphereDauxClapProcessor *, int, int) {
+  return 0;
+}
+
+int sphere_daux_clap_view_get_size(SphereDauxClapProcessor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_clap_view_can_resize(SphereDauxClapProcessor *) { return 0; }
+
+int sphere_daux_clap_view_constrain(SphereDauxClapProcessor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_clap_view_take_resize_request(SphereDauxClapProcessor *, int *,
+                                              int *) {
+  return 0;
+}
+
 } // extern "C"

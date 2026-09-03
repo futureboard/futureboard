@@ -3000,3 +3000,273 @@ mod point_delete_tests {
         assert!(!state.delete_controller_point(&clip, kind, first));
     }
 }
+
+/// Per-track timebase: what a clip holds onto when the tempo moves.
+mod track_timebase_tests {
+    use super::*;
+
+    fn track(state: &mut TimelineState, timebase: TrackTimebase) -> String {
+        let id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Midi,
+            name: "T".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        state
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .expect("track")
+            .timebase = timebase;
+        id
+    }
+
+    fn clip_start(state: &TimelineState, track_id: &str, clip_id: &str) -> f32 {
+        state
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("track")
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("clip")
+            .start_beat
+    }
+
+    /// Halving the tempo doubles the seconds-per-beat. A Musical clip keeps its
+    /// beat and moves on the clock; a Linear clip keeps the clock and moves in
+    /// beats. Both start at beat 8 = 4s at 120 BPM.
+    #[test]
+    fn a_tempo_change_moves_linear_clips_in_beats_and_musical_clips_in_seconds() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        state.bpm = 120.0;
+
+        let musical = track(&mut state, TrackTimebase::Musical);
+        let linear = track(&mut state, TrackTimebase::Linear);
+        let musical_clip = state.create_midi_clip(&musical, 8.0, 4.0).expect("clip");
+        let linear_clip = state.create_midi_clip(&linear, 8.0, 4.0).expect("clip");
+
+        // 8 beats at 120 BPM is 4 seconds.
+        assert!((state.seconds_at_beat(8.0) - 4.0).abs() < 1.0e-6);
+
+        let anchors = state.capture_linear_clip_anchors();
+        // Only the Linear track's clip is anchored to the clock.
+        assert_eq!(anchors.len(), 1);
+        state.bpm = 60.0;
+        state.reapply_linear_clip_anchors(&anchors);
+
+        // Musical: same beat, and now 8 seconds in.
+        assert!((clip_start(&state, &musical, &musical_clip) - 8.0).abs() < 1.0e-4);
+        // Linear: still 4 seconds in, which at 60 BPM is beat 4.
+        let linear_start = clip_start(&state, &linear, &linear_clip);
+        assert!((linear_start - 4.0).abs() < 1.0e-3, "got {linear_start}");
+        assert!((state.seconds_at_beat(linear_start as f64) - 4.0).abs() < 1.0e-3);
+    }
+
+    /// A Linear clip's musical length follows the tempo too — four beats of
+    /// MIDI at 120 BPM is two seconds, and it stays two seconds.
+    #[test]
+    fn a_linear_midi_clip_keeps_its_wall_clock_length() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        state.bpm = 120.0;
+        let linear = track(&mut state, TrackTimebase::Linear);
+        let clip_id = state.create_midi_clip(&linear, 0.0, 4.0).expect("clip");
+
+        let anchors = state.capture_linear_clip_anchors();
+        state.bpm = 60.0;
+        state.reapply_linear_clip_anchors(&anchors);
+
+        let clip = state.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("clip");
+        // 4 beats @120 = 2s; at 60 BPM that is 2 beats.
+        assert!(
+            (clip.duration_beats - 2.0).abs() < 1.0e-3,
+            "got {}",
+            clip.duration_beats
+        );
+    }
+
+    /// Re-anchoring is exactly reversible, which is what lets undo of a tempo
+    /// edit put Linear clips back without carrying a second snapshot.
+    #[test]
+    fn re_anchoring_round_trips_when_the_tempo_returns() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        state.bpm = 120.0;
+        let linear = track(&mut state, TrackTimebase::Linear);
+        let clip_id = state.create_midi_clip(&linear, 6.0, 4.0).expect("clip");
+        let before = clip_start(&state, &linear, &clip_id);
+
+        let forward = state.capture_linear_clip_anchors();
+        state.bpm = 90.0;
+        state.reapply_linear_clip_anchors(&forward);
+        assert!((clip_start(&state, &linear, &clip_id) - before).abs() > 1.0e-3);
+
+        // Undo: capture under the new tempo, restore the old one, re-anchor.
+        let back = state.capture_linear_clip_anchors();
+        state.bpm = 120.0;
+        state.reapply_linear_clip_anchors(&back);
+        assert!((clip_start(&state, &linear, &clip_id) - before).abs() < 1.0e-3);
+    }
+
+    /// A project with no Linear track pays nothing and moves nothing.
+    #[test]
+    fn a_musical_only_project_captures_no_anchors() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let musical = track(&mut state, TrackTimebase::Musical);
+        let _ = state.create_midi_clip(&musical, 4.0, 4.0).expect("clip");
+
+        let anchors = state.capture_linear_clip_anchors();
+        assert!(anchors.is_empty());
+        assert!(!state.reapply_linear_clip_anchors(&anchors));
+    }
+
+    #[test]
+    fn timebase_tags_round_trip_and_unknown_tags_stay_musical() {
+        for timebase in [TrackTimebase::Musical, TrackTimebase::Linear] {
+            assert_eq!(TrackTimebase::from_tag(timebase.to_tag()), timebase);
+        }
+        assert_eq!(TrackTimebase::from_tag(200), TrackTimebase::Musical);
+        assert_eq!(TrackTimebase::Musical.toggled(), TrackTimebase::Linear);
+        assert_eq!(TrackTimebase::Linear.toggled(), TrackTimebase::Musical);
+    }
+}
+
+/// Project timebase: the ruler's ticks and every position readout.
+mod time_display_ruler_tests {
+    use super::*;
+
+    fn state_at_zoom(ppb: f32) -> TimelineState {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0;
+        state.viewport.pixels_per_second = ppb / 0.5;
+        state.sync_pixels_per_beat();
+        state.update_viewport_size(1200.0, 500.0);
+        state
+    }
+
+    /// Bars+Beats keeps the ruler on the arrangement grid, so the ruler and the
+    /// grid behind the clips are literally the same lines.
+    #[test]
+    fn bars_and_beats_reuses_the_arrangement_grid() {
+        let state = state_at_zoom(40.0);
+        let ruler = state.ruler_grid_lines(1200.0);
+        let grid = state.arrangement_grid_lines(1200.0);
+        assert_eq!(ruler.len(), grid.len());
+        assert!(ruler
+            .iter()
+            .zip(grid.iter())
+            .all(|(a, b)| a.x == b.x && a.beat == b.beat));
+    }
+
+    /// A time-based timebase gets its own ticks. Every labelled one must land on
+    /// a whole multiple of the chosen step in *seconds*, not on a bar.
+    #[test]
+    fn seconds_ruler_labels_land_on_round_clock_positions() {
+        let mut state = state_at_zoom(40.0);
+        state.time_display_format = TimeDisplayFormat::Seconds;
+        let lines = state.ruler_grid_lines(1200.0);
+        assert!(!lines.is_empty());
+
+        let labelled: Vec<f64> = lines
+            .iter()
+            .filter(|line| line.show_label)
+            .map(|line| state.seconds_at_beat(line.beat as f64))
+            .collect();
+        assert!(labelled.len() >= 2, "expected several labels");
+
+        // Consecutive labels are one constant step apart, and that step is a
+        // round number of seconds.
+        let step = labelled[1] - labelled[0];
+        assert!(step > 0.0);
+        for pair in labelled.windows(2) {
+            assert!(
+                ((pair[1] - pair[0]) - step).abs() < 1.0e-3,
+                "uneven label spacing: {pair:?}"
+            );
+        }
+        for seconds in &labelled {
+            let slots = seconds / step;
+            assert!(
+                (slots - slots.round()).abs() < 1.0e-3,
+                "{seconds}s is not a whole step of {step}s"
+            );
+        }
+    }
+
+    /// Labels must never collide, at any zoom, in any time-based format.
+    #[test]
+    fn time_ruler_labels_never_overlap_at_any_zoom() {
+        for format in [
+            TimeDisplayFormat::Seconds,
+            TimeDisplayFormat::Timecode,
+            TimeDisplayFormat::Samples,
+        ] {
+            for ppb in [2.0, 12.0, 40.0, 160.0, 600.0] {
+                let mut state = state_at_zoom(ppb);
+                state.time_display_format = format;
+                let lines = state.ruler_grid_lines(1200.0);
+                let mut previous = f32::NEG_INFINITY;
+                for line in lines.iter().filter(|line| line.show_label) {
+                    assert!(
+                        line.x - previous >= 60.0,
+                        "{format:?} @ppb={ppb}: labels {previous} and {} too close",
+                        line.x
+                    );
+                    previous = line.x;
+                }
+            }
+        }
+    }
+
+    /// Every format must produce a readout, and switching format must change it
+    /// — a setting that renders the same string everywhere would be a lie.
+    #[test]
+    fn each_timebase_formats_the_same_position_differently() {
+        let mut state = state_at_zoom(40.0);
+        state.project_sample_rate = 48_000;
+        // Beat 8 at 120 BPM is 4 seconds.
+        let mut seen = Vec::new();
+        for format in TimeDisplayFormat::ALL {
+            state.time_display_format = format;
+            let text = state.format_position_at(8.0);
+            assert!(!text.is_empty(), "{format:?} produced nothing");
+            seen.push(text);
+        }
+        assert_eq!(seen[0], "3.1", "bars+beats");
+        assert_eq!(seen[1], "0:04.000", "seconds");
+        assert_eq!(seen[2], "00:00:04:00", "timecode");
+        assert_eq!(seen[3], "192000", "samples");
+    }
+
+    /// The timebase is a display setting: it must never move the grid the clips
+    /// are laid out and snapped against.
+    #[test]
+    fn changing_the_timebase_leaves_the_arrangement_grid_alone() {
+        let musical = state_at_zoom(40.0);
+        let before = musical.arrangement_grid_lines(1200.0);
+        let before: Vec<(f32, f32)> = before.iter().map(|l| (l.x, l.beat)).collect();
+
+        let mut timecode = state_at_zoom(40.0);
+        timecode.time_display_format = TimeDisplayFormat::Timecode;
+        let after = timecode.arrangement_grid_lines(1200.0);
+        let after: Vec<(f32, f32)> = after.iter().map(|l| (l.x, l.beat)).collect();
+
+        assert_eq!(before, after);
+    }
+}

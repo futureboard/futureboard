@@ -30,6 +30,7 @@
 //! Nothing in this module is called from an audio callback.
 
 pub mod publish;
+pub mod quality;
 pub mod resample;
 pub mod sink;
 
@@ -46,12 +47,25 @@ use sphere_jam_client::ids::{JamId, StreamId, UserId};
 use sphere_jam_client::protocol::{ParticipantSummary, StreamSummary};
 use sphere_jam_client::session::{JamEvent, JamSession, JamSessionOptions, JamSnapshot, JamState};
 use DirectAudio::engine::SharedState;
-use DirectAudio::jam_bus::{jam_device_id, publish_key_track, PUBLISH_KEY_MASTER};
+use DirectAudio::jam_bus::{
+    jam_device_id, publish_key_track, PUBLISH_KEY_MASTER, PUBLISH_KEY_MULTITRACK,
+};
 
 use crate::audio_connections::{AudioConnectionDirection, AvailablePort, AvailablePorts};
 
 pub use publish::JamEngineSource;
+pub use quality::{JamPublishQuality, JamStreamMode, StreamCost, SAMPLE_FORMATS, SAMPLE_RATES};
 pub use sink::JamEngineSink;
+
+/// The names this Studio's own streams carry in the room.
+///
+/// Fixed rather than derived from the project, because a name is also the key a
+/// reconnect re-attaches by: `JamSession` adopts an existing stream of the same
+/// name rather than minting a second one, so a name that followed the project
+/// title would strand the old stream every time somebody renamed a song.
+pub const MASTER_STREAM_NAME: &str = "Studio Master";
+/// See [`MASTER_STREAM_NAME`].
+pub const MULTITRACK_STREAM_NAME: &str = "Studio Multitrack";
 
 /// The account token Studio already holds.
 ///
@@ -140,6 +154,10 @@ pub struct JamUiState {
     /// The most recent invite link minted from this Studio, shown once so it
     /// can be copied. Never persisted.
     pub invite_link: Option<String>,
+    /// The wire format this Studio publishes with, and what it publishes.
+    pub quality: JamPublishQuality,
+    /// Tracks the multitrack stream carries, in channel-pair order.
+    pub multitrack_tracks: Vec<(String, String)>,
 }
 
 impl JamUiState {
@@ -351,6 +369,11 @@ pub struct JamController {
     published_keys: Vec<String>,
     /// The last invite minted here, held only until the UI has shown it.
     invite_link: Option<String>,
+    /// The wire format this Studio publishes with, and what it publishes.
+    /// Session state: it is never written to a project.
+    quality: JamPublishQuality,
+    /// Tracks the multitrack stream carries, in channel-pair order.
+    multitrack_tracks: Vec<(String, String)>,
     last_error: Option<String>,
 }
 
@@ -373,6 +396,8 @@ impl JamController {
             device_id: device_id(),
             published_keys: Vec::new(),
             invite_link: None,
+            quality: JamPublishQuality::default(),
+            multitrack_tracks: Vec::new(),
             last_error: None,
         })
     }
@@ -412,6 +437,34 @@ impl JamController {
         let exchanged = self.api.exchange_invite(secret, code)?;
         let jam_id = JamId::new(exchanged.jam.id.clone());
         self.join(jam_id, exchanged.access_token)
+    }
+
+    /// Join whatever a pasted link or code names.
+    ///
+    /// Both shapes a person can actually be handed:
+    ///
+    /// * an invite link, `https://.../j/CODE#secret`, which carries a bearer
+    ///   secret in its fragment and is exchanged for an access token;
+    /// * a room link or bare code, which carries no secret and only works for
+    ///   an account the jam already admits.
+    ///
+    /// The distinction is not cosmetic — an invite is how somebody who is *not*
+    /// yet a member gets in — so the fragment decides which call is made rather
+    /// than both being tried in turn. A link with no fragment that resolves to
+    /// a jam this account cannot enter fails as a permission error, which is
+    /// the truth, instead of as "invalid link".
+    pub fn join_with_link(&mut self, link: &str) -> Result<()> {
+        let parsed = parse_jam_link(link)
+            .ok_or_else(|| JamError::Config(format!("{link:?} is not a jam link or code")))?;
+        match parsed.secret {
+            Some(secret) => self.join_with_invite(&parsed.code, &secret),
+            None => {
+                let jam = self.api.jam_by_code(&parsed.code)?;
+                let jam_id = JamId::new(jam.jam.id.clone());
+                self.set_join_url(jam.join_url.clone());
+                self.join(jam_id, String::new())
+            }
+        }
     }
 
     /// Join a jam this account is already a member of, or was invited to.
@@ -458,8 +511,11 @@ impl JamController {
     ///
     /// The tap is on the master feed the engine already renders, before the
     /// Control Room touches it — a jam listener hears the mix, not this
-    /// engineer's dim, mono or monitor inserts.
-    pub fn publish_master(&mut self, name: &str) -> Result<()> {
+    /// engineer's dim, mono or monitor inserts. Whether it also carries the
+    /// metronome is [`JamPublishQuality::master_click`]; the engine decides
+    /// where to mix the click relative to the tap, so neither answer costs the
+    /// stream a resample or a second buffer.
+    pub fn publish_master(&mut self) -> Result<()> {
         let Some(session) = self.session.as_ref() else {
             return Err(JamError::Session("not in a jam".to_string()));
         };
@@ -474,17 +530,163 @@ impl JamController {
             ));
         }
         self.published_keys.push(PUBLISH_KEY_MASTER.to_string());
+        self.shared
+            .jam_bus
+            .set_master_click_published(self.quality.master_click);
 
         let source = Arc::new(JamEngineSource::new(
             Arc::clone(&self.shared),
             Arc::clone(&self.clock),
             PUBLISH_KEY_MASTER,
-            PUBLISH_SAMPLE_RATE,
+            self.quality.sample_rate,
         ));
-        session.publish(
-            JamPublishRequest::stereo(name.to_string(), JamPublishSourceKind::Master),
-            source,
-        )
+        let mut request =
+            JamPublishRequest::stereo(MASTER_STREAM_NAME, JamPublishSourceKind::Master);
+        request.sample_format = self.quality.sample_format;
+        request.sample_rate = self.quality.sample_rate as i32;
+        match session.publish(request, source) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.published_keys.retain(|key| key != PUBLISH_KEY_MASTER);
+                self.shared.jam_bus.release_publish(PUBLISH_KEY_MASTER);
+                Err(error)
+            }
+        }
+    }
+
+    /// Stop publishing the master bus.
+    pub fn unpublish_master(&mut self) -> Result<()> {
+        self.unpublish_named(MASTER_STREAM_NAME);
+        self.published_keys.retain(|key| key != PUBLISH_KEY_MASTER);
+        self.shared.jam_bus.release_publish(PUBLISH_KEY_MASTER);
+        self.publish_ui_state();
+        Ok(())
+    }
+
+    /// Share several tracks as one multitrack stream.
+    ///
+    /// `tracks` is the layout in order — the first entry fills channels 1-2,
+    /// the second 3-4 — and each is a track id with the name the room should
+    /// see for that pair. An empty list stops the stream.
+    ///
+    /// One stream, not one per track: a receiving Studio is dropping a take
+    /// onto a timeline, and a single stream carries one capture base and one
+    /// sequence, so every pair lands sample-aligned with the rest.
+    pub fn publish_multitrack(&mut self, tracks: &[(String, String)]) -> Result<()> {
+        if tracks.is_empty() {
+            return self.stop_multitrack();
+        }
+        if self.session.is_none() {
+            return Err(JamError::Session("not in a jam".to_string()));
+        }
+        if self.engine.is_none() {
+            return Err(JamError::Audio(
+                "the audio engine is not running".to_string(),
+            ));
+        }
+        if tracks.len() > DirectAudio::jam_bus::MAX_MULTITRACK_PAIRS {
+            return Err(JamError::Audio(format!(
+                "a multitrack stream carries at most {} tracks",
+                DirectAudio::jam_bus::MAX_MULTITRACK_PAIRS
+            )));
+        }
+
+        let track_ids: Vec<String> = tracks.iter().map(|(id, _)| id.clone()).collect();
+        let labels: Vec<String> = tracks.iter().map(|(_, name)| name.clone()).collect();
+        let mut request = JamPublishRequest::multitrack(
+            MULTITRACK_STREAM_NAME,
+            track_ids.clone(),
+            &labels,
+            self.quality.sample_format,
+        );
+        // The layout has to fit a datagram before anything is claimed or
+        // announced. Sixteen channels of 32-bit float is 64 bytes a frame, and
+        // no frame length worth sending fits inside 1200 — the server would
+        // refuse the stream, so refusing it here says why while the choice is
+        // still the user's to change.
+        if request.frame_sizes.is_empty() {
+            return Err(JamError::Audio(format!(
+                "{} tracks at {} do not fit one network packet — share fewer tracks, or choose a smaller bit depth",
+                tracks.len(),
+                quality::sample_format_label(self.quality.sample_format)
+            )));
+        }
+        request.sample_rate = self.quality.sample_rate as i32;
+
+        // Release before claiming: the engine fixes a stream's layout for the
+        // life of a claim, so changing which tracks are shared is a republish.
+        self.stop_multitrack()?;
+
+        let Some(engine) = self.engine.as_ref() else {
+            return Err(JamError::Audio(
+                "the audio engine is not running".to_string(),
+            ));
+        };
+        engine
+            .set_multitrack_jam_publish(&track_ids)
+            .map_err(|error| JamError::Audio(error.to_string()))?;
+        let Some(session) = self.session.as_ref() else {
+            let _ = engine.set_multitrack_jam_publish(&[]);
+            return Err(JamError::Session("not in a jam".to_string()));
+        };
+
+        let source = Arc::new(JamEngineSource::new(
+            Arc::clone(&self.shared),
+            Arc::clone(&self.clock),
+            PUBLISH_KEY_MULTITRACK,
+            self.quality.sample_rate,
+        ));
+        match session.publish(request, source) {
+            Ok(()) => {
+                self.published_keys.push(PUBLISH_KEY_MULTITRACK.to_string());
+                self.multitrack_tracks = tracks.to_vec();
+                Ok(())
+            }
+            Err(error) => {
+                // The engine is already assembling blocks into a slot nothing
+                // will read. Stop it rather than leaving a tap running for a
+                // stream that was never announced.
+                let _ = engine.set_multitrack_jam_publish(&[]);
+                Err(error)
+            }
+        }
+    }
+
+    /// Stop the multitrack stream and release its slot.
+    pub fn stop_multitrack(&mut self) -> Result<()> {
+        self.unpublish_named(MULTITRACK_STREAM_NAME);
+        if let Some(engine) = self.engine.as_ref() {
+            let _ = engine.set_multitrack_jam_publish(&[]);
+        }
+        self.published_keys
+            .retain(|key| key != PUBLISH_KEY_MULTITRACK);
+        self.shared.jam_bus.release_publish(PUBLISH_KEY_MULTITRACK);
+        self.multitrack_tracks.clear();
+        Ok(())
+    }
+
+    /// Which tracks the multitrack stream carries, in channel-pair order.
+    pub fn multitrack_tracks(&self) -> &[(String, String)] {
+        &self.multitrack_tracks
+    }
+
+    /// The wire format this Studio publishes with.
+    pub fn quality(&self) -> JamPublishQuality {
+        self.quality.clone()
+    }
+
+    /// Replace the wire format.
+    ///
+    /// Depth, rate and layout are announced per stream, so a change reaches the
+    /// room on the next publish rather than immediately. Nothing already live
+    /// is republished behind the user's back: a stream whose format changed
+    /// under a receiver would decode as noise until the receiver noticed.
+    pub fn set_quality(&mut self, quality: JamPublishQuality) {
+        self.shared
+            .jam_bus
+            .set_master_click_published(quality.master_click);
+        self.quality = quality;
+        self.publish_ui_state();
     }
 
     /// Share one track or bus over the jam.
@@ -555,6 +757,14 @@ impl JamController {
         }
         // Dropping the handle stops the worker and joins its threads.
         self.session = None;
+        // Stop the engine assembling a stream nothing will read. Releasing the
+        // slot alone would leave every shared track still staging its block
+        // into it, which costs a memcpy per track per callback for a jam that
+        // ended.
+        if let Some(engine) = self.engine.as_ref() {
+            let _ = engine.set_multitrack_jam_publish(&[]);
+        }
+        self.multitrack_tracks.clear();
         for key in self.published_keys.drain(..) {
             self.shared.jam_bus.release_publish(&key);
         }
@@ -592,6 +802,31 @@ impl JamController {
         self.session.as_ref()?.snapshot().jam_id
     }
 
+    /// Withdraw the stream this Studio published under `name`.
+    ///
+    /// The room is asked by stream id, never by name — a name is a display
+    /// label and another participant may well be publishing one that matches,
+    /// so the lookup is narrowed to this device's own participant before an id
+    /// is taken from it. Nothing to withdraw is not an error: leaving a jam and
+    /// stopping a stream race, and the outcome either way is that the stream is
+    /// gone.
+    fn unpublish_named(&self, name: &str) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let snapshot = session.snapshot();
+        let Some(mine) = snapshot.self_participant.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+        if let Some(stream) = snapshot
+            .streams
+            .iter()
+            .find(|stream| stream.participant_id == mine && stream.name == name)
+        {
+            let _ = session.unpublish(StreamId::new(stream.id.clone()));
+        }
+    }
+
     fn set_join_url(&mut self, url: String) {
         if let Ok(mut state) = ui_state().write() {
             state.join_url = url;
@@ -612,6 +847,8 @@ impl JamController {
             .or_else(|| session_snapshot.last_error.clone());
         next.invite_link = self.invite_link.clone();
         next.publishing = self.published_keys.clone();
+        next.quality = self.quality.clone();
+        next.multitrack_tracks = self.multitrack_tracks.clone();
 
         if let Ok(mut state) = ui_state().write() {
             // The join url comes from the REST response, which the session
@@ -717,7 +954,75 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
         publishing: Vec::new(),
         last_error: snapshot.last_error.clone(),
         invite_link: None,
+        quality: JamPublishQuality::default(),
+        multitrack_tracks: Vec::new(),
     }
+}
+
+/// A jam link, taken apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JamLink {
+    /// The shareable code, e.g. `EWEFDN`.
+    pub code: String,
+    /// The invite secret from the fragment, when the link carries one.
+    pub secret: Option<String>,
+}
+
+/// Read a pasted link or code.
+///
+/// Deliberately tolerant about the shell and strict about the payload: people
+/// paste links with a trailing slash, with the scheme missing, wrapped in angle
+/// brackets by a chat client, or they paste nothing but the six-character code
+/// somebody read out to them. All of those name the same room. What it will not
+/// do is guess: a string with no recognisable code returns `None` so the caller
+/// can say the link is not a jam link, rather than making a request for a room
+/// that was never named.
+pub fn parse_jam_link(raw: &str) -> Option<JamLink> {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c| c == '<' || c == '>' || c == '"');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // The secret is a bearer credential and lives in the fragment precisely so
+    // it never reaches a server log. Splitting it off first keeps it out of
+    // every code path below.
+    let (before_fragment, fragment) = match trimmed.split_once('#') {
+        Some((before, after)) => (before, Some(after)),
+        None => (trimmed, None),
+    };
+    let secret = fragment
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .map(str::to_string);
+
+    let path = before_fragment
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(before_fragment);
+    let path = path.split('?').next().unwrap_or(path);
+
+    let code = match path.rsplit_once("/j/") {
+        Some((_, code)) => code,
+        // No `/j/` at all: either a bare code, or something that is not a jam
+        // link. A bare code has no path separator in it, which is what tells
+        // the two apart without guessing.
+        None if !path.contains('/') => path,
+        None => return None,
+    };
+    let code = code.trim_matches('/').trim();
+    if code.is_empty()
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(JamLink {
+        code: code.to_string(),
+        secret,
+    })
 }
 
 fn channel_labels(summary: &StreamSummary) -> Vec<String> {
@@ -959,6 +1264,57 @@ mod tests {
         assert_eq!(grouped[1].1[0].stream_name, "Talkback");
         // And both are still the same account.
         assert_eq!(state.streams_for_user("usr_1").len(), 2);
+    }
+
+    #[test]
+    fn an_invite_link_is_taken_apart_into_a_code_and_a_secret() {
+        let link =
+            parse_jam_link("https://jam.futureboard.studio/j/EWEFDN#s3cr3t").expect("parsed");
+        assert_eq!(link.code, "EWEFDN");
+        assert_eq!(link.secret.as_deref(), Some("s3cr3t"));
+    }
+
+    #[test]
+    fn a_room_link_carries_no_secret_and_a_bare_code_is_still_a_room() {
+        // No fragment: this is the shareable room link, which only lets in an
+        // account the jam already admits. Inventing a secret for it would turn
+        // a permission error into "invalid link".
+        let link = parse_jam_link("https://jam.futureboard.studio/j/EWEFDN").expect("parsed");
+        assert_eq!(link.code, "EWEFDN");
+        assert!(link.secret.is_none());
+
+        // And the shape people read out loud.
+        assert_eq!(parse_jam_link("EWEFDN").expect("parsed").code, "EWEFDN");
+    }
+
+    #[test]
+    fn the_shapes_a_link_arrives_in_all_name_the_same_room() {
+        for raw in [
+            "  https://jam.futureboard.studio/j/EWEFDN/  ",
+            "<https://jam.futureboard.studio/j/EWEFDN>",
+            "jam.futureboard.studio/j/EWEFDN",
+            "https://jam.futureboard.studio/j/EWEFDN?from=chat",
+        ] {
+            assert_eq!(
+                parse_jam_link(raw)
+                    .unwrap_or_else(|| panic!("{raw:?} should parse"))
+                    .code,
+                "EWEFDN",
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn something_that_is_not_a_jam_link_is_refused_rather_than_guessed_at() {
+        // A request for a room that was never named is worse than a refusal:
+        // the user is told the link is fine and the join simply fails.
+        assert!(parse_jam_link("").is_none());
+        assert!(parse_jam_link("https://example.com/some/other/page").is_none());
+        assert!(parse_jam_link("not a code").is_none());
+        // An empty fragment is a link with no secret, not a secret of "".
+        let link = parse_jam_link("https://jam.futureboard.studio/j/EWEFDN#").expect("parsed");
+        assert!(link.secret.is_none());
     }
 
     #[test]

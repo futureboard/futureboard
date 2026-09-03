@@ -1243,6 +1243,7 @@ impl TimelineState {
                     name,
                     track_type: TrackType::Bus,
                     ara: None,
+                    timebase: TrackTimebase::default(),
                     parent_group_id: None,
                     group_collapsed: false,
                     color: parent_color,

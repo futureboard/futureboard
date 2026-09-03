@@ -407,6 +407,16 @@ pub mod direction {
 /// Rates the server's negotiator will select.
 pub const SUPPORTED_SAMPLE_RATES: [i32; 6] = [44100, 48000, 88200, 96000, 176400, 192000];
 
+/// The widest layout one stream may carry, matching the server's own
+/// `protocol.MaxStreamChannels`.
+///
+/// Mono and stereo are the interoperable set every client handles; anything
+/// wider is a multitrack layout that both ends opt into by listing the count in
+/// their capabilities. Sixteen is where the datagram budget stops the idea
+/// being useful anyway: at 16-bit that is 32 bytes a frame, or about
+/// thirty-seven samples per packet.
+pub const MAX_STREAM_CHANNELS: usize = 16;
+
 /// One codec a client can handle, with the parameter sets it supports.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodecCapability {
@@ -844,6 +854,18 @@ pub struct StreamPublishRequest {
     pub channels: i32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_metadata: Vec<ChannelMetadata>,
+    /// Frame sizes offered for this stream alone, overriding the ones in
+    /// `audio.capabilities`.
+    ///
+    /// Frame length and channel count are not independent for uncompressed
+    /// audio: a datagram carries about 1200 bytes, which is roomy at two
+    /// channels and very tight at sixteen. One session publishes both, and a
+    /// session-wide list cannot say "256 for the master, 32 for the multitrack
+    /// take" — so the wide stream states its own. Empty leaves the capability
+    /// list in charge, which is what the server assumes of a client that sends
+    /// nothing here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_sizes: Vec<i32>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub clock_domain: String,
     pub latency: LatencyMetadata,

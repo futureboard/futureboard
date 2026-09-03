@@ -2597,6 +2597,8 @@ impl StudioLayout {
         let bpm = bpm.clamp(components::BPM_MIN, components::BPM_MAX);
         let changed = self.timeline.update(cx, |timeline, cx| {
             if (timeline.state.bpm - bpm).abs() > 0.005 {
+                // Captured under the old tempo, reapplied under the new one.
+                let linear_anchors = timeline.state.capture_linear_clip_anchors();
                 timeline.state.bpm = bpm;
                 // An audio clip's bar count is a function of the tempo: a
                 // tempo-synced clip keeps its bars and moves in seconds, every
@@ -2604,6 +2606,9 @@ impl StudioLayout {
                 // here is what keeps the drawn clip and the clip you can grab
                 // the same object after a tempo change.
                 timeline.state.reconcile_audio_clip_lengths();
+                // Linear tracks hold wall-clock time: their clips move in beats
+                // so they stay where they were on the clock.
+                timeline.state.reapply_linear_clip_anchors(&linear_anchors);
                 cx.notify();
                 true
             } else {
@@ -2685,7 +2690,12 @@ impl StudioLayout {
     ) -> bool {
         let changed = self.timeline.update(cx, |timeline, cx| {
             let prev = timeline.capture_tempo_state();
+            // Tempo-map edits move the clock under every clip. Linear tracks
+            // hold their wall-clock position across that, so their anchors are
+            // read before the edit and reapplied under the new map.
+            let linear_anchors = timeline.state.capture_linear_clip_anchors();
             edit(timeline);
+            timeline.state.reapply_linear_clip_anchors(&linear_anchors);
             let changed = timeline.record_tempo_edit(label, prev, cx);
             if changed {
                 cx.notify();

@@ -234,11 +234,23 @@ struct SphereDauxClapProcessor {
   std::atomic<int> pending_main_shell_w{0};
   std::atomic<int> pending_main_shell_h{0};
 
+  // ── Host-owned view ──────────────────────────────────────────────────────
+  // The `view_host_*` state backs the path where the *caller* owns the window
+  // and this side only drives `clap.gui`. It is deliberately separate from the
+  // `embed_*`/`editor_window` shell state above: the two are never active at
+  // once, and the resize request has its own pending slot so the shell's
+  // `take_pending_shell_resize` consumer cannot swallow it.
+  bool view_host_attached{false};
+  std::atomic<int> view_host_resize_w{0};
+  std::atomic<int> view_host_resize_h{0};
+  std::atomic<bool> view_host_resize_pending{false};
+
 #if defined(_WIN32)
   DauxEditorWindow editor_window{};
   HWND editor_parent_hwnd{nullptr};
   HWND editor_embed_top_hwnd{nullptr};
   HWND editor_attach_hwnd{nullptr};
+  HWND view_host_parent{nullptr};
   RECT embed_last_applied{};
 #elif defined(__APPLE__)
   void *editor_native_window{nullptr};   // NSWindow*

@@ -3007,7 +3007,7 @@ fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<
             div()
                 .text_size(px(9.0))
                 .text_color(Colors::text_muted())
-                .child(format!("{} · {}", target_name, state.format_bar_beat(beat))),
+                .child(format!("{} · {}", target_name, state.format_position(beat))),
         )
         .with_animation(
             "timeline-file-drop-label-pulse",
@@ -3054,7 +3054,7 @@ fn clip_clone_hint_overlay(
     let label = format!(
         "Copy {kind} to {} · {}",
         target_track.name,
-        state.format_bar_beat(hint.start_beat)
+        state.format_position(hint.start_beat)
     );
 
     let ghost = div()
@@ -3119,8 +3119,8 @@ fn pen_clip_draw_overlay(
     let length_label = format_clip_length(length, bpb);
     let range_label = format!(
         "{} → {}",
-        state.format_bar_beat(clip_start),
-        state.format_bar_beat(clip_end)
+        state.format_position(clip_start),
+        state.format_position(clip_end)
     );
 
     let ghost_fill = Colors::with_alpha(track_color, 0.16);

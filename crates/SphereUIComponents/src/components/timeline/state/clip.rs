@@ -175,14 +175,6 @@ pub enum ClipEdge {
     Right,
 }
 
-/// Whether a clip's anchor is stored in beats or wall-clock time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClipTimebase {
-    #[default]
-    Musical,
-    Absolute,
-}
-
 /// Highest numeric suffix among existing `clip-N` ids, plus one. Exposed so
 /// callers that mint several clip ids in a row (e.g. multi-track MIDI import)
 /// can reserve a run of ids locally instead of re-scanning `tracks` — clips

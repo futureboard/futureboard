@@ -324,4 +324,40 @@ int sphere_daux_vst2_focus_editor(SphereDauxVst2Processor *p) {
   return vst2_focus_editor_mac(p);
 }
 
+// ── Host-owned view host ────────────────────────────────────────────────────
+//
+// Windows-only, exactly like the VST3 bridge's: the macOS editor is hosted in
+// the bridge-owned NSWindow above. These exist so the shared C surface links.
+
+int sphere_daux_vst2_view_attach(SphereDauxVst2Processor *, unsigned long long,
+                                 int, int, int *, int *) {
+  vst2_set_last_error("host-owned VST2 view is Windows-only");
+  return 0;
+}
+
+void sphere_daux_vst2_view_detach(SphereDauxVst2Processor *) {}
+
+int sphere_daux_vst2_view_is_attached(SphereDauxVst2Processor *) { return 0; }
+
+int sphere_daux_vst2_view_set_size(SphereDauxVst2Processor *, int, int) {
+  return 0;
+}
+
+int sphere_daux_vst2_view_get_size(SphereDauxVst2Processor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_vst2_view_can_resize(SphereDauxVst2Processor *) { return 0; }
+
+int sphere_daux_vst2_view_constrain(SphereDauxVst2Processor *, int *, int *) {
+  return 0;
+}
+
+int sphere_daux_vst2_view_take_resize_request(SphereDauxVst2Processor *, int *,
+                                              int *) {
+  return 0;
+}
+
+void sphere_daux_vst2_view_idle(SphereDauxVst2Processor *) {}
+
 } // extern "C"

@@ -218,6 +218,13 @@ bool CLAP_ABI host_gui_request_resize(const clap_host_t *host, uint32_t width,
   p->pending_main_shell_h.store(static_cast<int>(height),
                                 std::memory_order_relaxed);
   p->pending_main_shell_resize.store(true, std::memory_order_release);
+  // Host-owned view path has its own consumer, so it gets its own slot —
+  // whichever of the two is live drains only what belongs to it.
+  p->view_host_resize_w.store(static_cast<int>(width),
+                              std::memory_order_relaxed);
+  p->view_host_resize_h.store(static_cast<int>(height),
+                              std::memory_order_relaxed);
+  p->view_host_resize_pending.store(true, std::memory_order_release);
   return true;
 }
 

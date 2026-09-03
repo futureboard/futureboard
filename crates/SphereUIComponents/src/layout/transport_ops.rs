@@ -355,7 +355,7 @@ impl StudioLayout {
             (
                 timeline
                     .state
-                    .format_bar_beat(timeline.state.transport.playhead_beats),
+                    .format_position(timeline.state.transport.playhead_beats),
                 bpm,
                 bpm_label,
                 bpm_has_automation,

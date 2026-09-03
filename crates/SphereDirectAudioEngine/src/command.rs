@@ -77,6 +77,16 @@ pub enum EngineCommand {
         track_index: usize,
         slot: Option<u32>,
     },
+    /// Assign the channel pairs of the Audio Jam multitrack stream.
+    ///
+    /// `pairs[k]` is the track index filling pair `k`, and [`NO_JAM_PAIR`]
+    /// marks a pair nobody fills. A fixed array rather than a `Vec` because the
+    /// callback applies this command and must not free a heap allocation; the
+    /// whole assignment is replaced at once because a stream's channel layout
+    /// is announced to receivers once and cannot be edited underneath them.
+    SetJamMultitrackPairs {
+        pairs: [u32; crate::jam_bus::MAX_MULTITRACK_PAIRS],
+    },
     /// Set non-destructive stereo/mono/mid/side monitoring preview.
     SetTrackPreviewMode { track_id: String, value: f32 },
     /// Set a plugin/insert parameter.

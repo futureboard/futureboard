@@ -174,6 +174,23 @@ pub(crate) mod backend {
             playing: i32,
             recording: i32,
         );
+        // Host-owned view host. The caller owns the window; these drive only
+        // the plug-in's editor, so all three formats reach the GPUI editor
+        // window through the same calls.
+        fn view_attach(
+            parent_hwnd: u64,
+            width: i32,
+            height: i32,
+            out_width: *mut i32,
+            out_height: *mut i32,
+        ) -> i32;
+        fn view_detach();
+        fn view_is_attached() -> i32;
+        fn view_set_size(width: i32, height: i32) -> i32;
+        fn view_get_size(out_width: *mut i32, out_height: *mut i32) -> i32;
+        fn view_can_resize() -> i32;
+        fn view_constrain(io_width: *mut i32, io_height: *mut i32) -> i32;
+        fn view_take_resize_request(out_width: *mut i32, out_height: *mut i32) -> i32;
         fn embed_editor(parent_hwnd: u64, x: i32, y: i32, width: i32, height: i32) -> u64;
         fn embed_set_bounds(x: i32, y: i32, width: i32, height: i32);
         fn embed_refresh();
@@ -203,6 +220,17 @@ pub(crate) mod backend {
             controller_len: i32,
         ) -> i32;
         fn list_parameters_json() -> *mut c_char;
+    }
+
+    /// One editor idle tick. Only VST2 has one: its editor repaints and
+    /// animates only while the host calls `effEditIdle`. VST3 and CLAP editors
+    /// drive their own timers, so this is deliberately a no-op for them rather
+    /// than a third C entry point that would do nothing.
+    #[inline]
+    pub unsafe fn view_idle(format: PluginModuleFormat, raw: *mut SphereDauxVst3Processor) {
+        if format == PluginModuleFormat::Vst2 {
+            vst2::view_idle(as_vst2(raw));
+        }
     }
 
     // ── Entry points that take no instance pointer ───────────────────────────

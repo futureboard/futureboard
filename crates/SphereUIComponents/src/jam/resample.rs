@@ -34,13 +34,20 @@ const MAX_DRIFT: f64 = 100e-6;
 /// fixed input length; the caller's blocks are re-chunked to it.
 const CHUNK: usize = 256;
 
-/// A stereo, drift-aware, band-limited rate converter.
+/// A drift-aware, band-limited rate converter for any channel count.
 ///
 /// Interleaved in, interleaved out, because that is what both the jam wire
 /// format and the engine's rings use; `rubato` works in planar buffers, so the
 /// deinterleave and re-interleave happen here, into buffers allocated once.
+///
+/// The channel count is fixed at construction. A multitrack stream is one
+/// converter over all sixteen channels rather than eight stereo ones, so every
+/// channel is resampled against the same ratio and the same drift correction —
+/// eight converters nudged independently would slowly smear the phase
+/// relationships that make a multitrack take worth sending as one stream.
 pub struct JamResampler {
     inner: Option<SincFixedIn<f32>>,
+    channels: usize,
     source_rate: u32,
     target_rate: u32,
     /// The nominal ratio, before drift.
@@ -71,6 +78,12 @@ impl JamResampler {
     /// running a sinc kernel over audio that does not need it would add
     /// latency and ringing for nothing, and equal rates are the common case.
     pub fn new(source_rate: u32, target_rate: u32) -> Self {
+        Self::with_channels(source_rate, target_rate, 2)
+    }
+
+    /// Build a converter for `channels` interleaved channels.
+    pub fn with_channels(source_rate: u32, target_rate: u32, channels: usize) -> Self {
+        let channels = channels.max(1);
         let base_ratio = if source_rate == 0 {
             1.0
         } else {
@@ -93,22 +106,30 @@ impl JamResampler {
                 oversampling_factor: 128,
                 window: WindowFunction::BlackmanHarris2,
             };
-            SincFixedIn::<f32>::new(base_ratio, 2.0, params, CHUNK, 2).ok()
+            SincFixedIn::<f32>::new(base_ratio, 2.0, params, CHUNK, channels).ok()
         };
 
         Self {
             inner,
+            channels,
             source_rate,
             target_rate,
             base_ratio,
-            pending: Vec::with_capacity(CHUNK * 2 * 4),
-            // `vec![Vec::with_capacity(n); 2]` clones the first vector and
+            pending: Vec::with_capacity(CHUNK * channels * 4),
+            // `vec![Vec::with_capacity(n); n]` clones the first vector and
             // loses its capacity on the copy, which would put an allocation in
             // the first conversion of every stream.
-            planar_in: (0..2).map(|_| Vec::with_capacity(CHUNK)).collect(),
-            planar_out: (0..2).map(|_| Vec::with_capacity(CHUNK * 2)).collect(),
+            planar_in: (0..channels).map(|_| Vec::with_capacity(CHUNK)).collect(),
+            planar_out: (0..channels)
+                .map(|_| Vec::with_capacity(CHUNK * 2))
+                .collect(),
             drift: 0.0,
         }
+    }
+
+    /// Channels this converter was built for.
+    pub fn channels(&self) -> usize {
+        self.channels
     }
 
     pub fn source_rate(&self) -> u32 {
@@ -151,7 +172,7 @@ impl JamResampler {
         self.drift * 1e6
     }
 
-    /// Convert one block of interleaved stereo, appending into `out`.
+    /// Convert one block of interleaved audio, appending into `out`.
     ///
     /// Input that does not fill a whole chunk is held for the next call, which
     /// is what makes a stream of small network packets come out as continuous
@@ -164,13 +185,15 @@ impl JamResampler {
         };
         self.pending.extend_from_slice(interleaved);
 
-        let frame_stride = 2;
+        let frame_stride = self.channels;
         while self.pending.len() >= CHUNK * frame_stride {
-            self.planar_in[0].clear();
-            self.planar_in[1].clear();
+            for plane in self.planar_in.iter_mut() {
+                plane.clear();
+            }
             for frame in 0..CHUNK {
-                self.planar_in[0].push(self.pending[frame * frame_stride]);
-                self.planar_in[1].push(self.pending[frame * frame_stride + 1]);
+                for (channel, plane) in self.planar_in.iter_mut().enumerate() {
+                    plane.push(self.pending[frame * frame_stride + channel]);
+                }
             }
             self.pending.drain(..CHUNK * frame_stride);
 
@@ -192,8 +215,9 @@ impl JamResampler {
                 continue;
             };
             for frame in 0..written {
-                out.push(self.planar_out[0][frame]);
-                out.push(self.planar_out[1][frame]);
+                for plane in self.planar_out.iter().take(frame_stride) {
+                    out.push(plane[frame]);
+                }
             }
         }
     }
@@ -201,7 +225,7 @@ impl JamResampler {
     /// Frames held back waiting for a full chunk. Part of the jam branch's
     /// latency, and reported as such rather than hidden.
     pub fn pending_frames(&self) -> usize {
-        self.pending.len() / 2
+        self.pending.len() / self.channels.max(1)
     }
 
     /// The algorithmic delay this converter adds, in output samples.

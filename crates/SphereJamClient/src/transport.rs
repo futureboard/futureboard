@@ -273,6 +273,7 @@ pub fn connect(
     timeout: Duration,
     resumed: bool,
 ) -> Result<MediaTransport> {
+    crate::crypto::ensure_crypto_provider();
     match candidate.kind {
         TransportKind::Udp => connect_udp(candidate, timeout, resumed),
         TransportKind::Tcp => connect_stream(candidate, timeout, resumed, false),
@@ -562,6 +563,7 @@ fn tls_stream(
     tcp: TcpStream,
     host: &str,
 ) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>> {
+    crate::crypto::ensure_crypto_provider();
     let mut roots = rustls::RootCertStore::empty();
     let loaded = rustls_native_certs::load_native_certs();
     for certificate in loaded.certs {

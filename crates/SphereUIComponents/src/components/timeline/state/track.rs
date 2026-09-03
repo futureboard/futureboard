@@ -128,6 +128,68 @@ impl Default for TrackLaneMode {
     }
 }
 
+/// What a track's clips are anchored to when the tempo changes.
+///
+/// Positions are always *stored* in beats — this decides what is held constant
+/// when the tempo map moves underneath them:
+///
+/// - [`Musical`](Self::Musical): the beat is held. A clip on bar 5 stays on
+///   bar 5 and its wall-clock position moves. This is how a DAW normally
+///   behaves and is the default for every track type.
+/// - [`Linear`](Self::Linear): the wall-clock time is held. A clip at 1:23.000
+///   stays at 1:23.000 and its bar position moves. This is what dialogue, sound
+///   effects, and anything locked to picture need.
+///
+/// Available on every track type: a tempo change moves audio, MIDI, instrument
+/// and video lanes alike, so any of them can need to be pinned to the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackTimebase {
+    #[default]
+    Musical,
+    Linear,
+}
+
+impl TrackTimebase {
+    /// Stable persistence tag. Never renumber — these are written into project
+    /// files.
+    pub fn to_tag(self) -> u8 {
+        match self {
+            Self::Musical => 0,
+            Self::Linear => 1,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => Self::Linear,
+            _ => Self::Musical,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Musical => "Musical",
+            Self::Linear => "Linear",
+        }
+    }
+
+    /// Short glyph for the track-header toggle. Paired with a colour change, so
+    /// the state never rests on hue alone.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Musical => "♪",
+            Self::Linear => "⏱",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Musical => Self::Linear,
+            Self::Linear => Self::Musical,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackState {
     pub id: String,
@@ -139,6 +201,10 @@ pub struct TrackState {
     /// instead of read from its source file, so this and the ARA session must
     /// be changed together — see `layout::ara_ops`.
     pub ara: Option<crate::components::timeline::state::clip::AraTrackBinding>,
+    /// What this track's clips hold constant when the tempo changes — their
+    /// bar position ([`TrackTimebase::Musical`]) or their wall-clock position
+    /// ([`TrackTimebase::Linear`]).
+    pub timebase: TrackTimebase,
     /// Parent arrangement group, if any. Only `TrackType::Group` ids are valid.
     pub parent_group_id: Option<String>,
     /// Folder presentation state. Meaningful only for `TrackType::Group`.
@@ -444,6 +510,7 @@ impl TimelineState {
             name: options.name,
             track_type,
             ara: None,
+            timebase: TrackTimebase::default(),
             parent_group_id: None,
             group_collapsed: false,
             color: options.color,

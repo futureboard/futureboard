@@ -160,6 +160,7 @@ impl JamApiClient {
     /// would throw away the connection pool and pay a TLS handshake per
     /// request.
     pub fn new(config: JamConfig, credentials: SharedCredentials) -> Result<Self> {
+        crate::crypto::ensure_crypto_provider();
         let http = reqwest::blocking::Client::builder()
             .timeout(config.connect_timeout.max(Duration::from_secs(1)))
             // Certificate validation is never relaxed. A development server on

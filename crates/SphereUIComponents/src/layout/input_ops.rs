@@ -11,7 +11,9 @@ use crate::components::plugin_picker::{
     sync_selection_from_highlight, visible_plugin_id_at, PluginPickerState,
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
-use crate::components::timeline::timeline_state::{is_project_routing_track, ClipType, TrackType};
+use crate::components::timeline::timeline_state::{
+    is_project_routing_track, ClipType, TrackTimebase, TrackType,
+};
 use crate::i18n::I18n;
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
@@ -1245,6 +1247,29 @@ impl StudioLayout {
                     menu_item_enabled("Reset Track Height", "track:height-reset", exists),
                     menu_item_enabled("Reset All Track Heights", "track:height-reset-all", exists),
                 ];
+                // Timebase — what this track's clips hold onto when the tempo
+                // moves. Only offered where there are clips to hold: a Bus,
+                // Return or Group owns none, so the setting would have nothing
+                // to act on and must not pretend otherwise.
+                if let Some(track) = track.as_ref().filter(|track| {
+                    !track.track_type.is_routing() && track.track_type != TrackType::Master
+                }) {
+                    let timebase = track.timebase;
+                    entries.extend([
+                        ContextMenuEntry::Separator,
+                        ContextMenuEntry::Header("Timebase".to_string()),
+                        ContextMenuEntry::checked_item(
+                            "Musical — follows tempo",
+                            "track:timebase-musical",
+                            timebase == TrackTimebase::Musical,
+                        ),
+                        ContextMenuEntry::checked_item(
+                            "Linear — holds wall-clock time",
+                            "track:timebase-linear",
+                            timebase == TrackTimebase::Linear,
+                        ),
+                    ]);
+                }
                 entries.extend(self.ara_track_menu_entries(track_id, exists, cx));
                 entries.extend([
                     ContextMenuEntry::Separator,
@@ -1259,7 +1284,7 @@ impl StudioLayout {
             }
             ContextTarget::TimelineMarker { marker_id, beat } => {
                 let state = &self.timeline.read(cx).state;
-                let label = state.format_bar_beat(*beat as f32);
+                let label = state.format_position(*beat as f32);
                 let name = state
                     .marker(marker_id)
                     .map(|marker| marker.name.clone())
@@ -1281,7 +1306,7 @@ impl StudioLayout {
             }
             ContextTarget::SongTextMarker { event_id, beat } => {
                 let state = &self.timeline.read(cx).state;
-                let position = state.format_bar_beat_at(*beat);
+                let position = state.format_position_at(*beat);
                 let event_label = state
                     .song_text_event(event_id)
                     .map(|event| format!("{}: {}", event.event_type().label(), event.text()))
@@ -1660,7 +1685,7 @@ impl StudioLayout {
             }
             ContextTarget::TimeSignaturePoint { point_id, beat } => {
                 let state = &self.timeline.read(cx).state;
-                let label = state.format_bar_beat_at(*beat);
+                let label = state.format_position_at(*beat);
                 let sig = state
                     .time_signature_map
                     .points
@@ -1681,7 +1706,7 @@ impl StudioLayout {
             }
             ContextTarget::TimeSignatureTrack { beat, point_id } => {
                 let state = &self.timeline.read(cx).state;
-                let label = state.format_bar_beat_at(*beat);
+                let label = state.format_position_at(*beat);
                 if point_id.is_some() {
                     let sig = point_id
                         .as_ref()
@@ -1804,7 +1829,7 @@ impl StudioLayout {
                 bpm,
                 point_id,
             } => {
-                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+                let label = self.timeline.read(cx).state.format_position(*beat as f32);
                 if point_id.is_some() {
                     let bpm_label = if bpm.fract().abs() < 0.05 {
                         format!("{bpm:.0}")
@@ -1845,10 +1870,10 @@ impl StudioLayout {
             }
             ContextTarget::MarkerTrack { beat, marker_id } => {
                 let state = &self.timeline.read(cx).state;
-                let label = state.format_bar_beat(*beat as f32);
+                let label = state.format_position(*beat as f32);
                 match marker_id.as_deref().and_then(|id| state.marker(id)) {
                     Some(marker) => {
-                        let at = state.format_bar_beat(marker.beat as f32);
+                        let at = state.format_position(marker.beat as f32);
                         vec![
                             ContextMenuEntry::disabled_item(
                                 format!("{} — {at}", marker.name),
@@ -1892,14 +1917,14 @@ impl StudioLayout {
             }
             ContextTarget::RegionTrack { beat, region_id } => {
                 let state = &self.timeline.read(cx).state;
-                let label = state.format_bar_beat(*beat as f32);
+                let label = state.format_position(*beat as f32);
                 match region_id.as_deref().and_then(|id| state.region(id)) {
                     Some(region) => {
                         let (start, end) = region.normalized_range();
                         let span = format!(
                             "{} – {}",
-                            state.format_bar_beat(start as f32),
-                            state.format_bar_beat(end as f32)
+                            state.format_position(start as f32),
+                            state.format_position(end as f32)
                         );
                         vec![
                             ContextMenuEntry::disabled_item(
@@ -1946,7 +1971,7 @@ impl StudioLayout {
                 ]
             }
             ContextTarget::TimelineRuler { beat } => {
-                let label = self.timeline.read(cx).state.format_bar_beat(*beat as f32);
+                let label = self.timeline.read(cx).state.format_position(*beat as f32);
                 let has_automation = self.timeline.read(cx).state.tempo_has_automation();
                 let mut entries = vec![
                     ContextMenuEntry::disabled_item(format!("Tempo at {label}"), "noop"),

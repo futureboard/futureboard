@@ -228,7 +228,9 @@ pub fn timeline_ruler(
     let any_soloed = state.any_track_soloed();
 
     let ruler_grid_width = state.viewport.viewport_width.max(1.0);
-    let lines = state.arrangement_grid_lines(ruler_grid_width);
+    // The ruler's ticks follow the project timebase; the grid behind the clips
+    // stays musical. For Bars+Beats these are the same lines.
+    let lines = state.ruler_grid_lines(ruler_grid_width);
 
     let on_seek_clone = on_seek.clone();
     let on_seek_drag = on_seek.clone();
@@ -768,7 +770,7 @@ pub fn timeline_ruler(
                 // character per line and look like random digits). Each label
                 // gets its own min-width so the text lays out on a single row.
                 .children(lines.iter().filter(|l| l.show_label).map(|line| {
-                    let label = state.format_bar_beat(line.beat);
+                    let label = state.format_position(line.beat);
                     let (font_weight, text_color) = match line.level {
                         GridLineLevel::Bar => {
                             (gpui::FontWeight::BOLD, Colors::timeline_ruler_text())
