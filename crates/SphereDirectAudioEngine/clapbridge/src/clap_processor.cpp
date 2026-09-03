@@ -16,10 +16,16 @@
 
 #if defined(_WIN32)
 #include <windows.h>
-#elif defined(__APPLE__)
-#include <CoreFoundation/CoreFoundation.h>
 #else
+// Every POSIX platform loads the module with `dlopen`, macOS included: a
+// `.clap` there is a bundle, so CoreFoundation resolves the executable inside
+// it (`mac_executable_path`) and `dlopen` loads that path. Selecting
+// CoreFoundation *instead of* dlfcn.h on Apple left `dlopen`/`dlsym`/
+// `dlclose`/`dlerror` undeclared and broke the macOS build.
 #include <dlfcn.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 #endif
 
 namespace {

@@ -3,8 +3,16 @@
 set -euo pipefail
 
 # Required for Community Edition builds / clippy / tests.
+#
+# `external/ARA_SDK` is here because ARA hosting is compiled on Windows and
+# macOS: `SphereAraHost` pulls in `ara2-bridge-companion`, whose build script
+# hard-fails without the SDK. It is a submodule *containing submodules* —
+# ARA_API, ARA_Library and ARA_Examples — and the headers everything needs live
+# in the nested ARA_API, so initializing only the outer one leaves an empty
+# directory and the build still fails.
 REQUIRED_SUBMODULES=(
   external/vst3sdk
+  external/ARA_SDK
   external/clap
   external/clap-helpers
   external/yoga
@@ -36,6 +44,19 @@ git submodule update --init --force --checkout -- external/vst3sdk
 
 git -C external/vst3sdk submodule update --init --force --checkout -- \
   base cmake pluginterfaces public.sdk tutorials vstgui4
+
+# ARA SDK, then its nested ARA_API only. That one holds every header the build
+# consumes (`ARAInterface.h` for the companion shim, `ARAVST3.h` for the VST3
+# bridge and scanner); ARA_Library and ARA_Examples are ~10 MB of code nothing
+# here compiles, so they stay uninitialized.
+git submodule update --init --force --depth=1 --checkout -- external/ARA_SDK
+git -C external/ARA_SDK submodule update --init --force --depth=1 --checkout -- ARA_API
+
+# Fail loudly here rather than 20 minutes later inside a build script.
+if [[ ! -f external/ARA_SDK/ARA_API/ARAInterface.h ]]; then
+  echo "error: external/ARA_SDK/ARA_API is empty after init — the nested ARA_API submodule did not check out." >&2
+  exit 1
+fi
 
 for path in "${OPTIONAL_SUBMODULES[@]}"; do
   if git submodule update --init --force --depth=1 --checkout -- "$path"; then

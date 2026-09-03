@@ -33,9 +33,14 @@ fn sdk_root(variable: &str, submodule: &str, marker: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| repository_root().join(submodule));
     if !path.join(marker).is_file() {
+        // `--recursive` is the load-bearing part for the ARA SDK: it is a
+        // submodule whose contents (ARA_API, ARA_Library, ARA_Examples) are
+        // themselves submodules, so a plain `--init` leaves the directory
+        // present but empty and this check still fires.
         panic!(
             "{variable} / {submodule} does not look like an SDK checkout: {} is missing.\n\
-             Run `git submodule update --init --recursive {submodule}`.",
+             Run `git submodule update --init --recursive {submodule}`\n\
+             (that SDK nests submodules — without --recursive its subdirectories stay empty).",
             path.join(marker).display()
         );
     }
