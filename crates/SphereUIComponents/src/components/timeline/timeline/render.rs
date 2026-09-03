@@ -1196,20 +1196,48 @@ impl Render for Timeline {
         let on_automation_hover: crate::components::timeline::automation_lane::AutomationHoverCallback =
             std::sync::Arc::new(on_automation_hover);
 
-        // Sub-lane header controls: activate / enable / clear / hide. Activation
-        // is UI-only; enable/clear/hide are committed edits.
+        // Sub-lane header controls: activate / mode / clear / remove / pick.
+        // Activation and the picker are UI-only; mode/clear/remove are
+        // committed edits.
         let on_automation_lane_action = cx.listener(
             |this,
              payload: &(
                 String,
                 String,
                 crate::components::timeline::automation_lane::AutomationLaneAction,
+                f32,
+                f32,
             ),
-             _window,
+             window,
              cx| {
+                use crate::components::timeline::automation_control_lane::AutomationControlAction;
                 use crate::components::timeline::automation_lane::AutomationLaneAction;
-                let (track_id, lane_id, action) = (payload.0.clone(), payload.1.clone(), payload.2);
+                let (track_id, lane_id, action, x, y) = (
+                    payload.0.clone(),
+                    payload.1.clone(),
+                    payload.2,
+                    payload.3,
+                    payload.4,
+                );
                 match action {
+                    AutomationLaneAction::PickTarget => {
+                        // The lane name is a parameter selector: the same picker
+                        // the control row opens, anchored at the click.
+                        this.state.activate_automation_lane(&track_id, &lane_id);
+                        if let Some(cb) = this.on_automation_control.clone() {
+                            cb(
+                                &(
+                                    track_id.clone(),
+                                    AutomationControlAction::OpenTargetPicker,
+                                    x,
+                                    y,
+                                ),
+                                window,
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    }
                     AutomationLaneAction::Activate => {
                         this.state.activate_automation_lane(&track_id, &lane_id);
                         this.state.select_track(&track_id);

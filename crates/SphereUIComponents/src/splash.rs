@@ -194,6 +194,7 @@ mod tests {
                 entitlements: Vec::new(),
                 expires_at: None,
             }),
+            audio_engine: None,
         }
     }
 
@@ -205,6 +206,7 @@ mod tests {
             edition: "Professional",
             app_version: "test".to_string(),
             license: None,
+            audio_engine: None,
         };
         assert_eq!(
             splash_image_path_for_edition(Some(&unlicensed)),

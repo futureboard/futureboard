@@ -200,6 +200,63 @@ pub fn cell_anchor(
     }
 }
 
+/// Anchor for the cell in row `row_index`, corrected for the table's own
+/// scroll offset (`scroll_x`, `scroll_y` are GPUI scroll offsets: `<= 0`,
+/// growing negative as the table scrolls right / down).
+///
+/// The row index is exact where a pointer snap is not: a list scrolled by a
+/// fraction of a row put the popover a few pixels off its cell, and a table
+/// scrolled sideways put it under the wrong column entirely — which is what
+/// made the menu look cropped. Both are gone here because the anchor is the
+/// cell's laid-out rectangle, reconstructed from the same numbers the layout
+/// used.
+pub fn cell_anchor_for_row(
+    columns: &ColumnWidths,
+    cell: EditableCell,
+    row_index: usize,
+    table_top: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+) -> CellAnchor {
+    CellAnchor {
+        x: columns.offset_of(cell) + scroll_x,
+        y: table_top + row_index as f32 * ROW_HEIGHT + scroll_y,
+        width: columns.width_of(cell),
+        height: ROW_HEIGHT,
+    }
+}
+
+/// Height of one dropdown option row and the menu's inner padding, matching
+/// the shared string menu so the estimated height never under-sizes the list
+/// (an under-estimate is what cut the last option off and forced a scroll on
+/// a four-item menu).
+pub const DROPDOWN_ROW_HEIGHT: f32 = 25.0;
+pub const DROPDOWN_PADDING: f32 = 8.0;
+/// Longest menu before it scrolls.
+pub const DROPDOWN_MAX_HEIGHT: f32 = 268.0;
+
+/// Natural height of a menu with `option_count` rows, capped so a long device
+/// list scrolls instead of covering the whole window.
+pub fn dropdown_height(option_count: usize) -> f32 {
+    (option_count as f32 * DROPDOWN_ROW_HEIGHT + DROPDOWN_PADDING).min(DROPDOWN_MAX_HEIGHT)
+}
+
+/// Width for a menu whose widest label is `longest_label_chars` characters:
+/// at least the cell it opened from, wide enough to show the longest option
+/// in full, never wider than the window allows.
+///
+/// A cell-width menu truncated every real endpoint name ("Focusrite USB ASIO —
+/// Analogue 3 + 4" in a 110 px port column), so the list read as cropped.
+pub fn dropdown_width(longest_label_chars: usize, anchor_width: f32, viewport_width: f32) -> f32 {
+    // 10.5 px UI text averages ~6.3 px per glyph; padding, the check mark and
+    // its gap make up the rest.
+    const GLYPH: f32 = 6.3;
+    const CHROME: f32 = DROPDOWN_PADDING + 16.0 + 8.0 + 11.0 + 6.0;
+    let wanted = longest_label_chars as f32 * GLYPH + CHROME;
+    let max = (viewport_width - 12.0).max(anchor_width.min(viewport_width));
+    wanted.max(anchor_width).min(max)
+}
+
 /// Which side a popover ended up on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopoverSide {
@@ -628,6 +685,57 @@ pub fn status_detail(status: AudioConnectionStatus) -> Option<String> {
 mod tests {
     use super::*;
     use crate::audio_connections::{AudioConnection, AvailablePorts};
+
+    // ── Dropdown geometry ────────────────────────────────────────────────────
+
+    /// The anchor is the cell's laid-out rectangle: row index times row height
+    /// from the table top, shifted by however far the table has scrolled.
+    #[test]
+    fn row_anchor_follows_the_tables_own_scroll_offset() {
+        let columns = column_widths(1000.0);
+        let unscrolled = cell_anchor_for_row(&columns, EditableCell::Device, 3, 100.0, 0.0, 0.0);
+        assert_eq!(unscrolled.x, columns.offset_of(EditableCell::Device));
+        assert_eq!(unscrolled.y, 100.0 + 3.0 * ROW_HEIGHT);
+        assert_eq!(unscrolled.width, columns.device);
+        assert_eq!(unscrolled.height, ROW_HEIGHT);
+
+        // Scrolled 40 px right and one and a half rows down: the popover must
+        // move with the cell, not stay where the unscrolled cell was.
+        let scrolled = cell_anchor_for_row(
+            &columns,
+            EditableCell::Device,
+            3,
+            100.0,
+            -40.0,
+            -1.5 * ROW_HEIGHT,
+        );
+        assert_eq!(scrolled.x, unscrolled.x - 40.0);
+        assert_eq!(scrolled.y, unscrolled.y - 1.5 * ROW_HEIGHT);
+    }
+
+    /// A short menu is exactly as tall as its rows, so nothing is cut off and
+    /// nothing scrolls; a long one caps and scrolls.
+    #[test]
+    fn dropdown_height_fits_every_row_until_the_cap() {
+        assert_eq!(
+            dropdown_height(4),
+            4.0 * DROPDOWN_ROW_HEIGHT + DROPDOWN_PADDING
+        );
+        assert_eq!(dropdown_height(40), DROPDOWN_MAX_HEIGHT);
+    }
+
+    /// The menu grows past its cell to show the longest label, but never past
+    /// the window.
+    #[test]
+    fn dropdown_width_fits_the_longest_label_within_the_window() {
+        // Short labels: the cell width wins.
+        assert_eq!(dropdown_width(4, 150.0, 1000.0), 150.0);
+        // A long endpoint name widens the menu past a narrow port column.
+        let wide = dropdown_width(34, 110.0, 1000.0);
+        assert!(wide > 200.0, "{wide}");
+        // But a tiny window clamps it.
+        assert_eq!(dropdown_width(80, 110.0, 300.0), 288.0);
+    }
 
     fn ports() -> AvailablePorts {
         AvailablePorts::for_device("dev-1", "Interface", 4, 4)

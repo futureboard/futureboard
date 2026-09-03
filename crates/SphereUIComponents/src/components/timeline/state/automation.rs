@@ -219,6 +219,24 @@ impl AutomationTarget {
         }
     }
 
+    /// Readout of a normalized value in the target's own unit, so a lane can
+    /// say "-6.0 dB" or "L32" instead of "0.71". Targets whose engine mapping is
+    /// not a fader law (plug-in parameters, send levels) read as a percentage —
+    /// the one description of a normalized value that cannot be wrong.
+    pub fn format_value(&self, norm: f32) -> String {
+        let norm = norm.clamp(0.0, 1.0);
+        match self {
+            AutomationTarget::TrackVolume => format!("{} dB", volume::format_db(norm)),
+            AutomationTarget::TrackPan => {
+                crate::components::knob::format_pan_label(norm * 2.0 - 1.0)
+            }
+            AutomationTarget::TrackMute => if norm >= 0.5 { "Muted" } else { "Open" }.to_string(),
+            AutomationTarget::PluginParameter { .. } | AutomationTarget::SendLevel { .. } => {
+                format!("{:.0}%", norm * 100.0)
+            }
+        }
+    }
+
     /// Stable discriminant tag for binary persistence.
     pub fn to_tag(&self) -> u8 {
         match self {

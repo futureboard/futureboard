@@ -60,8 +60,15 @@ pub struct JsDauxStatus {
     pub requested_sample_rate: u32,
     /// Active buffer size (frames).
     pub buffer_size: u32,
-    /// Estimated output latency (ms) = buffer_frames / sample_rate * 1000.
+    /// Output latency (ms): the driver-reported figure on ASIO, the measured
+    /// callback→play-out delay on cpal backends, else the buffer-size estimate.
     pub estimated_latency_ms: f64,
+    /// Input (capture→callback) latency in ms, or `0` when the open backend
+    /// has not reported/measured it.
+    pub input_latency_ms: f64,
+    /// `input_latency_ms + estimated_latency_ms`, or `0` when the input half
+    /// is unknown — a round trip is never stated from one half.
+    pub round_trip_latency_ms: f64,
     /// Number of audio glitches / underruns since the stream was opened.
     pub glitch_count: f64,
     /// Device-level underruns (ALSA xruns and equivalents) since the stream was

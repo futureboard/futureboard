@@ -39,9 +39,12 @@ impl AboutWindow {
 impl Render for AboutWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let version = crate::edition::app_version();
-        let edition = crate::edition::current_edition_info()
+        let info = crate::edition::current_edition_info();
+        let edition = info
+            .as_ref()
             .map(|info| info.edition)
             .unwrap_or("Community");
+        let audio_engine = info.as_ref().and_then(|info| info.audio_engine.clone());
 
         div()
             .size_full()
@@ -65,10 +68,57 @@ impl Render for AboutWindow {
                 },
             ))
             .child(about_header(&version, edition))
-            .child(info_rows())
+            .child(info_rows(audio_engine.as_ref().map(|badge| badge.name)))
+            .children(audio_engine.as_ref().map(audio_engine_badge))
             .child(credits_panel())
             .child(footer())
     }
+}
+
+/// Partner engine credit: logo beside the engine name and its trademark line.
+/// Only rendered when the edition provider reports a licensed engine, so a
+/// Community build shows nothing here rather than an empty frame.
+fn audio_engine_badge(badge: &crate::edition::AudioEngineBadge) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .mx(px(16.0))
+        .mb(px(12.0))
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(crate::theme::radius::SURFACE))
+        .bg(Colors::surface_panel())
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .children(badge.logo.clone().map(|logo| {
+            img(gpui::ImageSource::Image(logo))
+                .flex_none()
+                .h(px(28.0))
+                .max_w(px(96.0))
+                .object_fit(ObjectFit::Contain)
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child(badge.name),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.5))
+                        .text_color(Colors::text_muted())
+                        .child(badge.notice),
+                ),
+        )
 }
 
 /// Icon + name + version/edition badges, centred at the top of the window.
@@ -141,8 +191,9 @@ fn badge(label: String, accent: bool) -> impl IntoElement {
         .child(label)
 }
 
-/// Two compact key/value rows summarising the runtime and plugin host.
-fn info_rows() -> impl IntoElement {
+/// Compact key/value rows summarising the runtime, plugin host, and — on a
+/// build running a licensed engine — the audio engine.
+fn info_rows(audio_engine: Option<&'static str>) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -150,6 +201,7 @@ fn info_rows() -> impl IntoElement {
         .pb(px(14.0))
         .gap(px(4.0))
         .child(info_row("Runtime", "GPUI + Rust"))
+        .children(audio_engine.map(|engine| info_row("Audio Engine", engine)))
         .child(info_row("Plugin Host", "VST3 / CLAP"))
         .child(info_row("Graphics", "WGPU"))
 }

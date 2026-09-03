@@ -473,6 +473,7 @@ impl PianoRoll {
 
 impl Render for PianoRoll {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.window_scale = window.scale_factor();
         // The piano roll had no perf scope at all, so `FUTUREBOARD_UI_PERF=1`
         // attributed every repaint it caused to the arrangement's `Timeline`
         // scope and none of its own work to anything.

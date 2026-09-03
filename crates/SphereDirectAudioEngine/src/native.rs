@@ -326,6 +326,10 @@ pub struct EngineStats {
     pub last_error: Option<String>,
     pub glitch_count: u64,
     pub estimated_latency_ms: f64,
+    /// See [`crate::types::JsDauxStatus::input_latency_ms`].
+    pub input_latency_ms: f64,
+    /// See [`crate::types::JsDauxStatus::round_trip_latency_ms`].
+    pub round_trip_latency_ms: f64,
     /// `true` when the device was lost mid-stream and recovery is pending.
     pub device_lost: bool,
     /// Lifecycle state: "Closed" | "Ready" | "Running" | "DeviceLost".
@@ -998,6 +1002,8 @@ impl AudioEngine {
             last_error: daux.last_error.or(st.last_error),
             glitch_count: daux.glitch_count as u64,
             estimated_latency_ms: daux.estimated_latency_ms,
+            input_latency_ms: daux.input_latency_ms,
+            round_trip_latency_ms: daux.round_trip_latency_ms,
             device_lost: daux.device_lost,
             device_state: daux.device_state,
             dropout_protection_mode: dropout.protection_mode.as_str().to_string(),

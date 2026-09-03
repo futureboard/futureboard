@@ -42,6 +42,7 @@ use crate::theme::Colors;
 // ── Layout constants (CSS px) ───────────────────────────────────────────────
 mod articulation_lane;
 mod cc_lane;
+mod cc_lane_render;
 mod render;
 
 /// Default note-row height (px per semitone). Reset-zoom restores this value so
@@ -1035,6 +1036,9 @@ pub struct PianoRoll {
     custom_cc: u8,
     /// Bounds of the CC strip, captured at paint for cursor → beat/value mapping.
     cc_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The window's device scale, recorded each render so the controller
+    /// lane's GPU painter rasterises at physical resolution.
+    window_scale: f32,
     /// Lane points snapshotted when a CC paint/erase gesture begins (undo prev).
     cc_edit_prev: Option<Vec<MidiControllerPoint>>,
     /// Clip/controller captured with `cc_edit_prev`; cancellation and commit must
@@ -1290,6 +1294,7 @@ impl PianoRoll {
             open_select_menu: None,
             custom_cc: 74,
             cc_bounds: Rc::new(Cell::new(None)),
+            window_scale: 1.0,
             cc_edit_prev: None,
             cc_edit_target: None,
             cc_selection: HashSet::new(),

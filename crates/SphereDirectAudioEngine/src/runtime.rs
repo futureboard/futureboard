@@ -2571,9 +2571,16 @@ impl RuntimeProject {
                 });
             }
 
-            let midi_instrument_insert_ix = find_midi_instrument_insert_ix(&inserts, &t.track_type);
             let soundfont_player = RuntimeSoundfontPlayer::from_snapshot(t, output_sample_rate);
             let solfege_engine = RuntimeSolfegeEngine::from_snapshot(t, output_sample_rate);
+            // A built-in instrument owns the track's notes; the inserts around
+            // it are effects and must never be handed the MIDI stream.
+            let midi_instrument_insert_ix =
+                if soundfont_player.is_some() || solfege_engine.is_some() {
+                    None
+                } else {
+                    find_midi_instrument_insert_ix(&inserts, &t.track_type)
+                };
             // The built-in player's decimation delay at an oversampled render
             // quality is real path latency, so it has to be in the track's
             // reported figure from the first graph build — not only after a
@@ -4109,6 +4116,12 @@ fn insert_accepts_midi_events(insert: &RuntimeInsert, track_type: &str) -> bool 
     }
     let is_bridge = insert.kind.eq_ignore_ascii_case("external-bridge-plugin");
     if !is_bridge && insert.vst3.is_none() {
+        return false;
+    }
+    // A bridged insert the snapshot already resolved as an effect (registry
+    // kind, or any insert on a built-in-instrument track) processes audio; it
+    // is never the track's note destination, whatever the track type.
+    if is_bridge && insert.bridge_is_effect {
         return false;
     }
     let ty = track_type.to_ascii_lowercase();

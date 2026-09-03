@@ -469,8 +469,10 @@ impl CefRuntime {
         let browser_settings = cef::BrowserSettings {
             // A transparent windowless surface would composite the timeline
             // through the editor; an opaque background also lets the host
-            // upload frames without premultiplied-alpha handling.
-            background_color: if windowless { OPAQUE_BACKGROUND } else { 0 },
+            // upload frames without premultiplied-alpha handling. A windowed
+            // child gets the same panel colour so its HWND never flashes
+            // Chromium's default white before the page's first paint.
+            background_color: OPAQUE_BACKGROUND,
             windowless_frame_rate: if windowless { WINDOWLESS_FRAME_RATE } else { 0 },
             ..Default::default()
         };

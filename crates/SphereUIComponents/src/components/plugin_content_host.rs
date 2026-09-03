@@ -79,7 +79,7 @@ mod imp {
         SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN,
         WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS,
         WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-        WS_VISIBLE,
+        WS_POPUP, WS_VISIBLE,
     };
 
     /// Every live content host and what it holds, so the hook can tell a key
@@ -721,11 +721,75 @@ mod imp {
             }
         }
     }
+
+    /// A never-shown top-level HWND for a native child that must exist without
+    /// being visible — the boot-time CEF warm-up browser, which only has to
+    /// spawn Chromium's helper processes. `WS_POPUP` without `WS_VISIBLE`, no
+    /// owner, so it never appears on screen or the taskbar. Drop destroys it.
+    pub struct HiddenHostWindow {
+        hwnd: u64,
+    }
+
+    impl HiddenHostWindow {
+        pub fn create() -> Option<Self> {
+            ensure_content_host_class();
+            // SAFETY: the class is registered above; every argument is a
+            // constant or null, and the handle is destroyed on drop.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    CONTENT_HOST_CLASS,
+                    PCWSTR::null(),
+                    WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    0,
+                    0,
+                    2,
+                    2,
+                    None,
+                    None::<HMENU>,
+                    None,
+                    None,
+                )
+            }
+            .ok()?;
+            Some(Self {
+                hwnd: hwnd.0 as u64,
+            })
+        }
+
+        pub fn hwnd(&self) -> u64 {
+            self.hwnd
+        }
+    }
+
+    impl Drop for HiddenHostWindow {
+        fn drop(&mut self) {
+            unsafe {
+                if self.hwnd != 0 && IsWindow(Some(hwnd_from(self.hwnd))).as_bool() {
+                    let _ = DestroyWindow(hwnd_from(self.hwnd));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
     use super::{ContentHostKind, ContentRect};
+
+    /// Non-Windows stub: off-screen hosting never needs a hidden parent.
+    pub struct HiddenHostWindow {
+        _private: (),
+    }
+
+    impl HiddenHostWindow {
+        pub fn create() -> Option<Self> {
+            None
+        }
+        pub fn hwnd(&self) -> u64 {
+            0
+        }
+    }
 
     /// Non-Windows stub. Host-process editor embedding via NSView/X11 is a later
     /// slice; this keeps the crate compiling everywhere.
@@ -770,4 +834,4 @@ mod imp {
     }
 }
 
-pub use imp::{place_owned_popup, ContentChildHwnd};
+pub use imp::{place_owned_popup, ContentChildHwnd, HiddenHostWindow};

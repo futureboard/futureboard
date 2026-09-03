@@ -1962,6 +1962,9 @@ pub fn apply_to_timeline(
                 })
                 .collect();
             let instrument_plugin_instance_id = match track_type {
+                // A Soundfont Player / Solfege track sounds through the track
+                // itself; its inserts are effects, so none is "the instrument".
+                _ if pt.soundfont.is_some() || pt.solfege.is_some() => None,
                 crate::components::timeline::timeline_state::TrackType::Instrument
                 | crate::components::timeline::timeline_state::TrackType::Midi => inserts
                     .iter()

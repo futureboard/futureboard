@@ -83,6 +83,23 @@ pub struct EditionInfo {
     pub app_version: String,
     /// The current license, or `None` when this build/machine is not licensed.
     pub license: Option<LicenseDisplay>,
+    /// A licensed audio-engine integration the About surfaces should name and
+    /// credit, or `None` when the build runs on the platform's stock backends.
+    pub audio_engine: Option<AudioEngineBadge>,
+}
+
+/// A licensed audio-engine integration — the Professional Edition's ASIO host —
+/// as the About window and the Settings About panel present it. Carries the
+/// partner logo the engine's license terms ask to be shown with its name.
+#[derive(Debug, Clone)]
+pub struct AudioEngineBadge {
+    /// Display name, e.g. `"ASIO Audio Engine"`.
+    pub name: &'static str,
+    /// Trademark / attribution line shown beside the logo.
+    pub notice: &'static str,
+    /// Logo bitmap for `gpui::img`, decoded by GPUI on first paint; `None`
+    /// renders a text-only badge.
+    pub logo: Option<Arc<gpui::Image>>,
 }
 
 type EditionProvider = Arc<dyn Fn() -> EditionInfo + Send + Sync + 'static>;
@@ -211,6 +228,7 @@ mod tests {
                 entitlements: vec!["asio".to_string()],
                 expires_at: None,
             }),
+            audio_engine: None,
         }));
         let info = current_edition_info().expect("provider was installed");
         assert_eq!(info.edition, "Test");

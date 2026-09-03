@@ -555,12 +555,16 @@ pub struct ViewRect {
     pub height: i32,
 }
 
-/// Built-in editors are always hosted off-screen.
+/// Whether built-in editors are hosted off-screen (OSR) or as a native CEF
+/// child window.
 ///
-/// Windows uses CEF accelerated OSR and copies D3D11 shared textures directly
-/// into GPUI's DirectX atlas. Other platforms retain the software framebuffer
-/// path until their compositor-specific texture interop is enabled.
-pub const OFFSCREEN_HOSTING: bool = true;
+/// Windows hosts them **windowed**: the editor shell creates a real `WS_CHILD`
+/// content HWND (`plugin_content_host`) and CEF owns a child browser window
+/// inside it, so Chromium paints, composites, and receives input directly —
+/// no shared-texture copy, no frame republishing through the GPUI atlas, no
+/// synthesized input. Other platforms retain the software off-screen path
+/// until their compositor-specific native embedding is enabled.
+pub const OFFSCREEN_HOSTING: bool = cfg!(not(target_os = "windows"));
 
 /// Optional synchronous GPU sink supplied by the GPUI editor window.
 #[cfg(feature = "builtin-plugin-editor")]
@@ -827,6 +831,9 @@ mod imp {
         _view: WebView<'static>,
         _client: sphere_webview::runtime::cef::Client,
         _lifecycle: BrowserLifecycle,
+        /// Hidden native parent of a *windowed* warm-up browser (Windows).
+        /// Declared last so it outlives the browser it hosts.
+        _parent: Option<crate::components::plugin_content_host::HiddenHostWindow>,
     }
 
     /// One CEF runtime plus every open editor view.
@@ -1136,9 +1143,11 @@ mod imp {
                 Ok(subprocess) => subprocess,
                 Err(error) => return remember_runtime_failure(error.to_string()),
             },
-            // Chromium decides this once, at initialize. Every built-in editor
-            // is OSR-hosted, including accelerated shared-texture OSR on Windows.
-            windowless_rendering: true,
+            // Chromium decides this once, at initialize. Windows hosts every
+            // built-in editor (and the warm-up browser) as a native child
+            // window, and CEF advises against enabling OSR support in a
+            // process that never uses it; the other platforms are OSR-hosted.
+            windowless_rendering: super::OFFSCREEN_HOSTING,
             ..Default::default()
         };
         let runtime = match CefRuntime::initialize(config, Some(&mut app)) {
@@ -1192,18 +1201,34 @@ mod imp {
             return;
         }
         let url = "about:blank".to_string();
-        let surface = OsrSurface::new(2, 2, 1.0);
-        let (mut client, lifecycle) =
-            plugin_browser_client_with_surface(&url, Some(surface.clone()));
+        // Windowed hosting needs a native parent, and the warm-up must never
+        // show a window of its own: park it under a hidden top-level HWND.
+        // Off-screen hosting paints into a throwaway 2×2 surface instead.
+        let (parent_window, surface) = if super::OFFSCREEN_HOSTING {
+            (None, Some(OsrSurface::new(2, 2, 1.0)))
+        } else {
+            match crate::components::plugin_content_host::HiddenHostWindow::create() {
+                Some(window) => (Some(window), None),
+                None => {
+                    eprintln!("[cef-warmup] warm-up browser skipped: no hidden host window");
+                    return;
+                }
+            }
+        };
+        let parent_handle = parent_window.as_ref().map_or(0, |window| window.hwnd());
+        let (mut client, lifecycle) = plugin_browser_client_with_surface(&url, surface.clone());
         let result = WindowBounds::new(0, 0, 2, 2)
             .map_err(|error| error.to_string())
             .and_then(|bounds| {
-                let config = WebViewConfig::new(url, bounds).windowless(surface);
+                let mut config = WebViewConfig::new(url, bounds);
+                if let Some(surface) = surface {
+                    config = config.windowless(surface);
+                }
                 // SAFETY: the warm-up view is stored in `host.warmup`,
                 // declared before `host.runtime`, and therefore released
-                // first.
+                // first; its hidden parent lives in the same struct, after it.
                 unsafe {
-                    let parent = NativeParent::from_raw(hwnd_to_cef(0));
+                    let parent = NativeParent::from_raw(hwnd_to_cef(parent_handle));
                     host.runtime
                         .create_webview_detached(parent, config, Some(&mut client))
                 }
@@ -1212,13 +1237,15 @@ mod imp {
         match result {
             Ok(view) => {
                 eprintln!(
-                    "[cef-warmup] warm-up browser created browser_id={}",
-                    view.browser_identifier()
+                    "[cef-warmup] warm-up browser created browser_id={} windowed={}",
+                    view.browser_identifier(),
+                    view.osr_surface().is_none()
                 );
                 host.warmup = Some(WarmupBrowser {
                     _view: view,
                     _client: client,
                     _lifecycle: lifecycle,
+                    _parent: parent_window,
                 });
             }
             Err(error) => {
@@ -1347,8 +1374,9 @@ mod imp {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return Err(HostAvailability::NoEditorForPlugin(plugin_id.to_string()));
         };
-        // OSR accepts no native parent; when Windows supplies one it is used
-        // only for monitor information and native dialog ownership.
+        // Windowed (Windows): `parent_hwnd` is the shell's content child and
+        // the browser fills it. Off-screen: no native parent is required; one
+        // supplied anyway is used only for monitor info and dialog ownership.
         WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
             .map_err(|e| HostAvailability::RuntimeFailed(e.to_string()))?;
 
@@ -1753,10 +1781,13 @@ mod imp {
                         let url = diagnostic_control_url().unwrap_or_else(|| {
                             format!("mikoplugin://{}/index.html", open.origin)
                         });
+                        // Windowed: CEF creates its own child window inside
+                        // `parent_hwnd` at the physical rect and handles DPI,
+                        // painting, and input itself — no surface at all.
                         // Off-screen: CEF lays out in logical pixels and paints
                         // physical ones into the surface the client owns.
                         let screen_geometry = pending.screen_geometry.unwrap_or_default();
-                        let surface = Some({
+                        let surface = super::OFFSCREEN_HOSTING.then(|| {
                             let (width, height) =
                                 logical_size(rect, bounds_command.scale_factor);
                             let surface = if let Some(sink) = open.accelerated_sink.clone() {

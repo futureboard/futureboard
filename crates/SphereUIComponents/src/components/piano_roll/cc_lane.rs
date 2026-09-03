@@ -4,7 +4,7 @@
 
 use super::*;
 
-use gpui::{PathBuilder, PathStyle, StrokeOptions};
+use super::cc_lane_render::{self, CcHandle, CcLaneSnapshot};
 
 /// Spacing, in lane pixels, between samples written while freehand-drawing a CC
 /// stroke. Small enough that the written curve matches the pointer path at any
@@ -794,22 +794,17 @@ impl PianoRoll {
         (1.0 - value.clamp(0.0, 1.0)) * (lane_h - 10.0) + 5.0
     }
 
-    /// The controller curve **and** its point handles, painted by one canvas.
+    /// The controller curve **and** its point handles.
     ///
-    /// This used to be a per-column canvas plus one interactive `div` per point.
-    /// Both scaled badly on a dense lane: each column re-scanned the whole point
-    /// list to interpolate its value, so the curve cost `O(width × points)` per
-    /// frame, and a few hundred points meant a few hundred styled, hoverable
-    /// elements laid out and painted every frame — which is what made drawing
-    /// feel heavy.
-    ///
-    /// Now the curve is sampled in a single merged walk over columns and points
-    /// (`O(width + points)`, since both are ordered by beat), and the handles are
-    /// quads in the same canvas. Nothing is lost by dropping the elements: the
-    /// handles never had a click handler — the lane's own `on_mouse_down`
-    /// hit-tests them geometrically via [`Self::cc_point_at`] — so they were
-    /// purely visual.
-    pub(super) fn build_cc_curve(&self, cx: &Context<Self>, clip_id: &str) -> gpui::AnyElement {
+    /// The lane samples the envelope once per visible column in a single merged
+    /// walk over columns and points (`O(width + points)`, both ordered by beat)
+    /// and culls handles outside the strip, then hands that draw-only snapshot
+    /// to [`cc_lane_render`]: the GPU painter when the Renderer setting asks
+    /// for it and a device is available, the batched GPUI canvas otherwise.
+    /// The handles never had click handlers — the lane's own `on_mouse_down`
+    /// hit-tests them geometrically via [`Self::cc_point_at`] — so they are
+    /// purely visual on both paths.
+    pub(super) fn build_cc_curve(&self, cx: &mut Context<Self>, clip_id: &str) -> gpui::AnyElement {
         let (view_w, cc_h) = self.cc_view_size();
         let kind = self.active_cc;
         let default_value = controller_default_value(kind);
@@ -818,8 +813,8 @@ impl PianoRoll {
 
         let mut samples = Vec::with_capacity(num_cols + 1);
         // Visible handles only — everything scrolled out of the strip is culled
-        // before it reaches the paint closure.
-        let mut handles: Vec<(f32, f32, bool)> = Vec::new();
+        // before it reaches the painter.
+        let mut handles: Vec<CcHandle> = Vec::new();
 
         {
             let timeline = self.timeline.read(cx);
@@ -862,66 +857,28 @@ impl PianoRoll {
                 if x < -HANDLE_R || x > view_w + HANDLE_R {
                     continue;
                 }
-                handles.push((
+                handles.push(CcHandle {
                     x,
-                    Self::controller_y_for_value(p.value, cc_h),
-                    self.cc_selection.contains(&p.id),
-                ));
+                    y: Self::controller_y_for_value(p.value, cc_h),
+                    selected: self.cc_selection.contains(&p.id),
+                });
             }
         }
 
-        let line_color = Colors::accent_primary();
-        let baseline_color = Colors::with_alpha(Colors::text_primary(), 0.10);
-        let handle_fill = Colors::accent_primary();
-        let handle_ring = Colors::text_primary();
-        canvas(
-            |_b, _w, _cx| {},
-            move |bounds: Bounds<Pixels>, (), window, _cx| {
-                let origin = bounds.origin;
-                let baseline = Bounds::new(
-                    origin + point(px(0.0), px(baseline_y)),
-                    size(px(view_w), px(1.0)),
-                );
-                window.paint_quad(fill(baseline, baseline_color));
-                // Keep the controller envelope as one continuous stroked path.
-                // Column quads create visible stair-stepping on diagonal ramps,
-                // especially at fractional Windows scale factors.
-                if samples.len() >= 2 {
-                    let options = StrokeOptions::default()
-                        .with_line_width(1.6)
-                        .with_miter_limit(2.0);
-                    let mut path =
-                        PathBuilder::stroke(px(1.6)).with_style(PathStyle::Stroke(options));
-                    path.move_to(origin + point(px(0.0), px(samples[0])));
-                    for (col, y) in samples.iter().enumerate().skip(1) {
-                        path.line_to(origin + point(px(col as f32), px(*y)));
-                    }
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, line_color);
-                    }
-                }
-                for (x, y, selected) in &handles {
-                    // A selected handle reads as a ring around a filled dot; an
-                    // unselected one is the plain dot.
-                    if *selected {
-                        let ring = Bounds::new(
-                            origin + point(px(x - HANDLE_R), px(y - HANDLE_R)),
-                            size(px(HANDLE_R * 2.0), px(HANDLE_R * 2.0)),
-                        );
-                        window.paint_quad(fill(ring, handle_ring));
-                    }
-                    let dot_r = if *selected { HANDLE_R - 2.0 } else { HANDLE_R };
-                    let dot = Bounds::new(
-                        origin + point(px(x - dot_r), px(y - dot_r)),
-                        size(px(dot_r * 2.0), px(dot_r * 2.0)),
-                    );
-                    window.paint_quad(fill(dot, handle_fill));
-                }
-            },
-        )
-        .absolute()
-        .inset_0()
-        .into_any_element()
+        let snapshot = CcLaneSnapshot {
+            width: view_w,
+            height: cc_h,
+            scale: self.window_scale,
+            samples,
+            handles,
+            baseline_y,
+        };
+        if cc_lane_render::wgpu_selected() {
+            if let Some(element) = cc_lane_render::render_wgpu(&snapshot, cx) {
+                return element;
+            }
+        }
+        cc_lane_render::render_gpui(&snapshot)
     }
 
     fn build_cc_selection_overlay(&self) -> Option<gpui::AnyElement> {
@@ -985,7 +942,7 @@ impl PianoRoll {
                 .justify_center()
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
-                .child("Drag to draw · Alt free · Shift-drag line · Right-click a point to delete")
+                .child("Drag to draw · Alt+drag draws free (no snap) · Shift-drag line · Right-click a point to delete")
         });
         let curve_menu = self.build_cc_curve_menu(cx);
         let selection_overlay = self.build_cc_selection_overlay();
@@ -1022,6 +979,22 @@ impl PianoRoll {
                         // Alt is the lane-wide "free" modifier: it releases the
                         // grid for whichever gesture the click starts.
                         let free = ev.modifiers.alt;
+                        // Alt+click on empty lane is *free draw* in every tool
+                        // (Line keeps Alt as its free ramp). With the Select
+                        // tool this used to start a subtract-marquee, so the
+                        // one gesture the hint advertised did nothing there;
+                        // a point under the cursor still moves, freely.
+                        if free && this.tool != PianoTool::Line {
+                            if let Some(cid) = this.editing_clip_id(cx) {
+                                if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
+                                    this.begin_cc_move(id, true, window, cx);
+                                    return;
+                                }
+                            }
+                            this.cc_selection.clear();
+                            this.begin_cc_paint(false, true, lx, ly, window, cx);
+                            return;
+                        }
                         // The Line tool draws a ramp; Shift is retained as the
                         // established temporary line gesture from other tools.
                         if this.tool == PianoTool::Line

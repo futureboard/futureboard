@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../packages/shared/app/windows/app.rc");
     println!("cargo:rerun-if-changed=../../../packages/shared/app/windows/app.manifest");
     println!("cargo:rerun-if-changed=../../../packages/shared/app/icons/icon.ico");
+    println!("cargo:rerun-if-changed=../../../packages/shared/app/icons/fbproj.ico");
     println!("cargo:rerun-if-changed=../../../.discordrpcsecret");
 
     stage_professional_sources();
@@ -294,7 +295,34 @@ fn stage_professional_sources() {
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         stage_professional_source(&source_dir, &output_dir, "asio.rs");
+        // The ASIO logo the About window shows beside the licensed engine is
+        // embedded (include_bytes!) from this staged copy, like the EULA text.
+        copy_professional_asset_as(
+            &assets_dir,
+            &output_dir,
+            "logo/asio-logo.png",
+            "asio-logo.png",
+        );
     }
+}
+
+/// As [`copy_professional_asset`], for an asset that lives in a subdirectory of
+/// `assets/`: it is staged flat under `staged_name` so the staged source can
+/// embed it with one `concat!(env!("OUT_DIR"), ...)` path.
+fn copy_professional_asset_as(
+    assets_dir: &Path,
+    output_dir: &Path,
+    relative_path: &str,
+    staged_name: &str,
+) {
+    let source_path = assets_dir.join(relative_path);
+    println!("cargo:rerun-if-changed={}", source_path.display());
+    std::fs::copy(&source_path, output_dir.join(staged_name)).unwrap_or_else(|error| {
+        panic!(
+            "Professional Edition asset is required for --features professional: {}: {error}",
+            source_path.display()
+        )
+    });
 }
 
 /// Copy an Professional Edition asset verbatim into the staging directory so the

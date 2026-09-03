@@ -508,12 +508,20 @@ fn track_type_hosts_instrument(track_type: TrackType) -> bool {
 /// master track has no note source, so an insert on one can only ever run as an
 /// effect regardless of what it claims. On a track that *can* host an instrument
 /// the declaration is trusted as before.
+///
+/// `builtin_instrument` says the track's note source is the built-in Soundfont
+/// Player or the native Solfege engine. Those are track instruments, not
+/// inserts, so every insert on such a track is an effect *by construction*:
+/// the legacy slot-zero fallback would otherwise turn the first DSP Fx a user
+/// drops on a Soundfont track into an "instrument" that is fed no audio and
+/// merely adds its (silent) output — the Fx appears to do nothing.
 fn bridge_insert_role(
     track_type: TrackType,
     slot_index: usize,
     plugin_is_instrument: Option<bool>,
+    builtin_instrument: bool,
 ) -> &'static str {
-    if !track_type_hosts_instrument(track_type) {
+    if !track_type_hosts_instrument(track_type) || builtin_instrument {
         return "effect";
     }
     match plugin_is_instrument {
@@ -529,6 +537,7 @@ fn build_engine_inserts_for(
     track_type: TrackType,
     slots: &[InsertSlotState],
     export_mode: bool,
+    builtin_instrument: bool,
 ) -> Vec<EngineInsertSnapshot> {
     use crate::components::timeline::timeline_state::InsertPluginFormat;
 
@@ -575,7 +584,12 @@ fn build_engine_inserts_for(
                         .filter(|p| !p.trim().is_empty())?
                 };
 
-                let role = bridge_insert_role(track_type, slot_index, slot.plugin_is_instrument);
+                let role = bridge_insert_role(
+                    track_type,
+                    slot_index,
+                    slot.plugin_is_instrument,
+                    builtin_instrument,
+                );
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
@@ -757,7 +771,19 @@ fn vsti_output_children_json(slot: &InsertSlotState) -> serde_json::Value {
 }
 
 fn build_engine_inserts(track: &TrackState, export_mode: bool) -> Vec<EngineInsertSnapshot> {
-    build_engine_inserts_for(&track.id, track.track_type, &track.inserts, export_mode)
+    build_engine_inserts_for(
+        &track.id,
+        track.track_type,
+        &track.inserts,
+        export_mode,
+        track_has_builtin_instrument(track),
+    )
+}
+
+/// The track sounds through a built-in instrument (Soundfont Player or Solfege)
+/// rather than a hosted VSTi insert.
+fn track_has_builtin_instrument(track: &TrackState) -> bool {
+    track.builtin_soundfont_player || track.solfege.is_some()
 }
 
 /// Build the DirectAudio send descriptors for one track (Phase 3). Each send carries
@@ -959,6 +985,7 @@ fn build_engine_project_snapshot_inner(
         TrackType::Master,
         &state.master.inserts,
         export_mode,
+        false,
     );
     log_track_insert_chain(MASTER_TRACK_ID, &master_inserts);
 
@@ -2327,8 +2354,14 @@ mod tests {
         let track = state
             .find_track(&track_id)
             .expect("instrument track in state");
-        assert_eq!(bridge_insert_role(track.track_type, 0, None), "instrument");
-        assert_eq!(bridge_insert_role(track.track_type, 1, None), "effect");
+        assert_eq!(
+            bridge_insert_role(track.track_type, 0, None, false),
+            "instrument"
+        );
+        assert_eq!(
+            bridge_insert_role(track.track_type, 1, None, false),
+            "effect"
+        );
 
         state.set_insert_plugin_role(&track_id, &slot_instrument, false);
         let snapshot = build_engine_project_snapshot(&state, 48_000, None, None);
@@ -2365,20 +2398,50 @@ mod tests {
             TrackType::Master,
         ] {
             assert_eq!(
-                bridge_insert_role(track_type, 0, Some(true)),
+                bridge_insert_role(track_type, 0, Some(true), false),
                 "effect",
                 "{track_type:?} has no note source, so slot 0 cannot be an instrument"
             );
-            assert_eq!(bridge_insert_role(track_type, 2, Some(true)), "effect");
-            assert_eq!(bridge_insert_role(track_type, 0, None), "effect");
+            assert_eq!(
+                bridge_insert_role(track_type, 2, Some(true), false),
+                "effect"
+            );
+            assert_eq!(bridge_insert_role(track_type, 0, None, false), "effect");
         }
         // Tracks that do carry notes keep trusting the declaration.
         for track_type in [TrackType::Instrument, TrackType::Midi] {
-            assert_eq!(bridge_insert_role(track_type, 0, Some(true)), "instrument");
-            assert_eq!(bridge_insert_role(track_type, 3, Some(true)), "instrument");
-            assert_eq!(bridge_insert_role(track_type, 0, Some(false)), "effect");
-            assert_eq!(bridge_insert_role(track_type, 0, None), "instrument");
-            assert_eq!(bridge_insert_role(track_type, 1, None), "effect");
+            assert_eq!(
+                bridge_insert_role(track_type, 0, Some(true), false),
+                "instrument"
+            );
+            assert_eq!(
+                bridge_insert_role(track_type, 3, Some(true), false),
+                "instrument"
+            );
+            assert_eq!(
+                bridge_insert_role(track_type, 0, Some(false), false),
+                "effect"
+            );
+            assert_eq!(bridge_insert_role(track_type, 0, None, false), "instrument");
+            assert_eq!(bridge_insert_role(track_type, 1, None, false), "effect");
+        }
+    }
+
+    /// On a Soundfont Player / Solfege track the note source is the track
+    /// itself, so every insert — slot 0 included, declared or not — is an
+    /// effect that must be fed the instrument's audio.
+    #[test]
+    fn inserts_on_a_builtin_instrument_track_are_always_effects() {
+        for track_type in [TrackType::Instrument, TrackType::Midi] {
+            assert_eq!(bridge_insert_role(track_type, 0, None, true), "effect");
+            assert_eq!(
+                bridge_insert_role(track_type, 0, Some(true), true),
+                "effect"
+            );
+            assert_eq!(
+                bridge_insert_role(track_type, 1, Some(false), true),
+                "effect"
+            );
         }
     }
 

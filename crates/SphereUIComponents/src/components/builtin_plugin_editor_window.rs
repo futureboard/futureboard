@@ -1791,7 +1791,13 @@ impl BuiltinPluginEditorWindow {
             width: rect.width,
             height: rect.height,
         };
-        let accelerated_sink = self.surface.accelerated_sink(window);
+        // A windowed browser paints into its own HWND; only off-screen hosting
+        // has frames for the GPUI surface to present.
+        let accelerated_sink = if OFFSCREEN_HOSTING {
+            self.surface.accelerated_sink(window)
+        } else {
+            None
+        };
         match host::open_view(
             self.view_id,
             &self.editor_id,

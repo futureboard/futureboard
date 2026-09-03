@@ -4,7 +4,8 @@
 # runtime). The AppImage this package extracts is built by
 # packaging/linux/bundle-appimage.sh and published on every nightly release.
 pkgname=futureboard-studio-bin
-pkgver=2026.7.2
+pkgver=2026.9.1_beta1.2
+_appver=2026.9.1-beta1.2
 pkgrel=1
 pkgdesc="Futureboard Studio — native Digital Audio Workstation"
 arch=('x86_64')
@@ -27,7 +28,9 @@ conflicts=('futureboard-studio')
 options=('!strip' '!debug')
 install=futureboard-studio-bin.install
 
-_appimage="Futureboard.Studio-${pkgver}-x86_64.AppImage"
+# The release asset carries the exact version (hyphen and all); AUR pkgver
+# cannot, so `_appver` is synced alongside it by scripts/sync-version.mjs.
+_appimage="Futureboard.Studio-${_appver}-x86_64.AppImage"
 source_x86_64=("${_appimage}::https://github.com/arizkami/Futureboard/releases/download/nightly/${_appimage}")
 sha256sums_x86_64=('SKIP')
 

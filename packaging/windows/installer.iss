@@ -34,7 +34,7 @@
 #endif
 
 #ifndef MyAppVersion
-#define MyAppVersion "2026.7.2"
+#define MyAppVersion "2026.9.1-beta1.2"
 #endif
 
 #define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
@@ -88,6 +88,11 @@ Name: "desktopicon"; \
 
 Name: "fileassoc_apak"; \
     Description: "Associate .apak packages with APAK Installer"; \
+    GroupDescription: "File associations:"; \
+    Flags: checkedonce
+
+Name: "fileassoc_fbproj"; \
+    Description: "Associate .fbproj projects with {#MyAppName}"; \
     GroupDescription: "File associations:"; \
     Flags: checkedonce
 
@@ -161,6 +166,40 @@ Root: HKA; \
     ValueName: ""; \
     ValueData: """{app}\apakinstaller.exe"" ""%1"""; \
     Tasks: fileassoc_apak
+
+; Associate .fbproj project files with Futureboard Studio. Double-clicking a
+; project launches `FutureboardNative.exe "<path>"`; the app routes a project
+; argument straight to Studio (`StartupRoute::OpenProject`). Icon index 1 of
+; the executable is the document icon embedded from app.rc.
+Root: HKA; \
+    Subkey: "Software\Classes\.fbproj"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "Futureboard.Project"; \
+    Flags: uninsdeletevalue; \
+    Tasks: fileassoc_fbproj
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.Project"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "Futureboard Studio Project"; \
+    Flags: uninsdeletekey; \
+    Tasks: fileassoc_fbproj
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.Project\DefaultIcon"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "{app}\{#MyAppExeName},1"; \
+    Tasks: fileassoc_fbproj
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.Project\shell\open\command"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: """{app}\{#MyAppExeName}"" ""%1"""; \
+    Tasks: fileassoc_fbproj
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; \

@@ -20,6 +20,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use crate::backend::render::{drain_commands, fill_output_f32, LocalAudioState};
 use crate::backend::DauxDeviceConfig;
 use crate::command::EngineCommand;
+use crate::dsp::dither::{DitheredOutput, OutputDither};
 use crate::engine::SharedState;
 use crate::error::SphereAudioError;
 use crate::runtime::RuntimeProject;
@@ -321,9 +322,13 @@ fn build_stream_typed<T>(
     mmcss_priority: bool,
 ) -> Result<cpal::Stream, String>
 where
-    T: SizedSample + Sample + FromSample<f32>,
+    T: SizedSample + Sample + FromSample<f32> + DitheredOutput,
 {
     let output_sample_rate = config.sample_rate.0;
+    // Word-length reduction state for integer device formats (ASIO Int32LSB /
+    // Int16LSB, WASAPI Exclusive integer modes). Owned by the callback; one
+    // xorshift per stream, advanced per sample, never reseeded mid-stream.
+    let mut dither = OutputDither::new();
     let sr = output_sample_rate as f64;
     let ch = config.channels as usize;
     let mut runtime = initial_runtime;
@@ -379,12 +384,18 @@ where
                 // and record-stop compensation reads it to line overdubs up.
                 // The legacy callback path already did this; the DAUx path was
                 // dropping `info` on the floor, leaving it stuck at 0.
+                //
+                // Not when the backend reports its own latency (ASIO): cpal's
+                // ASIO timestamp spans exactly one buffer, so storing it here
+                // every block would overwrite the driver's full-path figure.
                 let ts = info.timestamp();
-                if let Some(delay) = ts.playback.duration_since(&ts.callback) {
-                    shared.output_latency_secs.store(
-                        crate::engine::f32_store(delay.as_secs_f32()),
-                        Ordering::Relaxed,
-                    );
+                if !shared.latency_from_driver.load(Ordering::Relaxed) {
+                    if let Some(delay) = ts.playback.duration_since(&ts.callback) {
+                        shared.output_latency_secs.store(
+                            crate::engine::f32_store(delay.as_secs_f32()),
+                            Ordering::Relaxed,
+                        );
+                    }
                 }
 
                 // ── Set MMCSS on first callback invocation ────────────────────
@@ -429,8 +440,14 @@ where
                 fill_output_f32(scratch, ch, &mut runtime, &shared, &mut local);
 
                 // ── Convert f32 → T ───────────────────────────────────────────
+                // Not `from_sample`: that truncates toward zero, which is a bias
+                // plus signal-correlated distortion at the device word length —
+                // audible as a dirty floor on quiet material and fade tails.
+                // Integer targets are rounded with TPDF dither at their own
+                // resolution (24 valid bits for 32-bit words); floats pass
+                // through. See `dsp::dither`.
                 for (dst, src) in data.iter_mut().zip(scratch.iter()) {
-                    *dst = T::from_sample(*src);
+                    *dst = T::dithered_from_f32(*src, &mut dither);
                 }
                 let _ = mmcss_set; // suppress unused (non-windows)
             },

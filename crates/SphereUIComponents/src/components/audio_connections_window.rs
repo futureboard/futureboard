@@ -28,10 +28,12 @@ use crate::audio_connections::{
     AvailablePorts, ChannelLayout,
 };
 use crate::components::audio_connections_panel::{
-    cell_anchor, column_widths, layout_label, AudioConnectionsPanelState, ColumnWidths,
-    ConnectionRow, ConnectionsTab, EditableCell, OpenDropdown, ROW_HEIGHT,
+    cell_anchor_for_row, column_widths, dropdown_height, dropdown_width, layout_label,
+    AudioConnectionsPanelState, ColumnWidths, ConnectionRow, ConnectionsTab, EditableCell,
+    OpenDropdown, ROW_HEIGHT,
 };
 use crate::components::combo_box::combo_box_string_menu;
+use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::text_input::{text_field, TextInputState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
 use crate::theme::Colors;
@@ -174,6 +176,9 @@ pub struct AudioConnectionsWindow {
     snapshot: AudioConnectionsSnapshot,
     on_edit: ConnectionEditCb,
     on_close: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + 'static>,
+    /// The table's scroll position, so a dropdown anchors to where its cell
+    /// actually is after the table scrolled sideways or down.
+    table_scroll: gpui::ScrollHandle,
 }
 
 impl AudioConnectionsWindow {
@@ -190,6 +195,7 @@ impl AudioConnectionsWindow {
             snapshot,
             on_edit,
             on_close,
+            table_scroll: gpui::ScrollHandle::new(),
         }
     }
 
@@ -327,15 +333,17 @@ impl AudioConnectionsWindow {
     /// carries a hover state, a caret, and a focus ring when it is the active
     /// Tab target — enough to read as editable without making the table noisy.
     ///
-    /// The anchor is computed from the column layout and the row grid, both in
-    /// this window's coordinate space, so the popover follows the cell when the
-    /// window is resized or moved to another display.
+    /// The anchor is the cell's own laid-out rectangle — column layout, row
+    /// index, and the table's current scroll — all in this window's coordinate
+    /// space, so the popover sits on its cell after any resize, scroll, or
+    /// move to another display.
     #[allow(clippy::too_many_arguments)]
     fn combo_cell(
         &self,
         element_id: gpui::ElementId,
         text: String,
         cell_kind: EditableCell,
+        row_index: usize,
         columns: &ColumnWidths,
         available: bool,
         focused: bool,
@@ -343,9 +351,19 @@ impl AudioConnectionsWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let enabled = self.snapshot.has_project;
+        let open = self.panel.is_dropdown_open(&dropdown);
         let width = columns.width_of(cell_kind);
         let columns = *columns;
         let full_label = text.clone();
+        // Rest fill is transparent over the row; hover lifts it with the shared
+        // state layer, and the cell whose menu is open holds the selected fill
+        // so the eye can find which cell the floating list belongs to.
+        let rest_fill = if open {
+            Colors::state_selected()
+        } else {
+            gpui::transparent_black().into()
+        };
+        let hover_fill = Colors::composite(rest_fill, Colors::state_hover());
         div()
             .id(element_id)
             .w(px(width))
@@ -354,20 +372,22 @@ impl AudioConnectionsWindow {
             .flex_row()
             .items_center()
             .justify_between()
+            .gap(px(4.0))
             .h(px(ROW_HEIGHT - 4.0))
             .px(px(5.0))
             .rounded(px(crate::theme::radius::CONTROL))
             .border(px(1.0))
-            .border_color(if focused {
+            .border_color(if focused || open {
                 Colors::accent_primary()
             } else {
                 Colors::border_subtle()
             })
+            .bg(rest_fill)
             // The full text is always reachable, however narrow the column is.
             .tooltip(tooltip_text(full_label))
             .when(enabled, |cell| {
                 cell.cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|s| s.bg(Colors::button_bg_hover()))
+                    .hover(move |s| s.bg(hover_fill))
             })
             .child(
                 div()
@@ -375,7 +395,9 @@ impl AudioConnectionsWindow {
                     .min_w(px(0.0))
                     .truncate()
                     .text_size(px(10.0))
-                    .text_color(if available {
+                    .text_color(if !enabled {
+                        Colors::text_muted()
+                    } else if available {
                         Colors::text_primary()
                     } else {
                         Colors::accent_warning()
@@ -386,18 +408,29 @@ impl AudioConnectionsWindow {
                 div()
                     .flex_none()
                     .text_size(px(7.0))
-                    .text_color(Colors::text_muted())
-                    .child("▾"),
+                    .text_color(if open {
+                        Colors::accent_primary()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .child(if open { "▴" } else { "▾" }),
             )
             .when(enabled, |cell| {
                 cell.on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, _w, cx| {
+                    cx.listener(move |this, _event: &gpui::MouseDownEvent, _w, cx| {
                         // Stop here so opening a dropdown never also toggles
                         // Enabled or re-triggers the row click.
                         cx.stop_propagation();
-                        let pointer_y: f32 = event.position.y.into();
-                        let anchor = cell_anchor(&columns, cell_kind, pointer_y, table_top());
+                        let scroll = this.table_scroll.offset();
+                        let anchor = cell_anchor_for_row(
+                            &columns,
+                            cell_kind,
+                            row_index,
+                            table_top(),
+                            scroll.x.into(),
+                            scroll.y.into(),
+                        );
                         this.panel.toggle_dropdown_at(dropdown.clone(), anchor);
                         cx.notify();
                     }),
@@ -667,15 +700,24 @@ impl AudioConnectionsWindow {
         };
 
         let labels: Vec<String> = options.iter().map(|(label, _)| label.clone()).collect();
-        let popup_height = (labels.len() as f32 * 20.0 + 8.0).min(220.0);
+        // Sized to its content: as tall as its rows (until it must scroll), and
+        // wide enough for the longest label — a menu the width of a 110 px port
+        // column truncated every real endpoint name and read as cropped.
+        let popup_height = dropdown_height(labels.len());
         // This window's own content rect — never the main project window's.
         let viewport = crate::overlay::external_dialog_overlay_bounds(window);
+        let longest = labels
+            .iter()
+            .map(|label| label.chars().count())
+            .max()
+            .unwrap_or(0);
+        let popup_width = dropdown_width(longest, anchor.width, viewport.size.width.into());
         let placement = crate::overlay::resolve_popup_placement(
             gpui::bounds(
                 gpui::point(px(anchor.x), px(anchor.y)),
                 gpui::size(px(anchor.width), px(anchor.height)),
             ),
-            gpui::size(px(anchor.width.max(140.0)), px(popup_height)),
+            gpui::size(px(popup_width), px(popup_height)),
             viewport,
             crate::overlay::PopupPlacementOptions {
                 preferred_side: crate::overlay::PopupSide::Bottom,
@@ -738,8 +780,17 @@ impl AudioConnectionsWindow {
         let device_ok = !matches!(row.status, AudioConnectionStatus::DeviceMissing);
         let port_ok = !matches!(row.status, AudioConnectionStatus::PortMissing);
 
+        // Selection is fill plus a leading-edge marker (never a border change,
+        // which would reflow the row); hover lifts whichever fill is at rest.
+        let rest_fill = if row.selected {
+            Colors::surface_selected_soft()
+        } else {
+            gpui::transparent_black().into()
+        };
+        let hover_fill = Colors::composite(rest_fill, Colors::state_hover());
         div()
             .id(("audio-connection-row", index))
+            .relative()
             .flex()
             .flex_row()
             .items_center()
@@ -748,7 +799,8 @@ impl AudioConnectionsWindow {
             .w(px(columns.total()))
             .border_b(px(1.0))
             .border_color(Colors::border_subtle())
-            .when(row.selected, |r| r.bg(Colors::surface_selected_soft()))
+            .bg(rest_fill)
+            .hover(move |r| r.bg(hover_fill))
             .cursor(gpui::CursorStyle::PointingHand)
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -757,6 +809,17 @@ impl AudioConnectionsWindow {
                     cx.notify();
                 }),
             )
+            .when(row.selected, |r| {
+                r.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.0))
+                        .bg(Colors::accent_primary()),
+                )
+            })
             // Enabled toggle. Disabling keeps every mapping — the bus simply
             // resolves to silence until it is re-enabled.
             .child(
@@ -805,6 +868,7 @@ impl AudioConnectionsWindow {
                 ("audio-connection-config", index).into(),
                 layout_label(row.layout),
                 EditableCell::Configuration,
+                index,
                 columns,
                 true,
                 focused_cell == Some(EditableCell::Configuration),
@@ -815,6 +879,7 @@ impl AudioConnectionsWindow {
                 ("audio-connection-device", index).into(),
                 row.device_label.clone(),
                 EditableCell::Device,
+                index,
                 columns,
                 device_ok,
                 focused_cell == Some(EditableCell::Device),
@@ -825,6 +890,7 @@ impl AudioConnectionsWindow {
                 ("audio-connection-left", index).into(),
                 row.left_port.clone(),
                 EditableCell::LeftPort,
+                index,
                 columns,
                 port_ok,
                 focused_cell == Some(EditableCell::LeftPort),
@@ -842,6 +908,7 @@ impl AudioConnectionsWindow {
                         ("audio-connection-right", index).into(),
                         text,
                         EditableCell::RightPort,
+                        index,
                         columns,
                         port_ok,
                         focused_cell == Some(EditableCell::RightPort),
@@ -854,18 +921,36 @@ impl AudioConnectionsWindow {
                     .into_any_element(),
                 None => cell(String::new(), columns.right_port, true).into_any_element(),
             })
+            // Status on two channels — a dot and the word share the hue — so
+            // "needs attention" is scannable down the column without reading.
             .child(
                 div()
                     .id(("audio-connection-status", index))
                     .w(px(columns.status))
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(5.0))
                     .px(px(6.0))
-                    .text_size(px(9.5))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .truncate()
-                    .text_color(status_color(row.status))
                     .tooltip(tooltip_text(status_tooltip))
-                    .child(status_label),
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded(px(crate::theme::radius::PILL))
+                            .bg(status_color(row.status)),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(px(9.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(status_color(row.status))
+                            .child(status_label),
+                    ),
             )
     }
 }
@@ -974,12 +1059,20 @@ impl Render for AudioConnectionsWindow {
             (ConnectionsTab::Outputs, "audio-connections-tab-out"),
         ] {
             let active = tab == this_tab;
+            // Each tab carries its bus count, so the other direction's state is
+            // readable without switching to it.
+            let tab_count = self
+                .snapshot
+                .registry
+                .by_direction(this_tab.direction())
+                .len();
             tabs = tabs.child(
                 div()
                     .id(element_id)
                     .flex()
                     .items_center()
                     .justify_center()
+                    .gap(px(5.0))
                     .h(px(TABS_HEIGHT - 2.0))
                     .px(px(12.0))
                     .cursor(gpui::CursorStyle::PointingHand)
@@ -996,7 +1089,24 @@ impl Render for AudioConnectionsWindow {
                     } else {
                         Colors::text_secondary()
                     })
+                    .hover(|s| s.bg(Colors::state_hover()))
                     .child(this_tab.label())
+                    .when(has_project, |t| {
+                        t.child(
+                            div()
+                                .px(px(5.0))
+                                .rounded(px(crate::theme::radius::PILL))
+                                .bg(Colors::surface_panel_alt())
+                                .text_size(px(8.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if active {
+                                    Colors::text_secondary()
+                                } else {
+                                    Colors::text_muted()
+                                })
+                                .child(tab_count.to_string()),
+                        )
+                    })
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(move |this, _event: &gpui::MouseDownEvent, _w, cx| {
@@ -1035,28 +1145,41 @@ impl Render for AudioConnectionsWindow {
             }
         };
 
-        let duplicate_button = selected.clone().map(|id| {
+        // Duplicate / Remove are always in the bar and simply disabled without
+        // a selection: buttons that appear and vanish shift the toolbar under
+        // the pointer and make the row-selection state harder to read.
+        let duplicate_button = {
             let on_edit = self.on_edit.clone();
+            let target = selected.clone();
             toolbar_button(
                 "audio-connections-duplicate",
                 "Duplicate".to_string(),
-                has_project,
-                move |_e, w, cx| on_edit(&ConnectionEdit::Duplicate { id: id.clone() }, w, cx),
+                has_project && target.is_some(),
+                move |_e, w, cx| {
+                    if let Some(id) = target.clone() {
+                        on_edit(&ConnectionEdit::Duplicate { id }, w, cx);
+                    }
+                },
             )
-        });
+        };
 
-        let remove_button = selected.clone().map(|id| {
+        let remove_button = {
             let on_edit = self.on_edit.clone();
+            let target = selected.clone();
             toolbar_button(
                 "audio-connections-remove",
                 "Remove".to_string(),
-                has_project,
+                has_project && target.is_some(),
                 // Referenced buses are confirmed by the shared message-box
                 // window; the layout decides, because only it knows the
                 // references.
-                move |_e, w, cx| on_edit(&ConnectionEdit::RequestRemove { id: id.clone() }, w, cx),
+                move |_e, w, cx| {
+                    if let Some(id) = target.clone() {
+                        on_edit(&ConnectionEdit::RequestRemove { id }, w, cx);
+                    }
+                },
             )
-        });
+        };
 
         let reset_button = {
             let on_edit = self.on_edit.clone();
@@ -1092,8 +1215,16 @@ impl Render for AudioConnectionsWindow {
                 has_project,
                 add_stereo,
             ))
-            .children(duplicate_button)
-            .children(remove_button)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(1.0))
+                    .h(px(14.0))
+                    .mx(px(3.0))
+                    .bg(Colors::border_subtle()),
+            )
+            .child(duplicate_button)
+            .child(remove_button)
             .child(div().flex_1().min_w(px(0.0)))
             .child(reset_button);
 
@@ -1127,17 +1258,36 @@ impl Render for AudioConnectionsWindow {
                 .child("No project is open. Audio Connections are stored per project.")
                 .into_any_element()
         } else if rows.is_empty() {
+            // The empty state offers the one action that fills the table in a
+            // click, rather than pointing at the toolbar.
+            let on_edit = self.on_edit.clone();
             div()
                 .flex()
                 .flex_1()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(4.0))
+                .gap(px(6.0))
                 .text_size(px(10.5))
                 .text_color(Colors::text_muted())
-                .child(format!("No {} buses yet.", tab.label().to_lowercase()))
-                .child("Use Add Mono / Add Stereo, or Reset Defaults.")
+                .child(
+                    div()
+                        .text_color(Colors::text_secondary())
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(format!("No {} buses yet", tab.label().to_lowercase())),
+                )
+                .child("Create the default buses for the current audio device, or add one with Add Mono / Add Stereo.")
+                .child(
+                    div().mt(px(6.0)).child(fb_button(
+                        "audio-connections-empty-reset",
+                        "Create Default Buses",
+                        FbButtonKind::Primary,
+                        true,
+                        move |_, w, cx| {
+                            on_edit(&ConnectionEdit::RequestResetDefaults { direction }, w, cx)
+                        },
+                    )),
+                )
                 .into_any_element()
         } else {
             let mut list = div()
@@ -1161,6 +1311,8 @@ impl Render for AudioConnectionsWindow {
             .flex_1()
             .min_h_0()
             .overflow_scroll()
+            // Tracked so a dropdown can anchor to where its cell is *now*.
+            .track_scroll(&self.table_scroll)
             .child(header_row)
             .child(body);
 
@@ -1263,8 +1415,8 @@ pub fn open_audio_connections_window(
 mod tests {
     use super::*;
     use crate::components::audio_connections_panel::{
-        column_widths, removal_needs_confirmation, reset_defaults_needs_confirmation, snap_row_top,
-        AudioConnectionsPanelState, ColumnWidths, PopoverSide,
+        cell_anchor, column_widths, removal_needs_confirmation, reset_defaults_needs_confirmation,
+        snap_row_top, AudioConnectionsPanelState, ColumnWidths, PopoverSide,
     };
 
     fn ports_with(input_channels: u32, output_channels: u32) -> AvailablePorts {

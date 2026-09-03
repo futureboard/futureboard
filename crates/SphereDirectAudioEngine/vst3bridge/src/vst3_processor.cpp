@@ -1353,12 +1353,39 @@ void daux_editor_window_dpi_changed(void *user_data, void *shell_hwnd,
   if (!p || !p->editor_view || !content || !IsWindow(content))
     return;
   daux_editor_set_content_scale(p, shell, "WM_DPICHANGED");
-  daux_resize_child_client(content, width, height);
-  auto local = daux_local_view_rect(width, height);
+  // The scale factor just changed the view's own idea of its size — a
+  // fixed-size editor now wants (logical × new scale), which is not the
+  // shell's client rect scaled from the old DPI (titlebar rounding, and an
+  // editor that never accepted a free resize in the first place). Ask the
+  // view, then recompute the windowed size from that answer so the shell
+  // outer = content + titlebar at the new DPI, exactly like the open path.
+  int content_w = width;
+  int content_h = height;
+  Steinberg::ViewRect rescaled{};
+  const auto get_size_result = p->editor_view->getSize(&rescaled);
+  if (get_size_result == Steinberg::kResultTrue ||
+      get_size_result == Steinberg::kResultOk) {
+    const int w = daux_view_rect_width(rescaled);
+    const int h = daux_view_rect_height(rescaled);
+    if (w > 0 && h > 0) {
+      content_w = w;
+      content_h = h;
+    }
+  }
+  content_w = std::clamp(content_w, 160, 4096);
+  content_h = std::clamp(content_h, 160, 4096);
+  daux_constrain_content_size(p, &content_w, &content_h);
+  const bool shell_changed =
+      daux_embed_apply_content_size(p, content_w, content_h, "WM_DPICHANGED.getSize");
+  daux_resize_child_client(content, content_w, content_h);
+  auto local = daux_local_view_rect(content_w, content_h);
   const auto on_size_res = p->editor_view->onSize(&local);
   std::fprintf(stderr,
-               "[PluginEditor] WM_DPICHANGED onSize result=0x%x client=%dx%d\n",
-               static_cast<unsigned>(on_size_res), width, height);
+               "[PluginEditor] WM_DPICHANGED onSize result=0x%x client=%dx%d "
+               "(suggested=%dx%d getSize=0x%x shell_resized=%d)\n",
+               static_cast<unsigned>(on_size_res), content_w, content_h, width,
+               height, static_cast<unsigned>(get_size_result),
+               shell_changed ? 1 : 0);
 }
 
 void daux_editor_window_close_requested(void *user_data) {
@@ -3726,7 +3753,14 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
 
   // ── Phase C: getSize → preferred content size, resize the open shell to
   // match, then install the IPlugFrame before attached().
-  daux_editor_set_content_scale(processor, parent, "before_getSize");
+  //
+  // Scale from the shell the view will actually live in, not the owner: the
+  // detached editor can sit on a monitor with a different DPI than Studio's
+  // main window, and a size queried at the wrong scale opens cropped or with
+  // a gap until the next resize.
+  daux_editor_set_content_scale(
+      processor, (content && IsWindow(content)) ? content : parent,
+      "before_getSize");
 
   Steinberg::ViewRect preferred{};
   const auto get_size_result = processor->editor_view->getSize(&preferred);

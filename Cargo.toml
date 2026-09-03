@@ -80,7 +80,7 @@ exclude = [
 
 
 [workspace.package]
-version = "0.1.0"
+version = "2026.9.1-beta1.2"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -222,19 +222,19 @@ memmap2 = "0.9"
 midir = "0.9"
 rustfft = "6"
 
-# Solfege is consumed as a Git workspace so Singer follows the engine's
-# host-neutral runtime and event contracts instead of maintaining a fork here.
-solfege-audio = { path = "../dsp/solfege-engine/crates/solfege-audio" }
-solfege-core = { path = "../dsp/solfege-engine/crates/solfege-core" }
-solfege-engine = { path = "../dsp/solfege-engine/crates/solfege-engine", default-features = false, features = ["fbmx"] }
-solfege-event = { path = "../dsp/solfege-engine/crates/solfege-event" }
+# Solfege is consumed from its own Git repository so Singer follows the
+# engine's host-neutral runtime and event contracts instead of maintaining a
+# fork here — and so a clone builds without a sibling `../dsp` checkout.
+solfege-audio = { git = "https://github.com/futureboard/solfage-engine" }
+solfege-core = { git = "https://github.com/futureboard/solfage-engine" }
+solfege-engine = { git = "https://github.com/futureboard/solfage-engine", default-features = false, features = ["fbmx"] }
+solfege-event = { git = "https://github.com/futureboard/solfage-engine" }
 # SFM v1 container reader produced by the DSP workspace. This is format-only;
 # realtime inference still comes from the existing Solfege + FBMX runtimes.
-solfege-model = { path = "../dsp/solfege-engine/crates/solfege-model" }
-solfege-acoustic = { path = "../dsp/solfege-engine/crates/solfege-acoustic" }
+solfege-model = { git = "https://github.com/futureboard/solfage-engine" }
+solfege-acoustic = { git = "https://github.com/futureboard/solfage-engine" }
 # Shared FBMX container loader used by the DAW's Solfege instrument wrapper.
-# The runtime currently lives beside Futureboard in the DSP workspace.
-fbmx-runtime = { path = "../dsp/crates/fbmx-runtime" }
+fbmx-runtime = { git = "https://github.com/futureboard/fbmx-runtime" }
 # Pure-Rust ONNX inference (CPU) for offline audio analysis. Dual MIT/Apache-2.0.
 # Re-exports `tract_ndarray` via its prelude.
 tract-onnx = "0.21"

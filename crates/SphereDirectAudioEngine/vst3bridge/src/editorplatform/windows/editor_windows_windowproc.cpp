@@ -320,16 +320,26 @@ LRESULT CALLBACK top_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       const unsigned old_dpi = dpi(h);
       const unsigned new_dpi = LOWORD(wp) ? LOWORD(wp) : old_dpi;
       const RECT *suggested = reinterpret_cast<RECT *>(lp);
+      // The suggested rect is the shell scaled by new/old DPI. A fixed-size
+      // editor pins WM_GETMINMAXINFO to the *current* outer size, which
+      // silently rejected this move — the plug-in then rescaled its content
+      // for the new DPI inside a window that never grew, and was cropped.
+      // Mark the resize as shell-driven so the lock lets the DPI size through.
+      set_resizing(c, true);
       SetWindowPos(h, nullptr, suggested->left, suggested->top,
                    suggested->right - suggested->left,
                    suggested->bottom - suggested->top,
                    SWP_NOZORDER | SWP_NOACTIVATE);
+      set_resizing(c, false);
       std::fprintf(stderr, "[NativeEditorShell] wm_dpichanged old=%u new=%u\n",
                    old_dpi, new_dpi);
       std::fprintf(stderr, "[PluginEditor] WM_DPICHANGED dpi=%u\n", dpi(h));
       resize_content(h, c);
       invalidate_titlebar(h);
       HWND content = hwnd(c->window.content_hwnd);
+      // The callback re-queries IPlugView::getSize at the new content scale
+      // and recomputes the windowed size from it; the rect handed over here is
+      // only the fallback when the view has no size to report.
       if (content && IsWindow(content) && attached(c) && c->cb.on_dpi_changed) {
         RECT rc{};
         GetClientRect(content, &rc);

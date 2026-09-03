@@ -62,7 +62,13 @@ impl StartupPlan {
     pub fn resolve() -> Self {
         let schema = SettingsSchema::load_from_disk();
         let show_welcome_screen = schema.general.show_start_screen;
-        let route = if show_welcome_screen {
+        // A project handed over on the command line — the shell's file
+        // association (`FutureboardNative.exe "%1"`), a drag onto the
+        // executable, or a terminal — always wins over the saved start route:
+        // the user asked for *that* file, not for Welcome or the last session.
+        let route = if let Some(path) = project_path_from_args(std::env::args_os().skip(1)) {
+            StartupRoute::OpenProject(path)
+        } else if show_welcome_screen {
             StartupRoute::Welcome
         } else if let Some(path) = restore_last_project_candidate() {
             StartupRoute::RestoreLastProject(path)
@@ -74,6 +80,21 @@ impl StartupPlan {
             show_welcome_screen,
         }
     }
+}
+
+/// The first argument that names an existing Futureboard project file, if
+/// any. Anything else on the command line (flags, a stray path to a WAV) is
+/// ignored rather than treated as a project, so a bad association can never
+/// send the app looking for a project inside a sample.
+pub fn project_path_from_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<PathBuf> {
+    args.into_iter().map(PathBuf::from).find(|path| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("fbproj"))
+            && path.is_file()
+    })
 }
 
 fn restore_last_project_candidate() -> Option<PathBuf> {
@@ -199,4 +220,45 @@ pub async fn run_lightweight_boot(cx: &mut AsyncApp) -> StartupPlan {
 
     log_startup_phase(StartupPhase::Done);
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_path_from_args;
+    use std::ffi::OsString;
+
+    #[test]
+    fn only_an_existing_fbproj_argument_becomes_the_open_route() {
+        let dir =
+            std::env::temp_dir().join(format!("futureboard-startup-args-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let project = dir.join("Song.FBPROJ");
+        std::fs::write(&project, b"not a real project").expect("write");
+        let sample = dir.join("kick.wav");
+        std::fs::write(&sample, b"riff").expect("write");
+
+        let args = |items: &[&std::path::Path]| -> Vec<OsString> {
+            items.iter().map(|p| p.as_os_str().to_owned()).collect()
+        };
+
+        // Flags and non-project files are skipped; case of the extension is
+        // irrelevant (Explorer preserves whatever the user typed).
+        assert_eq!(
+            project_path_from_args(args(&[
+                std::path::Path::new("--verbose"),
+                &sample,
+                &project
+            ])),
+            Some(project.clone())
+        );
+        // A project path that does not exist is not a route: the shell would
+        // otherwise open a blank Studio and report a missing file.
+        assert_eq!(
+            project_path_from_args(args(&[&dir.join("missing.fbproj")])),
+            None
+        );
+        assert_eq!(project_path_from_args(Vec::<OsString>::new()), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

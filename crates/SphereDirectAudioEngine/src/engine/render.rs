@@ -2909,14 +2909,12 @@ fn publish_multitrack_to_jam(
     slot.commit(frames, runtime.sample_rate);
 }
 
+/// Channel pan law for the track fader stage — see
+/// [`crate::dsp::gain::pan_gains`]. One law for the live callback and the
+/// offline bounce so an export sits exactly where the mix was heard.
 #[inline]
 pub fn pan_gains(pan: f32) -> (f32, f32) {
-    let pan = pan.clamp(-1.0, 1.0);
-    if pan < 0.0 {
-        (1.0, 1.0 + pan)
-    } else {
-        (1.0 - pan, 1.0)
-    }
+    crate::dsp::gain::pan_gains(pan)
 }
 
 #[cfg(test)]
@@ -4143,6 +4141,38 @@ mod soundfont_instrument_tests {
                 .expect("graph still builds without the font");
         runtime.midi_preview_note_on("sf-1", 0, 60, 100);
         assert_eq!(render_peak(&mut runtime), 0.0);
+    }
+
+    /// Regression: a DSP Fx dropped on a Soundfont track used to be picked as
+    /// the track's "MIDI instrument" (any bridged insert on an Instrument track
+    /// qualified), so notes were pushed at the effect's bridge sink and the
+    /// player itself was starved — silence with an Fx, sound without one. The
+    /// player owns the notes; the effect only sees audio.
+    #[test]
+    fn an_effect_insert_does_not_take_the_notes_away_from_the_player() {
+        let font = FontFile::new("effect-insert");
+        let mut track = soundfont_track("sf-1", &font, test_font::MELODIC_PRESET);
+        let mut params = HashMap::new();
+        params.insert("format".to_string(), serde_json::json!("BuiltIn"));
+        params.insert("classId".to_string(), serde_json::json!("equz8"));
+        params.insert("role".to_string(), serde_json::json!("effect"));
+        track.inserts.push(crate::types::EngineInsertSnapshot {
+            id: "insert-sf-1-eq".to_string(),
+            kind: "external-bridge-plugin".to_string(),
+            enabled: true,
+            params,
+            state: None,
+        });
+        let mut runtime = build_runtime(vec![track, master_track()]);
+        assert!(
+            runtime.tracks[0].midi_instrument_insert_ix.is_none(),
+            "an effect insert must not become the note destination"
+        );
+        runtime.midi_preview_note_on("sf-1", 0, 60, 100);
+        assert!(
+            render_peak(&mut runtime) > 0.001,
+            "the player must still sound with an effect in the chain"
+        );
     }
 }
 

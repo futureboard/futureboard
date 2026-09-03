@@ -50,12 +50,15 @@ const AUTOMATION_SUBLANE_RAIL_X: f32 = 18.0;
 pub enum AutomationLaneAction {
     /// Focus the editor on this lane (header body click).
     Activate,
-    /// Toggle the lane's read on/off (enabled flag).
+    /// Toggle the lane's automation mode between Read and Off (enabled flag).
     ToggleEnable,
     /// Remove every point but keep the lane.
     Clear,
-    /// Hide the sub-lane row (lane + points preserved).
+    /// Remove the sub-lane (lane and its points).
     Hide,
+    /// Open the parameter picker for this track: the lane's name is a
+    /// selector, so choosing another parameter shows (or adds) its lane.
+    PickTarget,
 }
 
 /// Sub-lane mouse-down payload:
@@ -76,9 +79,12 @@ pub type AutomationDeleteCallback = std::sync::Arc<
     dyn Fn(&(String, String, f32, f32), &mut gpui::Window, &mut gpui::App) -> bool + 'static,
 >;
 
-/// Sub-lane header action payload: `(track_id, lane_id, action)`.
+/// Sub-lane header action payload: `(track_id, lane_id, action, window_x,
+/// window_y)`. The position anchors the parameter picker for
+/// [`AutomationLaneAction::PickTarget`]; the other actions ignore it.
 pub type AutomationLaneActionCallback = std::sync::Arc<
-    dyn Fn(&(String, String, AutomationLaneAction), &mut gpui::Window, &mut gpui::App) + 'static,
+    dyn Fn(&(String, String, AutomationLaneAction, f32, f32), &mut gpui::Window, &mut gpui::App)
+        + 'static,
 >;
 
 /// Sub-lane hover payload: `(track_id, lane_id, beat, value_norm)`. Fired on
@@ -100,9 +106,15 @@ fn target_category(target: &AutomationTarget) -> &'static str {
 }
 
 /// One expanded automation sub-lane rendered directly below its parent track.
-/// Left header carries the target name/category + lane controls; the right area
-/// draws the envelope (line + points) and captures point edits scoped to this
-/// lane's own row bounds.
+///
+/// The left header is a compact lane strip: the parameter name is a selector
+/// (opens the target picker), a Read/Off pill is the lane's automation mode, a
+/// live readout says what the curve is worth (the hovered point, else the
+/// value at the playhead, in the parameter's own unit), and the lane's own
+/// controls sit at the right edge. The right area draws the envelope — a
+/// filled body under the curve, the curve, the base value as a dashed guide,
+/// the points, and a value tag on the hovered point — and captures point edits
+/// scoped to this lane's own row bounds.
 #[allow(clippy::too_many_arguments)]
 pub fn automation_lane(
     track_id: &str,
@@ -164,14 +176,25 @@ pub fn automation_lane(
     if let Some(cb) = activate_action {
         let tid = track_id.clone();
         let lid = lane_id.clone();
-        header = header.on_mouse_down(gpui::MouseButton::Left, move |_e, window, cx| {
-            cx.stop_propagation();
-            cb(
-                &(tid.clone(), lid.clone(), AutomationLaneAction::Activate),
-                window,
-                cx,
-            );
-        });
+        header = header.on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                cb(
+                    &(
+                        tid.clone(),
+                        lid.clone(),
+                        AutomationLaneAction::Activate,
+                        x,
+                        y,
+                    ),
+                    window,
+                    cx,
+                );
+            },
+        );
     }
 
     // Nesting gutter — slightly darker band in the indent column so child lanes
@@ -202,17 +225,31 @@ pub fn automation_lane(
             }),
     );
 
-    // Accent bar + title — indented, smaller than the parent track name.
-    let name_row = div()
+    // ── Row 1: parameter selector + live value readout ───────────────────────
+    //
+    // The name is a selector, not a label: clicking it opens the track's
+    // parameter picker, exactly like choosing what a lane shows on a console
+    // automation strip. The chevron is the one hint that it opens something.
+    let pick_target = on_lane_action.clone();
+    let mut name_button = div()
+        .id(("automation-lane-target", id_num))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(5.0))
         .min_w(px(0.0))
+        .h(px(20.0))
+        .pl(px(5.0))
+        .pr(px(5.0))
+        .rounded(px(crate::theme::radius::CONTROL))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::button_bg_hover()))
+        .tooltip(lane_tooltip("Choose parameter"))
         .child(
             div()
+                .flex_none()
                 .w(px(2.0))
-                .h(px(9.0))
+                .h(px(10.0))
                 .rounded(px(crate::theme::radius::PILL))
                 .bg(accent),
         )
@@ -220,7 +257,6 @@ pub fn automation_lane(
             // Parameter name must stay on a single line — `truncate` applies
             // nowrap + ellipsis so "Volume" can never wrap to "Volu / me".
             div()
-                .flex_1()
                 .min_w(px(0.0))
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -231,83 +267,231 @@ pub fn automation_lane(
                 })
                 .truncate()
                 .child(lane.name.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(8.0))
+                .text_color(Colors::text_muted())
+                .child("▾"),
         );
+    if let Some(cb) = pick_target {
+        let tid = track_id.clone();
+        let lid = lane_id.clone();
+        name_button = name_button.on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                cb(
+                    &(
+                        tid.clone(),
+                        lid.clone(),
+                        AutomationLaneAction::PickTarget,
+                        x,
+                        y,
+                    ),
+                    window,
+                    cx,
+                );
+            },
+        );
+    }
 
-    let category_row = div()
+    // Readout: the hovered point's value, else what the lane plays at the
+    // playhead — the header always says what the curve is worth right now, in
+    // the parameter's own unit. Hover reading takes the curve hue so it is
+    // recognisably "the point under the cursor", not the transport value.
+    let hovered_point_value = lane_hover
+        .as_ref()
+        .and_then(|h| h.point_id)
+        .and_then(|id| lane.points.iter().find(|p| p.id == id))
+        .map(|p| p.value);
+    let readout_value = hovered_point_value.unwrap_or_else(|| {
+        evaluate_automation(
+            &lane.points,
+            state.transport.playhead_beats as f64,
+            lane.target.default_value(),
+        )
+    });
+    let readout = div()
+        .flex_none()
+        .px(px(6.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(crate::theme::radius::CONTROL))
+        .bg(Colors::with_alpha(Colors::surface_base(), 0.55))
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(if hovered_point_value.is_some() {
+            Colors::automation_curve()
+        } else if lane.enabled {
+            Colors::text_secondary()
+        } else {
+            Colors::text_muted()
+        })
+        .child(lane.target.format_value(readout_value));
+
+    let name_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .child(div().flex_1().min_w(px(0.0)).child(name_button))
+        .child(readout);
+
+    // ── Row 2: automation mode + category, lane controls at the right edge ──
+    //
+    // Two honest states: Read plays the lane back, Off bypasses it. Fill and
+    // border both carry the state (latched language), never hue alone.
+    let mode_action = on_lane_action.clone();
+    let (mode_label, mode_tip, mode_fill, mode_border, mode_text) = if lane.enabled {
+        let (fill, border) = Colors::latched(
+            Colors::automation_lane_header_bg(),
+            Colors::state_automation(),
+        );
+        (
+            "READ",
+            "Automation mode: Read — the lane drives the parameter. Click for Off.",
+            fill,
+            border,
+            Colors::state_automation(),
+        )
+    } else {
+        (
+            "OFF",
+            "Automation mode: Off — the lane is bypassed. Click for Read.",
+            Colors::button_bg(),
+            Colors::button_border(),
+            Colors::button_text_muted(),
+        )
+    };
+    let mut mode_pill = div()
+        .id(("automation-lane-mode", id_num))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(16.0))
+        .min_w(px(36.0))
+        .px(px(6.0))
+        .rounded(px(crate::theme::radius::CONTROL))
+        .bg(mode_fill)
+        .border(px(1.0))
+        .border_color(mode_border)
+        .text_size(px(8.0))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(mode_text)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .tooltip(lane_tooltip(mode_tip))
+        .child(mode_label);
+    if let Some(cb) = mode_action {
+        let tid = track_id.clone();
+        let lid = lane_id.clone();
+        mode_pill = mode_pill.on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                cb(
+                    &(
+                        tid.clone(),
+                        lid.clone(),
+                        AutomationLaneAction::ToggleEnable,
+                        x,
+                        y,
+                    ),
+                    window,
+                    cx,
+                );
+            },
+        );
+    }
+
+    let category_label = div()
+        .min_w(px(0.0))
         .text_size(px(8.0))
         .text_color(category_color)
-        .pl(px(6.0))
         .truncate()
         .child(category);
 
-    // Lane controls stay flush to the right edge of the header column.
+    // Lane controls stay flush to the right edge of the header column. Clear
+    // is the destructive action here (removes every point), so it is the one
+    // that reads danger on hover; Remove drops the lane itself.
     let control_buttons = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(4.0))
         .child(lane_button(
-            ("automation-lane-enable", id_num).into(),
-            "E",
-            "Enable automation lane",
-            LaneButtonStyle::Toggle,
-            lane.enabled,
-            track_id.clone(),
-            lane_id.clone(),
-            AutomationLaneAction::ToggleEnable,
-            on_lane_action.clone(),
-        ))
-        // Clear is the destructive action here (removes every point), so it is
-        // the one that reads danger on hover.
-        .child(lane_button(
             ("automation-lane-clear", id_num).into(),
             "C",
             "Clear automation points",
             LaneButtonStyle::Danger,
-            false,
             track_id.clone(),
             lane_id.clone(),
             AutomationLaneAction::Clear,
             on_lane_action.clone(),
         ))
         .child(lane_button(
-            ("automation-lane-hide", id_num).into(),
-            "x",
-            "Hide lane",
+            ("automation-lane-remove", id_num).into(),
+            "×",
+            "Remove lane",
             LaneButtonStyle::Neutral,
-            false,
             track_id.clone(),
             lane_id.clone(),
             AutomationLaneAction::Hide,
             on_lane_action.clone(),
         ));
 
+    let mode_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(6.0))
+        .min_w(px(0.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .min_w(px(0.0))
+                .pl(px(5.0))
+                .child(mode_pill)
+                .child(category_label),
+        )
+        .child(div().flex_none().child(control_buttons));
+
     let header = header.child(
         div()
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
+            .justify_center()
+            .gap(px(3.0))
             .w_full()
             .h_full()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(1.0))
-                    .pl(px(AUTOMATION_SUBLANE_HEADER_INDENT))
-                    .pr(px(4.0))
-                    .child(name_row)
-                    .child(category_row),
-            )
-            .child(div().flex_none().pr(px(8.0)).child(control_buttons)),
+            .pl(px(AUTOMATION_SUBLANE_HEADER_INDENT))
+            .pr(px(8.0))
+            .child(name_row)
+            .child(mode_row),
     );
 
     // ── Right envelope + interaction area ────────────────────────────────────
-    let envelope = lane_envelope(lane, state, lane_height, marquee, lane_hover.as_ref());
+    let envelope = lane_envelope(
+        lane,
+        state,
+        lane_height,
+        is_active,
+        marquee,
+        lane_hover.as_ref(),
+    );
 
     // Cursor reflects what the hovered region edits: a point handle (pointer) or a
     // curve segment (vertical-resize = drag to shape tension). Built-in OS cursors
@@ -468,13 +652,11 @@ pub fn automation_lane(
         .child(lane_area)
 }
 
-/// Visual weight for a sub-lane control. Only the active toggle carries the
-/// accent; the destructive action stays neutral until hovered.
+/// Visual weight for a sub-lane control: the destructive action stays neutral
+/// until hovered; everything else is a quiet neutral button.
 #[derive(Clone, Copy)]
 enum LaneButtonStyle {
-    /// Accent when `active`, neutral otherwise (Enable).
-    Toggle,
-    /// Always neutral with a quiet hover (Hide).
+    /// Always neutral with a quiet hover (Remove).
     Neutral,
     /// Neutral by default, danger/red only on hover (Clear).
     Danger,
@@ -487,7 +669,6 @@ fn lane_button(
     label: &'static str,
     tooltip: &'static str,
     style: LaneButtonStyle,
-    active: bool,
     track_id: String,
     lane_id: String,
     action: AutomationLaneAction,
@@ -497,8 +678,8 @@ fn lane_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(20.0))
-        .h(px(20.0))
+        .w(px(18.0))
+        .h(px(18.0))
         .rounded(px(crate::theme::radius::CONTROL))
         .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
@@ -506,12 +687,6 @@ fn lane_button(
         .cursor(gpui::CursorStyle::PointingHand)
         .tooltip(lane_tooltip(tooltip));
     match style {
-        LaneButtonStyle::Toggle if active => {
-            // Active enable is the one place the accent shows.
-            btn = btn
-                .bg(Colors::accent_primary())
-                .text_color(Colors::text_inverse());
-        }
         LaneButtonStyle::Danger => {
             btn = btn
                 .bg(Colors::button_bg())
@@ -521,7 +696,7 @@ fn lane_button(
                         .text_color(Colors::status_error())
                 });
         }
-        LaneButtonStyle::Toggle | LaneButtonStyle::Neutral => {
+        LaneButtonStyle::Neutral => {
             btn = btn
                 .bg(Colors::button_bg())
                 .text_color(Colors::button_text_muted())
@@ -532,10 +707,19 @@ fn lane_button(
         }
     }
     if let Some(cb) = cb {
-        btn = btn.on_mouse_down(gpui::MouseButton::Left, move |_e, window, cx| {
-            cx.stop_propagation();
-            cb(&(track_id.clone(), lane_id.clone(), action), window, cx);
-        });
+        btn = btn.on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let x: f32 = event.position.x.into();
+                let y: f32 = event.position.y.into();
+                cb(
+                    &(track_id.clone(), lane_id.clone(), action, x, y),
+                    window,
+                    cx,
+                );
+            },
+        );
     }
     btn.child(label)
 }
@@ -584,13 +768,16 @@ fn paint_automation_stroke(
     }
 }
 
-/// Draw the automation line + points for one lane inside its sub-lane area.
-/// Pure render of state. The curve is sampled per visible column so Hold steps
-/// and Linear ramps are both correct.
+/// Draw the automation envelope for one lane inside its sub-lane area: the
+/// filled body under the curve, the curve, the dashed base-value guide, the
+/// points, and a value tag on the hovered (or, on the active lane, selected)
+/// point. Pure render of state. The curve is sampled per visible column so
+/// Hold steps and Linear ramps are both correct.
 fn lane_envelope(
     lane: &AutomationLaneState,
     state: &TimelineState,
     lane_height: f32,
+    is_active: bool,
     marquee: Option<&AutomationMarquee>,
     hover: Option<&AutomationHover>,
 ) -> impl IntoElement {
@@ -649,27 +836,54 @@ fn lane_envelope(
     } else {
         Colors::with_alpha(Colors::automation_curve(), 0.5)
     };
-    // Center/value reference line + a soft band behind the curve so the lane has
-    // a quiet value guide rather than a single sharp line on a flat block.
+    // Base-value guide: dashed so it reads as a reference, never as a second
+    // curve. The filled body under the curve is what gives the lane its amount;
+    // the active lane's body sits a step brighter so the focused lane is
+    // findable across a tall arrangement without a louder curve.
     let baseline_color = Colors::automation_center_line();
-    let band_color = Colors::automation_center_band();
-    let band_h = (lane_height * 0.5).clamp(10.0, 30.0);
+    let body_alpha = match (enabled, is_active) {
+        (true, true) => 0.16,
+        (true, false) => 0.10,
+        (false, _) => 0.05,
+    };
+    let body_color = Colors::with_alpha(Colors::automation_curve(), body_alpha);
+    let body_floor = lane_height;
 
     let line = canvas(
         |_b, _w, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
-            // Soft center band behind everything.
-            let band = Bounds::new(
-                bounds.origin + point(px(0.0), px((baseline_y - band_h / 2.0).max(0.0))),
-                size(px(lane_w), px(band_h)),
-            );
-            window.paint_quad(fill(band, band_color));
-            // Center/value guide line.
-            let bl = Bounds::new(
-                bounds.origin + point(px(0.0), px(baseline_y)),
-                size(px(lane_w), px(1.0)),
-            );
-            window.paint_quad(fill(bl, baseline_color));
+            // Filled body: the sampled curve closed down to the lane floor. One
+            // fill path per lane, tessellated once — same cost class as the
+            // stroke it sits under.
+            if samples.len() >= 2 {
+                let mut body = PathBuilder::fill();
+                let (x0, y0) = samples[0];
+                body.move_to(bounds.origin + point(px(x0), px(body_floor)));
+                body.line_to(bounds.origin + point(px(x0), px(y0)));
+                for &(x, y) in &samples[1..] {
+                    body.line_to(bounds.origin + point(px(x), px(y)));
+                }
+                let (xn, _) = samples[samples.len() - 1];
+                body.line_to(bounds.origin + point(px(xn), px(body_floor)));
+                body.close();
+                if let Ok(path) = body.build() {
+                    window.paint_path(path, body_color);
+                }
+            }
+
+            // Dashed base-value guide.
+            const DASH: f32 = 6.0;
+            const GAP: f32 = 4.0;
+            let mut x = 0.0f32;
+            while x < lane_w {
+                let w = DASH.min(lane_w - x);
+                let dash = Bounds::new(
+                    bounds.origin + point(px(x), px(baseline_y)),
+                    size(px(w), px(1.0)),
+                );
+                window.paint_quad(fill(dash, baseline_color));
+                x += DASH + GAP;
+            }
 
             // Base envelope: ONE continuous anti-aliased stroke for the whole
             // visible curve. Replaces the old per-column hard quads, so diagonals
@@ -706,34 +920,69 @@ fn lane_envelope(
     .absolute()
     .inset_0();
 
-    let markers: Vec<_> = points
-        .iter()
-        .filter_map(|p| {
-            let x = state.beats_to_x(p.beat);
-            if x < -8.0 || x > lane_w + 8.0 {
-                return None;
-            }
-            let y = automation_value_to_y(p.value, lane_height);
-            let (fill_color, ring) = if p.selected {
-                (Colors::text_primary(), Colors::automation_curve())
+    let hovered_point = hover.and_then(|h| h.point_id);
+    let mut markers: Vec<gpui::Div> = Vec::new();
+    let mut value_tags: Vec<gpui::Div> = Vec::new();
+    for p in &points {
+        let x = state.beats_to_x(p.beat);
+        if x < -8.0 || x > lane_w + 8.0 {
+            continue;
+        }
+        let y = automation_value_to_y(p.value, lane_height);
+        let hovered = hovered_point == Some(p.id);
+        let (fill_color, ring) = if p.selected {
+            (Colors::text_primary(), Colors::automation_curve())
+        } else {
+            (Colors::automation_point(), Colors::automation_curve())
+        };
+        let size_px = if p.selected || hovered { 9.0 } else { 7.0 };
+        markers.push(
+            div()
+                .absolute()
+                .left(px(x - size_px / 2.0))
+                .top(px(y - size_px / 2.0))
+                .w(px(size_px))
+                .h(px(size_px))
+                .rounded(px(crate::theme::radius::PILL))
+                .bg(fill_color)
+                .border(px(1.0))
+                .border_color(ring),
+        );
+        // Value tag: the hovered point always; selected points only on the
+        // active lane, so a multi-lane track does not sprout a label per lane.
+        if hovered || (p.selected && is_active) {
+            const TAG_H: f32 = 16.0;
+            // Above the point unless that would leave the lane; then below.
+            let tag_top = if y - TAG_H - 6.0 >= 0.0 {
+                y - TAG_H - 6.0
             } else {
-                (Colors::automation_point(), Colors::automation_curve())
+                (y + 7.0).min(lane_height - TAG_H)
             };
-            let size_px = if p.selected { 9.0 } else { 7.0 };
-            Some(
+            value_tags.push(
                 div()
                     .absolute()
-                    .left(px(x - size_px / 2.0))
-                    .top(px(y - size_px / 2.0))
-                    .w(px(size_px))
-                    .h(px(size_px))
-                    .rounded(px(crate::theme::radius::PILL))
-                    .bg(fill_color)
+                    .left(px(x + 7.0))
+                    .top(px(tag_top))
+                    .h(px(TAG_H))
+                    .px(px(5.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(crate::theme::radius::CONTROL))
+                    .bg(Colors::surface_raised())
                     .border(px(1.0))
-                    .border_color(ring),
-            )
-        })
-        .collect();
+                    .border_color(if hovered {
+                        Colors::with_alpha(Colors::automation_curve(), 0.7)
+                    } else {
+                        Colors::border_subtle()
+                    })
+                    .text_size(px(9.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(Colors::text_primary())
+                    .whitespace_nowrap()
+                    .child(lane.target.format_value(p.value)),
+            );
+        }
+    }
 
     let marquee_el = marquee.filter(|m| m.lane_id == lane.id).map(|m| {
         let x0 = state.beats_to_x(m.start_beat.min(m.cur_beat));
@@ -756,5 +1005,6 @@ fn lane_envelope(
         .inset_0()
         .child(line)
         .children(markers)
+        .children(value_tags)
         .children(marquee_el)
 }

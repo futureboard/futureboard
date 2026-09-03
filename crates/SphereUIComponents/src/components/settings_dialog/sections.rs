@@ -356,6 +356,11 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
         ));
 
     if let Some(info) = edition.as_ref() {
+        // Named only while the licensed engine is registered (see the
+        // Professional provider), so this row never claims an unavailable backend.
+        if let Some(engine) = info.audio_engine.as_ref() {
+            section = section.child(settings_row("Audio Engine", settings_readout(engine.name)));
+        }
         section = section.child(license_status_row(info.license.as_ref()));
         if let Some(license) = info.license.as_ref() {
             if let Some(licensee) = license
@@ -790,8 +795,24 @@ pub(crate) fn audio_latency_report_section(
                 i18n.tr("settings.field.output-buffer-latency"),
                 settings_value_readout(latency_ms_label(i18n, latency.buffer_ms)),
             ))
+            // Input/output halves are shown only when the backend reports them
+            // (ASIO); the estimate has no input half to show.
+            .when(latency.round_trip_reported, |card| {
+                card.child(settings_daw_row(
+                    i18n.tr("settings.field.input-latency"),
+                    settings_value_readout(latency_ms_label(i18n, latency.input_ms)),
+                ))
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.output-latency"),
+                    settings_value_readout(latency_ms_label(i18n, latency.output_ms)),
+                ))
+            })
             .child(settings_daw_row(
-                i18n.tr("settings.field.round-trip-latency"),
+                if latency.round_trip_reported {
+                    i18n.tr("settings.field.round-trip-latency")
+                } else {
+                    i18n.tr("settings.field.round-trip-latency-estimated")
+                },
                 settings_value_readout(latency_ms_label(i18n, latency.round_trip_ms)),
             ))
             .child(settings_daw_row(

@@ -1,9 +1,10 @@
 //! GPUI presentation of an **off-screen** built-in plugin editor.
 //!
-//! CEF renders windowless on every platform. Windows normally copies accelerated
-//! D3D11 shared textures directly into stable GPUI atlas tiles; software OSR
-//! hands the host a BGRA framebuffer instead. This module owns both presentation
-//! paths plus input forwarding:
+//! Used only where `OFFSCREEN_HOSTING` is on (macOS/Linux). Windows hosts the
+//! browser as a native CEF child window and never touches this surface. For
+//! off-screen hosts, accelerated D3D11 shared textures can be copied directly
+//! into stable GPUI atlas tiles; software OSR hands the host a BGRA framebuffer
+//! instead. This module owns both presentation paths plus input forwarding:
 //!
 //! - **Out:** reusing stable GPU textures for accelerated frames, or turning a
 //!   software frame into a GPUI texture and releasing the previous atlas tile.

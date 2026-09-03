@@ -960,7 +960,16 @@ pub struct SettingsAudioLatencySnapshot {
     pub deferred_sample_rate: u32,
     pub buffer_ms: f64,
     pub buffer_frames: u32,
+    /// Input (capture) latency the backend reports, ms; `0` when unknown.
+    pub input_ms: f64,
+    /// Output (play-out) latency the backend reports/measures, ms.
+    pub output_ms: f64,
+    /// Reported round trip when the backend knows both halves (ASIO), else
+    /// the classic two-buffer estimate.
     pub round_trip_ms: f64,
+    /// `true` when `round_trip_ms` is the backend's own figure rather than
+    /// the estimate, so the UI can say which it is showing.
+    pub round_trip_reported: bool,
     pub max_path_ms: f64,
     pub max_path_samples: u32,
     pub master_plugin_ms: f64,
@@ -1141,7 +1150,14 @@ impl SettingsAudioLatencySnapshot {
             deferred_sample_rate: 0,
             buffer_ms: info.buffer_ms,
             buffer_frames: info.buffer_frames,
-            round_trip_ms: info.buffer_ms * 2.0,
+            input_ms: stats.input_latency_ms,
+            output_ms: stats.estimated_latency_ms,
+            round_trip_ms: if stats.round_trip_latency_ms > 0.0 {
+                stats.round_trip_latency_ms
+            } else {
+                info.buffer_ms * 2.0
+            },
+            round_trip_reported: stats.round_trip_latency_ms > 0.0,
             max_path_ms: info.max_path_ms,
             max_path_samples: info.max_path_samples,
             master_plugin_ms: info.master_ms,

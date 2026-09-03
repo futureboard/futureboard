@@ -477,6 +477,12 @@ pub struct SharedState {
     /// `output_latency_secs` this is the round-trip a recorded clip must shift
     /// earlier by so live overdubs line up with what the player heard.
     pub record_input_latency_secs: AtomicU32,
+    /// `true` while the open backend reports its own input/output latencies
+    /// (the ASIO driver's `ASIOGetLatencies`). The cpal output callback then
+    /// leaves `output_latency_secs` alone: cpal's ASIO timestamp only ever
+    /// spans one buffer, so letting it overwrite the driver figure every block
+    /// under-reported output latency and hid the input latency entirely.
+    pub latency_from_driver: AtomicBool,
     /// Peak actually mixed to the monitor output for diagnostics.
     pub monitor_output_peak: AtomicU32,
 
@@ -633,6 +639,7 @@ impl Default for SharedState {
             record_peak: AtomicU32::new(f32_store(0.0)),
             output_latency_secs: AtomicU32::new(f32_store(0.0)),
             record_input_latency_secs: AtomicU32::new(f32_store(0.0)),
+            latency_from_driver: AtomicBool::new(false),
             monitor_output_peak: AtomicU32::new(f32_store(0.0)),
             preview_ring: crate::input_ring::PreviewPeakRing::default(),
             recording_preview_active: AtomicBool::new(false),
@@ -3507,6 +3514,14 @@ impl EngineInner {
         self.shared
             .output_latency_secs
             .store(f32_store(0.0), Ordering::Relaxed);
+        self.shared
+            .record_input_latency_secs
+            .store(f32_store(0.0), Ordering::Relaxed);
+        // Until a backend that reports its own latencies (ASIO) is open, the
+        // cpal callback measurement is the source again.
+        self.shared
+            .latency_from_driver
+            .store(false, Ordering::Relaxed);
 
         let initial_runtime = self.get_initial_runtime(None);
 
@@ -3575,6 +3590,7 @@ impl EngineInner {
                 let dev_name = handle.device_name.clone();
                 deferred_open_warning = handle.input_warning.clone();
                 *self.asio_caps.lock() = Some(handle.caps.clone());
+                self.publish_asio_latencies(&handle.caps);
                 let stream = ActiveStream::AsioDuplex(Box::new(handle));
                 self.commit_stream_open(sr, bs, dev_name, "DAUx ASIO".into());
                 stream
@@ -4417,8 +4433,99 @@ impl EngineInner {
         }
     }
 
+    /// Publish an ASIO session's driver-reported latencies as the engine's
+    /// input/output latency. `ASIOGetLatencies` covers the whole path —
+    /// buffers plus the converters' own delay — which is what monitoring
+    /// displays and take compensation need; the cpal block timestamp does not.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn publish_asio_latencies(&self, caps: &crate::backend::AsioSessionCaps) {
+        let sample_rate = caps.sample_rate.max(1) as f32;
+        self.shared.record_input_latency_secs.store(
+            f32_store(caps.input_latency_samples as f32 / sample_rate),
+            Ordering::Relaxed,
+        );
+        self.shared.output_latency_secs.store(
+            f32_store(caps.output_latency_samples as f32 / sample_rate),
+            Ordering::Relaxed,
+        );
+        self.shared
+            .latency_from_driver
+            .store(true, Ordering::Relaxed);
+        eprintln!(
+            "[DAUx ASIO] latency in={} out={} samples @ {} Hz ({:.2} ms round trip)",
+            caps.input_latency_samples,
+            caps.output_latency_samples,
+            caps.sample_rate,
+            (caps.input_latency_samples + caps.output_latency_samples) as f64 / sample_rate as f64
+                * 1000.0
+        );
+    }
+
+    /// Service the ASIO driver's asynchronous notifications. Control thread
+    /// only; called from the status poll so nothing here touches a callback.
+    ///
+    /// * `latenciesChanged` — re-query `ASIOGetLatencies` and republish, so the
+    ///   figures (and the next take's compensation) follow a driver whose
+    ///   internal buffering moved without a buffer-size change.
+    /// * `resetRequest` — the driver wants its buffers disposed and recreated
+    ///   (typically after the user changed the buffer size in its control
+    ///   panel). Ignoring it kept streaming through buffers the driver had
+    ///   already resized on its side: wrong block size, stale latencies, and
+    ///   input that lagged the output by whatever the panel had just added.
+    ///   The session is reopened with the same config, which re-snaps the
+    ///   buffer size to the driver's new constraints.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn service_asio_driver_events(&self) {
+        let (latencies_changed, reset_requested, refreshed) = {
+            let stream_guard = self.active_stream.lock();
+            let Some(handle) = stream_guard.as_ref().and_then(|s| s.as_asio_duplex()) else {
+                return;
+            };
+            let reset_requested = handle.take_reset_request();
+            let latencies_changed = handle.take_latencies_changed();
+            let refreshed = if latencies_changed && !reset_requested {
+                handle.refresh_latencies()
+            } else {
+                None
+            };
+            (latencies_changed, reset_requested, refreshed)
+        };
+
+        if let Some((input, output)) = refreshed {
+            let mut caps_guard = self.asio_caps.lock();
+            if let Some(caps) = caps_guard.as_mut() {
+                caps.input_latency_samples = input;
+                caps.output_latency_samples = output;
+                let caps = caps.clone();
+                drop(caps_guard);
+                self.publish_asio_latencies(&caps);
+            }
+        } else if latencies_changed && !reset_requested {
+            eprintln!("[DAUx ASIO] latenciesChanged received but ASIOGetLatencies failed");
+        }
+
+        if reset_requested {
+            eprintln!("[DAUx ASIO] driver requested a reset; reopening the session");
+            // Reuse the device-loss recovery: it reopens with the last-known
+            // config and clears the flag on success. On failure the flag stays
+            // set and the UI shows DeviceLost, which is the honest state of a
+            // driver that has withdrawn its buffers.
+            self.shared.device_lost.store(true, Ordering::Relaxed);
+            match self.recover_daux() {
+                Ok(_) => eprintln!("[DAUx ASIO] session reopened after driver reset"),
+                Err(error) => eprintln!("[DAUx ASIO] reopen after driver reset failed: {error}"),
+            }
+        }
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "asio")))]
+    fn service_asio_driver_events(&self) {}
+
     /// Return the current DAUx status (backend, device, latency, glitches).
     pub fn get_daux_status(&self) -> JsDauxStatus {
+        // The status poll is the control thread's regular visit, so it is where
+        // the driver's pending notifications get acted on.
+        self.service_asio_driver_events();
         let st = self.status.lock().clone();
         let daux_cfg = self.daux_config.lock().clone();
         let glitch_count = self.glitch_counter.load(Ordering::Relaxed) as f64;
@@ -4457,6 +4564,20 @@ impl EngineInner {
         } else {
             0.0
         };
+        // Input latency is known only where the backend reports it (ASIO) or a
+        // recording stream has measured it; `0` means "not measured", never
+        // "zero delay", so a round trip is only stated when both halves are.
+        let input_latency_ms = f32_load(
+            self.shared
+                .record_input_latency_secs
+                .load(Ordering::Relaxed),
+        ) as f64
+            * 1000.0;
+        let round_trip_latency_ms = if input_latency_ms > 0.0 {
+            input_latency_ms + estimated_latency_ms
+        } else {
+            0.0
+        };
 
         JsDauxStatus {
             backend_id,
@@ -4466,6 +4587,8 @@ impl EngineInner {
             requested_sample_rate: daux_cfg.sample_rate.unwrap_or(0),
             buffer_size: st.buffer_size,
             estimated_latency_ms,
+            input_latency_ms,
+            round_trip_latency_ms,
             glitch_count,
             device_xruns,
             mmcss_active,
@@ -6995,7 +7118,7 @@ mod routing_tests {
         let frames = 5usize;
         let channels = 2usize;
         let mut audio_track = track("audio", "audio", vec![]);
-        audio_track.pan = -1.0;
+        audio_track.pan = 0.0; // unity at center → left == source
         let tracks = vec![audio_track];
         let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
         let mut samples = Vec::new();
@@ -7088,7 +7211,7 @@ mod routing_tests {
 
         let render = |reverse: bool, speed: f32| -> Vec<f32> {
             let mut audio_track = track("audio", "audio", vec![]);
-            audio_track.pan = -1.0; // equal-power hard-left → left == source
+            audio_track.pan = 0.0; // unity at center → left == source
             let tracks = vec![audio_track];
             let audio_graph = crate::audio_graph::plan_runtime_audio_graph(&tracks).unwrap();
             let source = Arc::new(ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
@@ -7196,9 +7319,10 @@ mod routing_tests {
         let (l, r) = apply_track_chain_at_beat(1.0, 1.0, &mut t, 0.0);
 
         assert!(l.abs() < 1e-6, "full-right pan should mute left");
+        // Equal-power law, unity at center: hard right lands at +3 dB (√2).
         assert!(
-            (r - 1.0).abs() < 1e-6,
-            "0 dB automation should override base volume"
+            (r - std::f32::consts::SQRT_2).abs() < 1e-6,
+            "0 dB automation should override base volume (got {r})"
         );
     }
 

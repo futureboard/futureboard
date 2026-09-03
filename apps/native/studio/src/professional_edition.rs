@@ -199,6 +199,51 @@ fn edition_info() -> sphere_ui_components::edition::EditionInfo {
         edition: "Professional",
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         license,
+        audio_engine: asio_engine_badge(),
+    }
+}
+
+/// Steinberg ASIO logo, staged by `build.rs` beside the private sources and
+/// embedded so the About window needs no install-layout file.
+#[cfg(target_os = "windows")]
+static ASIO_LOGO_PNG: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/futureboard-professional/asio-logo.png"
+));
+
+/// The ASIO Audio Engine badge for the About surfaces.
+///
+/// Present only while the licensed ASIO host is actually registered — the same
+/// condition under which the audio backend list offers ASIO — so About never
+/// advertises an engine this machine cannot select. GPUI decodes the PNG on
+/// first paint; the `Image` handle is built once and shared across renders.
+fn asio_engine_badge() -> Option<sphere_ui_components::edition::AudioEngineBadge> {
+    #[cfg(target_os = "windows")]
+    {
+        use sphere_ui_components::edition::AudioEngineBadge;
+        use std::sync::{Arc, OnceLock};
+
+        if !DirectAudio::asio_support_enabled() {
+            return None;
+        }
+        static LOGO: OnceLock<Arc<gpui::Image>> = OnceLock::new();
+        let logo = LOGO
+            .get_or_init(|| {
+                Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Png,
+                    ASIO_LOGO_PNG.to_vec(),
+                ))
+            })
+            .clone();
+        return Some(AudioEngineBadge {
+            name: "ASIO Audio Engine",
+            notice: "ASIO is a trademark and software of Steinberg Media Technologies GmbH.",
+            logo: Some(logo),
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
     }
 }
 

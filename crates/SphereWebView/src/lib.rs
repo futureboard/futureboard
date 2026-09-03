@@ -5,9 +5,10 @@
 //! workspace-local `build/cef/<version>/<platform>` directory, then enable
 //! `cef-runtime` in the executable that owns the CEF process lifecycle.
 //!
-//! Built-in editors use windowless/off-screen rendering (see [`osr`]). Windows
-//! can consume CEF's accelerated D3D11 shared textures; software BGRA frames
-//! remain available as a cross-platform path and automatic Windows fallback.
+//! On Windows built-in editors are native CEF child windows
+//! ([`runtime::RenderMode::Windowed`]); other platforms use windowless/
+//! off-screen rendering (see [`osr`]), where accelerated D3D11 shared textures
+//! and software BGRA frames remain available.
 
 use std::path::{Path, PathBuf};
 
