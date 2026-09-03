@@ -7,9 +7,9 @@ mod export_settings;
 mod export_window;
 
 pub use export_settings::{
-    ExportChannelMode, ExportMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
-    ExportSampleRateChoice, ExportSettings, ExportSettingsError, ExportTailChoice,
-    ExportTrackTarget,
+    ExportChannelMode, ExportEstimate, ExportMode, ExportNormalizeChoice, ExportProjectDefaults,
+    ExportRangeChoice, ExportSampleRateChoice, ExportSettings, ExportSettingsError,
+    ExportTailChoice, ExportTrackTarget,
 };
 pub use export_window::{
     open_export_arrangement_window, ExportArrangementWindow, ExportJobState, EXPORT_WINDOW_WIDTH,
@@ -257,5 +257,77 @@ mod tests {
         s.flac_bit_depth = 16;
         let req = s.to_request(&snapshot, &defaults()).unwrap();
         assert_eq!(req.sample_format, AudioSampleFormat::I16);
+    }
+
+    /// Multitrack can filter every available target away. Validation has to see
+    /// that before Export is enabled, not after the job is spawned.
+    #[test]
+    fn multitrack_with_no_direct_tracks_fails_validation() {
+        let mut d = defaults();
+        d.track_targets = vec![ExportTrackTarget {
+            id: "bus-1".to_string(),
+            name: "Drum Bus".to_string(),
+            include_in_multitrack: false,
+        }];
+        let mut settings = valid_wav();
+        settings.mode = ExportMode::Multitrack;
+        assert_eq!(settings.batch_target_count(&d), 0);
+        assert_eq!(
+            settings.validate(&d),
+            Err(ExportSettingsError::NoTracksForBatchExport)
+        );
+        // Stems still takes every mixer channel, routing included.
+        settings.mode = ExportMode::Stems;
+        assert_eq!(settings.batch_target_count(&d), 1);
+        assert!(settings.validate(&d).is_ok());
+    }
+
+    /// The dialog's readouts must come from the same request the engine gets.
+    #[test]
+    fn estimate_matches_request_geometry() {
+        let snapshot = snapshot_with_content(4.0);
+        let settings = valid_wav();
+        let d = defaults();
+        let request = settings.to_request(&snapshot, &d).unwrap();
+        let estimate = settings.estimate(&snapshot, &d).unwrap();
+        assert_eq!(estimate.sample_rate, request.render.sample_rate);
+        assert_eq!(estimate.channels, request.render.channels);
+        assert_eq!(estimate.start_sample, request.render.start_sample);
+        assert_eq!(estimate.end_sample, request.render.end_sample);
+        assert_eq!(estimate.content_frames, request.render.content_frames());
+        assert_eq!(estimate.max_tail_frames, request.render.max_tail_frames());
+        assert_eq!(estimate.file_count, 1);
+        // 2 s of content + the 5 s default tail, stereo 24-bit at 48 kHz.
+        assert_eq!(estimate.content_frames, 96_000);
+        assert_eq!(estimate.max_tail_frames, 240_000);
+        let frames = estimate.content_frames + estimate.max_tail_frames;
+        assert_eq!(estimate.uncompressed_bytes, Some(frames * 2 * 3 + 44));
+    }
+
+    /// The peak target and both "until silence" parameters are real engine
+    /// inputs, so the dialog is allowed to name them.
+    #[test]
+    fn peak_target_and_tail_values_reach_the_request() {
+        let snapshot = snapshot_with_content(4.0);
+        let mut s = valid_wav();
+        s.normalize = ExportNormalizeChoice::PeakDb(-3.0);
+        s.tail = ExportTailChoice::UntilSilence {
+            max_seconds: 7.5,
+            threshold_db: -48.0,
+        };
+        let req = s.to_request(&snapshot, &defaults()).unwrap();
+        assert!(matches!(
+            req.render.normalize,
+            DirectAudio::ExportNormalizeMode::PeakDb(db) if (db + 3.0).abs() < 1e-6
+        ));
+        assert!(matches!(
+            req.render.tail,
+            DirectAudio::ExportTailMode::UntilSilence {
+                max_seconds,
+                threshold_db,
+            } if (max_seconds - 7.5).abs() < 1e-9 && (threshold_db + 48.0).abs() < 1e-6
+        ));
+        // 7.5 s at 48 kHz is the cap the progress denominator uses.
+        assert_eq!(req.render.max_tail_frames(), 360_000);
     }
 }

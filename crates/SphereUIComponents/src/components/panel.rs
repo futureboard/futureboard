@@ -34,7 +34,7 @@ use crate::components::inspector::{
 };
 use crate::components::inspector_kit;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
-use crate::components::slider::slider_with_drag_callbacks;
+use crate::components::slider::{bipolar_slider_with_drag_callbacks, slider_with_drag_callbacks};
 use crate::components::solfege_editor::SolfegePitchSummary;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
@@ -48,7 +48,7 @@ use crate::components::timeline::timeline_state::{
 use crate::i18n::I18n;
 use crate::overlay::{inspector_combo_menu_position, OverlayAnchor};
 use crate::solfege::{ModelLoadState, SolfegeModelInfo};
-use crate::theme::{typography, Colors};
+use crate::theme::{space, typography, Colors};
 
 type RoutingComboToggleCb =
     Arc<dyn Fn(InspectorRoutingCombo, Option<OverlayAnchor>, &mut Window, &mut App) + 'static>;
@@ -2238,39 +2238,52 @@ fn track_inspector(
             .when_some(auto_toggle, |row, toggle| row.child(toggle))
     };
 
-    // ── Pan slider (mapped -1..1 ↔ 0..1) + readout ──────────────────────
+    // ── Pan slider (bipolar, centre-detented) + readout ─────────────────
+    //
+    // The value travels in real -1..1 pan units end to end: the control fills
+    // outward from the rail centre, so neutral reads as an empty rail rather
+    // than a half-full one, and no 0..1 remapping happens at this call site.
     let pan_row = {
         let start = callbacks.on_pan_drag_start.clone();
         let preview = callbacks.on_pan_drag_preview.clone();
         let commit = callbacks.on_pan_drag_commit.clone();
+        // `on_pan` runs one `EditCommand::SetTrackPan` through the edit stack —
+        // exactly what a double-click reset should record, and the same path
+        // the TrackHeader pan pill resets through.
+        let reset = callbacks.on_pan.clone();
         let tid_start = tid.clone();
         let tid_preview = tid.clone();
         let tid_commit = tid.clone();
-        let pan_norm = (track.pan + 1.0) / 2.0;
+        let tid_reset = tid.clone();
+        let pan_readout = format_pan(i18n, track.pan);
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0))
-            .child(slider_with_drag_callbacks(
+            .gap(px(space::BASE))
+            .child(bipolar_slider_with_drag_callbacks(
                 "inspector-pan",
-                pan_norm,
+                track.pan,
                 track.color,
+                Some(pan_readout.clone()),
                 Some(move |_: &f32, w: &mut Window, cx: &mut App| start(&tid_start, w, cx)),
                 Some(move |v: &f32, w: &mut Window, cx: &mut App| {
-                    let pan = (*v * 2.0 - 1.0).clamp(-1.0, 1.0);
-                    preview(&(tid_preview.clone(), pan), w, cx);
+                    preview(&(tid_preview.clone(), *v), w, cx);
                 }),
                 Some(move |w: &mut Window, cx: &mut App| commit(&tid_commit, w, cx)),
-                None::<fn(&mut Window, &mut App)>,
+                Some(move |w: &mut Window, cx: &mut App| reset(&(tid_reset.clone(), 0.0), w, cx)),
             ))
             .child(
                 div()
                     .flex_shrink_0()
-                    .min_w(px(40.0))
+                    .flex()
+                    .justify_end()
+                    // Right-aligned on the same 48 px column as the volume
+                    // readout above, so the two numbers in this form line up.
+                    .min_w(px(48.0))
                     .text_size(px(typography::DENSE_LABEL))
                     .text_color(Colors::text_secondary())
-                    .child(format_pan(i18n, track.pan)),
+                    .child(pan_readout),
             )
     };
 

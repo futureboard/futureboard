@@ -250,6 +250,19 @@ impl StudioLayout {
                     cx.notify();
                     enabled
                 });
+                // The toolbar button and the Settings checkbox are the same
+                // switch. Persist it here or the next settings change of any
+                // kind re-reads the schema, finds the stale value, and turns the
+                // click back off — button, engine and all. Written straight
+                // through `SettingsModel` rather than `handle_setting_update` so
+                // a transport command does not re-enter `sync_settings_to_systems`
+                // (which is what would push the reverted value back).
+                self.settings.update(cx, |settings, cx| {
+                    settings.update_setting(
+                        move |schema| schema.recording.metronome.enabled = enabled,
+                        cx,
+                    );
+                });
                 if let (enabled, Some(engine)) = (enabled, self.audio_bridge.engine.as_ref()) {
                     if let Err(error) = engine.set_metronome_enabled(enabled) {
                         if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {

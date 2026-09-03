@@ -77,6 +77,56 @@ fn log_post_play_callback(step: &str) {
     eprintln!("[play-debug callback] {step} (remaining={left})");
 }
 
+// ── Metronome voice ───────────────────────────────────────────────────────────
+
+/// Which click the metronome synthesises (Settings → Recording → Metronome).
+///
+/// Two genuinely different voices rather than two levels of one: Woodblock is a
+/// short squared decay that reads as a transient, Beep is a longer flat-topped
+/// tone. Told apart by envelope as well as pitch, so they stay distinguishable
+/// through a dense mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetronomeSound {
+    Woodblock,
+    Beep,
+}
+
+impl MetronomeSound {
+    /// Compact wire form for [`EngineCommand::SetMetronomeVoice`] — the same
+    /// code-in-a-command shape `SetTrackPreviewMode` uses.
+    #[inline]
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Beep,
+            _ => Self::Woodblock,
+        }
+    }
+
+    #[inline]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Woodblock => 0,
+            Self::Beep => 1,
+        }
+    }
+
+    /// Settings persists the timbre as its display label; the engine owns the
+    /// mapping so the UI never has to know the codes.
+    pub fn from_label(label: &str) -> Self {
+        if label.eq_ignore_ascii_case("beep") {
+            Self::Beep
+        } else {
+            Self::Woodblock
+        }
+    }
+}
+
+/// Fraction of the beep's length spent ramping in — long enough to avoid a
+/// click at the onset, short enough to still land on the beat.
+const BEEP_ATTACK_FRACTION: f32 = 0.06;
+/// Fraction of the beep's length spent ramping out.
+const BEEP_RELEASE_FRACTION: f32 = 0.3;
+
 // ── Per-stream oscillator + local playback state ──────────────────────────────
 
 /// Local (non-shared) state for one audio stream.
@@ -125,10 +175,22 @@ pub struct LocalAudioState {
     pub metronome_next_beat: f64,
     pub tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot,
     pub metronome_click_remaining: u32,
+    /// Base click length in samples (the Woodblock voice's whole duration).
     pub metronome_click_len: u32,
+    /// Length of the click currently sounding — the envelope's denominator.
+    /// Voices have different durations, so this is not always `click_len`.
+    pub metronome_click_span: u32,
     pub metronome_click_phase: f64,
     pub metronome_click_phase_inc: f64,
     pub metronome_click_gain: f32,
+    /// User click level from Settings, already mapped to a linear multiplier
+    /// (the persisted default is unity). Folded into `metronome_click_gain` at
+    /// arm time so every mix site inherits it.
+    pub metronome_volume: f32,
+    pub metronome_sound: MetronomeSound,
+    /// Voice of the click currently sounding. Latched at arm time so switching
+    /// timbre in Settings cannot step the envelope of a click already in flight.
+    pub metronome_click_sound: MetronomeSound,
     /// When true, metronome scheduling and output are suppressed (playhead scrub).
     pub metronome_suspended: bool,
     /// Standalone File Browser audition, owned by this stream/callback.
@@ -170,9 +232,13 @@ impl LocalAudioState {
             tempo_map: crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(120.0),
             metronome_click_remaining: 0,
             metronome_click_len: (sample_rate * 0.024).round().max(1.0) as u32,
+            metronome_click_span: (sample_rate * 0.024).round().max(1.0) as u32,
             metronome_click_phase: 0.0,
             metronome_click_phase_inc: 0.0,
             metronome_click_gain: 0.0,
+            metronome_volume: 1.0,
+            metronome_sound: MetronomeSound::Woodblock,
+            metronome_click_sound: MetronomeSound::Woodblock,
             metronome_suspended: false,
             audition: AuditionPlayer::default(),
         }
@@ -182,6 +248,13 @@ impl LocalAudioState {
         self.metronome_enabled = enabled;
         self.metronome_click_remaining = 0;
         self.reset_metronome_schedule(position_sample, sample_rate);
+    }
+
+    /// Click level and timbre. Takes effect from the next click: changing the
+    /// voice under a sounding one would step its envelope.
+    pub fn set_metronome_voice(&mut self, volume: f32, sound: MetronomeSound) {
+        self.metronome_volume = volume.clamp(0.0, 2.0);
+        self.metronome_sound = sound;
     }
 
     pub fn set_bpm(&mut self, bpm: f64, position_sample: u64, sample_rate: u32) {
@@ -222,6 +295,13 @@ impl LocalAudioState {
         position_sample: u64,
         sample_rate: u32,
     ) {
+        // The accent lookup indexes this map from the audio thread. Its
+        // constructors guarantee at least one point; if that invariant is ever
+        // broken upstream, keep the last valid map rather than panic in the
+        // device callback.
+        if map.points().is_empty() {
+            return;
+        }
         self.time_signature_map = map;
         if let Some(pt) = self.time_signature_map.points().first() {
             self.metronome_ts_num = pt.numerator as u32;
@@ -318,15 +398,32 @@ impl LocalAudioState {
             let accent = self
                 .time_signature_map
                 .metronome_accent_at_beat(self.metronome_next_beat);
-            let (freq, gain) = match accent {
-                crate::time_signature_map::MetronomeAccent::Downbeat => (1760.0, 0.34),
-                crate::time_signature_map::MetronomeAccent::Group => (1320.0, 0.28),
-                crate::time_signature_map::MetronomeAccent::Normal => (980.0, 0.22),
+            let (freq, gain) = match self.metronome_sound {
+                MetronomeSound::Woodblock => match accent {
+                    crate::time_signature_map::MetronomeAccent::Downbeat => (1760.0, 0.34),
+                    crate::time_signature_map::MetronomeAccent::Group => (1320.0, 0.28),
+                    crate::time_signature_map::MetronomeAccent::Normal => (980.0, 0.22),
+                },
+                // The beep sits a register lower and holds, so it reads as a
+                // tone against the woodblock's tick rather than as the same
+                // click at another pitch.
+                MetronomeSound::Beep => match accent {
+                    crate::time_signature_map::MetronomeAccent::Downbeat => (880.0, 0.30),
+                    crate::time_signature_map::MetronomeAccent::Group => (660.0, 0.25),
+                    crate::time_signature_map::MetronomeAccent::Normal => (440.0, 0.20),
+                },
             };
             self.metronome_click_phase = 0.0;
             self.metronome_click_phase_inc = freq / sr;
-            self.metronome_click_gain = gain;
-            self.metronome_click_remaining = self.metronome_click_len;
+            self.metronome_click_gain = gain * self.metronome_volume;
+            self.metronome_click_sound = self.metronome_sound;
+            self.metronome_click_span = match self.metronome_sound {
+                MetronomeSound::Woodblock => self.metronome_click_len,
+                // ~48 ms: long enough to be heard as a pitch, still inside a beat
+                // at any usable tempo.
+                MetronomeSound::Beep => self.metronome_click_len.saturating_mul(2).max(1),
+            };
+            self.metronome_click_remaining = self.metronome_click_span;
             if metronome_debug_enabled() {
                 let compensated_audible_sample_position =
                     output_sample_position.saturating_sub(compensation_delay);
@@ -349,22 +446,49 @@ impl LocalAudioState {
                     self.metronome_ts_den,
                 );
             }
+            let previous_beat = self.metronome_next_beat;
             self.metronome_next_beat = self
                 .time_signature_map
-                .next_metronome_click_after(self.metronome_next_beat);
+                .next_metronome_click_after(previous_beat);
+            // The non-finite case takes the guard too: `samples_at_beat(NaN)`
+            // clamps to 0, which would make the scan condition permanently true.
+            if !self.metronome_next_beat.is_finite() || self.metronome_next_beat <= previous_beat {
+                // A malformed map (a segment that is not a whole number of bars
+                // can make the bar-start and bar-beat derivations disagree) can
+                // hand back the beat we just fired, which would spin this loop
+                // forever inside the device callback. Step past it instead: one
+                // click may land on the wrong subdivision, the audio thread does
+                // not hang.
+                self.metronome_next_beat = previous_beat + 1.0;
+                break;
+            }
         }
 
         if self.metronome_click_remaining == 0 {
             return 0.0;
         }
 
-        let age = self
-            .metronome_click_len
-            .saturating_sub(self.metronome_click_remaining) as f32;
-        let t = age / self.metronome_click_len.max(1) as f32;
-        let env = (1.0 - t).max(0.0);
+        let span = self.metronome_click_span.max(1);
+        let age = span.saturating_sub(self.metronome_click_remaining) as f32;
+        let t = (age / span as f32).clamp(0.0, 1.0);
+        let env = match self.metronome_click_sound {
+            // Percussive: squared decay from the transient.
+            MetronomeSound::Woodblock => {
+                let decay = (1.0 - t).max(0.0);
+                decay * decay
+            }
+            // Tonal: fast attack, flat body, short release.
+            MetronomeSound::Beep => {
+                if t < BEEP_ATTACK_FRACTION {
+                    t / BEEP_ATTACK_FRACTION
+                } else if t > 1.0 - BEEP_RELEASE_FRACTION {
+                    ((1.0 - t) / BEEP_RELEASE_FRACTION).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            }
+        };
         let sample = (self.metronome_click_phase * std::f64::consts::TAU).sin() as f32
-            * env
             * env
             * self.metronome_click_gain;
         self.metronome_click_phase += self.metronome_click_phase_inc;
@@ -432,12 +556,12 @@ pub fn drain_commands(
                 runtime.all_notes_off("project_load");
                 let old = std::mem::replace(runtime, *next_runtime);
                 runtime.sample_rate = output_sample_rate;
-                // Preserve the plugin-bridge sinks across reloads (Stage 3b) — a
-                // freshly built project never carries them.
-                runtime.plugin_bridge_sinks = old.plugin_bridge_sinks.clone();
-                // Re-cache the per-insert sink handles on the fresh graph (the
-                // block path reads insert.bridge_sink, never the map).
-                runtime.resolve_bridge_sinks();
+                // The plugin-bridge sinks (Stage 3b) are carried across the
+                // reload by `EngineInner::load_project`, which copies its
+                // control-thread mirror into the graph and resolves the
+                // per-insert handles there. Cloning the map and re-resolving
+                // every insert used to happen right here, on the audio thread,
+                // in the same callback as Play.
                 runtime.bridge_editor_active = old.bridge_editor_active.clone();
                 // The panic the all_notes_off above pushed into the (preserved)
                 // sinks still needs flushing through the new graph.
@@ -463,7 +587,15 @@ pub fn drain_commands(
                 local.playing_local = was_playing;
                 let pos = shared.position_samples.load(Ordering::Relaxed);
                 runtime.reset_midi_playback(pos);
-                local.set_tempo_map(runtime.tempo_map.clone(), pos, output_sample_rate);
+                // Cloning the segment vector here allocates (and frees the old
+                // one) on the audio thread. A project sync almost never changes
+                // the tempo, so compare first and re-arm the schedule without
+                // touching the heap when it has not.
+                if local.tempo_map.segments == runtime.tempo_map.segments {
+                    local.reset_metronome_schedule(pos, output_sample_rate);
+                } else {
+                    local.set_tempo_map(runtime.tempo_map.clone(), pos, output_sample_rate);
+                }
                 let old_state = crate::engine::AudioEngineState::from_u8(
                     shared.engine_state.load(Ordering::Relaxed),
                 );
@@ -502,13 +634,15 @@ pub fn drain_commands(
             }
             EngineCommand::StartTransport => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
-                let active_clips = runtime.active_clip_count_at_sample(pos);
                 if command_debug_enabled() {
+                    // Counting active clips walks the whole clip list; it is a
+                    // diagnostic, so it stays inside the guard rather than
+                    // running on every Play.
                     eprintln!(
                         "[DAUx] StartTransport: pos={}sa ({:.3}s), active={}, scheduled={}",
                         pos,
                         pos as f64 / output_sample_rate as f64,
-                        active_clips,
+                        runtime.active_clip_count_at_sample(pos),
                         runtime.clips.len(),
                     );
                 }
@@ -604,6 +738,9 @@ pub fn drain_commands(
             }
             EngineCommand::SetMetronomeSuspended(suspended) => {
                 local.set_metronome_suspended(suspended);
+            }
+            EngineCommand::SetMetronomeVoice { volume, sound } => {
+                local.set_metronome_voice(volume, MetronomeSound::from_code(sound));
             }
             EngineCommand::SetBpm(bpm) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -2098,6 +2235,128 @@ mod tests {
         assert!(
             local.metronome_click_remaining > 0,
             "uncompensated metronome should arm at the raw beat sample"
+        );
+    }
+
+    /// Render one whole click into a buffer. 120 BPM puts beat 0 at sample 0,
+    /// so the first call arms; 4096 samples is well short of beat 1 (24 000),
+    /// so exactly one click lands in the result.
+    fn render_one_click(sound: MetronomeSound, volume: f32) -> Vec<f32> {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_voice(volume, sound);
+        local.set_metronome_enabled(true, 0, 48_000);
+        (0..4_096u64)
+            .map(|sample| local.metronome_sample(sample, sample, 48_000, true, 0, 0))
+            .collect()
+    }
+
+    fn click_peak(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+    }
+
+    /// The scrub suspension is the state a ruler drag leaves behind. While it
+    /// holds, nothing may reach the output — and lifting it must re-arm without
+    /// waiting for the next Play.
+    #[test]
+    fn a_suspended_metronome_emits_no_click() {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_enabled(true, 0, 48_000);
+        local.set_metronome_suspended(true);
+
+        // One second at 120 BPM covers two beats — both would click otherwise.
+        for sample in 0..48_000u64 {
+            let click = local.metronome_sample(sample, sample, 48_000, true, 0, 0);
+            assert_eq!(click, 0.0, "suspended metronome clicked at sample {sample}");
+        }
+        assert_eq!(local.metronome_click_remaining, 0);
+
+        local.set_metronome_suspended(false);
+        local.reset_metronome_schedule(48_000, 48_000);
+        let _ = local.metronome_sample(48_000, 0, 48_000, true, 0, 0);
+        assert!(
+            local.metronome_click_remaining > 0,
+            "resuming must re-arm the click without a transport restart"
+        );
+    }
+
+    /// Woodblock and Beep are two voices, not one voice at two pitches: the
+    /// woodblock has decayed to nothing while the beep is still sounding.
+    #[test]
+    fn the_beep_voice_differs_from_the_woodblock_in_length_and_envelope() {
+        let woodblock = render_one_click(MetronomeSound::Woodblock, 1.0);
+        let beep = render_one_click(MetronomeSound::Beep, 1.0);
+
+        assert!(click_peak(&woodblock) > 0.0, "the woodblock never sounded");
+        assert!(click_peak(&beep) > 0.0, "the beep never sounded");
+        // 24 ms woodblock = 1152 samples at 48 kHz; the beep runs twice that.
+        assert_eq!(
+            click_peak(&woodblock[1_500..]),
+            0.0,
+            "the woodblock should be over well before 1500 samples"
+        );
+        assert!(
+            click_peak(&beep[1_500..]) > 0.0,
+            "the beep should still be sounding where the woodblock has stopped"
+        );
+    }
+
+    /// The Settings click level reaches the generator, so every mix site — block
+    /// mixer, per-sample fallbacks, and the legacy callback — inherits it.
+    #[test]
+    fn the_click_level_scales_the_generated_click() {
+        let full = click_peak(&render_one_click(MetronomeSound::Woodblock, 1.0));
+        let half = click_peak(&render_one_click(MetronomeSound::Woodblock, 0.5));
+        let silent = click_peak(&render_one_click(MetronomeSound::Woodblock, 0.0));
+
+        assert!(full > 0.0);
+        assert!(
+            (half - full * 0.5).abs() < 1e-4,
+            "half level should halve the click ({half} vs {full})"
+        );
+        assert_eq!(silent, 0.0, "a zero click level must be silent");
+    }
+
+    /// A segment that is not a whole number of bars can make the bar-start and
+    /// bar-beat derivations disagree, which used to be able to hand the click
+    /// scan the beat it had just fired — an endless loop inside the device
+    /// callback. The schedule must always move forward.
+    #[test]
+    fn an_irregular_time_signature_map_cannot_stall_the_click_scan() {
+        let map = crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::from_points(vec![
+            crate::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                beat: 0.0,
+                numerator: 4,
+                denominator: 4,
+                grouping: vec![4],
+            },
+            crate::time_signature_map::RuntimeTimeSignaturePointSnapshot {
+                // Three quarter notes into a 4/4 bar: the marker deliberately
+                // does not land on a bar line.
+                beat: 3.0,
+                numerator: 7,
+                denominator: 8,
+                grouping: vec![2, 2, 3],
+            },
+        ]);
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_time_signature_map(map, 0, 48_000);
+        local.set_metronome_enabled(true, 0, 48_000);
+
+        let mut previous = local.metronome_next_beat;
+        // Four seconds at 120 BPM = eight beats, crossing the marker.
+        for sample in 0..(4 * 48_000u64) {
+            let _ = local.metronome_sample(sample, sample, 48_000, true, 0, 0);
+            assert!(
+                local.metronome_next_beat >= previous,
+                "click schedule went backwards at sample {sample}"
+            );
+            previous = local.metronome_next_beat;
+        }
+        assert!(
+            previous >= 8.0,
+            "click schedule stopped advancing at beat {previous}"
         );
     }
 

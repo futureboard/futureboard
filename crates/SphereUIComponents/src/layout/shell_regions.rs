@@ -43,10 +43,19 @@ use crate::components::timeline::timeline_state::TrackState;
 
 /// The file-browser sidebar as its own view.
 ///
-/// Rebuilding it meant cloning the whole `FileBrowserState` tree and
-/// re-creating eight callbacks per frame, on every frame the transport moved.
+/// Rebuilding it meant re-creating eight callbacks per frame, on every frame
+/// the transport moved.
 pub struct BrowserSidebarView {
     owner: Entity<StudioLayout>,
+    /// Focus target for the tree itself.
+    ///
+    /// It lives here rather than on `StudioLayout` because the sidebar is the
+    /// only view that renders it, and `StudioLayout` reaches it through
+    /// [`BrowserSidebarView::tree_focus`] when routing keys. Before this the
+    /// browser had no focus target at all, so arrows, Enter and type-ahead
+    /// only worked while the *search field* was focused — clicking a row
+    /// killed the keyboard.
+    pub tree_focus: gpui::FocusHandle,
     /// Keeps the region repainting on every shell change, exactly as it did
     /// when the shell rendered it inline.
     _observers: Vec<gpui::Subscription>,
@@ -62,7 +71,11 @@ impl BrowserSidebarView {
             cx.observe(&owner, |_, _, cx| cx.notify()),
             cx.observe(settings, |_, _, cx| cx.notify()),
         ];
-        Self { owner, _observers }
+        Self {
+            owner,
+            tree_focus: cx.focus_handle(),
+            _observers,
+        }
     }
 
     /// Root style used while the view is cached. Must match the wrapper
@@ -82,7 +95,10 @@ impl Render for BrowserSidebarView {
         // before its element tree was laid out, and this view is rendered from
         // that tree's prepaint.
         let owner = self.owner.clone();
-        owner.update(cx, |layout, cx| layout.render_browser_sidebar(window, cx))
+        let tree_focus = self.tree_focus.clone();
+        owner.update(cx, |layout, cx| {
+            layout.render_browser_sidebar(&tree_focus, window, cx)
+        })
     }
 }
 
@@ -91,6 +107,7 @@ impl StudioLayout {
     /// cost lands only on frames where the shell actually changed.
     pub(super) fn render_browser_sidebar(
         &mut self,
+        tree_focus: &gpui::FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -153,6 +170,9 @@ impl StudioLayout {
                 });
             })
         };
+        // Mouse selection and keyboard selection go through the same operation
+        // (`apply_browser_selection`), so arrowing to a file can no longer give
+        // a different result from clicking it.
         let on_browser_select: std::sync::Arc<
             dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -160,17 +180,21 @@ impl StudioLayout {
             std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
                 let path = path.clone();
                 this.update(cx, |this, cx| {
-                    this.file_browser.select(path.clone());
-                    if crate::components::file_browser::is_audio_path(&path) {
-                        // Visual mini-waveform preview always decodes on select.
-                        this.ensure_browser_waveform(path.clone(), cx);
-                        // Browser selection is also a real audible audition;
-                        // decode happens off-thread in the engine, so this UI
-                        // event only queues work and never blocks rendering.
-                        if this.file_browser.preview_enabled {
-                            let _ = this.audition_browser_file(&path);
-                        }
-                    }
+                    this.apply_browser_selection(path, cx);
+                    cx.notify();
+                });
+            })
+        };
+        // Breadcrumb jump: expand the ancestors so the target lands on a row
+        // that is actually on screen, then select it normally.
+        let on_browser_reveal: std::sync::Arc<
+            dyn Fn(&PathBuf, &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |path: &PathBuf, _w, cx| {
+                let path = path.clone();
+                this.update(cx, |this, cx| {
+                    this.reveal_browser_path(path, cx);
                     cx.notify();
                 });
             })
@@ -280,8 +304,45 @@ impl StudioLayout {
                 });
             })
         };
-        let file_browser = self.file_browser.clone();
+        // Auto-preview: switching it off also silences whatever is playing, so
+        // the toggle's state and the audible output can never disagree.
+        let on_browser_toggle_preview: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if !this.file_browser.toggle_preview_enabled() {
+                        this.stop_browser_audition();
+                    }
+                    cx.notify();
+                });
+            })
+        };
+        let on_browser_stop_preview: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
+            let this = cx.entity().clone();
+            std::sync::Arc::new(move |_w, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.stop_browser_audition();
+                    cx.notify();
+                });
+            })
+        };
+
+        let browser_callbacks = components::BrowserCallbacks {
+            on_toggle: on_browser_toggle,
+            on_select: on_browser_select,
+            on_reveal: on_browser_reveal,
+            on_activate_file: on_browser_activate,
+            on_context_menu: on_browser_context,
+            on_collapse_all: on_browser_collapse_all,
+            on_rescan: on_browser_rescan,
+            on_toggle_preview: on_browser_toggle_preview,
+            on_stop_preview: on_browser_stop_preview,
+        };
+
         let browser_scroll = self.browser_scroll.clone();
+        let search_focused = self.browser_search_input.is_focused(window);
 
         let owner = cx.entity().clone();
         div()
@@ -293,19 +354,18 @@ impl StudioLayout {
                     layout.set_active_panel(WorkspaceActivePanel::Browser, cx);
                 });
             })
+            // `&self.file_browser`, not a clone: `FileBrowserState` owns the
+            // whole directory index, and deep-copying it once per render was
+            // the single largest allocation in this region.
             .child(components::sidebar(
-                &file_browser,
+                &self.file_browser,
                 browser_scroll,
+                tree_focus,
                 &self.browser_search_input,
-                self.browser_search_input.is_focused(window),
+                search_focused,
                 active_panel == WorkspaceActivePanel::Browser,
                 browser_search_callbacks,
-                on_browser_toggle,
-                on_browser_select,
-                on_browser_activate,
-                on_browser_context,
-                on_browser_collapse_all,
-                on_browser_rescan,
+                browser_callbacks,
                 i18n,
             ))
             .into_any_element()
@@ -903,6 +963,13 @@ impl StudioLayout {
     /// shell rebuild.
     pub(super) fn notify_app_chrome(&self, cx: &mut Context<Self>) {
         self.app_chrome.update(cx, |_, cx| cx.notify());
+    }
+
+    /// Repaint only the browser sidebar. The sample-audition playhead advances
+    /// at the poll rate and is visible nowhere else, so it takes the same route
+    /// the bar.beat readout does rather than rebuilding the whole shell.
+    pub(super) fn notify_browser_sidebar(&self, cx: &mut Context<Self>) {
+        self.browser_sidebar.update(cx, |_, cx| cx.notify());
     }
 }
 

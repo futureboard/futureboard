@@ -196,7 +196,7 @@ pub use settings_dialog::{
     open_settings_window, settings_dialog, HardwareCombo, OnSettingUpdate, SettingsDialogCallbacks,
     SettingsDialogState, SettingsTab, SettingsWindow,
 };
-pub use sidebar::{sidebar, SIDEBAR_WIDTH};
+pub use sidebar::{sidebar, BrowserCallbacks, SIDEBAR_WIDTH};
 pub use slider::slider;
 pub use solfege_editor::{SolfegeEditorPanel, SolfegeEditorTab};
 pub use song_text_panel::{

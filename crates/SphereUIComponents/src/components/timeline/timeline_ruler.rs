@@ -239,6 +239,13 @@ pub fn timeline_ruler(
     let scrub_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let scrub_active_drag = scrub_active.clone();
     let scrub_active_up = scrub_active.clone();
+    // A ruler drag routinely ends with the pointer off the ruler, and GPUI's
+    // `on_mouse_up` only fires while the hitbox is hovered — so the release that
+    // resumes the metronome was simply lost, leaving the click suspended until
+    // the next Play. `on_mouse_up_out` is the other half of that pair; the
+    // shared `swap(false)` makes exactly one of the two run the end callback.
+    let scrub_active_up_out = scrub_active.clone();
+    let scrub_end_out = on_playhead_scrub_end.clone();
     // Resolved once per frame from last frame's measurement, so every handler
     // built below shares one origin.
     let lane_origin = state.lane_origin_x();
@@ -411,7 +418,7 @@ pub fn timeline_ruler(
                                 .on_click(move |_, window, cx| {
                                     on_cycle_grid_clone(&(), window, cx);
                                 })
-                                .child(state.grid_division.label_with_shape(state.snap_shape)),
+                                .child(state.grid_step_label()),
                         ),
                 ),
         )
@@ -488,6 +495,16 @@ pub fn timeline_ruler(
                     move |_: &gpui::MouseUpEvent, window, cx| {
                         if scrub_active_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
                             if let Some(cb) = scrub_end.as_ref() {
+                                cb(window, cx);
+                            }
+                        }
+                    },
+                )
+                .on_mouse_up_out(
+                    gpui::MouseButton::Left,
+                    move |_: &gpui::MouseUpEvent, window, cx| {
+                        if scrub_active_up_out.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(cb) = scrub_end_out.as_ref() {
                                 cb(window, cx);
                             }
                         }
@@ -770,7 +787,7 @@ pub fn timeline_ruler(
                 // character per line and look like random digits). Each label
                 // gets its own min-width so the text lays out on a single row.
                 .children(lines.iter().filter(|l| l.show_label).map(|line| {
-                    let label = state.format_position(line.beat);
+                    let label = state.format_grid_line_label(line);
                     let (font_weight, text_color) = match line.level {
                         GridLineLevel::Bar => {
                             (gpui::FontWeight::BOLD, Colors::timeline_ruler_text())

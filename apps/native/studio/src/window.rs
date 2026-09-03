@@ -38,5 +38,9 @@ pub fn welcome_window_options(cx: &App) -> WindowOptions {
     }));
     options.show = true;
     options.focus = true;
+    // The start screen lays out a nav rail beside a two-column body; below this
+    // the columns stack and the recent list loses its date column. Without a
+    // floor the window can be dragged narrower than anything it can render.
+    options.window_min_size = Some(size(px(880.0), px(560.0)));
     options
 }

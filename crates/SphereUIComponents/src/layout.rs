@@ -1274,7 +1274,7 @@ impl StudioLayout {
         let owner = cx.entity().clone();
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_native_audio_callbacks(
-                Some(Arc::new(move |beats, bpm, reason| {
+                Some(Arc::new(move |beats, _bpm, reason| {
                     match reason {
                         SeekReason::UserDragStart | SeekReason::UserDragging => {
                             let _ = seek_engine.set_metronome_suspended(true);
@@ -1286,8 +1286,13 @@ impl StudioLayout {
                             let _ = seek_engine.set_metronome_suspended(false);
                         }
                     }
-                    let seconds = beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
-                    if let Err(error) = seek_engine.seek(seconds) {
+                    // Beat -> time through the engine's own tempo map, not the
+                    // single BPM this callback is handed: under tempo automation
+                    // the two disagree, and the metronome re-arms its grid from
+                    // wherever the seek landed. This callback has no access to
+                    // the project tempo map, and the engine's copy is the one
+                    // the click schedule is computed against anyway.
+                    if let Err(error) = seek_engine.seek_beats(beats.max(0.0) as f64) {
                         eprintln!("[audio] seek failed: {error}");
                     }
                 })),
@@ -2075,13 +2080,6 @@ impl StudioLayout {
                     }
                 }
             }
-            "browser:new-folder" => {
-                eprintln!("[browser] TODO: new folder action");
-            }
-            "browser:rename" => {
-                eprintln!("[browser] TODO: rename action");
-            }
-
             // ── View / zoom ──────────────────────────────────────────────
             "view:zoom-in" => self.zoom_timeline_by(cx, 1.25),
             "view:zoom-out" => self.zoom_timeline_by(cx, 0.8),
@@ -2346,7 +2344,11 @@ impl StudioLayout {
                     self.open_insert_picker(&track_id, None, cx);
                 }
             }
-            "file:export-arrangement" => {
+            // `file:export-audio` and `file:export-stems` are bound in every
+            // shipped keymap; both land here rather than in two dispatch arms
+            // that did not exist, which is why those shortcuts did nothing. The
+            // dialog owns the audio-vs-stems choice.
+            "file:export-arrangement" | "file:export-audio" | "file:export-stems" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
             }
             "file:export-midi" => self.open_export_midi_dialog(owner_bounds, cx),

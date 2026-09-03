@@ -12,6 +12,16 @@ pub struct GridLine {
     pub beat: f32,
     pub level: GridLineLevel,
     pub show_label: bool,
+    /// Exact wall-clock position, on lines a time-based timebase generated.
+    ///
+    /// Those lines are placed *from* a round number of seconds, and `beat` is
+    /// an `f32` derived from it — round-tripping back through the tempo map
+    /// loses the last few bits and lands a label one frame early (0.5 s comes
+    /// back as 0.49999997, which truncates to frame 14 instead of 15). The
+    /// exact value rides along so the label never has to re-derive it.
+    /// `None` on musical lines, which are placed from the beat in the first
+    /// place.
+    pub seconds: Option<f64>,
 }
 
 /// Inputs for [`resolve_timeline_grid_lod`]. A snapshot of the current timeline
@@ -229,6 +239,14 @@ impl TimelineState {
             self.viewport.scroll_x.to_bits().hash(&mut hasher);
             viewport_width.to_bits().hash(&mut hasher);
             self.bpm.to_bits().hash(&mut hasher);
+            // The timebase picks which generator runs and, for Timecode, the
+            // frame the ticks land on. Without these in the key, switching
+            // timebase would keep serving the previous grid.
+            self.time_display_format.to_tag().hash(&mut hasher);
+            self.timecode_rate.to_tag().hash(&mut hasher);
+            // Tempo automation bends where a wall-clock position sits, so a
+            // time-based grid has to invalidate when the map moves.
+            self.tempo_map.revision().hash(&mut hasher);
             // The map by content, not only by revision: the cache is
             // thread-wide, and two different maps can sit at the same revision
             // number. Meter changes are a handful of points at most.
@@ -265,6 +283,13 @@ impl TimelineState {
     }
 
     pub fn get_arrangement_grid_lines(&self, viewport_width: f32) -> Vec<GridLine> {
+        // A time-based timebase replaces the musical grid outright, so the
+        // ruler above the lanes and the lines behind the clips are one set of
+        // positions. Drawing bar lines under a timecode ruler is what makes the
+        // grid look like it "didn't follow".
+        if self.time_display_format.is_time_based() {
+            return self.get_time_ruler_lines(viewport_width);
+        }
         let power = crate::perf::power_mode();
         const MAX_GRID_LINES_BASE: usize = 1200;
         // Merge any grid line that would land within this many px of one already
@@ -341,6 +366,7 @@ impl TimelineState {
                 beat: rb,
                 level,
                 show_label: label_candidate,
+                seconds: None,
             });
         };
 
@@ -515,6 +541,59 @@ impl TimelineState {
         self.format_position_at(beats as f64)
     }
 
+    /// Same as [`Self::format_position_at`] but from an already-known exact
+    /// wall-clock position, skipping the beat round-trip.
+    ///
+    /// Bars+Beats still has to go back through the tempo map — it is the one
+    /// format whose answer is musical rather than temporal.
+    pub fn format_position_at_seconds(&self, seconds: f64) -> String {
+        match self.time_display_format {
+            TimeDisplayFormat::BarsBeats => self.format_bar_beat_at(self.beat_at_seconds(seconds)),
+            TimeDisplayFormat::Seconds => super::time_display::format_seconds(seconds),
+            TimeDisplayFormat::Timecode => {
+                super::time_display::format_timecode(seconds, self.timecode_rate)
+            }
+            TimeDisplayFormat::Samples => {
+                super::time_display::format_samples(seconds, self.project_sample_rate)
+            }
+        }
+    }
+
+    /// Label for the ruler's grid-resolution chip.
+    ///
+    /// Under a time-based timebase the musical division ("1/16") is not what
+    /// the grid is on, so the chip reports the clock step that actually applies
+    /// instead of a note value nothing snaps to.
+    pub fn grid_step_label(&self) -> String {
+        if !self.time_display_format.is_time_based() {
+            return self.grid_division.label_with_shape(self.snap_shape);
+        }
+        let step = self.time_grid_step().minor;
+        if matches!(self.time_display_format, TimeDisplayFormat::Timecode) {
+            let frames = step * self.timecode_rate.fps();
+            if frames < 59.5 {
+                return format!("{} f", frames.round().max(1.0) as i64);
+            }
+        }
+        if step < 1.0 {
+            // Trim to the shortest exact form: 0.25 s, not 0.250 s.
+            format!("{} s", format!("{step:.3}").trim_end_matches('0'))
+        } else if step < 60.0 {
+            format!("{} s", step.round() as i64)
+        } else {
+            format!("{} m", (step / 60.0).round() as i64)
+        }
+    }
+
+    /// A grid line's label, taking the exact wall-clock position when the line
+    /// carries one.
+    pub fn format_grid_line_label(&self, line: &GridLine) -> String {
+        match line.seconds {
+            Some(seconds) => self.format_position_at_seconds(seconds),
+            None => self.format_position(line.beat),
+        }
+    }
+
     /// Wall-clock positions of every clip on a Linear-timebase track.
     ///
     /// Call this *before* mutating the tempo map, then
@@ -603,28 +682,39 @@ impl TimelineState {
 
     /// Ruler ticks for the current timebase.
     ///
-    /// Bars+Beats reuses the arrangement grid, so the ruler and the grid behind
-    /// the clips stay the same lines. A time-based timebase gets its own ticks
-    /// at round clock intervals instead — labelling musical bar positions with
-    /// timecode would put the numbers at arbitrary places and read as noise.
-    ///
-    /// The *grid* is untouched either way: snapping, clip layout and hit-testing
-    /// stay musical whatever the ruler is showing.
+    /// Always the arrangement grid: the ruler and the lines behind the clips are
+    /// one set of positions in every timebase, which is what keeps a label
+    /// above a lane pointing at the line it names.
     pub fn ruler_grid_lines(&self, viewport_width: f32) -> std::rc::Rc<Vec<GridLine>> {
-        if !self.time_display_format.is_time_based() {
-            return self.arrangement_grid_lines(viewport_width);
-        }
-        std::rc::Rc::new(self.get_time_ruler_lines(viewport_width))
+        self.arrangement_grid_lines(viewport_width)
     }
 
-    /// Tick generation for a time-based ruler. Positions are resolved in real
+    /// Widest label any time-based format produces ("00:00:00:00", a long
+    /// sample index) plus breathing room, so labels never touch at any zoom.
+    const MIN_TIME_LABEL_PX: f64 = 68.0;
+
+    /// Tick spacing of the time-based grid, in real seconds.
+    ///
+    /// Resolved from `pixels_per_second` — the zoom factor, which *is* pixels
+    /// per real second whenever the tempo is constant. Shared by the tick
+    /// generator and by snapping so a clip lands on the line the user sees;
+    /// resolving them separately is how a grid starts lying about where things
+    /// go.
+    pub fn time_grid_step(&self) -> super::time_display::TimeRulerStep {
+        let frame_seconds = matches!(self.time_display_format, TimeDisplayFormat::Timecode)
+            .then(|| 1.0 / self.timecode_rate.fps());
+        super::time_display::resolve_time_ruler_step(
+            self.viewport.pixels_per_second.max(1.0e-6) as f64,
+            Self::MIN_TIME_LABEL_PX,
+            frame_seconds,
+        )
+    }
+
+    /// Tick generation for a time-based grid. Positions are resolved in real
     /// seconds and mapped back through the tempo map, so a tempo change bends
     /// the spacing exactly as it bends playback.
     pub fn get_time_ruler_lines(&self, viewport_width: f32) -> Vec<GridLine> {
         const MAX_TIME_RULER_LINES: usize = 1200;
-        // Widest label any format produces ("00:00:00:00", a long sample index)
-        // plus breathing room, so labels never touch at any zoom.
-        const MIN_TIME_LABEL_PX: f64 = 68.0;
 
         let viewport_width = viewport_width.max(1.0);
         let (start_beat, end_beat) = self.visible_beat_range(viewport_width);
@@ -633,19 +723,10 @@ impl TimelineState {
 
         let start_seconds = self.seconds_at_beat(start_beat);
         let end_seconds = self.seconds_at_beat(end_beat);
-        let span_seconds = end_seconds - start_seconds;
-        if !span_seconds.is_finite() || span_seconds <= 0.0 {
+        if !(end_seconds - start_seconds).is_finite() || end_seconds <= start_seconds {
             return Vec::new();
         }
-        let pixels_per_second = viewport_width as f64 / span_seconds;
-
-        let frame_seconds = matches!(self.time_display_format, TimeDisplayFormat::Timecode)
-            .then(|| 1.0 / self.timecode_rate.fps());
-        let step = super::time_display::resolve_time_ruler_step(
-            pixels_per_second,
-            MIN_TIME_LABEL_PX,
-            frame_seconds,
-        );
+        let step = self.time_grid_step();
 
         // Walk minor ticks and promote every one that lands on a major
         // division, so the two can never drift apart by a rounding step.
@@ -672,7 +753,8 @@ impl TimelineState {
             let is_major = slot.rem_euclid(per_major) == 0;
             // Same rule as the musical ruler: a label only survives if it clears
             // its neighbour.
-            let show_label = is_major && (x as f64 - last_label_x as f64) >= MIN_TIME_LABEL_PX;
+            let show_label =
+                is_major && (x as f64 - last_label_x as f64) >= Self::MIN_TIME_LABEL_PX;
             if show_label {
                 last_label_x = x;
             }
@@ -685,6 +767,7 @@ impl TimelineState {
                     GridLineLevel::Beat
                 },
                 show_label,
+                seconds: Some(seconds),
             });
         }
         lines

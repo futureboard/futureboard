@@ -155,6 +155,11 @@ pub enum EngineCommand {
     SetMetronomeSuspended(bool),
     /// Enable or disable generated metronome clicks.
     SetMetronomeEnabled(bool),
+    /// Click level and timbre from Settings → Recording → Metronome. `volume`
+    /// is a linear multiplier on the click's own gain; `sound` is a
+    /// [`crate::backend::render::MetronomeSound`] code (the same
+    /// code-in-a-command shape `SetTrackPreviewMode` uses).
+    SetMetronomeVoice { volume: f32, sound: u8 },
     /// Set project tempo for metronome scheduling (static tempo shortcut).
     SetBpm(f64),
     /// Replace the authoritative tempo map used for beat/time/sample conversion.

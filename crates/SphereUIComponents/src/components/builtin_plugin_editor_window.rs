@@ -2946,6 +2946,10 @@ pub fn open_builtin_editor_window(
         px(BUILTIN_EDITOR_MIN_WIDTH),
         px(BUILTIN_EDITOR_MIN_HEIGHT),
     ));
+    // Attach the monitor that holds the owner, or the requested rect is
+    // validated against the PRIMARY display and swapped for a default centred
+    // there — the editor opens on the wrong screen on any multi-monitor setup.
+    crate::window_position::apply_owner_display(&mut options, Some(owner_bounds), cx);
 
     cx.open_window(options, |window, cx| {
         let view = cx.new(|cx| {

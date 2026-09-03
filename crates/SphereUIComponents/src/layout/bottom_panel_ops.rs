@@ -207,7 +207,11 @@ impl StudioLayout {
     }
 
     pub(crate) fn sync_timeline_chrome_metrics(&self, cx: &mut Context<Self>) {
-        const SIDEBAR_WIDTH: f32 = 272.0;
+        // One source of truth: this width flows into
+        // `TimelineChromeMetrics.browser_width` → `viewport.panel_origin_x` →
+        // every arrangement hit test, so a second copy of the number here is a
+        // silent way to break clip hit-testing.
+        use crate::components::SIDEBAR_WIDTH;
         const INSPECTOR_WIDTH: f32 = 292.0;
         const STATUS_BAR_HEIGHT: f32 = 22.0;
         let show_browser = self.panels.browser;

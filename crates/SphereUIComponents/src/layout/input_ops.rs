@@ -356,7 +356,12 @@ impl StudioLayout {
             return false;
         }
         let search_focused = self.browser_search_input.is_focused(window);
-        if !search_focused {
+        // The tree now owns a real focus handle, so arrows, Enter and
+        // type-ahead survive a mouse click on a row. Before this the whole
+        // handler was gated on the *search field*, which meant clicking a row
+        // killed the keyboard until the user clicked the search box again.
+        let tree_focused = self.browser_sidebar.read(cx).tree_focus.is_focused(window);
+        if !search_focused && !tree_focused {
             return false;
         }
         if event.is_held && !is_repeatable_edit_key(event) {
@@ -370,46 +375,51 @@ impl StudioLayout {
 
         match key {
             "arrow_down" | "down" => {
-                self.file_browser.select_next();
+                let _ = self.file_browser.select_next();
+                self.reapply_browser_selection(cx);
                 cx.notify();
                 true
             }
             "arrow_up" | "up" => {
-                self.file_browser.select_previous();
+                let _ = self.file_browser.select_previous();
+                self.reapply_browser_selection(cx);
                 cx.notify();
                 true
             }
             "arrow_left" | "left" => {
-                self.file_browser.collapse_selected_or_parent();
-                let pending = self.file_browser.paths_needing_load();
-                for p in pending {
-                    self.file_browser.mark_loading(p.clone());
-                    self.spawn_directory_load(cx, p);
+                if self.file_browser.collapse_selected_or_parent() {
+                    self.drain_browser_directory_loads(cx);
+                    self.reapply_browser_selection(cx);
                 }
                 cx.notify();
                 true
             }
             "arrow_right" | "right" => {
-                self.file_browser.expand_selected();
-                let pending = self.file_browser.paths_needing_load();
-                for p in pending {
-                    self.file_browser.mark_loading(p.clone());
-                    self.spawn_directory_load(cx, p);
+                if self.file_browser.expand_selected() {
+                    self.drain_browser_directory_loads(cx);
+                    self.reapply_browser_selection(cx);
                 }
+                cx.notify();
+                true
+            }
+            // Escape belongs to the tree only; in the search field it still
+            // cancels the edit through the text-input tail below.
+            "escape" if tree_focused && !search_focused => {
+                self.file_browser.clear_type_ahead();
+                self.stop_browser_audition();
                 cx.notify();
                 true
             }
             "enter" | "numpad_enter" => {
                 if let Some(selected_path) = self.file_browser.selected.clone() {
-                    if selected_path.is_dir() {
+                    // Directory-ness comes from the cached node. The old
+                    // `selected_path.is_dir()` was a blocking `stat` on the UI
+                    // thread inside a key handler.
+                    if self.file_browser.selected_is_expandable() {
                         let id = selected_path.to_string_lossy().to_string();
                         let expanded = self.file_browser.toggle_node(&id, Some(&selected_path));
                         if expanded {
-                            let pending = self.file_browser.paths_needing_load();
-                            for p in pending {
-                                self.file_browser.mark_loading(p.clone());
-                                self.spawn_directory_load(cx, p);
-                            }
+                            self.drain_browser_directory_loads(cx);
                         }
                     } else {
                         let ext = selected_path
@@ -454,13 +464,44 @@ impl StudioLayout {
                 true
             }
             _ => {
-                if search_focused || is_text_input_key(event) {
+                if search_focused {
                     let action = self.browser_search_input.handle_key_ime(event, Some(cx));
                     self.sync_text_input_target(TextMenuTarget::BrowserSearch);
                     return !matches!(action, TextInputAction::Pass);
                 }
-                false
+                // Type-ahead. Gated on the tree's own focus handle — and it
+                // must consume the key, because further down the capture chain
+                // the virtual keyboard turns bare letters into MIDI notes.
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+                    return false;
+                }
+                let mut chars = event.keystroke.key.chars();
+                let Some(ch) = chars.next() else {
+                    return false;
+                };
+                if chars.next().is_some() || !ch.is_alphanumeric() {
+                    return false;
+                }
+                if self
+                    .file_browser
+                    .type_ahead(ch, std::time::Instant::now())
+                    .is_some()
+                {
+                    self.reapply_browser_selection(cx);
+                }
+                cx.notify();
+                true
             }
+        }
+    }
+
+    /// Push the model's current selection back through the shared selection
+    /// operation, so a keyboard move decodes peaks, auditions and scrolls into
+    /// view exactly like a mouse click does.
+    fn reapply_browser_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.file_browser.selected.clone() {
+            self.apply_browser_selection(path, cx);
         }
     }
 
@@ -1334,7 +1375,12 @@ impl StudioLayout {
             ContextTarget::Browser(path_opt) => {
                 let mut entries = Vec::new();
                 if let Some(path) = path_opt {
-                    if path.is_dir() {
+                    // Directory-ness comes from the browser's own cached node.
+                    // `path.is_dir()` here was a blocking `stat` run while
+                    // *building the menu*, i.e. on every right-click, which
+                    // stalls on a network share or a spun-down disk.
+                    let is_directory = self.file_browser.known_is_directory(path).unwrap_or(false);
+                    if is_directory {
                         let is_drive = path.parent().is_none();
                         if is_drive {
                             entries.push(ContextMenuEntry::item(
@@ -1358,14 +1404,10 @@ impl StudioLayout {
                                 i18n.tr("context.browser.refresh"),
                                 "browser:refresh",
                             ));
-                            entries.push(ContextMenuEntry::disabled_item(
-                                i18n.tr("context.browser.new-folder"),
-                                "browser:new-folder",
-                            ));
-                            entries.push(ContextMenuEntry::disabled_item(
-                                i18n.tr("context.browser.rename"),
-                                "browser:rename",
-                            ));
+                            // "New Folder" and "Rename" used to sit here as
+                            // permanently-disabled items backed by `eprintln!`
+                            // stubs. A menu entry that can never do anything is
+                            // not an affordance, so they are gone.
                             entries.push(ContextMenuEntry::item(
                                 i18n.tr("context.browser.copy-path"),
                                 "browser:copy-path",
@@ -1390,10 +1432,6 @@ impl StudioLayout {
                             entries.push(ContextMenuEntry::item(
                                 i18n.tr("context.browser.copy-path"),
                                 "browser:copy-path",
-                            ));
-                            entries.push(ContextMenuEntry::disabled_item(
-                                i18n.tr("context.browser.rename"),
-                                "browser:rename",
                             ));
                         } else if ext == "fbproj" {
                             entries.push(ContextMenuEntry::item(

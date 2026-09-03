@@ -29,6 +29,60 @@ impl StudioLayout {
         }
     }
 
+    /// Stop the preview voice and drop the playhead it owned.
+    ///
+    /// The engine has always exposed this; nothing in the UI called it, so a
+    /// browser audition could only be ended by waiting it out.
+    pub(crate) fn stop_browser_audition(&mut self) {
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            if let Err(error) = engine.stop_audition() {
+                eprintln!("[browser-preview] stop error: {error}");
+            }
+        }
+        self.file_browser.apply_preview_position(None);
+    }
+
+    /// The one browser "selection changed" operation.
+    ///
+    /// Mouse clicks and arrow keys both route through here, so keyboard
+    /// navigation decodes peaks and auditions exactly like a click does, and
+    /// the newly selected row is always scrolled into view.
+    pub(crate) fn apply_browser_selection(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file_browser.select(path.clone());
+        if let Some(index) = self.file_browser.index_of_selected() {
+            self.browser_scroll
+                .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+        }
+        if crate::components::file_browser::is_audio_path(&path) {
+            // Visual mini-waveform preview always decodes on select.
+            self.ensure_browser_waveform(path.clone(), cx);
+            // Browser selection is also a real audible audition; decode happens
+            // off-thread in the engine, so this UI event only queues work and
+            // never blocks rendering.
+            if self.file_browser.preview_enabled {
+                let _ = self.audition_browser_file(&path);
+            }
+        }
+    }
+
+    /// Dispatch a background scan for every expanded folder that has no cached
+    /// listing yet. `paths_needing_load` already skips folders that failed, so
+    /// one unreadable directory no longer re-queues a scan on every keystroke.
+    pub(crate) fn drain_browser_directory_loads(&mut self, cx: &mut Context<Self>) {
+        let pending = self.file_browser.paths_needing_load();
+        for p in pending {
+            self.file_browser.mark_loading(p.clone());
+            self.spawn_directory_load(cx, p);
+        }
+    }
+
+    /// Expand every ancestor of `path` and select it — the breadcrumb jump.
+    pub(crate) fn reveal_browser_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file_browser.reveal_path(&path);
+        self.drain_browser_directory_loads(cx);
+        self.apply_browser_selection(path, cx);
+    }
+
     /// Pull the Browser preview playhead published by the render callback into
     /// the browser state. Returns whether the preview pane needs a repaint.
     ///
@@ -66,10 +120,15 @@ impl StudioLayout {
             let _ = this.update(cx, move |this, cx| {
                 this.file_browser.end_waveform_load(&path);
                 if !result {
+                    // `decode_and_cache_file` writes *nothing* to the shared
+                    // cache when it fails, so `get_file_status` can never
+                    // report the failure — without recording it here the
+                    // preview pane says "Decoding waveform…" forever.
                     eprintln!(
                         "[browser-preview] waveform decode failed path={}",
                         path.display()
                     );
+                    this.file_browser.mark_waveform_failed(path);
                 }
                 cx.notify();
             });

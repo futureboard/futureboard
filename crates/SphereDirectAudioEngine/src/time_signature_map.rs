@@ -18,9 +18,21 @@ pub struct RuntimeTimeSignaturePointSnapshot {
     pub grouping: Vec<u16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// Normalized, beat-sorted time-signature map.
+///
+/// **Invariant: `points` is never empty.** Every constructor either builds a
+/// point or falls back to 4/4, because the metronome reads this map from the
+/// audio thread by index — an empty vector there is a panic across the device
+/// callback, not a missing accent.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTimeSignatureMapSnapshot {
     points: Vec<RuntimeTimeSignaturePointSnapshot>,
+}
+
+impl Default for RuntimeTimeSignatureMapSnapshot {
+    fn default() -> Self {
+        Self::static_sig(4, 4)
+    }
 }
 
 fn normalize_denominator(denominator: u16) -> u16 {
@@ -75,21 +87,35 @@ fn normalize_grouping(numerator: u16, denominator: u16, grouping: &[u16]) -> Vec
     }
 }
 
-fn group_starts(grouping: &[u16]) -> Vec<u16> {
-    let mut starts = vec![0u16];
+/// Whether `denom_index` starts a beat group other than the downbeat.
+///
+/// The allocation-free form of "collect the group start offsets, then look for
+/// this one": the metronome asks this per click, on the audio thread, so it
+/// must not build a `Vec` to answer.
+#[inline]
+fn is_group_start(grouping: &[u16], denom_index: u16) -> bool {
     let mut acc = 0u16;
     for (i, &grp) in grouping.iter().enumerate() {
-        if i > 0 {
-            starts.push(acc);
+        if i > 0 && acc == denom_index {
+            return true;
         }
         acc = acc.saturating_add(grp);
     }
-    starts
+    false
 }
 
 impl RuntimeTimeSignaturePointSnapshot {
     pub fn effective_grouping(&self) -> Vec<u16> {
         normalize_grouping(self.numerator, self.denominator, &self.grouping)
+    }
+
+    /// The already-normalized grouping. Points reach the audio thread only
+    /// through [`RuntimeTimeSignatureMapSnapshot`], whose constructors
+    /// normalize every grouping in place, so the click path reads the slice
+    /// instead of rebuilding it per click.
+    #[inline]
+    pub fn grouping_slice(&self) -> &[u16] {
+        &self.grouping
     }
 }
 
@@ -117,7 +143,9 @@ impl RuntimeTimeSignatureMapSnapshot {
         &self.points
     }
 
-    pub fn time_signature_at_beat(&self, beat: f64) -> RuntimeTimeSignaturePointSnapshot {
+    /// The signature in force at `beat`. Borrowed, not cloned: the metronome
+    /// calls this per click from the audio callback.
+    pub fn time_signature_at_beat(&self, beat: f64) -> &RuntimeTimeSignaturePointSnapshot {
         let beat = beat.max(0.0);
         let points = self.sorted_points();
         let mut idx = 0usize;
@@ -128,7 +156,9 @@ impl RuntimeTimeSignatureMapSnapshot {
                 break;
             }
         }
-        points[idx].clone()
+        // `points` is never empty (see the type invariant), so this cannot
+        // panic on the audio thread.
+        &points[idx]
     }
 
     pub fn bar_beat_at_beat(&self, beat: f64) -> (i64, u16, u16, u16) {
@@ -192,15 +222,13 @@ impl RuntimeTimeSignatureMapSnapshot {
     }
 
     pub fn metronome_accent_at_beat(&self, beat: f64) -> MetronomeAccent {
-        let pt = self.time_signature_at_beat(beat);
-        let grouping = pt.effective_grouping();
+        let grouping = self.time_signature_at_beat(beat).grouping_slice();
         let (_, beat_in_bar, _, _) = self.bar_beat_at_beat(beat);
         let denom_index = beat_in_bar.saturating_sub(1);
         if denom_index == 0 {
             return MetronomeAccent::Downbeat;
         }
-        let starts = group_starts(&grouping);
-        if starts.iter().skip(1).any(|&s| s == denom_index) {
+        if is_group_start(grouping, denom_index) {
             MetronomeAccent::Group
         } else {
             MetronomeAccent::Normal
@@ -260,29 +288,34 @@ impl RuntimeTimeSignatureMapSnapshot {
         )
     }
 
-    fn sorted_points(&self) -> Vec<RuntimeTimeSignaturePointSnapshot> {
-        let mut points = if self.points.is_empty() {
-            vec![RuntimeTimeSignaturePointSnapshot {
+    /// The points, already sorted by beat and grouping-normalized by [`sort`].
+    ///
+    /// This used to clone the whole vector (plus a `Vec<u16>` per point) on
+    /// every call, i.e. roughly a dozen heap allocations per metronome click,
+    /// on the audio thread. `sort` establishes the normalization once, at
+    /// construction, so the click path can read the slice.
+    ///
+    /// [`sort`]: Self::sort
+    #[inline]
+    fn sorted_points(&self) -> &[RuntimeTimeSignaturePointSnapshot] {
+        &self.points
+    }
+
+    /// Normalize + sort in place, and uphold the never-empty invariant.
+    fn sort(&mut self) {
+        if self.points.is_empty() {
+            // A project with no time-signature markers is a real state (the UI
+            // resolves an implicit 4/4 for it), and it reaches the engine as an
+            // empty point list. Materialize that implicit signature here so the
+            // audio thread always has a point to index.
+            self.points.push(RuntimeTimeSignaturePointSnapshot {
                 beat: 0.0,
                 numerator: 4,
                 denominator: 4,
-                grouping: vec![4],
-            }]
-        } else {
-            self.points.clone()
-        };
-        for pt in &mut points {
-            pt.grouping = normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
+                grouping: default_time_signature_grouping(4, 4),
+            });
+            return;
         }
-        points.sort_by(|a, b| {
-            a.beat
-                .partial_cmp(&b.beat)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        points
-    }
-
-    fn sort(&mut self) {
         for pt in &mut self.points {
             pt.grouping = normalize_grouping(pt.numerator, pt.denominator, &pt.grouping);
         }
@@ -412,6 +445,120 @@ mod tests {
             beat = map.next_metronome_click_after(beat);
         }
         assert_eq!(count_6_8, 6);
+    }
+
+    /// Walk a bar the way `metronome_sample` does and collect what it would
+    /// play. These three pin the accent/next-click behaviour across the switch
+    /// from cloned points to borrowed ones.
+    fn walk_bar(
+        map: &RuntimeTimeSignatureMapSnapshot,
+        start: f64,
+        clicks: usize,
+    ) -> (Vec<MetronomeAccent>, f64) {
+        let mut beat = start;
+        let mut accents = Vec::new();
+        for _ in 0..clicks {
+            accents.push(map.metronome_accent_at_beat(beat));
+            beat = map.next_metronome_click_after(beat);
+        }
+        (accents, beat)
+    }
+
+    #[test]
+    fn four_four_accents_and_next_clicks() {
+        let map = RuntimeTimeSignatureMapSnapshot::static_sig(4, 4);
+        let (accents, next) = walk_bar(&map, 0.0, 4);
+        assert!((next - 4.0).abs() < 1e-9);
+        assert_eq!(
+            accents,
+            vec![
+                MetronomeAccent::Downbeat,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Normal,
+            ]
+        );
+    }
+
+    #[test]
+    fn seven_eight_accents_and_next_clicks() {
+        let map =
+            RuntimeTimeSignatureMapSnapshot::from_points(vec![RuntimeTimeSignaturePointSnapshot {
+                beat: 0.0,
+                numerator: 7,
+                denominator: 8,
+                // Empty grouping normalizes to the 2+2+3 default.
+                grouping: Vec::new(),
+            }]);
+        let (accents, next) = walk_bar(&map, 0.0, 7);
+        assert!((next - 3.5).abs() < 1e-9);
+        assert_eq!(
+            accents,
+            vec![
+                MetronomeAccent::Downbeat,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Group,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Group,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Normal,
+            ]
+        );
+    }
+
+    #[test]
+    fn two_point_map_keeps_accents_after_the_marker() {
+        let map = RuntimeTimeSignatureMapSnapshot::from_points(vec![
+            RuntimeTimeSignaturePointSnapshot {
+                beat: 0.0,
+                numerator: 4,
+                denominator: 4,
+                grouping: vec![4],
+            },
+            RuntimeTimeSignaturePointSnapshot {
+                beat: 8.0,
+                numerator: 7,
+                denominator: 8,
+                grouping: vec![2, 2, 3],
+            },
+        ]);
+        let (before, at_marker) = walk_bar(&map, 4.0, 4);
+        assert!((at_marker - 8.0).abs() < 1e-9);
+        assert_eq!(before[0], MetronomeAccent::Downbeat);
+        assert_eq!(before[1], MetronomeAccent::Normal);
+
+        let (after, next_bar) = walk_bar(&map, 8.0, 7);
+        assert!((next_bar - 11.5).abs() < 1e-9);
+        assert_eq!(
+            after,
+            vec![
+                MetronomeAccent::Downbeat,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Group,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Group,
+                MetronomeAccent::Normal,
+                MetronomeAccent::Normal,
+            ]
+        );
+    }
+
+    /// A project with no time-signature markers reaches the engine as an empty
+    /// point list. The audio thread indexes this map, so it must never stay
+    /// empty — this is the test that keeps `points[idx]` from panicking in the
+    /// device callback.
+    #[test]
+    fn an_empty_point_list_materializes_four_four() {
+        let map = RuntimeTimeSignatureMapSnapshot::from_points(Vec::new());
+        assert_eq!(map.points().len(), 1);
+        assert_eq!(map.bar_beat_at_beat(0.0), (1, 1, 4, 4));
+        assert!(map.is_downbeat(0.0));
+        assert!((map.next_metronome_click_after(0.0) - 1.0).abs() < 1e-9);
+        assert_eq!(
+            RuntimeTimeSignatureMapSnapshot::default().points().len(),
+            1,
+            "Default must satisfy the never-empty invariant too"
+        );
     }
 
     #[test]

@@ -73,12 +73,13 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClassNameW,
         GetClientRect, GetDesktopWindow, GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect,
-        GetWindowThreadProcessId, IsChild, IsWindow, RegisterClassW, SetWindowPos,
-        SetWindowsHookExW, UnhookWindowsHookEx, GA_PARENT, GWL_STYLE, GW_CHILD, GW_OWNER,
-        HC_ACTION, HHOOK, HMENU, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE,
-        WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL,
-        WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW,
-        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        GetWindowThreadProcessId, IsChild, IsWindow, RegisterClassW, SetWindowLongPtrW,
+        SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, GA_PARENT, GWLP_HWNDPARENT,
+        GWL_STYLE, GW_CHILD, GW_OWNER, HC_ACTION, HHOOK, HMENU, HWND_TOPMOST, MSG, PM_REMOVE,
+        SWP_NOACTIVATE, SWP_NOZORDER, WH_GETMESSAGE, WINDOW_EX_STYLE, WM_ERASEBKGND, WM_KEYDOWN,
+        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_NULL, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS,
+        WM_SYSKEYDOWN, WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+        WS_VISIBLE,
     };
 
     /// Every live content host and what it holds, so the hook can tell a key
@@ -487,6 +488,63 @@ mod imp {
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
     }
 
+    /// Make `popup_hwnd` an owned, topmost window of `owner_hwnd` and place it
+    /// at the given **physical** screen rectangle.
+    ///
+    /// A host window that parks a plug-in's `WS_CHILD` view over its own client
+    /// area cannot draw a menu over that view — `WS_CLIPCHILDREN` removes the
+    /// child's rectangle from the parent's visible region, which is exactly why
+    /// the GPUI editor window sets it. The menu therefore has to be a window,
+    /// and a window that drops from another one has to be *owned* by it:
+    /// Windows keeps an owned window above its owner, keeps it off the taskbar
+    /// and out of Alt-Tab, and destroys it with the owner. GPUI's
+    /// `WindowKind::PopUp` supplies none of that (it creates the window with
+    /// `WS_EX_TOOLWINDOW`, no owner and no topmost bit), and the editor it drops
+    /// from is `WS_EX_TOPMOST`, so without this the popup is created, activated,
+    /// drawn — and sits underneath.
+    ///
+    /// The rectangle is applied here too, in physical pixels supplied by the
+    /// caller, because a popup's own DPI is sampled at the `CW_USEDEFAULT`
+    /// position it was created at rather than the monitor it belongs on.
+    ///
+    /// Returns `false` when either handle is not a live window.
+    pub fn place_owned_popup(
+        popup_hwnd: u64,
+        owner_hwnd: u64,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> bool {
+        if popup_hwnd == 0 || owner_hwnd == 0 || popup_hwnd == owner_hwnd {
+            return false;
+        }
+        let popup = hwnd_from(popup_hwnd);
+        let owner = hwnd_from(owner_hwnd);
+        // Safety: both handles are validated as live windows first, and every
+        // call below is a plain window-manager operation on the UI thread.
+        unsafe {
+            if !IsWindow(Some(popup)).as_bool() || !IsWindow(Some(owner)).as_bool() {
+                return false;
+            }
+            SetWindowLongPtrW(popup, GWLP_HWNDPARENT, owner.0 as isize);
+            let _ = SetWindowPos(
+                popup,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width.max(1),
+                height.max(1),
+                SWP_NOACTIVATE,
+            );
+        }
+        eprintln!(
+            "[plugin-editor-window] popup_owner_applied owner_hwnd=0x{owner_hwnd:x} \
+             popup_hwnd=0x{popup_hwnd:x} rect=({x},{y},{width}x{height}) topmost=1"
+        );
+        true
+    }
+
     /// A real `WS_CHILD` content window parented to a main-app top HWND. Drop
     /// destroys it. The handle ([`Self::hwnd`]) is what travels to the host
     /// process via `HostCommand::OpenEditorWithParentHwnd`.
@@ -675,6 +733,19 @@ mod imp {
         _private: (),
     }
 
+    /// No native child is ever created off Windows, so nothing occludes an
+    /// ordinary popup and there is no owner to attach.
+    pub fn place_owned_popup(
+        _popup_hwnd: u64,
+        _owner_hwnd: u64,
+        _x: i32,
+        _y: i32,
+        _width: i32,
+        _height: i32,
+    ) -> bool {
+        false
+    }
+
     impl ContentChildHwnd {
         pub fn create(_top_hwnd: u64, _rect: ContentRect) -> Option<Self> {
             None
@@ -699,4 +770,4 @@ mod imp {
     }
 }
 
-pub use imp::ContentChildHwnd;
+pub use imp::{place_owned_popup, ContentChildHwnd};

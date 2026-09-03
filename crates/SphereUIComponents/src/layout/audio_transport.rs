@@ -1009,10 +1009,14 @@ impl StudioLayout {
             self.notify_status_bar_if_changed(cx);
         }
 
-        // Browser sample preview playhead. Lives in the studio shell (the
-        // sidebar's preview pane), so its motion is a shell repaint reason on
-        // its own — auditioning happens with the transport stopped.
-        let preview_playhead_moved = self.poll_browser_preview_playhead();
+        // Browser sample preview playhead. It is drawn only inside the cached
+        // browser sidebar, so it notifies that region directly — folding it
+        // into the shell's `changed` return rebuilt every panel in the window
+        // at the poll rate for the whole length of an audition.
+        if self.poll_browser_preview_playhead() {
+            crate::perf::record_notify("browser-preview-playhead");
+            self.notify_browser_sidebar(cx);
+        }
 
         // The studio root owns the whole window, so notifying it makes GPUI
         // re-render, re-lay-out, and repaint every panel under it. Measured on
@@ -1029,7 +1033,7 @@ impl StudioLayout {
             crate::perf::record_notify("transport-readout");
             self.notify_app_chrome(cx);
         }
-        state_changed || preview_playhead_moved
+        state_changed
     }
 
     /// Block-rate automation evaluation scaffolding. Evaluates each track's
@@ -2186,6 +2190,13 @@ impl StudioLayout {
             )
         };
 
+        // Click level and timbre live in Settings, not the timeline, and a fresh
+        // stream has neither — push them on the same edge as the enable.
+        let (click_volume, click_sound) = {
+            let metronome = &self.settings.read(cx).current.recording.metronome;
+            (metronome.volume, metronome.sound_type.clone())
+        };
+
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             transport_freeze_debug::log("abort: engine handle missing");
             return;
@@ -2205,6 +2216,11 @@ impl StudioLayout {
         if let Err(error) = engine.set_metronome_enabled(metronome_enabled) {
             if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
                 eprintln!("[audio] set metronome failed: {error}");
+            }
+        }
+        if let Err(error) = engine.set_metronome_voice(click_volume, &click_sound) {
+            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
+                eprintln!("[audio] set metronome voice failed: {error}");
             }
         }
         let (loop_start_seconds, loop_end_seconds, playhead_seconds) = {
@@ -2305,24 +2321,30 @@ impl StudioLayout {
     }
 
     pub(super) fn sync_metronome_controls(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.audio_bridge.engine.as_ref() else {
+        if self.audio_bridge.engine.is_none() {
             return;
-        };
-        let (enabled, bpm) = {
-            let timeline = self.timeline.read(cx);
-            (
-                timeline.state.transport.metronome_enabled,
-                timeline.state.bpm as f64,
-            )
-        };
-        if let Err(error) = engine.set_bpm(bpm) {
-            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
-                eprintln!("[audio] set BPM failed: {error}");
-            }
         }
-        if let Err(error) = engine.set_metronome_enabled(enabled) {
-            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
-                eprintln!("[audio] set metronome failed: {error}");
+        // The tempo goes as the real map, never as a bare BPM. This used to call
+        // `set_bpm`, which is `set_tempo_map(bpm, [])` — it wiped every tempo
+        // point and made the audio thread rebuild and re-sort every MIDI event
+        // list, on every settings change, for a metronome sync.
+        self.sync_tempo_map_to_engine(cx);
+
+        let enabled = self.timeline.read(cx).state.transport.metronome_enabled;
+        let (click_volume, click_sound) = {
+            let metronome = &self.settings.read(cx).current.recording.metronome;
+            (metronome.volume, metronome.sound_type.clone())
+        };
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            if let Err(error) = engine.set_metronome_enabled(enabled) {
+                if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
+                    eprintln!("[audio] set metronome failed: {error}");
+                }
+            }
+            if let Err(error) = engine.set_metronome_voice(click_volume, &click_sound) {
+                if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen) {
+                    eprintln!("[audio] set metronome voice failed: {error}");
+                }
             }
         }
         self.sync_time_signature_map_to_engine(cx);
@@ -3560,9 +3582,15 @@ impl StudioLayout {
             .map(|stats| stats.transport_playing)
             .unwrap_or(false);
         self.stop_hardware_midi_playback();
-        let bpm = {
-            let timeline = self.timeline.read(cx);
-            timeline.state.bpm
+        // Beat -> seconds through the tempo map, the conversion
+        // `start_native_playback` already uses. A static `beat * 60 / bpm` lands
+        // somewhere else entirely under tempo automation, and the metronome
+        // re-arms its schedule from wherever the seek actually landed.
+        let seconds = {
+            let state = &self.timeline.read(cx).state;
+            state
+                .tempo_map
+                .seconds_at_beat(beat as f64, state.bpm.max(1.0) as f64)
         };
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
             match reason {
@@ -3576,7 +3604,6 @@ impl StudioLayout {
                     let _ = engine.set_metronome_suspended(false);
                 }
             }
-            let seconds = beat as f64 * 60.0 / bpm.max(1.0) as f64;
             if let Err(error) = engine.seek(seconds) {
                 self.audio_bridge.last_error = Some(error.to_string());
                 eprintln!("[audio] seek failed: {error}");

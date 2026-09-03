@@ -141,6 +141,24 @@ pub struct SnapSettings {
 
 impl SnapSettings {
     pub fn from_timeline(state: &TimelineState) -> Self {
+        // A time-based timebase draws a clock grid instead of a musical one, so
+        // snapping has to follow it: a clip must land on the line the user is
+        // looking at. The step comes from the same resolver the grid uses, so
+        // the two cannot disagree.
+        //
+        // Dotted/triplet are musical shapes with no meaning on a clock grid and
+        // are dropped rather than silently scaling a second by 1.5.
+        if state.time_display_format.is_time_based() {
+            let step_seconds = state.time_grid_step().minor.max(1.0e-6);
+            let step_beats = (step_seconds * state.bpm.max(1.0) as f64 / 60.0).max(1.0e-6);
+            return Self {
+                enabled: state.snap_to_grid,
+                division: SnapDivision::Auto,
+                shape: SnapShape::Straight,
+                beats_per_bar: state.beats_per_bar() as f64,
+                auto_step_beats: step_beats,
+            };
+        }
         Self {
             enabled: state.snap_to_grid,
             division: state.grid_division,

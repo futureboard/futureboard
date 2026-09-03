@@ -103,7 +103,7 @@ const RESET_CLICK_SLOP_PX: f32 = 3.0;
 ///
 /// Requiring the pointer to have stayed put separates the two. A keyboard-driven
 /// click has no travel to measure and is always a real activation.
-fn is_reset_double_click(event: &gpui::ClickEvent) -> bool {
+pub(crate) fn is_reset_double_click(event: &gpui::ClickEvent) -> bool {
     if event.click_count() < 2 {
         return false;
     }

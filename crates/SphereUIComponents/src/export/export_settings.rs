@@ -63,11 +63,24 @@ pub enum ExportMode {
 }
 
 impl ExportMode {
+    /// Labels describe what the engine actually does. Stems and Multitrack use
+    /// the identical post-fader tap — they differ only in whether routing
+    /// channels (bus/return/group) get their own file — so naming them "two
+    /// render modes" would be a lie.
     pub fn label(self) -> &'static str {
         match self {
             Self::Mixdown => "Mixdown",
-            Self::Stems => "Stems (all mixer channels)",
-            Self::Multitrack => "Multitrack (direct)",
+            Self::Stems => "All mixer channels",
+            Self::Multitrack => "Source tracks only",
+        }
+    }
+
+    /// Whether a batch export in this mode writes a file for `target`.
+    pub fn selects(self, target: &ExportTrackTarget) -> bool {
+        match self {
+            Self::Mixdown => false,
+            Self::Stems => true,
+            Self::Multitrack => target.include_in_multitrack,
         }
     }
 }
@@ -111,6 +124,27 @@ pub enum ExportTailChoice {
     FixedSeconds(f64),
     UntilSilence { max_seconds: f64, threshold_db: f32 },
 }
+
+/// Peak ceilings the dialog offers. Every entry is a real
+/// `ExportNormalizeMode::PeakDb` value the engine applies verbatim — the UI
+/// names the number instead of hiding one behind a generic "Normalize".
+pub const PEAK_TARGETS_DB: [f32; 4] = [-0.1, -0.3, -1.0, -3.0];
+
+/// Tail length used by [`ExportTailChoice::FixedSeconds`] when the user picks
+/// the fixed option. Lives here (not in the window) so the default settings and
+/// the dropdown cannot drift apart.
+pub const TAIL_FIXED_SECONDS: f64 = 5.0;
+/// Cap for [`ExportTailChoice::UntilSilence`].
+pub const TAIL_SILENCE_MAX_SECONDS: f64 = 10.0;
+/// Block-peak threshold that ends an "until silence" tail.
+pub const TAIL_SILENCE_THRESHOLD_DB: f32 = -60.0;
+
+/// Compression presets `FlacEncodeOptions::compression_level` accepts.
+pub const FLAC_COMPRESSION_RANGE: (u8, u8) = (0, 8);
+
+/// Bytes of RIFF/`fmt `/`data` header a canonical WAV file carries ahead of its
+/// samples. Only used to make the size readout honest about its overhead.
+const WAV_HEADER_BYTES: u64 = 44;
 
 /// Project-derived values the settings need to build a request without reaching
 /// into live timeline/engine state.
@@ -159,7 +193,7 @@ impl Default for ExportSettings {
             normalize: ExportNormalizeChoice::Off,
             // Capture reverb/delay/instrument-release tails past the last content
             // by default so exports don't hard-cut the decay.
-            tail: ExportTailChoice::FixedSeconds(5.0),
+            tail: ExportTailChoice::FixedSeconds(TAIL_FIXED_SECONDS),
             mode: ExportMode::Mixdown,
         }
     }
@@ -178,6 +212,23 @@ pub enum ExportSettingsError {
 }
 
 impl ExportSettingsError {
+    /// Fluent key for the localized form of this error.
+    ///
+    /// This module stays GPUI- and globals-free, so it publishes the *key* and
+    /// lets the window resolve it through `I18n::tr_or(key, &user_message())`.
+    pub fn message_key(&self) -> &'static str {
+        match self {
+            Self::NoOutputPath => "export.error.no-output-path",
+            Self::OutputDirMissing(_) => "export.error.output-dir-missing",
+            Self::InvalidRange => "export.error.invalid-range",
+            Self::NoContent => "export.error.no-content",
+            Self::UnsupportedSampleRate(_) => "export.error.unsupported-sample-rate",
+            Self::Mp3Unavailable => "export.error.mp3-unavailable",
+            Self::FlacUnsupportedBitDepth(_) => "export.error.flac-bit-depth",
+            Self::NoTracksForBatchExport => "export.error.no-batch-tracks",
+        }
+    }
+
     /// A concise, DAW-appropriate user-facing message.
     pub fn user_message(&self) -> String {
         match self {
@@ -200,6 +251,37 @@ impl ExportSettingsError {
 }
 
 const SUPPORTED_RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// Everything the dialog's readouts show, derived once from the *same*
+/// [`ArrangementExportRequest`] the engine will receive.
+///
+/// Deriving it from the request rather than recomputing the arithmetic is what
+/// keeps the summary honest: if a number here is wrong, the export is wrong the
+/// same way. Building one walks the snapshot's tempo map and stats the output
+/// folder, so callers cache it and refresh on mutation — never per frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportEstimate {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub sample_format: AudioSampleFormat,
+    pub format: AudioFileFormat,
+    /// MP3 is lossy, so its "depth" is a bitrate. `None` for PCM containers.
+    pub mp3_bitrate_kbps: Option<u16>,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub content_frames: u64,
+    /// Frames the tail mode may add. `UntilSilence` reports its cap, so the
+    /// real file can be shorter — readouts built from it say "up to".
+    pub max_tail_frames: u64,
+    pub content_seconds: f64,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    /// Number of files this export will write.
+    pub file_count: usize,
+    /// Size of one uncompressed output file, when the container stores
+    /// fixed-width PCM. `None` for FLAC/MP3 — only the encoder knows those.
+    pub uncompressed_bytes: Option<u64>,
+}
 
 impl ExportSettings {
     /// Default output file name for a project, e.g. `MyProject.wav`.
@@ -253,8 +335,20 @@ impl ExportSettings {
         Ok((start, end))
     }
 
-    fn resolved_sample_rate(&self, defaults: &ExportProjectDefaults) -> u32 {
+    pub fn resolved_sample_rate(&self, defaults: &ExportProjectDefaults) -> u32 {
         self.sample_rate.resolve(defaults.project_sample_rate)
+    }
+
+    /// How many files a batch export in the current mode would write.
+    ///
+    /// Mixdown is not a batch, so it counts zero here; [`ExportEstimate`]
+    /// reports its single file separately.
+    pub fn batch_target_count(&self, defaults: &ExportProjectDefaults) -> usize {
+        defaults
+            .track_targets
+            .iter()
+            .filter(|target| self.mode.selects(target))
+            .count()
     }
 
     fn sample_format(&self) -> AudioSampleFormat {
@@ -299,10 +393,55 @@ impl ExportSettings {
                 self.flac_bit_depth,
             ));
         }
-        if self.mode != ExportMode::Mixdown && defaults.track_targets.is_empty() {
+        // Mode-aware: Multitrack can filter every available target away, so
+        // testing "the project has tracks" would let Export stay enabled and
+        // fail later with a second, hand-written message.
+        if self.mode != ExportMode::Mixdown && self.batch_target_count(defaults) == 0 {
             return Err(ExportSettingsError::NoTracksForBatchExport);
         }
         Ok(())
+    }
+
+    /// Resolve the readouts the dialog shows, from the request the engine gets.
+    pub fn estimate(
+        &self,
+        snapshot: &EngineProjectSnapshot,
+        defaults: &ExportProjectDefaults,
+    ) -> Result<ExportEstimate, ExportSettingsError> {
+        let request = self.to_request(snapshot, defaults)?;
+        let sample_rate = request.render.sample_rate;
+        let rate = sample_rate.max(1) as f64;
+        let content_frames = request.render.content_frames();
+        let max_tail_frames = request.render.max_tail_frames();
+        let file_count = if self.mode == ExportMode::Mixdown {
+            1
+        } else {
+            self.batch_target_count(defaults)
+        };
+        let uncompressed_bytes = (request.format == AudioFileFormat::Wav).then(|| {
+            content_frames
+                .saturating_add(max_tail_frames)
+                .saturating_mul(request.render.channels as u64)
+                .saturating_mul(request.sample_format.bytes_per_sample() as u64)
+                .saturating_add(WAV_HEADER_BYTES)
+        });
+        Ok(ExportEstimate {
+            sample_rate,
+            channels: request.render.channels,
+            sample_format: request.sample_format,
+            format: request.format,
+            mp3_bitrate_kbps: (request.format == AudioFileFormat::Mp3)
+                .then_some(self.mp3_bitrate_kbps),
+            start_sample: request.render.start_sample,
+            end_sample: request.render.end_sample,
+            content_frames,
+            max_tail_frames,
+            content_seconds: content_frames as f64 / rate,
+            start_seconds: request.render.start_sample as f64 / rate,
+            end_seconds: request.render.end_sample as f64 / rate,
+            file_count,
+            uncompressed_bytes,
+        })
     }
 
     /// Build the engine [`ArrangementExportRequest`]. Validates first, then

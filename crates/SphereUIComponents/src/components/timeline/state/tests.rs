@@ -3254,19 +3254,131 @@ mod time_display_ruler_tests {
         assert_eq!(seen[3], "192000", "samples");
     }
 
-    /// The timebase is a display setting: it must never move the grid the clips
-    /// are laid out and snapped against.
+    /// The grid behind the clips follows the timebase. A timecode ruler over a
+    /// bar/beat grid is the "the grid didn't follow" bug.
     #[test]
-    fn changing_the_timebase_leaves_the_arrangement_grid_alone() {
+    fn the_arrangement_grid_follows_the_timebase() {
         let musical = state_at_zoom(40.0);
-        let before = musical.arrangement_grid_lines(1200.0);
-        let before: Vec<(f32, f32)> = before.iter().map(|l| (l.x, l.beat)).collect();
+        let before: Vec<(f32, f32)> = musical
+            .arrangement_grid_lines(1200.0)
+            .iter()
+            .map(|l| (l.x, l.beat))
+            .collect();
 
         let mut timecode = state_at_zoom(40.0);
         timecode.time_display_format = TimeDisplayFormat::Timecode;
-        let after = timecode.arrangement_grid_lines(1200.0);
-        let after: Vec<(f32, f32)> = after.iter().map(|l| (l.x, l.beat)).collect();
+        let after: Vec<(f32, f32)> = timecode
+            .arrangement_grid_lines(1200.0)
+            .iter()
+            .map(|l| (l.x, l.beat))
+            .collect();
 
-        assert_eq!(before, after);
+        assert_ne!(before, after, "grid did not follow the timebase");
+        // And the ruler draws that same set, so a label always names the line
+        // beneath it.
+        let ruler: Vec<(f32, f32)> = timecode
+            .ruler_grid_lines(1200.0)
+            .iter()
+            .map(|l| (l.x, l.beat))
+            .collect();
+        assert_eq!(ruler, after);
+    }
+
+    /// The cache is keyed by everything the generator reads, so flipping the
+    /// timebase cannot keep serving the previous grid.
+    #[test]
+    fn the_grid_cache_is_invalidated_by_the_timebase() {
+        let musical = state_at_zoom(40.0);
+        let first = musical.arrangement_grid_lines(1200.0);
+        let mut seconds = state_at_zoom(40.0);
+        seconds.time_display_format = TimeDisplayFormat::Seconds;
+        let second = seconds.arrangement_grid_lines(1200.0);
+        assert_ne!(
+            first.iter().map(|l| l.x).collect::<Vec<_>>(),
+            second.iter().map(|l| l.x).collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression: the label used to be re-derived from the line's `f32` beat,
+    /// so 0.5 s came back as 0.49999997 and truncated to frame 14 instead of 15.
+    /// Every timecode label must sit on a whole frame.
+    #[test]
+    fn timecode_labels_land_on_whole_frames() {
+        let mut state = state_at_zoom(40.0);
+        state.bpm = 140.0;
+        state.sync_pixels_per_beat();
+        state.time_display_format = TimeDisplayFormat::Timecode;
+        state.timecode_rate = TimecodeRate::Fps30;
+
+        let lines = state.ruler_grid_lines(1200.0);
+        let labels: Vec<String> = lines
+            .iter()
+            .filter(|line| line.show_label)
+            .map(|line| state.format_grid_line_label(line))
+            .collect();
+        assert!(labels.len() >= 3, "expected several labels");
+        for label in &labels {
+            let frames: u32 = label
+                .rsplit(':')
+                .next()
+                .expect("frame field")
+                .parse()
+                .expect("numeric frames");
+            assert!(frames < 30, "{label} has an out-of-range frame");
+        }
+        // The step is half a second here, so the frame field must alternate
+        // exactly 00 / 15 — never 14 or 29.
+        let frame_fields: Vec<&str> = labels
+            .iter()
+            .map(|l| l.rsplit(':').next().unwrap())
+            .collect();
+        assert!(
+            frame_fields.iter().all(|f| *f == "00" || *f == "15"),
+            "frames drifted off whole steps: {frame_fields:?}"
+        );
+    }
+
+    /// Snapping follows the drawn grid, so a clip lands on a line the user can
+    /// see rather than on a note value nothing is drawn at.
+    #[test]
+    fn snapping_follows_the_time_grid() {
+        let mut state = state_at_zoom(40.0);
+        state.time_display_format = TimeDisplayFormat::Seconds;
+        state.snap_to_grid = true;
+
+        let step_seconds = state.time_grid_step().minor;
+        let snap = SnapSettings::from_timeline(&state).to_musical();
+        let step_beats = snap.step_beats().expect("a time grid step");
+        // The snap step is the grid's minor step, expressed in beats.
+        let expected = step_seconds * state.bpm as f64 / 60.0;
+        assert!(
+            (step_beats - expected).abs() < 1.0e-6,
+            "snap step {step_beats} != grid step {expected}"
+        );
+
+        // And a snapped position is a whole number of grid steps in seconds.
+        let snapped = super::super::musical_snap::snap_beat(3.317, snap, false);
+        let slots = state.seconds_at_beat(snapped) / step_seconds;
+        assert!(
+            (slots - slots.round()).abs() < 1.0e-4,
+            "snapped to {snapped} beats, which is {slots} grid steps"
+        );
+    }
+
+    /// The resolution chip must report the step that actually applies, not a
+    /// note value nothing snaps to.
+    #[test]
+    fn the_grid_chip_reports_the_clock_step_when_time_based() {
+        let mut state = state_at_zoom(40.0);
+        let musical_label = state.grid_step_label();
+        state.time_display_format = TimeDisplayFormat::Timecode;
+        let timecode_label = state.grid_step_label();
+        assert_ne!(musical_label, timecode_label);
+        assert!(
+            timecode_label.ends_with(" f")
+                || timecode_label.ends_with(" s")
+                || timecode_label.ends_with(" m"),
+            "unexpected chip label {timecode_label}"
+        );
     }
 }

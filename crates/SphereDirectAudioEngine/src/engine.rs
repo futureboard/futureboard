@@ -409,6 +409,13 @@ pub struct SharedState {
     pub loop_start_samples: AtomicU64,
     pub loop_end_samples: AtomicU64,
     pub metronome_enabled: AtomicBool,
+    /// Click level as f32 bits — a linear multiplier on the generated click's
+    /// own gain. Durable home for the Settings value so a device reopen can
+    /// re-seed the fresh stream.
+    pub metronome_gain: AtomicU32,
+    /// Click timbre as a [`crate::backend::render::MetronomeSound`] code, kept
+    /// beside the level for the same reason.
+    pub metronome_sound: AtomicU8,
 
     // Recording (Phase U): input monitor tap + session flag for realtime mix.
     pub recording_active: AtomicBool,
@@ -567,6 +574,12 @@ pub struct SharedState {
 /// preview is playing.
 pub const AUDITION_POSITION_IDLE: u64 = u64::MAX;
 
+/// The persisted metronome-volume position that means "unity" — the click level
+/// Studio shipped with before the control was connected to anything. Settings
+/// defaults to exactly this, so connecting the slider does not quietly change
+/// anyone's click level; moving it up is headroom, moving it down attenuates.
+pub const METRONOME_UNITY_VOLUME: f32 = 0.8;
+
 impl Default for SharedState {
     fn default() -> Self {
         Self {
@@ -588,6 +601,8 @@ impl Default for SharedState {
             loop_start_samples: AtomicU64::new(0),
             loop_end_samples: AtomicU64::new(0),
             metronome_enabled: AtomicBool::new(false),
+            metronome_gain: AtomicU32::new(f32_store(1.0)),
+            metronome_sound: AtomicU8::new(0),
             recording_active: AtomicBool::new(false),
             recording_monitor_mix: AtomicBool::new(false),
             recording_monitor_l: AtomicU32::new(f32_store(0.0)),
@@ -832,6 +847,16 @@ pub struct EngineInner {
 
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
+    /// The tempo map the audio thread was last *sent* — not the one the last
+    /// project load happened to carry. `set_tempo_map` skips a push whose
+    /// segments match this, and a fresh stream is re-seeded from it, so a
+    /// 120 -> 140 -> 120 sequence still reaches the callback while an unchanged
+    /// map never costs a MIDI-model rebuild there.
+    last_sent_tempo_map: Mutex<crate::tempo_map::RuntimeTempoMapSnapshot>,
+    /// The time-signature map the audio thread was last sent. The runtime graph
+    /// has no time-signature field, so without this the map has no durable home
+    /// on the control side and a device reopen loses it.
+    last_sent_time_signature_map: Mutex<crate::time_signature_map::RuntimeTimeSignatureMapSnapshot>,
     plugin_bridge_sinks: Mutex<crate::plugin_bridge::PluginBridgeSinkMap>,
     /// Control-thread mirror of the ARA renderers installed per track.
     ///
@@ -944,6 +969,11 @@ fn insert_load_trace(line: impl FnOnce() -> String) {
 impl EngineInner {
     pub fn new() -> Self {
         log_sphere_audio_processor_diagnostics_once();
+        // What a freshly opened stream's `LocalAudioState` also starts at, so
+        // the first re-seed after a device open is a no-op rather than a push.
+        let default_tempo_map = crate::tempo_map::RuntimeTempoMapSnapshot::static_tempo(120.0);
+        let default_time_signature_map =
+            crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(4, 4);
         Self {
             shared: Arc::new(SharedState::default()),
             active_stream: Mutex::new(None),
@@ -955,6 +985,8 @@ impl EngineInner {
             project: Mutex::new(None),
             input_state_revision: AtomicU64::new(0),
             runtime: Mutex::new(RuntimeProject::default()),
+            last_sent_tempo_map: Mutex::new(default_tempo_map),
+            last_sent_time_signature_map: Mutex::new(default_time_signature_map),
             plugin_bridge_sinks: Mutex::new(Default::default()),
             ara_renderers: Mutex::new(HashMap::new()),
             audio_cache: Mutex::new(HashMap::new()),
@@ -1173,6 +1205,9 @@ impl EngineInner {
         *self.stream.lock() = Some(stream);
         *self.cmd_tx.lock() = Some(tx);
 
+        // The callback's metronome/tempo/meter state starts at its defaults.
+        self.reseed_stream_transport_state();
+
         // Update status.
         let mut st = self.status.lock();
         st.stream_open = true;
@@ -1205,6 +1240,33 @@ impl EngineInner {
         let mut st = self.status.lock();
         st.stream_open = false;
         st.running = false;
+    }
+
+    /// Push the control thread's transport-clock and metronome state into a
+    /// freshly opened stream.
+    ///
+    /// Every backend builds its `LocalAudioState` from scratch — metronome off,
+    /// static 120 BPM, static 4/4 — and nothing else re-pushed it, so changing
+    /// the audio device silently stopped the click (and moved the accents) until
+    /// the next Play. All control-thread sends; the tempo map is gated by
+    /// `apply_tempo_map`'s identity check on the other side, so re-seeding a map
+    /// the new graph already carries costs the callback nothing.
+    fn reseed_stream_transport_state(&self) {
+        let tempo_map = self.last_sent_tempo_map.lock().clone();
+        let time_signature_map = self.last_sent_time_signature_map.lock().clone();
+        let metronome_enabled = self.shared.metronome_enabled.load(Ordering::Relaxed);
+        let metronome_gain = f32_load(self.shared.metronome_gain.load(Ordering::Relaxed));
+        let metronome_sound = self.shared.metronome_sound.load(Ordering::Relaxed);
+        let _ = self.send_command(EngineCommand::SetTempoMap(tempo_map));
+        let _ = self.send_command(EngineCommand::SetTimeSignatureMap(time_signature_map));
+        let _ = self.send_command(EngineCommand::SetMetronomeVoice {
+            volume: metronome_gain,
+            sound: metronome_sound,
+        });
+        let _ = self.send_command(EngineCommand::SetMetronomeEnabled(metronome_enabled));
+        // A new stream cannot be inside a scrub, but saying so explicitly costs
+        // one queued command and removes a way for a reopen to come up silent.
+        let _ = self.send_command(EngineCommand::SetMetronomeSuspended(false));
     }
 
     /// Start audio playback (calls `stream.play()`).
@@ -1305,8 +1367,47 @@ impl EngineInner {
         self.send_command(EngineCommand::SetMetronomeEnabled(enabled))
     }
 
+    /// Click level and timbre (Settings → Recording → Metronome).
+    ///
+    /// `volume` is the persisted 0..1 control position. The persisted default
+    /// (0.8) maps to unity — the click level Studio has always had — so wiring
+    /// this control up changes nothing until the user moves it, and the top of
+    /// the slider is headroom rather than a new default.
+    pub fn set_metronome_voice(
+        &self,
+        volume: f32,
+        sound_label: &str,
+    ) -> Result<(), SphereAudioError> {
+        let sound = crate::backend::render::MetronomeSound::from_label(sound_label);
+        let gain = (volume.max(0.0) / METRONOME_UNITY_VOLUME).clamp(0.0, 2.0);
+        self.shared
+            .metronome_gain
+            .store(f32_store(gain), Ordering::Relaxed);
+        self.shared
+            .metronome_sound
+            .store(sound.code(), Ordering::Relaxed);
+        self.send_command(EngineCommand::SetMetronomeVoice {
+            volume: gain,
+            sound: sound.code(),
+        })
+    }
+
     pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {
         self.set_tempo_map(bpm, Vec::new())
+    }
+
+    /// Seek by musical position, converted through the engine's own tempo map.
+    ///
+    /// The engine owns beat<->time for playback, MIDI and the metronome grid, so
+    /// a caller computing `beat * 60 / bpm` lands somewhere else entirely as
+    /// soon as the project has one tempo point — and the click then falls off
+    /// the grid it was seeked to.
+    pub fn seek_beats(&self, beat: f64) -> Result<(), SphereAudioError> {
+        let seconds = self
+            .last_sent_tempo_map
+            .lock()
+            .seconds_at_beat(beat.max(0.0));
+        self.seek(seconds)
     }
 
     /// Replace the authoritative tempo map used for playback, metronome, and
@@ -1321,6 +1422,19 @@ impl EngineInner {
         if let Some(project) = self.project.lock().as_mut() {
             project.bpm = default_bpm;
             project.tempo_points = points;
+        }
+        // Applying a tempo map on the audio thread recomputes and re-sorts every
+        // MIDI event list. Play, every project sync, and every settings change
+        // push a map, almost always the same one — so gate on what was actually
+        // sent last. (Not on `self.runtime`'s copy: that mirror is only written
+        // by `load_project`, so 120 -> 140 -> 120 would drop the second push and
+        // leave the callback at 140.)
+        {
+            let mut last_sent = self.last_sent_tempo_map.lock();
+            if last_sent.segments == snapshot.segments {
+                return Ok(());
+            }
+            *last_sent = snapshot.clone();
         }
         self.send_command(EngineCommand::SetTempoMap(snapshot))
     }
@@ -1423,6 +1537,10 @@ impl EngineInner {
         ack.load(Ordering::Acquire)
     }
 
+    /// Install a single project-wide signature, replacing any marker map.
+    ///
+    /// This is the *static* signature path; a project with time-signature
+    /// markers reaches the engine through [`Self::set_time_signature_map`].
     pub fn set_time_signature(
         &self,
         numerator: u32,
@@ -1434,6 +1552,19 @@ impl EngineInner {
         self.shared
             .time_sig_den
             .store(denominator.max(1), Ordering::Relaxed);
+        // The audio thread rebuilds a whole map (two heap allocations) for this
+        // command, so send it only when it actually changes the map it holds.
+        let snapshot = crate::time_signature_map::RuntimeTimeSignatureMapSnapshot::static_sig(
+            numerator.clamp(1, 64) as u16,
+            denominator.clamp(1, 64) as u16,
+        );
+        {
+            let mut last_sent = self.last_sent_time_signature_map.lock();
+            if *last_sent == snapshot {
+                return Ok(());
+            }
+            *last_sent = snapshot;
+        }
         self.send_command(EngineCommand::SetTimeSignature(numerator, denominator))
     }
 
@@ -1451,7 +1582,21 @@ impl EngineInner {
                 .time_sig_den
                 .store(pt.denominator.max(1) as u32, Ordering::Relaxed);
         }
+        {
+            let mut last_sent = self.last_sent_time_signature_map.lock();
+            if *last_sent == snapshot {
+                return Ok(());
+            }
+            *last_sent = snapshot.clone();
+        }
         self.send_command(EngineCommand::SetTimeSignatureMap(snapshot))
+    }
+
+    /// Whether the control thread is holding a real marker map (more than one
+    /// signature). Used by `load_project` to decide whether the project's single
+    /// static signature is news or would flatten a map the UI already pushed.
+    fn has_time_signature_markers(&self) -> bool {
+        self.last_sent_time_signature_map.lock().points().len() > 1
     }
 
     pub fn set_loop(
@@ -2824,6 +2969,19 @@ impl EngineInner {
                 }
             }
         }
+        // Carry the plugin-bridge sinks (Stage 3b) into the rebuilt graph and
+        // re-cache the per-insert handles here, on the control thread. The
+        // realtime `LoadProject` arm used to clone the map and re-resolve every
+        // insert itself — heap work in the same callback as Play. The mirror is
+        // maintained in lockstep with `SetPluginBridgeSink`, so it is the same
+        // set the callback's graph holds. Must happen before the runtime mirror
+        // below is stored, or that mirror loses the sinks.
+        runtime.plugin_bridge_sinks = self.plugin_bridge_sinks.lock().clone();
+        runtime.resolve_bridge_sinks();
+        // The callback applies this graph's tempo map wholesale, so record it as
+        // sent: the trailing `set_tempo_map` below then costs nothing instead of
+        // rebuilding every MIDI event list on the audio thread after every sync.
+        *self.last_sent_tempo_map.lock() = runtime.tempo_map.clone();
         *self.runtime.lock() = runtime.clone();
         *current_project = Some(snapshot.clone());
         let load_result = self.send_command(EngineCommand::LoadProject(Box::new(runtime)));
@@ -2857,7 +3015,17 @@ impl EngineInner {
         }
 
         let _ = self.set_tempo_map(snapshot.bpm, snapshot.tempo_points.clone());
-        let _ = self.set_time_signature(snapshot.time_signature[0], snapshot.time_signature[1]);
+        // The project snapshot carries one signature, not the marker list — the
+        // time-signature map reaches the engine from the UI as a real map.
+        // Pushing the project signature unconditionally replaced that whole map
+        // with a single point, so every project sync (including the dirty-poll
+        // sync during playback) flattened the meter and moved the metronome's
+        // accents. Seed the static signature only while no marker map is
+        // installed; once one is, it stays authoritative until the UI replaces
+        // it (which it does, including when the last marker is deleted).
+        if !self.has_time_signature_markers() {
+            let _ = self.set_time_signature(snapshot.time_signature[0], snapshot.time_signature[1]);
+        }
 
         Ok(())
     }
@@ -3457,6 +3625,10 @@ impl EngineInner {
         }
 
         *self.active_stream.lock() = Some(stream);
+
+        // The new callback's metronome/tempo/time-signature state starts at its
+        // defaults; hand it what the control thread is actually holding.
+        self.reseed_stream_transport_state();
 
         // Re-derive input routing after every backend/device reopen. ASIO
         // restores atomic routing on its persistent callback; other backends
@@ -4404,6 +4576,7 @@ impl EngineInner {
                 EngineCommand::Seek { .. } => "Seek",
                 EngineCommand::SetMetronomeEnabled(_) => "SetMetronomeEnabled",
                 EngineCommand::SetMetronomeSuspended(_) => "SetMetronomeSuspended",
+                EngineCommand::SetMetronomeVoice { .. } => "SetMetronomeVoice",
                 EngineCommand::SetBpm(_) => "SetBpm",
                 EngineCommand::SetTempoMap(_) => "SetTempoMap",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
@@ -4914,6 +5087,12 @@ where
                         }
                         EngineCommand::SetMetronomeSuspended(suspended) => {
                             metronome.set_metronome_suspended(suspended);
+                        }
+                        EngineCommand::SetMetronomeVoice { volume, sound } => {
+                            metronome.set_metronome_voice(
+                                volume,
+                                crate::backend::render::MetronomeSound::from_code(sound),
+                            );
                         }
                         EngineCommand::SetBpm(bpm) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);

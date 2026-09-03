@@ -448,10 +448,14 @@ impl Render for AraEditorHost {
             .size_full();
         if !attached {
             // Opaque only until the native child covers the region. Once it is
-            // parked, this stays a transparent hole: `PluginEditorWindow` found
-            // that an opaque layer over a plug-in's own HWND can composite on
-            // top of it, and the panel has no reason to paint under something
-            // that fully covers it.
+            // parked, painting here is pointless rather than harmful: the app
+            // boots with `GPUI_DISABLE_DIRECT_COMPOSITION=1`, so gpui gives its
+            // windows `WS_CLIPCHILDREN` (`gpui_windows/src/window.rs:502`) and
+            // the child's rectangle is removed from the window's visible region
+            // — GPUI cannot paint over a plug-in's own HWND, and it cannot hide
+            // one either. See `plugin_editor_chrome::PresetMenuWindow` for the
+            // consequence: chrome that has to appear over a plug-in's surface
+            // has to be a window, not an element.
             root = root.bg(Colors::surface_base());
         }
         root.on_children_prepainted(move |bounds, _window, cx| {

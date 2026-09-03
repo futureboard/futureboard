@@ -89,7 +89,15 @@ impl StudioLayout {
             project_sample_rate: sample_rate,
             master_volume,
             content_end_beat,
-            time_selection: None,
+            // The arrangement's range selection is the "Time selection" export
+            // range. Passing `None` here is what left that option permanently
+            // unavailable; the dialog already handles `Some(..)` and hides the
+            // option when there is no range to export.
+            time_selection: tl_state
+                .arrangement_range
+                .as_ref()
+                .map(|range| (range.start_beat, range.end_beat))
+                .filter(|(start, end)| end > start),
             loop_range: {
                 let t = &tl_state.transport;
                 if t.loop_end_beats > t.loop_start_beats {

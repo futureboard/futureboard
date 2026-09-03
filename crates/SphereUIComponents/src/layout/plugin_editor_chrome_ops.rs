@@ -13,9 +13,21 @@ use crate::components::plugin_editor_chrome::{
 };
 use crate::layout::StudioLayout;
 
-/// Extension for a stored preset file: the plug-in's own opaque state bytes,
-/// exactly as it handed them over. Nothing here parses or edits them — a preset
-/// that a plug-in cannot read back is worse than no preset at all.
+/// Extension for a stored preset file.
+///
+/// The file itself is the shared FBPST container written by
+/// `SpherePluginHost::preset::write_state_preset`: magic, a 24-byte header,
+/// JSON metadata naming the plug-in it belongs to, then that plug-in's own
+/// opaque state. Nothing here parses or edits the state — a preset a plug-in
+/// cannot read back is worse than no preset at all — but the container around
+/// it must be unwrapped before the state is handed over.
+///
+/// It is deliberately **not** `.pst`, even though the container is the one every
+/// `.pst` uses: `SpherePluginHost::preset::clear_all_presets` and
+/// `load_cached_plugins` walk the whole preset root recursively and treat every
+/// `.pst` under it as a scan-cache row. User presets live inside that root, so
+/// renaming the extension would list them as phantom plug-ins and delete them
+/// with "Clear Plugin Cache".
 const PRESET_EXTENSION: &str = "fbstate";
 
 /// Set to keep the pre-GPUI Win32 editor shell for bridged inserts.
@@ -271,7 +283,12 @@ impl StudioLayout {
             self.plugin_editors
                 .open
                 .retain(|(track, _), _| track != track_id);
-            let _ = handle.update(cx, |_editor, window, _cx| window.remove_window());
+            // The preset list is a window of its own; it goes before the editor
+            // it hangs from, so no platform is left holding an orphan.
+            let _ = handle.update(cx, |editor, window, cx| {
+                editor.close_preset_menu(cx);
+                window.remove_window();
+            });
             return;
         };
         if was_active {
@@ -417,27 +434,46 @@ impl StudioLayout {
             return;
         };
         let path = dir.join(format!("{}.{PRESET_EXTENSION}", presets[index]));
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        // Through the container reader, never `fs::read`. The file is an FBPST
+        // container and its state starts past the magic, the 24-byte header and
+        // the JSON metadata; handing the whole file to `send_plugin_state` gave
+        // the plug-in a payload it cannot parse, which is a preset that silently
+        // does nothing or worse.
+        let (preset_plugin_id, state) = match SpherePluginHost::preset::read_state_preset(&path) {
+            Ok(preset) => preset,
             Err(error) => {
                 eprintln!("[plugin-preset] could not read {}: {error}", path.display());
                 return;
             }
         };
+        // The container says which plug-in produced the state, and state handed
+        // to a different plug-in is not a preset, it is corruption. Presets are
+        // filed per plug-in, so a mismatch means a file was moved or a plug-in
+        // id changed — either way the load stops here.
+        if preset_plugin_id != plugin_id {
+            eprintln!(
+                "[plugin-preset] refusing {}: it holds state for '{preset_plugin_id}', not \
+                 '{plugin_id}'",
+                path.display()
+            );
+            return;
+        }
         // Straight back to the plug-in as opaque state, and into the project so
         // a save keeps what is actually loaded.
         if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref().cloned() {
             if let Ok(mut runtime) = runtime.lock() {
-                if let Err(error) = runtime.send_plugin_state(insert_id, &bytes) {
+                if let Err(error) = runtime.send_plugin_state(insert_id, &state) {
                     eprintln!("[plugin-preset] SetPluginState failed: {error}");
                     return;
                 }
             }
         }
+        let state_len = state.len();
+        let stored = std::sync::Arc::new(state);
         self.timeline.update(cx, |timeline, cx| {
             if let Some(slots) = timeline.state.insert_slots_mut(track_id) {
                 if let Some(slot) = slots.iter_mut().find(|slot| slot.id == insert_id) {
-                    slot.vst3_state = Some(std::sync::Arc::new(bytes.clone()));
+                    slot.vst3_state = Some(stored.clone());
                 }
             }
             cx.notify();
@@ -445,9 +481,8 @@ impl StudioLayout {
         self.plugin_editors.preset_selection.insert(key, index);
         self.mark_dirty_view_only();
         eprintln!(
-            "[plugin-preset] loaded '{}' for insert={insert_id} bytes={}",
-            presets[index],
-            bytes.len()
+            "[plugin-preset] loaded '{}' for insert={insert_id} bytes={state_len}",
+            presets[index]
         );
         cx.notify();
     }

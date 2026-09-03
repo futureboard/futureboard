@@ -664,12 +664,30 @@ impl AudioEngine {
         self.inner.seek(position_seconds.max(0.0))
     }
 
+    /// Seek by musical position, converted through the engine's authoritative
+    /// tempo map. Prefer this over converting beats with a single BPM: under
+    /// tempo automation the two disagree, and the metronome re-arms from the
+    /// engine's answer.
+    pub fn seek_beats(&self, beat: f64) -> Result<(), SphereAudioError> {
+        self.inner.seek_beats(beat)
+    }
+
     pub fn set_metronome_suspended(&self, suspended: bool) -> Result<(), SphereAudioError> {
         self.inner.set_metronome_suspended(suspended)
     }
 
     pub fn set_metronome_enabled(&self, enabled: bool) -> Result<(), SphereAudioError> {
         self.inner.set_metronome_enabled(enabled)
+    }
+
+    /// Click level (the persisted 0..1 control position, where the 0.8 default
+    /// is unity) and timbre label ("Woodblock" / "Beep") from Settings.
+    pub fn set_metronome_voice(
+        &self,
+        volume: f32,
+        sound_label: &str,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.set_metronome_voice(volume, sound_label)
     }
 
     pub fn set_bpm(&self, bpm: f64) -> Result<(), SphereAudioError> {

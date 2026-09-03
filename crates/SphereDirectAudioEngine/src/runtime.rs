@@ -2968,6 +2968,15 @@ impl RuntimeProject {
         tempo_map: RuntimeTempoMapSnapshot,
         position_sample: u64,
     ) -> u64 {
+        // Identical segments mean an identical beat<->sample mapping, so the
+        // rebuild below would recompute every event to the value it already
+        // holds and re-sort every list — on the audio thread, in the same
+        // callback as Play. `revision` is bumped per rebuild, so two
+        // structurally identical maps built independently compare unequal;
+        // compare the segments, which are the mapping.
+        if self.tempo_map.segments == tempo_map.segments {
+            return position_sample;
+        }
         let sr = self.sample_rate.max(1) as f64;
         let current_beat = self.tempo_map.beat_at_samples(position_sample, sr);
         self.all_notes_off("tempo_change");
