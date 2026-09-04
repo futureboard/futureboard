@@ -412,6 +412,43 @@ fn atomic_max_bits(target: &AtomicU32, value: f32) {
 /// Whether this callback should feed take-only capture paths.
 ///
 /// Pure and realtime-safe: callers provide callback-local atomic snapshots.
+
+/// Which armed tracks the growing waveform can describe, and on which input
+/// channels, in `shared.preview_rings` slot order.
+///
+/// Shared by both capture paths on purpose. They had grown separate ideas of
+/// this — the own-stream path derived it and the ASIO tap did not derive it at
+/// all, so a take recorded through ASIO published no preview tracks and the UI
+/// tore its growing clip down on the first poll. One derivation is the only way
+/// the two paths can stay honest about it.
+///
+/// A track whose first input channel is outside the device's channel count is
+/// skipped rather than clamped: it is not recording anything the preview could
+/// draw, and clamping would draw somebody else's signal under its name. A mono
+/// track previews its one channel on both sides.
+pub(crate) fn preview_tracks_for(
+    tracks: &[crate::types::JsRecordingTrackConfig],
+    input_channels: usize,
+) -> Vec<(String, usize, usize)> {
+    tracks
+        .iter()
+        .take(crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS)
+        .filter_map(|t| {
+            let l = *t.input_channels.first()? as usize;
+            if l >= input_channels {
+                return None;
+            }
+            let r = t
+                .input_channels
+                .get(1)
+                .map(|&c| c as usize)
+                .filter(|&c| c < input_channels)
+                .unwrap_or(l);
+            Some((t.track_id.clone(), l, r))
+        })
+        .collect()
+}
+
 #[inline]
 pub(crate) fn should_capture_recording(
     recording_active: bool,
@@ -974,24 +1011,7 @@ fn start_recording_with_config(
         .recording_preview_active
         .store(true, Ordering::Relaxed);
 
-    let preview_tracks: Vec<(String, usize, usize)> = config
-        .tracks
-        .iter()
-        .take(crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS)
-        .filter_map(|t| {
-            let l = *t.input_channels.first()? as usize;
-            if l >= input_ch {
-                return None;
-            }
-            let r = t
-                .input_channels
-                .get(1)
-                .map(|&c| c as usize)
-                .filter(|&c| c < input_ch)
-                .unwrap_or(l);
-            Some((t.track_id.clone(), l, r))
-        })
-        .collect();
+    let preview_tracks = preview_tracks_for(&config.tracks, input_ch);
     *shared.recording_preview_track_ids.lock() =
         preview_tracks.iter().map(|(id, ..)| id.clone()).collect();
     for slot in 0..preview_tracks.len() {
@@ -1109,6 +1129,20 @@ pub(crate) fn start_recording_asio_tap(
     let preview_channels = config.monitor_channels.len().clamp(1, 2) as u32;
     let start_sample = shared.position_samples.load(Ordering::Relaxed);
     shared.preview_ring.reset();
+
+    // Which armed tracks the growing waveform can describe, and on which input
+    // channels. The own-stream path has always published this; the ASIO tap did
+    // not, so `recording_preview_tracks()` reported nothing and the UI tore its
+    // preview down on the first poll of every take.
+    let preview_tracks = preview_tracks_for(&config.tracks, input_ch);
+    {
+        let mut ids = shared.recording_preview_track_ids.lock();
+        ids.clear();
+        for (slot, (track_id, _, _)) in preview_tracks.iter().enumerate() {
+            shared.preview_rings[slot].reset();
+            ids.push(track_id.clone());
+        }
+    }
     shared.recording_preview_id.fetch_add(1, Ordering::Relaxed);
     shared
         .recording_preview_start_sample
@@ -1133,6 +1167,10 @@ pub(crate) fn start_recording_asio_tap(
         samples_per_bin,
         capture_on_transport: config.capture_on_transport.unwrap_or(false),
         dropped_blocks: Arc::clone(&dropped_blocks),
+        preview_accums: preview_tracks
+            .iter()
+            .map(|&(_, l, r)| crate::backend::asio_session::PreviewAccum::new(l, r))
+            .collect(),
     };
 
     eprintln!(
@@ -1294,5 +1332,82 @@ mod tests {
         assert!(!shared.monitor_enabled_any.load(Ordering::Relaxed));
         assert!(!shared.input_ring.is_active());
         assert_eq!(f32_load(shared.record_peak.load(Ordering::Relaxed)), 0.0);
+    }
+}
+
+/// The one derivation both capture paths use to decide what the growing
+/// waveform can draw, and for which track.
+///
+/// It earns its own tests because getting it wrong is silent: the take still
+/// records correctly to disk, and only the picture on the timeline is missing
+/// or shows the wrong channel.
+#[cfg(test)]
+mod preview_track_tests {
+    use super::preview_tracks_for;
+    use crate::types::JsRecordingTrackConfig;
+
+    fn track(id: &str, channels: &[u32]) -> JsRecordingTrackConfig {
+        JsRecordingTrackConfig {
+            track_id: id.to_string(),
+            input_channels: channels.to_vec(),
+            name: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn each_track_previews_its_own_channels_not_the_monitor_pair() {
+        let tracks = [
+            track("vox", &[0, 1]),
+            track("gtr", &[2, 3]),
+            track("kick", &[4]),
+        ];
+        assert_eq!(
+            preview_tracks_for(&tracks, 8),
+            vec![
+                ("vox".to_string(), 0, 1),
+                ("gtr".to_string(), 2, 3),
+                // A mono track draws its one channel on both sides rather than
+                // pulling in whatever happens to sit next to it.
+                ("kick".to_string(), 4, 4),
+            ]
+        );
+    }
+
+    /// Skipped, not clamped: a track pointed past the end of the device is not
+    /// recording anything the preview could draw, and clamping would put
+    /// somebody else's signal under its name.
+    #[test]
+    fn a_track_outside_the_devices_channel_count_is_skipped() {
+        let tracks = [track("vox", &[0, 1]), track("ghost", &[8, 9])];
+        assert_eq!(
+            preview_tracks_for(&tracks, 2),
+            vec![("vox".to_string(), 0, 1)]
+        );
+    }
+
+    /// Half-outside is a mono preview of the channel that does exist, which is
+    /// exactly what that track is recording.
+    #[test]
+    fn a_right_channel_outside_the_device_falls_back_to_the_left() {
+        let tracks = [track("wide", &[1, 7])];
+        assert_eq!(preview_tracks_for(&tracks, 2), vec![("wide".into(), 1, 1)]);
+    }
+
+    #[test]
+    fn a_track_with_no_input_channel_has_nothing_to_preview() {
+        assert!(preview_tracks_for(&[track("silent", &[])], 8).is_empty());
+    }
+
+    /// The slot table the rings live in is fixed, so the derivation has to stop
+    /// at its length rather than hand out an index that would panic.
+    #[test]
+    fn the_slot_table_bounds_how_many_tracks_preview() {
+        let tracks: Vec<_> = (0..crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS + 4)
+            .map(|i| track(&format!("t{i}"), &[0, 1]))
+            .collect();
+        assert_eq!(
+            preview_tracks_for(&tracks, 2).len(),
+            crate::input_ring::MAX_RECORDING_PREVIEW_TRACKS
+        );
     }
 }

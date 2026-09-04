@@ -951,23 +951,25 @@ impl Timeline {
             }
         }
 
-        if drag.additive {
-            for clip_id in hit_clip_ids {
-                if !self.state.selection.selected_clip_ids.contains(&clip_id) {
-                    self.state.selection.selected_clip_ids.push(clip_id);
-                }
-            }
-        } else if drag.dragging {
-            self.state.selection.selected_clip_ids = hit_clip_ids;
-            self.state.selection.selected_track_id = track_ids.first().cloned();
+        // Tracks and clips are committed together — see
+        // `TimelineState::apply_marquee_selection` for why the tracks are part
+        // of the result rather than a side effect of the clips.
+        if drag.dragging || drag.additive {
+            self.state.apply_marquee_selection(
+                &track_ids,
+                hit_clip_ids,
+                &drag.start_track_id,
+                drag.additive,
+            );
         }
 
         if Self::input_debug_enabled() {
             eprintln!(
-                "[selection] marquee_commit additive={} dragging={} selected={}",
+                "[selection] marquee_commit additive={} dragging={} clips={} tracks={}",
                 drag.additive,
                 drag.dragging,
-                self.state.selection.selected_clip_ids.len()
+                self.state.selection.selected_clip_ids.len(),
+                self.state.selection.selected_track_ids.len()
             );
         }
 

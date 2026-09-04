@@ -150,7 +150,7 @@ impl KeymapWindow {
         cx.notify();
     }
 
-    fn open_edit_for_row(&mut self, row: &KeymapRow, cx: &mut Context<Self>) {
+    fn open_edit_for_row(&mut self, row: &KeymapRow, window: &mut Window, cx: &mut Context<Self>) {
         self.edit_dialog = Some(EditDialogState {
             action_id: row.action_id.clone(),
             action_label: row.action_label.clone(),
@@ -163,7 +163,13 @@ impl KeymapWindow {
             conflicts: Vec::new(),
             show_conflict: false,
         });
-        cx.notify();
+        // Armed on open. Recording used to need a second, separate click on the
+        // keystroke field — a small target inside a dialog the user had just
+        // opened *to* record something — and if that click missed, every key
+        // went to the window's own shortcuts instead. Opening the dialog is the
+        // request to record; the field stays clickable to re-arm after a
+        // mistake.
+        self.arm_recorder(window, cx);
     }
 
     fn arm_recorder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -420,7 +426,7 @@ impl KeymapWindow {
                     conflicts: Vec::new(),
                     show_conflict: false,
                 });
-                cx.notify();
+                self.arm_recorder(window, cx);
             }
             _ => {
                 if key == "escape" {
@@ -437,7 +443,7 @@ impl KeymapWindow {
                     if let Some(id) = self.selected_row_id.clone() {
                         if let Some(row) = self.manager.rows().iter().find(|r| r.id == id) {
                             let row = row.clone();
-                            self.open_edit_for_row(&row, cx);
+                            self.open_edit_for_row(&row, window, cx);
                         }
                     }
                 } else if matches!(key, "delete" | "backspace") {
@@ -612,10 +618,10 @@ impl Render for KeymapWindow {
                     let row_clone = row.clone();
                     keymap_row_element(row, selected).on_mouse_down(
                         MouseButton::Left,
-                        move |event, _, cx| {
+                        move |event, window, cx| {
                             if event.click_count >= 2 {
                                 let _ = entity.update(cx, |this, cx| {
-                                    this.open_edit_for_row(&row_clone, cx);
+                                    this.open_edit_for_row(&row_clone, window, cx);
                                 });
                             } else {
                                 let _ = entity.update(cx, |this, cx| {
@@ -982,7 +988,11 @@ fn edit_dialog_overlay(
                         .on_mouse_down(MouseButton::Left, on_arm)
                         .child(key_recorder_field(
                             &dialog.recorder,
-                            "Click then press keys",
+                            if dialog.recorder.armed {
+                                "Press the keys you want"
+                            } else {
+                                "Click to record again"
+                            },
                             dialog.recorder.armed,
                         )),
                 )

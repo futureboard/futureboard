@@ -27,6 +27,20 @@ fn main() {
     #[cfg(feature = "builtin-plugin-editor")]
     dispatch_cef_process();
 
+    // ── fbrd:// links ─────────────────────────────────────────────────────────
+    // The OS launches a fresh process for a scheme URL. If a Studio is already
+    // running this process hands the URL over and leaves before it has opened
+    // an audio device, touched settings, or shown a window — none of which a
+    // second instance should ever do. Otherwise the URL is queued and this
+    // process becomes the instance that acts on it once it has booted.
+    if let Some(url) = sphere_ui_components::deeplink::url_from_args(std::env::args_os().skip(1)) {
+        if sphere_ui_components::deeplink::forward_to_running_instance(&url) {
+            boot::log("fbrd link handed to the running instance");
+            return;
+        }
+        sphere_ui_components::deeplink::enqueue(url);
+    }
+
     // Privilege safety — must run before audio, plugins, settings, or project I/O.
     // Community and Professional Edition both block elevated launches. Developer
     // builds may opt in with `--features allow_elevated_for_testing`.
@@ -116,9 +130,16 @@ fn main() {
     }
 
     boot::log("process setup done");
-    application()
-        .with_assets(EmbeddedAssets::new())
-        .run(app::setup);
+    let application = application().with_assets(EmbeddedAssets::new());
+    // macOS hands a `fbrd://` link to the running app as an Apple event; the
+    // shell drains this queue on the UI thread. Windows and Linux never call
+    // this — they launch a new process, which is handled above.
+    application.on_open_urls(|urls| {
+        for url in urls {
+            sphere_ui_components::deeplink::enqueue(url);
+        }
+    });
+    application.run(app::setup);
     #[cfg(feature = "builtin-plugin-editor")]
     sphere_ui_components::components::builtin_plugin_editor::shutdown();
     if let Some(discord_rpc) = discord_rpc {

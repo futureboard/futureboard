@@ -19,6 +19,7 @@
 //! Callers on other threads speak to it through a command channel and read a
 //! snapshot; nothing outside this module touches the socket.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -37,9 +38,10 @@ use crate::protocol::{
     ChannelMetadata, ClockSyncRequest, ClockSyncResponse, CodecCapability, JamClosed,
     JamJoinRequest, JamJoined, JamLeaveRequest, JamParticipantEvent, JamParticipantState,
     ParticipantSummary, RegionSummary, SampleFormat, StreamEvent, StreamPublishRequest,
-    StreamPublished, StreamSummary, StreamUnpublishRequest, TransportCandidates,
-    TransportCapabilities, TransportKind, TransportSelect, TransportSelected, UserSummary,
-    MAX_STREAM_CHANNELS,
+    StreamPublished, StreamSubscribeRequest, StreamSubscribed, StreamSummary,
+    StreamUnpublishRequest, StreamUnsubscribeRequest, StreamUnsubscribed, SubscriptionMode,
+    SubscriptionRefusal, TransportCandidates, TransportCapabilities, TransportKind,
+    TransportSelect, TransportSelected, UserSummary, MAX_STREAM_CHANNELS,
 };
 use crate::registry::JamRegistry;
 use crate::signaling::SignalingClient;
@@ -101,6 +103,14 @@ pub enum JamCommand {
         source: Arc<dyn JamPublishSource>,
     },
     Unpublish(StreamId),
+    /// Start receiving these streams as well.
+    Subscribe(Vec<StreamId>),
+    /// Stop receiving these streams.
+    Unsubscribe(Vec<StreamId>),
+    /// Take the whole room again, letting the server choose.
+    SubscribeEverything,
+    /// Receive nothing until something is asked for.
+    SubscribeNothing,
     /// Stop the worker entirely.
     Shutdown,
 }
@@ -127,6 +137,18 @@ pub enum JamEvent {
     FormatSelected {
         stream: StreamId,
         format: AudioFormat,
+    },
+    /// The set of streams this client receives changed, and what the server
+    /// would not grant.
+    ///
+    /// `streams` is the whole set, not a delta, so a host can reconcile its
+    /// routing against one value. It is empty under [`SubscriptionMode::Auto`],
+    /// where the server decides and a snapshot would go stale on the next
+    /// publish.
+    IngressChanged {
+        mode: SubscriptionMode,
+        streams: Vec<StreamId>,
+        refused: Vec<SubscriptionRefusal>,
     },
     Published(StreamSummary),
     Unpublished(StreamId),
@@ -194,6 +216,27 @@ pub struct JamSessionOptions {
     /// Sample rate to publish at. Independent of the project rate: the jam
     /// branch resamples, the project does not change.
     pub publish_sample_rate: i32,
+    /// Which streams this client wants the server to send it.
+    pub ingress: JamIngress,
+}
+
+/// The ingress policy this client joins with.
+///
+/// Egress was always explicit — a client says what it publishes. Ingress was
+/// not: the server sent every participant every stream it could decode. That is
+/// right for a listener and wrong for a DAW, where one performer routed to one
+/// track should cost one stream rather than the whole room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JamIngress {
+    /// Take the room. The server chooses, exactly as it always did, and this is
+    /// the default so no existing caller changes behaviour.
+    #[default]
+    Everything,
+    /// Take only what the host asks for. The session goes silent the moment it
+    /// joins and stays silent until [`JamSession::subscribe`] names something,
+    /// which is what keeps a project with two routed tracks from paying for a
+    /// six-piece band.
+    Routed,
 }
 
 impl JamSessionOptions {
@@ -244,6 +287,7 @@ impl JamSessionOptions {
             // with no frame sizes at all.
             publish_frame_samples: 128,
             publish_sample_rate: 48_000,
+            ingress: JamIngress::Everything,
         }
     }
 }
@@ -391,6 +435,32 @@ impl JamSession {
         self.send(JamCommand::Unpublish(stream))
     }
 
+    /// Start receiving these streams, in addition to whatever is already
+    /// arriving.
+    ///
+    /// A stream that is not published yet is remembered rather than refused: a
+    /// track bound to a performer who has not started is a track waiting, and
+    /// it attaches by itself when that performer publishes.
+    pub fn subscribe(&self, streams: Vec<StreamId>) -> Result<()> {
+        self.send(JamCommand::Subscribe(streams))
+    }
+
+    /// Stop receiving these streams. The bandwidth stops with them.
+    pub fn unsubscribe(&self, streams: Vec<StreamId>) -> Result<()> {
+        self.send(JamCommand::Unsubscribe(streams))
+    }
+
+    /// Take the whole room, letting the server choose again. This is the
+    /// listener's view.
+    pub fn subscribe_everything(&self) -> Result<()> {
+        self.send(JamCommand::SubscribeEverything)
+    }
+
+    /// Receive nothing until something is asked for.
+    pub fn subscribe_nothing(&self) -> Result<()> {
+        self.send(JamCommand::SubscribeNothing)
+    }
+
     fn send(&self, command: JamCommand) -> Result<()> {
         self.commands
             .send(command)
@@ -442,6 +512,31 @@ struct Worker {
     publications: Vec<PendingPublish>,
     /// Stream ids currently published, in the same order as `publications`.
     published_ids: Vec<Option<StreamId>>,
+
+    /// The ingress policy in force. It starts at the option the caller supplied
+    /// and moves whenever a subscribe command arrives, so a reconnect restores
+    /// what the host last asked for rather than what it started with.
+    ingress: JamIngress,
+    /// Streams the host asked for, whether or not they exist yet.
+    ///
+    /// Kept whole rather than pruned to what is published: a track bound to a
+    /// performer who has not joined is not a mistake, and pruning would make
+    /// that track re-bind by hand when they arrive.
+    wanted: BTreeSet<StreamId>,
+    /// What the server is believed to hold for this participant. The diff
+    /// against `wanted` is what actually goes on the wire, so a routing change
+    /// costs one message about the streams that moved rather than a restatement
+    /// of the whole set.
+    subscribed: BTreeSet<StreamId>,
+    /// The ingress mode the server is believed to hold for this participant.
+    /// A fresh join resets it to `Auto`, which is the server's own default; a
+    /// resume leaves it, because a resumed participant keeps both its declared
+    /// set and the routing-table entries behind it.
+    server_mode: SubscriptionMode,
+    /// Set when the wanted set and the room have diverged — a stream arrived
+    /// that a track is waiting for, or a routing command came in — so the pump
+    /// reconciles once, outside the event handler that noticed.
+    ingress_dirty: bool,
     shutdown: bool,
 }
 
@@ -457,6 +552,7 @@ impl Worker {
         state: Arc<RwLock<JamState>>,
         clock: Arc<Mutex<SessionClock>>,
     ) -> Self {
+        let options_ingress = options.ingress;
         Self {
             config,
             credentials,
@@ -475,6 +571,11 @@ impl Worker {
             participant_id: None,
             publications: Vec::new(),
             published_ids: Vec::new(),
+            ingress: options_ingress,
+            wanted: BTreeSet::new(),
+            subscribed: BTreeSet::new(),
+            server_mode: SubscriptionMode::Auto,
+            ingress_dirty: false,
             shutdown: false,
         }
     }
@@ -514,12 +615,51 @@ impl Worker {
                 self.published_ids.push(None);
             }
             JamCommand::Unpublish(stream) => self.drop_publication(&stream),
+            // Routing before there is a socket is normal: a project opens with
+            // its tracks already bound to performers. The intent is recorded
+            // and applied the moment a session exists.
+            JamCommand::Subscribe(streams) => self.want_streams(streams),
+            JamCommand::Unsubscribe(streams) => self.unwant_streams(&streams),
+            JamCommand::SubscribeEverything => self.want_everything(),
+            JamCommand::SubscribeNothing => self.want_nothing(),
             JamCommand::Leave => {
                 self.jam_id = None;
                 self.set_state(JamState::Disconnected);
             }
             JamCommand::Shutdown => self.shutdown = true,
         }
+    }
+
+    /// Add streams to what this client is asking for.
+    fn want_streams(&mut self, streams: Vec<StreamId>) {
+        // Asking for a specific stream is taking control. Leaving the policy at
+        // `Everything` would mean the server kept sending the rest of the room
+        // alongside, which is the cost this exists to avoid.
+        self.ingress = JamIngress::Routed;
+        for stream in streams {
+            self.wanted.insert(stream);
+        }
+        self.ingress_dirty = true;
+    }
+
+    fn unwant_streams(&mut self, streams: &[StreamId]) {
+        self.ingress = JamIngress::Routed;
+        for stream in streams {
+            self.wanted.remove(stream);
+        }
+        self.ingress_dirty = true;
+    }
+
+    fn want_everything(&mut self) {
+        self.ingress = JamIngress::Everything;
+        self.wanted.clear();
+        self.ingress_dirty = true;
+    }
+
+    fn want_nothing(&mut self) {
+        self.ingress = JamIngress::Routed;
+        self.wanted.clear();
+        self.ingress_dirty = true;
     }
 
     /// Attempt, run, and if the drop was recoverable, attempt again.
@@ -638,6 +778,10 @@ impl Worker {
                 self.jam_id = Some(jam_id);
                 self.access_token = access_token;
             }
+            JamCommand::Subscribe(streams) => self.want_streams(streams),
+            JamCommand::Unsubscribe(streams) => self.unwant_streams(&streams),
+            JamCommand::SubscribeEverything => self.want_everything(),
+            JamCommand::SubscribeNothing => self.want_nothing(),
             JamCommand::Leave | JamCommand::Shutdown => {}
         }
     }
@@ -661,6 +805,21 @@ impl Worker {
 
         self.set_state(JamState::Joining);
         let joined = self.join_room(&mut signaling, &jam_id)?;
+        if !joined.resumed {
+            // A fresh participant starts at the server's own default. A resumed
+            // one keeps its declared set and the routing entries behind it, so
+            // its believed state is still accurate and must not be discarded.
+            self.server_mode = SubscriptionMode::Auto;
+            self.subscribed.clear();
+        }
+
+        // Silence first, and before capabilities rather than after: capabilities
+        // are what make a receiver eligible, so a client that wants to choose
+        // has to say so while it is still ineligible. Asking afterwards pays for
+        // the whole room for one round trip, on the link that is the constraint.
+        if self.ingress == JamIngress::Routed {
+            self.silence_ingress(&mut signaling, &jam_id)?;
+        }
 
         // Codec capabilities before anything else: the server resolves a format
         // per stream per receiver and cannot pick one for a client that has not
@@ -672,6 +831,19 @@ impl Worker {
             message::AUDIO_CAPABILITIES,
             self.config.connect_timeout,
         )?;
+
+        // Now that a format can be resolved, ask for what the host routed.
+        self.ingress_dirty = true;
+        if let Err(error) = self.reconcile_ingress(&mut signaling, &jam_id) {
+            // A refused subscription is not a reason to fail the session: the
+            // room is joined, the transport is about to open, and the host can
+            // re-route. Failing here would turn one unroutable performer into a
+            // dropped jam.
+            if !error.recoverable() {
+                return Err(error);
+            }
+            self.record_error(&error, false);
+        }
 
         self.open_media(&mut signaling, joined.resumed)?;
         self.restore_publications(&mut signaling, &jam_id)?;
@@ -1056,6 +1228,10 @@ impl Worker {
                     self.publish_registry_snapshot();
                     self.emit(JamEvent::Unpublished(stream));
                 }
+                Ok(JamCommand::Subscribe(streams)) => self.want_streams(streams),
+                Ok(JamCommand::Unsubscribe(streams)) => self.unwant_streams(&streams),
+                Ok(JamCommand::SubscribeEverything) => self.want_everything(),
+                Ok(JamCommand::SubscribeNothing) => self.want_nothing(),
                 Ok(JamCommand::Join { .. }) => {
                     // Already in a jam. One jam per session; a second one is a
                     // second session, which keeps event ordering unambiguous.
@@ -1064,6 +1240,20 @@ impl Worker {
                 Err(TryRecvError::Disconnected) => {
                     self.shutdown = true;
                     continue;
+                }
+            }
+
+            // Reconciled here rather than where the divergence was noticed: a
+            // stream event arrives inside the event handler, which has no socket
+            // to answer on, and a routing command may arrive in the same turn as
+            // three others. One reconcile per turn coalesces them into the
+            // smallest set of messages that describes the change.
+            if self.ingress_dirty {
+                if let Err(error) = self.reconcile_ingress(signaling, jam_id) {
+                    if !error.recoverable() {
+                        return Err(error);
+                    }
+                    self.record_error(&error, false);
                 }
             }
 
@@ -1133,6 +1323,15 @@ impl Worker {
                 let event: StreamEvent = envelope.decode()?;
                 self.registry.observe_seq(event.seq);
                 self.registry.upsert_stream(event.stream.clone());
+                // A track bound to a performer who had not started yet is
+                // waiting for exactly this. Reconciling attaches it without the
+                // host having to notice the arrival and re-route by hand.
+                if self
+                    .wanted
+                    .contains(&StreamId::new(event.stream.id.clone()))
+                {
+                    self.ingress_dirty = true;
+                }
                 self.sync_subscriptions();
                 self.publish_registry_snapshot();
                 self.emit(JamEvent::StreamAdded(event.stream));
@@ -1147,6 +1346,11 @@ impl Worker {
                 };
                 self.registry.remove_stream(&id);
                 self.options.sink.stream_ended(&id);
+                // The server drops an unpublished stream from every declared
+                // set, so forgetting it here keeps the two views in step. It
+                // stays in `wanted`: the performer may publish again, and a
+                // track that was pointed at them should reattach.
+                self.subscribed.remove(&id);
                 self.sync_subscriptions();
                 self.publish_registry_snapshot();
                 self.emit(JamEvent::StreamRemoved(id));
@@ -1196,6 +1400,170 @@ impl Worker {
             clock.apply(measurement, response.session_ticks, t4);
         }
         Ok(())
+    }
+
+    /// Send `jam.stream_unsubscribe { all }`: drop everything and stay in
+    /// control of what comes back.
+    fn silence_ingress(&mut self, signaling: &mut SignalingClient, jam_id: &JamId) -> Result<()> {
+        let ack: StreamUnsubscribed = signaling.request(
+            message::JAM_STREAM_UNSUBSCRIBE,
+            &StreamUnsubscribeRequest {
+                jam_id: jam_id.as_str().to_string(),
+                stream_ids: Vec::new(),
+                all: true,
+            },
+            message::JAM_STREAM_UNSUBSCRIBED,
+            self.config.connect_timeout,
+        )?;
+        self.apply_unsubscribed(ack);
+        Ok(())
+    }
+
+    /// Make what the server sends match what the host asked for.
+    ///
+    /// The wire traffic is the diff, not the whole set: a project that re-points
+    /// one track sends one message about one stream. The exception is the switch
+    /// out of automatic ingress, where the first `subscribe` has to restate
+    /// everything wanted — it replaces what the server was choosing, and a
+    /// stream left out of it would keep arriving.
+    fn reconcile_ingress(&mut self, signaling: &mut SignalingClient, jam_id: &JamId) -> Result<()> {
+        self.ingress_dirty = false;
+
+        if self.ingress == JamIngress::Everything {
+            if self.server_mode == SubscriptionMode::Auto {
+                return Ok(());
+            }
+            let ack: StreamSubscribed = signaling.request(
+                message::JAM_STREAM_SUBSCRIBE,
+                &StreamSubscribeRequest {
+                    jam_id: jam_id.as_str().to_string(),
+                    stream_ids: Vec::new(),
+                    all: true,
+                },
+                message::JAM_STREAM_SUBSCRIBED,
+                self.config.connect_timeout,
+            )?;
+            self.apply_subscribed(ack);
+            return Ok(());
+        }
+
+        // Only what the room actually has can be subscribed. The rest stays in
+        // `wanted` and attaches when it appears.
+        let present: BTreeSet<StreamId> = self
+            .registry
+            .streams()
+            .into_iter()
+            .map(|stream| stream.id.clone())
+            .collect();
+        let want: BTreeSet<StreamId> = self.wanted.intersection(&present).cloned().collect();
+
+        if want.is_empty() {
+            if self.server_mode == SubscriptionMode::Explicit && self.subscribed.is_empty() {
+                return Ok(());
+            }
+            return self.silence_ingress(signaling, jam_id);
+        }
+
+        if self.server_mode == SubscriptionMode::Explicit {
+            let drop: Vec<StreamId> = self.subscribed.difference(&want).cloned().collect();
+            if !drop.is_empty() {
+                let ack: StreamUnsubscribed = signaling.request(
+                    message::JAM_STREAM_UNSUBSCRIBE,
+                    &StreamUnsubscribeRequest {
+                        jam_id: jam_id.as_str().to_string(),
+                        stream_ids: drop.iter().map(|id| id.as_str().to_string()).collect(),
+                        all: false,
+                    },
+                    message::JAM_STREAM_UNSUBSCRIBED,
+                    self.config.connect_timeout,
+                )?;
+                self.apply_unsubscribed(ack);
+            }
+        }
+
+        let add: Vec<StreamId> = if self.server_mode == SubscriptionMode::Auto {
+            want.iter().cloned().collect()
+        } else {
+            want.difference(&self.subscribed).cloned().collect()
+        };
+        if add.is_empty() {
+            return Ok(());
+        }
+        let ack: StreamSubscribed = signaling.request(
+            message::JAM_STREAM_SUBSCRIBE,
+            &StreamSubscribeRequest {
+                jam_id: jam_id.as_str().to_string(),
+                stream_ids: add.iter().map(|id| id.as_str().to_string()).collect(),
+                all: false,
+            },
+            message::JAM_STREAM_SUBSCRIBED,
+            self.config.connect_timeout,
+        )?;
+        self.apply_subscribed(ack);
+        Ok(())
+    }
+
+    /// Fold a `jam.stream_subscribed` reply in.
+    fn apply_subscribed(&mut self, ack: StreamSubscribed) {
+        self.server_mode = ack.mode;
+        if ack.mode == SubscriptionMode::Auto {
+            // Under automatic ingress the set is the server's, and the reply
+            // carries none. Formats for the whole room follow as ordinary
+            // `audio.format_selected` events, so there is nothing to clear.
+            self.subscribed.clear();
+            self.emit(JamEvent::IngressChanged {
+                mode: ack.mode,
+                streams: Vec::new(),
+                refused: ack.refused,
+            });
+            return;
+        }
+        let held: BTreeSet<StreamId> = ack.stream_ids.iter().cloned().map(StreamId::new).collect();
+        self.retire_formats(self.subscribed.difference(&held).cloned().collect());
+        self.subscribed = held;
+        self.settle_ingress(ack.mode, ack.refused);
+    }
+
+    /// Fold a `jam.stream_unsubscribed` reply in.
+    fn apply_unsubscribed(&mut self, ack: StreamUnsubscribed) {
+        self.server_mode = ack.mode;
+        let held: BTreeSet<StreamId> = ack.stream_ids.iter().cloned().map(StreamId::new).collect();
+        // `dropped` is what this message actually stopped, which is what has to
+        // be released; diffing against the reported set would miss a stream the
+        // server had subscribed under automatic ingress and this client never
+        // named.
+        let mut retire: Vec<StreamId> = ack.dropped.iter().cloned().map(StreamId::new).collect();
+        for gone in self.subscribed.difference(&held) {
+            if !retire.contains(gone) {
+                retire.push(gone.clone());
+            }
+        }
+        self.retire_formats(retire);
+        self.subscribed = held;
+        self.settle_ingress(ack.mode, Vec::new());
+    }
+
+    /// A stream that is no longer subscribed stops arriving. Clearing the
+    /// negotiated format is what takes it out of the media table; the sink is
+    /// told so it can release the ring and go silent rather than repeat its
+    /// last block.
+    fn retire_formats(&mut self, streams: Vec<StreamId>) {
+        for stream in streams {
+            if self.registry.clear_stream_format(&stream) {
+                self.options.sink.stream_ended(&stream);
+            }
+        }
+    }
+
+    fn settle_ingress(&mut self, mode: SubscriptionMode, refused: Vec<SubscriptionRefusal>) {
+        self.sync_subscriptions();
+        self.publish_registry_snapshot();
+        let streams: Vec<StreamId> = self.subscribed.iter().cloned().collect();
+        self.emit(JamEvent::IngressChanged {
+            mode,
+            streams,
+            refused,
+        });
     }
 
     /// Tell the media threads which aliases they are receiving and in what

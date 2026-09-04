@@ -237,8 +237,32 @@ impl AudioEngineState {
         }
     }
 
+    /// Whether this state means the engine cannot produce audio at all.
+    ///
+    /// `LoadingProject` is deliberately **not** one of them. It means "the
+    /// control thread is building the next graph"; the graph the callback is
+    /// holding is untouched and still perfectly renderable until the swap
+    /// arrives, and the swap itself preserves the transport (see the
+    /// `LoadProject` arm in `backend::render`).
+    ///
+    /// Treating it as silence is what made playback stop mid-song: the UI
+    /// re-syncs the project whenever it goes dirty — including while playing —
+    /// and with plug-ins loaded that rebuild takes seconds. The mix went hard
+    /// silent for the whole of it, and every path that failed to send the
+    /// command left the state stuck, so the only way back was pressing Play,
+    /// whose `StartTransport` forces `Running`.
     pub fn outputs_silence(self) -> bool {
-        !matches!(self, Self::Running)
+        !matches!(self, Self::Running | Self::LoadingProject)
+    }
+
+    /// Whether the transport may advance and the graph may be rendered.
+    ///
+    /// The same set as [`Self::outputs_silence`] read the other way round, and
+    /// the reason both exist: `Paused` outputs silence *by default* but still
+    /// wakes the graph for MIDI preview, so the two questions have different
+    /// answers there and the render path asks them separately.
+    pub fn renders_transport(self) -> bool {
+        matches!(self, Self::Running | Self::LoadingProject)
     }
 }
 
@@ -1161,6 +1185,7 @@ impl EngineInner {
                     ) {
                         Ok(mut runtime) => {
                             runtime.resolve_jam_inputs(snapshot, &self.shared.jam_bus);
+                            runtime.resolve_loopback_inputs(snapshot);
                             runtime
                         }
                         Err(e) => {
@@ -2383,16 +2408,54 @@ impl EngineInner {
             return Err(error);
         }
 
-        let next_runtime_source = RuntimeTrackInputSource::from_route(
-            &input_source.channels,
-            self.jam_slot_for(&input_source),
-        );
+        // A `trk:` route names a track, not a device, so it cannot go through
+        // `from_route` — that would read the hardware channels the route
+        // happens to carry. Resolving it needs the whole track list, which is
+        // also where the publish flags come from, so both are done together
+        // below.
+        let next_runtime_source = if input_source.is_loopback() {
+            RuntimeTrackInputSource::None
+        } else {
+            RuntimeTrackInputSource::from_route(
+                &input_source.channels,
+                self.jam_slot_for(&input_source),
+            )
+        };
+        let publishers_before: Vec<bool> = {
+            let runtime = self.runtime.lock();
+            (0..snapshot.tracks.len())
+                .map(|index| runtime.track_loopback_publish(index))
+                .collect()
+        };
         self.runtime.lock().update_track_input_state(
             track_index,
             record_armed,
             monitor_enabled,
             next_runtime_source,
         );
+        // Re-resolve every loopback route against the edited project, then tell
+        // the callback about the tracks whose publish flag actually moved. The
+        // destination's own route rides the `SetTrackInputState` below.
+        let (next_runtime_source, publish_changes) = {
+            let mut runtime = self.runtime.lock();
+            runtime.resolve_loopback_inputs(snapshot);
+            let resolved = runtime.track_input_source(track_index);
+            let changes: Vec<(usize, bool)> = publishers_before
+                .iter()
+                .enumerate()
+                .filter_map(|(index, before)| {
+                    let now = runtime.track_loopback_publish(index);
+                    (now != *before).then_some((index, now))
+                })
+                .collect();
+            (resolved.unwrap_or(next_runtime_source), changes)
+        };
+        for (index, publish) in publish_changes {
+            let _ = self.send_command(EngineCommand::SetTrackLoopbackPublish {
+                track_index: index,
+                publish,
+            });
+        }
         let command = EngineCommand::SetTrackInputState {
             track_index,
             record_armed,
@@ -2855,6 +2918,7 @@ impl EngineInner {
         // has no access to. Doing it here rather than inside the build keeps the
         // offline exporter free of live network audio.
         runtime.resolve_jam_inputs(&snapshot, &self.shared.jam_bus);
+        runtime.resolve_loopback_inputs(&snapshot);
 
         // Processors left in existing_vst3 had no matching insert in the new
         // snapshot — they are dropped here with reason="replaced-by-load-project".
@@ -3001,13 +3065,21 @@ impl EngineInner {
                     "[SphereAudio] ⚠ WARNING: no audio stream open — runtime stored, \
                      will apply on next openDevice/openDaux"
                 );
-                // No callback will run the graph-swap transition; leave a
-                // consistent Paused state instead of LoadingProject.
+                // No callback will run the graph-swap transition, so this is
+                // the only place that can leave a consistent state. It follows
+                // the transport rather than always parking in `Paused`: a
+                // stream that reopens under a running transport would otherwise
+                // find the engine silenced with no command coming to lift it.
+                let resumed = if self.shared.playing.load(Ordering::Relaxed) {
+                    AudioEngineState::Running
+                } else {
+                    AudioEngineState::Paused
+                };
                 self.shared
                     .engine_state
-                    .store(AudioEngineState::Paused as u8, Ordering::Relaxed);
+                    .store(resumed as u8, Ordering::Relaxed);
                 eprintln!(
-                    "[AudioEngineState] old=LoadingProject new=Paused source=load_project_no_stream"
+                    "[AudioEngineState] old=LoadingProject new={resumed:?} source=load_project_no_stream"
                 );
             }
             Err(e) => {
@@ -4624,6 +4696,7 @@ impl EngineInner {
                 match RuntimeProject::build(snapshot, sr, &mut audio_cache, None, self.pdc_enabled()) {
                     Ok(mut runtime) => {
                         runtime.resolve_jam_inputs(snapshot, &self.shared.jam_bus);
+                            runtime.resolve_loopback_inputs(snapshot);
                         runtime
                     }
                     Err(e) => {
@@ -4676,6 +4749,7 @@ impl EngineInner {
                 EngineCommand::SetTrackMute { .. } => "SetTrackMute",
                 EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
                 EngineCommand::SetTrackInputState { .. } => "SetTrackInputState",
+                EngineCommand::SetTrackLoopbackPublish { .. } => "SetTrackLoopbackPublish",
                 EngineCommand::SetTrackJamPublish { .. } => "SetTrackJamPublish",
                 EngineCommand::SetJamMultitrackPairs { .. } => "SetJamMultitrackPairs",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
@@ -5108,6 +5182,32 @@ where
                             // position so a load mid-playback stays in sync.
                             let midi_pos = shared.position_samples.load(Ordering::Relaxed);
                             runtime.reset_midi_playback(midi_pos);
+                            // Transport/audio-graph separation, same rule the
+                            // DAUx path states: a graph swap must never change
+                            // the user's transport state. `load_project` parks
+                            // the engine in `LoadingProject` on the control
+                            // thread, and this is the only place that can lift
+                            // it — without this the state stayed `LoadingProject`
+                            // for the rest of the session, which lies to the UI
+                            // and to every diagnostic that reads it.
+                            let was_playing = shared.playing.load(Ordering::Relaxed);
+                            playing_local = was_playing;
+                            let previous_state = crate::engine::AudioEngineState::from_u8(
+                                shared.engine_state.load(Ordering::Relaxed),
+                            );
+                            let swapped_state = if was_playing {
+                                crate::engine::AudioEngineState::Running
+                            } else {
+                                crate::engine::AudioEngineState::Paused
+                            };
+                            shared
+                                .engine_state
+                                .store(swapped_state as u8, Ordering::Relaxed);
+                            if callback_debug_enabled() || command_debug_enabled() {
+                                eprintln!(
+                                    "[AudioEngineState] old={previous_state:?} new={swapped_state:?} source=graph_swap was_playing={was_playing}"
+                                );
+                            }
                         }
                         EngineCommand::SetTestTone { enabled, frequency } => {
                             osc_on = enabled;
@@ -5379,6 +5479,12 @@ where
                             monitor_enabled,
                             input_source,
                         ),
+                        EngineCommand::SetTrackLoopbackPublish {
+                            track_index,
+                            publish,
+                        } => {
+                            runtime.update_track_loopback_publish(track_index, publish);
+                        }
                         EngineCommand::SetTrackJamPublish { track_index, slot } => {
                             runtime.update_track_jam_publish(track_index, slot);
                         }
@@ -6302,6 +6408,9 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            loopback_publish: false,
+            loopback_out_l: Vec::new(),
+            loopback_out_r: Vec::new(),
             jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
@@ -6798,6 +6907,9 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            loopback_publish: false,
+            loopback_out_l: Vec::new(),
+            loopback_out_r: Vec::new(),
             jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
@@ -6943,6 +7055,9 @@ mod bridge_insert_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            loopback_publish: false,
+            loopback_out_l: Vec::new(),
+            loopback_out_r: Vec::new(),
             jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
@@ -7042,6 +7157,9 @@ mod routing_tests {
             monitor_enabled: false,
             input_source: crate::runtime::RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            loopback_publish: false,
+            loopback_out_l: Vec::new(),
+            loopback_out_r: Vec::new(),
             jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
@@ -7161,6 +7279,8 @@ mod routing_tests {
                 ara_rendered: false,
                 fade_in_samples: 0,
                 fade_out_samples: 0,
+                fade_in_curve: crate::runtime::FadeCurve::EqualPower,
+                fade_out_curve: crate::runtime::FadeCurve::EqualPower,
                 source,
                 stretch_processor: None,
                 stretch_input_l: Vec::new(),
@@ -7248,6 +7368,8 @@ mod routing_tests {
                     ara_rendered: false,
                     fade_in_samples: 0,
                     fade_out_samples: 0,
+                    fade_in_curve: crate::runtime::FadeCurve::EqualPower,
+                    fade_out_curve: crate::runtime::FadeCurve::EqualPower,
                     source,
                     stretch_processor: None,
                     stretch_input_l: Vec::new(),
@@ -7701,5 +7823,84 @@ mod recording_preview_multi_track_tests {
         assert!(engine
             .drain_recording_preview_peaks_for_track("no-such-track", 0.0)
             .is_empty());
+    }
+}
+
+/// What each engine state means for the audio callback.
+///
+/// The distinction these assert is the difference between playback that
+/// survives a project sync and playback that stops dead in the middle of a
+/// song, so it is worth pinning rather than leaving to the one `matches!` in
+/// the render path.
+#[cfg(test)]
+mod engine_state_rendering_tests {
+    use super::AudioEngineState;
+
+    /// The bug this covers: the UI re-syncs the project whenever it goes dirty,
+    /// including while the transport is running, and `load_project` parks the
+    /// engine in `LoadingProject` for the whole rebuild — seconds, once
+    /// plug-ins have to be re-instantiated. While that state silenced the
+    /// output, a song simply stopped part-way through and only pressing Play
+    /// brought it back, because `StartTransport` is what forces `Running`.
+    ///
+    /// The graph the callback holds is not touched until the swap command
+    /// arrives, so there is nothing to protect against here.
+    #[test]
+    fn preparing_the_next_graph_does_not_silence_the_one_being_played() {
+        assert!(!AudioEngineState::LoadingProject.outputs_silence());
+        assert!(AudioEngineState::LoadingProject.renders_transport());
+    }
+
+    /// Everything that means the graph or the device is going away still has to
+    /// silence: those are the states where continuing to render is a
+    /// use-after-free or a write into a closed device, not a dropout.
+    #[test]
+    fn teardown_states_stay_hard_silence() {
+        for state in [
+            AudioEngineState::ClosingProject,
+            AudioEngineState::DeviceSwitching,
+            AudioEngineState::Suspended,
+        ] {
+            assert!(state.outputs_silence(), "{state:?} must output silence");
+            assert!(
+                !state.renders_transport(),
+                "{state:?} must not advance the transport"
+            );
+        }
+    }
+
+    /// `Paused` is the one state where the two questions differ: it outputs
+    /// silence by default, and the render path still wakes the graph from it
+    /// for MIDI preview and the post-panic bridge flush. A stale `playing_local`
+    /// left over from a graph swap must never drive rendering here.
+    #[test]
+    fn paused_is_silent_and_never_advances_the_transport() {
+        assert!(AudioEngineState::Paused.outputs_silence());
+        assert!(!AudioEngineState::Paused.renders_transport());
+    }
+
+    #[test]
+    fn running_plays() {
+        assert!(!AudioEngineState::Running.outputs_silence());
+        assert!(AudioEngineState::Running.renders_transport());
+    }
+
+    /// The state crosses to the callback as a byte, so an unknown value must
+    /// land on the state that keeps audio flowing rather than on one that
+    /// silences it.
+    #[test]
+    fn an_unknown_state_byte_decodes_to_running() {
+        assert_eq!(AudioEngineState::from_u8(0), AudioEngineState::Running);
+        assert_eq!(AudioEngineState::from_u8(200), AudioEngineState::Running);
+        for state in [
+            AudioEngineState::Running,
+            AudioEngineState::Paused,
+            AudioEngineState::LoadingProject,
+            AudioEngineState::ClosingProject,
+            AudioEngineState::DeviceSwitching,
+            AudioEngineState::Suspended,
+        ] {
+            assert_eq!(AudioEngineState::from_u8(state as u8), state);
+        }
     }
 }

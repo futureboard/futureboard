@@ -71,6 +71,56 @@ impl TimelineState {
             .collect()
     }
 
+    /// Commit what a marquee enclosed: the tracks it crossed and the clips it
+    /// touched.
+    ///
+    /// Tracks are part of the result, not a side effect of the clips. A band
+    /// pulled across five tracks that leaves four unselected is the gesture
+    /// failing, and a band pulled across empty lanes has no clips to hit at all
+    /// yet still says exactly which tracks the user meant.
+    ///
+    /// `anchor` is the track the drag started on. It becomes the primary and
+    /// the anchor for a following Shift-click, rather than whichever track
+    /// happens to be topmost — extending a selection should continue from where
+    /// the cursor actually went down.
+    ///
+    /// Additive keeps what was already selected and adds to it; replace does
+    /// what its name says.
+    pub fn apply_marquee_selection(
+        &mut self,
+        track_ids: &[String],
+        clip_ids: Vec<String>,
+        anchor: &str,
+        additive: bool,
+    ) {
+        if additive {
+            for clip_id in clip_ids {
+                if !self.selection.selected_clip_ids.contains(&clip_id) {
+                    self.selection.selected_clip_ids.push(clip_id);
+                }
+            }
+            for track_id in track_ids {
+                if !self.selection.selected_track_ids.contains(track_id) {
+                    self.selection.selected_track_ids.push(track_id.clone());
+                }
+            }
+            if self.selection.selected_track_id.is_none() {
+                self.selection.selected_track_id = Some(anchor.to_string());
+            }
+        } else {
+            self.selection.selected_clip_ids = clip_ids;
+            self.selection.selected_track_ids = track_ids.to_vec();
+            self.selection.selected_track_id = track_ids
+                .iter()
+                .find(|id| id.as_str() == anchor)
+                .cloned()
+                .or_else(|| track_ids.first().cloned());
+        }
+        if !track_ids.is_empty() {
+            self.selection.track_selection_anchor_id = Some(anchor.to_string());
+        }
+    }
+
     pub fn select_track(&mut self, track_id: &str) {
         self.selection.selected_track_id = Some(track_id.to_string());
         self.selection.selected_track_ids = vec![track_id.to_string()];
@@ -225,6 +275,120 @@ impl TimelineState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this covers: a marquee pulled across several tracks selected the
+    /// clips it touched but left the *tracks* alone — only the topmost one came
+    /// out selected — so "select across tracks" did not work, and a band across
+    /// empty lanes selected nothing at all.
+    #[test]
+    fn a_marquee_selects_every_track_it_crossed() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first = state.create_audio_track();
+        let second = state.create_audio_track();
+        let third = state.create_audio_track();
+        let spanned = vec![first.clone(), second.clone(), third.clone()];
+
+        // Dragged from the middle track outwards, with no clips under the band.
+        state.apply_marquee_selection(&spanned, Vec::new(), &second, false);
+
+        assert_eq!(state.selection.selected_track_ids, spanned);
+        assert!(
+            state.selection.selected_clip_ids.is_empty(),
+            "no clips were under the band"
+        );
+        // The primary and the anchor stay where the drag started, so a Shift
+        // click afterwards extends from the cursor rather than from the top.
+        assert_eq!(
+            state.selection.selected_track_id.as_deref(),
+            Some(second.as_str())
+        );
+        assert_eq!(
+            state.selection.track_selection_anchor_id.as_deref(),
+            Some(second.as_str())
+        );
+    }
+
+    #[test]
+    fn a_replacing_marquee_drops_what_was_selected_before() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first = state.create_audio_track();
+        let second = state.create_audio_track();
+
+        state.select_track(&first);
+        state.selection.selected_clip_ids = vec!["stale-clip".to_string()];
+
+        state.apply_marquee_selection(
+            &[second.clone()],
+            vec!["fresh-clip".to_string()],
+            &second,
+            false,
+        );
+
+        assert_eq!(state.selection.selected_track_ids, vec![second.clone()]);
+        assert_eq!(
+            state.selection.selected_clip_ids,
+            vec!["fresh-clip".to_string()]
+        );
+    }
+
+    /// Ctrl-drag adds to what is already selected — tracks included — and never
+    /// lists the same track twice however many times it is crossed.
+    #[test]
+    fn an_additive_marquee_unions_tracks_without_duplicating_them() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first = state.create_audio_track();
+        let second = state.create_audio_track();
+        let third = state.create_audio_track();
+
+        state.select_track(&first);
+        state.apply_marquee_selection(
+            &[second.clone(), third.clone()],
+            vec!["clip-b".to_string()],
+            &second,
+            true,
+        );
+        state.apply_marquee_selection(
+            &[first.clone(), second.clone()],
+            vec!["clip-b".to_string(), "clip-a".to_string()],
+            &first,
+            true,
+        );
+
+        assert_eq!(
+            state.selection.selected_track_ids,
+            vec![first.clone(), second.clone(), third.clone()]
+        );
+        assert_eq!(
+            state.selection.selected_clip_ids,
+            vec!["clip-b".to_string(), "clip-a".to_string()],
+            "a clip already selected must not be listed twice"
+        );
+        // Additive keeps the primary it had.
+        assert_eq!(
+            state.selection.selected_track_id.as_deref(),
+            Some(first.as_str())
+        );
+    }
+
+    /// An anchor outside the band (the drag left the arrangement) still has to
+    /// produce a primary, or the selection has tracks and no focus.
+    #[test]
+    fn a_marquee_whose_anchor_is_not_in_the_span_still_has_a_primary() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let first = state.create_audio_track();
+        let second = state.create_audio_track();
+
+        state.apply_marquee_selection(&[second.clone()], Vec::new(), &first, false);
+
+        assert_eq!(
+            state.selection.selected_track_id.as_deref(),
+            Some(second.as_str())
+        );
+    }
 
     #[test]
     fn ctrl_toggles_tracks_and_shift_selects_anchor_range() {

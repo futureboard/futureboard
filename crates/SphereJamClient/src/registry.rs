@@ -248,6 +248,20 @@ impl JamRegistry {
         }
     }
 
+    /// Forget the negotiated format, which is what marks a stream as no longer
+    /// arriving.
+    ///
+    /// A stream with no format is listed and not received — the same state it
+    /// is in between a publish and its `audio.format_selected` — so an
+    /// unsubscribe leaves it visible in the room and silent, which is exactly
+    /// what it now is.
+    pub fn clear_stream_format(&mut self, id: &StreamId) -> bool {
+        match self.streams.get_mut(id) {
+            Some(stream) => stream.format.take().is_some(),
+            None => false,
+        }
+    }
+
     pub fn participant(&self, id: &ParticipantId) -> Option<&Participant> {
         self.participants.get(id)
     }

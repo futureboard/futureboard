@@ -113,6 +113,38 @@ pub fn jam_device_id(stream_id: &str) -> String {
 /// sharing a counter.
 pub const PUBLISH_KEY_MASTER: &str = "master";
 
+/// Publish-slot key for the engine's live hardware input pair.
+///
+/// The one capture path the callback already stages — the pair the Control
+/// Room monitors — tapped before it reaches any track. It is how a performer
+/// sends an instrument into a jam without arming a track for it, and it is
+/// keyed by a constant rather than by connection because the engine has one
+/// live input pair, not one per Audio Connection; see
+/// [`publish_key_hardware_input`] for the per-connection form that shape will
+/// take when it exists.
+pub const PUBLISH_KEY_LIVE_INPUT: &str = "live-input";
+
+/// Device id of the Audio Jam's *output* ports in Audio Connections.
+///
+/// Where [`JAM_DEVICE_PREFIX`] makes a remote stream selectable as a track
+/// input, this makes the jam selectable as an output: an enabled output bus
+/// bound to these ports is a jam send, and its name is the stream the room
+/// sees. It deliberately does not carry the input prefix, so nothing that
+/// strips a stream id off a device id can mistake a send for a stream.
+pub const JAM_SEND_DEVICE_ID: &str = "jam-send";
+
+/// Port index of the master tap's left channel on [`JAM_SEND_DEVICE_ID`].
+pub const JAM_SEND_PORT_MASTER: u32 = 0;
+/// Port index of the live-input tap's left channel on [`JAM_SEND_DEVICE_ID`].
+pub const JAM_SEND_PORT_LIVE_INPUT: u32 = 2;
+/// Ports on the send device: two taps, a stereo pair each.
+pub const JAM_SEND_PORTS: u32 = 4;
+
+/// Whether a device id names the jam send device.
+pub fn is_jam_send_device(device_id: &str) -> bool {
+    device_id == JAM_SEND_DEVICE_ID
+}
+
 /// Publish-slot key for the multitrack stream.
 ///
 /// One key, one slot, one stream: every shared track occupies a channel pair
@@ -180,8 +212,13 @@ impl JamChannelMode {
         }
     }
 
+    /// Resolve a source frame to the destination pair.
+    ///
+    /// Public because track loopback maps its source the same way a jam stream
+    /// does — the mode describes a stereo route, not anything jam-specific —
+    /// and a second identical enum would be one more thing to keep in step.
     #[inline]
-    fn apply(self, left: f32, right: f32) -> (f32, f32) {
+    pub fn apply(self, left: f32, right: f32) -> (f32, f32) {
         match self {
             Self::Stereo => (left, right),
             Self::StereoSwapped => (right, left),
@@ -793,6 +830,10 @@ pub struct JamAudioBus {
     /// is a `RwLock<HashMap<String, _>>`, and taking a lock and hashing a string
     /// once per block is exactly the kind of work the realtime path must not do.
     master_publish: AtomicI32,
+    /// The live input pair's publish slot, or `-1`. Same reasoning as
+    /// `master_publish`: resolved once on the control thread so the callback
+    /// pays one load, never a key lookup.
+    live_input_publish: AtomicI32,
 }
 
 impl std::fmt::Debug for JamAudioBus {
@@ -831,6 +872,7 @@ impl Default for JamAudioBus {
             any_publish: AtomicBool::new(false),
             master_click: AtomicBool::new(true),
             master_publish: AtomicI32::new(-1),
+            live_input_publish: AtomicI32::new(-1),
         }
     }
 }
@@ -870,6 +912,16 @@ impl JamAudioBus {
     #[inline]
     pub fn master_publish(&self) -> Option<&JamPublishSlot> {
         let index = self.master_publish.load(Ordering::Acquire);
+        if index < 0 {
+            return None;
+        }
+        self.publishes.get(index as usize)
+    }
+
+    /// The live input pair's publish slot, if one is bound. One load.
+    #[inline]
+    pub fn live_input_publish(&self) -> Option<&JamPublishSlot> {
+        let index = self.live_input_publish.load(Ordering::Acquire);
         if index < 0 {
             return None;
         }
@@ -958,6 +1010,10 @@ impl JamAudioBus {
         if key == PUBLISH_KEY_MASTER {
             self.master_publish.store(index as i32, Ordering::Release);
         }
+        if key == PUBLISH_KEY_LIVE_INPUT {
+            self.live_input_publish
+                .store(index as i32, Ordering::Release);
+        }
         self.any_publish.store(true, Ordering::Release);
         Some(index)
     }
@@ -997,6 +1053,9 @@ impl JamAudioBus {
         if key == PUBLISH_KEY_MASTER {
             self.master_publish.store(-1, Ordering::Release);
         }
+        if key == PUBLISH_KEY_LIVE_INPUT {
+            self.live_input_publish.store(-1, Ordering::Release);
+        }
         self.any_publish.store(!keys.is_empty(), Ordering::Release);
     }
 
@@ -1018,6 +1077,7 @@ impl JamAudioBus {
         self.any_input.store(false, Ordering::Release);
         self.any_publish.store(false, Ordering::Release);
         self.master_publish.store(-1, Ordering::Release);
+        self.live_input_publish.store(-1, Ordering::Release);
     }
 
     pub fn bound_input_count(&self) -> usize {
@@ -1275,6 +1335,24 @@ mod tests {
             0
         );
         assert_eq!(left, vec![0.0]);
+    }
+
+    #[test]
+    fn the_live_input_publish_slot_is_resolved_and_released_like_the_masters() {
+        let bus = JamAudioBus::new();
+        assert!(bus.live_input_publish().is_none());
+        let index = bus.bind_publish(PUBLISH_KEY_LIVE_INPUT).expect("bound");
+        let slot = bus.live_input_publish().expect("resolved");
+        assert!(std::ptr::eq(slot, bus.publish(index).expect("indexed")));
+        // The two taps are distinct slots: a send of the live input must never
+        // read the master's ring or the other way round.
+        let master = bus.bind_publish(PUBLISH_KEY_MASTER).expect("bound");
+        assert_ne!(master, index);
+        bus.release_publish(PUBLISH_KEY_LIVE_INPUT);
+        assert!(bus.live_input_publish().is_none());
+        assert!(bus.master_publish().is_some());
+        bus.release_all();
+        assert!(bus.master_publish().is_none());
     }
 
     #[test]

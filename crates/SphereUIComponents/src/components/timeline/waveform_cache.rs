@@ -557,6 +557,27 @@ pub(crate) fn aggregate_peak_range_in_entry(
     peak_start: usize,
     peak_end: usize,
 ) -> WaveformPeak {
+    aggregate_peak_range_in_entry_opt(entry, samples_per_peak, peak_start, peak_end)
+        .unwrap_or(WaveformPeak { min: 0.0, max: 0.0 })
+}
+
+/// The same aggregate, distinguishing **no data** from **silence**.
+///
+/// `None` means this level holds nothing for that range — the peaks were never
+/// built, or the deep-zoom chunk covering it is not resident. `Some` with a
+/// zero min/max means the audio there really is silent.
+///
+/// The two used to be the same answer, and that is what made a waveform vanish
+/// when it was zoomed in far enough to leave the shipped ladder behind: the
+/// fine chunks are decoded in the background, so the first frames after a zoom
+/// have none, every column aggregated to zero, and the drawing skipped every
+/// bar instead of falling back to the coarse peaks it already had in memory.
+pub(crate) fn aggregate_peak_range_in_entry_opt(
+    entry: &FileEntry,
+    samples_per_peak: usize,
+    peak_start: usize,
+    peak_end: usize,
+) -> Option<WaveformPeak> {
     if let Some(preview) = &entry.preview {
         if let Some(lod) = preview
             .lods
@@ -566,9 +587,11 @@ pub(crate) fn aggregate_peak_range_in_entry(
             let end = peak_end.min(lod.peaks.len());
             let start = peak_start.min(end);
             if start >= end {
-                return WaveformPeak { min: 0.0, max: 0.0 };
+                // Past the end of a level that exists: nothing to draw here,
+                // and nothing a coarser level would add either.
+                return Some(WaveformPeak { min: 0.0, max: 0.0 });
             }
-            return aggregate_slice(&lod.peaks[start..end]);
+            return Some(aggregate_slice(&lod.peaks[start..end]));
         }
     }
 
@@ -591,11 +614,55 @@ pub(crate) fn aggregate_peak_range_in_entry(
             }
         }
     }
-    if any {
-        WaveformPeak { min: mn, max: mx }
-    } else {
-        WaveformPeak { min: 0.0, max: 0.0 }
+    any.then_some(WaveformPeak { min: mn, max: mx })
+}
+
+/// Whether every chunk covering peak indices `[peak_start, peak_end)` is
+/// resident at `samples_per_peak`.
+///
+/// A level that only half covers the visible span is worse than the coarse
+/// ladder: the covered columns come out at one resolution and the rest fall
+/// back to another, and a min/max envelope is taller the coarser it is, so the
+/// seam shows as a step in the waveform. Asking this first lets the drawing
+/// commit to one level for the whole frame and sharpen when the rest lands.
+///
+/// A level that lives in the preview ladder is always fully resident — it is
+/// built for the whole file — so it answers `true` without touching chunks.
+pub(crate) fn chunks_cover_peak_range(
+    entry: &FileEntry,
+    samples_per_peak: usize,
+    peak_start: usize,
+    peak_end: usize,
+) -> bool {
+    if let Some(preview) = &entry.preview {
+        if preview
+            .lods
+            .iter()
+            .any(|lod| lod.samples_per_peak == samples_per_peak)
+        {
+            return true;
+        }
     }
+    if peak_end <= peak_start {
+        return true;
+    }
+    let spp = samples_per_peak as u32;
+    let first = peak_start / CHUNK_PEAKS;
+    let last = (peak_end - 1) / CHUNK_PEAKS;
+    (first..=last).all(|chunk| entry.chunks.contains_key(&(spp, chunk as u32)))
+}
+
+/// The coarsest peak level this entry actually holds for the whole file.
+///
+/// Used as the fallback while finer, chunked detail is still being decoded: the
+/// shipped ladder is built with the preview and is always resident, so there is
+/// always something to draw.
+pub(crate) fn resident_ladder_samples_per_peak(entry: &FileEntry) -> Option<usize> {
+    entry
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.lods.first())
+        .map(|lod| lod.samples_per_peak)
 }
 
 /// Aggregate min/max for peak indices `[start, end)` using chunked storage.
@@ -1014,6 +1081,122 @@ pub fn pick_lod<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `FileEntry` holding the shipped ladder and, optionally, some deep-zoom
+    /// chunks — the two states the drawing has to tell apart.
+    fn entry_with(ladder: Option<usize>, chunks: &[(u32, u32)]) -> FileEntry {
+        let preview = ladder.map(|samples_per_peak| {
+            Arc::new(WaveformPreview {
+                sample_rate: 48_000,
+                channels: 2,
+                duration_seconds: 1.0,
+                total_frames: 48_000,
+                lods: vec![WaveformLod {
+                    samples_per_peak,
+                    peaks: vec![
+                        WaveformPeak {
+                            min: -0.5,
+                            max: 0.5
+                        };
+                        8
+                    ],
+                }],
+            })
+        });
+        let mut entry = FileEntry {
+            import: AudioImportState::default(),
+            meta: None,
+            chunks_total: 0,
+            chunks_ready: 0,
+            chunks: HashMap::new(),
+            preview,
+            revision: 0,
+        };
+        for &(spp, chunk) in chunks {
+            entry.chunks.insert(
+                (spp, chunk),
+                Arc::new(vec![
+                    WaveformPeak {
+                        min: -0.25,
+                        max: 0.25
+                    };
+                    CHUNK_PEAKS
+                ]),
+            );
+        }
+        entry
+    }
+
+    /// The bug this covers: zoom in past the shipped ladder and the fine peaks
+    /// are still being decoded, so every column aggregates to nothing. Reported
+    /// as `Some(0, 0)` that is indistinguishable from silence, which is why the
+    /// drawing skipped every bar and the waveform vanished — while zooming out,
+    /// back onto the ladder, looked perfectly normal.
+    #[test]
+    fn a_level_with_no_data_is_not_reported_as_silence() {
+        let entry = entry_with(Some(256), &[]);
+
+        // The ladder has data: a real answer, even where the audio is quiet.
+        let ladder =
+            aggregate_peak_range_in_entry_opt(&entry, 256, 0, 4).expect("the ladder has data");
+        assert_eq!((ladder.min, ladder.max), (-0.5, 0.5));
+        // A finer level nobody has decoded yet has *nothing*, and must say so
+        // rather than answering zero.
+        assert!(aggregate_peak_range_in_entry_opt(&entry, 4, 0, 4).is_none());
+        // The old entry point keeps its shape for callers that cannot act on
+        // the difference.
+        let flattened = aggregate_peak_range_in_entry(&entry, 4, 0, 4);
+        assert_eq!((flattened.min, flattened.max), (0.0, 0.0));
+    }
+
+    /// Past the end of a level that does exist is a real answer: there is no
+    /// audio there and no coarser level would find any.
+    #[test]
+    fn past_the_end_of_a_real_level_is_silence_not_missing_data() {
+        let entry = entry_with(Some(256), &[]);
+        let past = aggregate_peak_range_in_entry_opt(&entry, 256, 900, 950)
+            .expect("a level that exists always answers");
+        assert_eq!((past.min, past.max), (0.0, 0.0));
+    }
+
+    /// The fallback the drawing leans on has to exist whenever a preview does,
+    /// or a deep zoom has nothing to fall back to.
+    #[test]
+    fn the_resident_ladder_is_whatever_the_preview_shipped() {
+        assert_eq!(
+            resident_ladder_samples_per_peak(&entry_with(Some(512), &[])),
+            Some(512)
+        );
+        assert_eq!(
+            resident_ladder_samples_per_peak(&entry_with(None, &[])),
+            None
+        );
+    }
+
+    /// Half a visible span at one resolution and half at another shows as a
+    /// step, because a min/max envelope is taller the coarser it is. The
+    /// drawing asks this so it can commit to one level for the whole frame.
+    #[test]
+    fn a_partly_decoded_level_does_not_cover_the_span() {
+        // Chunk 0 only, at 4 samples per peak.
+        let entry = entry_with(Some(256), &[(4, 0)]);
+
+        assert!(chunks_cover_peak_range(&entry, 4, 0, CHUNK_PEAKS));
+        assert!(
+            !chunks_cover_peak_range(&entry, 4, 0, CHUNK_PEAKS + 1),
+            "a span reaching into the chunk after it is not covered"
+        );
+        assert!(!chunks_cover_peak_range(
+            &entry,
+            4,
+            CHUNK_PEAKS,
+            CHUNK_PEAKS * 2
+        ));
+        // A ladder level is built for the whole file, so it always covers.
+        assert!(chunks_cover_peak_range(&entry, 256, 0, 10_000_000));
+        // An empty span asks nothing and is trivially covered.
+        assert!(chunks_cover_peak_range(&entry, 4, 5, 5));
+    }
 
     #[test]
     fn lod_selection_tracks_zoom() {

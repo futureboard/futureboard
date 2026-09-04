@@ -5,6 +5,6 @@ Exec=FutureboardNative %U
 Icon=futureboard-studio
 Type=Application
 Categories=AudioVideo;Audio;Music;
-MimeType=application/x-fbproj;
+MimeType=application/x-fbproj;x-scheme-handler/fbrd;
 StartupWMClass=FutureboardNative
 Terminal=false

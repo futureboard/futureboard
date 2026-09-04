@@ -908,6 +908,12 @@ pub fn drain_commands(
                 monitor_enabled,
                 input_source,
             ),
+            EngineCommand::SetTrackLoopbackPublish {
+                track_index,
+                publish,
+            } => {
+                runtime.update_track_loopback_publish(track_index, publish);
+            }
             EngineCommand::SetTrackJamPublish { track_index, slot } => {
                 runtime.update_track_jam_publish(track_index, slot);
             }
@@ -1127,10 +1133,12 @@ fn fill_output_f32_inner(
     shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
     let engine_state =
         crate::engine::AudioEngineState::from_u8(shared.engine_state.load(Ordering::Relaxed));
-    // The transport only advances in Running — a stale `playing_local` left
-    // over from a graph swap must never drive rendering while Paused.
-    let transport_playing =
-        local.playing_local && matches!(engine_state, crate::engine::AudioEngineState::Running);
+    // The transport advances in Running, and keeps advancing while the control
+    // thread prepares the next graph: `LoadingProject` does not touch the graph
+    // this callback is holding. A stale `playing_local` left over from a graph
+    // swap must still never drive rendering while Paused, or while the device
+    // or project is being torn down.
+    let transport_playing = local.playing_local && engine_state.renders_transport();
     let software_monitoring = shared.monitor_enabled_any.load(Ordering::Relaxed)
         && shared.live_input_active.load(Ordering::Relaxed)
         && shared.input_ring.is_active();
@@ -1333,6 +1341,22 @@ fn fill_output_f32_inner(
         clear_input_bus_meter(shared, local);
         false
     };
+
+    // Audio Jam live-input tap. The pair `read_monitor_input` just staged is
+    // the instrument plugged into the interface, before any track has touched
+    // it — which is what a performer sending "my guitar" to the room means.
+    // Atomics into a preallocated ring; one load when nothing is bound.
+    if monitor_input_ready {
+        if let Some(slot) = shared.jam_bus.live_input_publish() {
+            let n = frames_in_block as usize;
+            slot.write_planar(
+                &local.monitor_input_l[..n],
+                &local.monitor_input_r[..n],
+                n,
+                runtime.sample_rate,
+            );
+        }
+    }
 
     // Whether the metronome reaches the Audio Jam master stream.
     //
@@ -2195,6 +2219,59 @@ mod tests {
     fn shared_clock_resyncs_as_soon_as_backlog_exceeds_one_block() {
         assert_eq!(monitor_resync_limit_frames(256, 256, true), 256);
         assert_eq!(monitor_resync_limit_frames(720, 256, false), 976);
+    }
+
+    /// Losing the transport mid-beat truncates the click that was sounding and
+    /// does **not** schedule an extra one: the scan has already moved on to the
+    /// next beat, and coming back inside the same beat finds nothing due.
+    ///
+    /// Worth pinning because the click is a single armed voice rather than a
+    /// queue, so anything that re-armed it out of turn would be heard as an
+    /// extra beat rather than as a dropout. It also rules the click scheduler
+    /// out as the source of a burst of fast clicks — whatever produces that, it
+    /// is not the transport being taken away and given back.
+    #[test]
+    fn losing_the_transport_mid_beat_truncates_rather_than_repeats_the_click() {
+        let mut local = LocalAudioState::new(48_000.0);
+        local.set_metronome_enabled(true, 0, 48_000);
+
+        // 120 BPM: beat 0 at sample 0, beat 1 at 24 000. Nothing inside one
+        // beat should click twice.
+        let _ = local.metronome_sample(0, 0, 48_000, true, 0, 0);
+        assert!(local.metronome_click_remaining > 0, "beat 0 arms the click");
+        for sample in 1..2_000u64 {
+            local.metronome_sample(sample, sample, 48_000, true, 0, 0);
+        }
+        let quiet = local.metronome_click_remaining;
+        assert_eq!(
+            quiet, 0,
+            "the click must finish and not re-arm inside a beat"
+        );
+
+        // One block rendered with the transport reported as stopped — what the
+        // render gate did for the whole of a project sync, before
+        // `LoadingProject` stopped counting as "not playing".
+        for sample in 2_000..2_256u64 {
+            let click = local.metronome_sample(sample, sample, 48_000, false, 0, 0);
+            assert_eq!(click, 0.0, "a stopped transport must be silent");
+        }
+
+        // Back to playing, still inside beat 0-to-1: nothing is due until beat
+        // 1 at sample 24 000, so no extra click may appear.
+        for sample in 2_256..20_000u64 {
+            let click = local.metronome_sample(sample, sample, 48_000, true, 0, 0);
+            assert_eq!(
+                click, 0.0,
+                "an extra click appeared at sample {sample}, inside beat 0"
+            );
+        }
+
+        // And the real next beat still arrives on time.
+        local.metronome_sample(24_000, 24_000, 48_000, true, 0, 0);
+        assert!(
+            local.metronome_click_remaining > 0,
+            "beat 1 must still click after the transport was interrupted"
+        );
     }
 
     #[test]

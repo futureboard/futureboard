@@ -40,6 +40,7 @@ pub mod input_ring;
 /// the realtime callback. See [`jam_bus`] for why the engine owns them.
 pub mod jam_bus;
 mod latency_graph;
+pub mod loopback;
 pub mod monitor;
 pub mod native;
 pub mod plugin_backend;

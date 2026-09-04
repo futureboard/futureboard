@@ -650,6 +650,27 @@ impl StudioLayout {
     pub(crate) fn publish_audio_connection_routing(&mut self, cx: &mut Context<Self>) {
         use crate::audio_routing_compile::{compile_routing, RoutingCompileRequest};
 
+        // Publish the track list before the port inventory is read: a track
+        // added or renamed in this same edit has to be selectable in the Input
+        // menu the compile below validates against, or its first appearance
+        // would be one recompile late.
+        {
+            let timeline = self.timeline.read(cx);
+            crate::loopback_ports::set_sources(
+                timeline
+                    .state
+                    .tracks
+                    .iter()
+                    .filter(|track| {
+                        crate::loopback_ports::is_loopback_source_kind(track.track_type)
+                    })
+                    .map(|track| crate::loopback_ports::LoopbackSource {
+                        track_id: track.id.clone(),
+                        display_name: track.name.clone(),
+                    })
+                    .collect(),
+            );
+        }
         let ports = crate::audio_connections::current_available_ports();
         let request = {
             let timeline = self.timeline.read(cx);
@@ -671,6 +692,14 @@ impl StudioLayout {
         let generation = publisher.next_generation();
         let result = compile_routing(&registry, &ports, &request, generation);
         publisher.publish(result.snapshot);
+        // What arrives from the jam is part of the same decision. A remote
+        // stream is only audible through an input connection, so the registry is
+        // what says which performers this project is listening to — and a stream
+        // nobody routed should not be sent at all.
+        crate::jam::ingress::sync(&registry);
+        // And what leaves: an output bus bound to the jam's send ports is a
+        // publish, so it is applied from the same registry edit that made it.
+        crate::jam::egress::sync(&registry);
         // Hardware ownership is part of the same compile: publishing routing
         // without it would leave the engine writing the previous destination.
         self.push_output_routing_to_engine(cx);

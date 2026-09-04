@@ -65,6 +65,51 @@ pub struct RecordSink {
     /// Blocks dropped because the pool/queue was exhausted (shared with the
     /// recording session for the end-of-take report).
     pub dropped_blocks: Arc<AtomicU64>,
+    /// One accumulator per armed track, in `shared.recording_preview_track_ids`
+    /// order, so the callback can fill `shared.preview_rings[slot]` — the rings
+    /// the UI actually drains for the growing waveform.
+    ///
+    /// It lives on the sink rather than in the callback because the callback is
+    /// built when the ASIO session opens, long before anyone knows which tracks
+    /// a take will arm. Allocated once on the control thread and only mutated
+    /// in place afterwards, so the realtime path still never allocates.
+    pub preview_accums: Vec<PreviewAccum>,
+}
+
+/// Per-track preview bin accumulator. Mirrors the own-stream path's private
+/// accumulator in `recording.rs`; it is public here only because the sink that
+/// owns it crosses the module boundary.
+pub struct PreviewAccum {
+    /// Input channel indices this track records, as the disk writer sees them —
+    /// not the global monitor pair, or every track's waveform would be the same
+    /// picture.
+    pub l_ch: usize,
+    pub r_ch: usize,
+    pub bin_min: f32,
+    pub bin_max: f32,
+    pub bin_sumsq: f32,
+    pub bin_count: usize,
+}
+
+impl PreviewAccum {
+    pub fn new(l_ch: usize, r_ch: usize) -> Self {
+        Self {
+            l_ch,
+            r_ch,
+            bin_min: f32::MAX,
+            bin_max: f32::MIN,
+            bin_sumsq: 0.0,
+            bin_count: 0,
+        }
+    }
+
+    #[inline]
+    fn reset(&mut self) {
+        self.bin_min = f32::MAX;
+        self.bin_max = f32::MIN;
+        self.bin_sumsq = 0.0;
+        self.bin_count = 0;
+    }
 }
 
 /// Per-hardware-channel input peaks. Storage is allocated when the session
@@ -629,6 +674,15 @@ impl CallbackRecordSinkState {
         self.active.as_deref()
     }
 
+    /// The per-track preview accumulators of the live take, if there is one.
+    /// Empty for a take that armed no track the preview can describe.
+    fn preview_accums_mut(&mut self) -> &mut [PreviewAccum] {
+        match self.active.as_deref_mut() {
+            Some(sink) => sink.preview_accums.as_mut_slice(),
+            None => &mut [],
+        }
+    }
+
     fn drain_commands(
         &mut self,
         input_cmd_rx: &Receiver<AsioInputCommand>,
@@ -661,7 +715,9 @@ impl CallbackRecordSinkState {
 /// stream contract in `recording.rs`):
 ///   1. monitor  → `shared.input_ring` (drained by the output render callback)
 ///   2. meters   → peak atomics (+ `session_input_peak` for the Settings test)
-///   3. preview  → min/max/rms bins → `shared.preview_ring`
+///   3. preview  → min/max/rms bins → `shared.preview_ring` (the monitor mix)
+///               and one ring per armed track in `shared.preview_rings`, which
+///               is what the growing on-timeline waveform is drawn from
 ///   4. record   → preallocated block pool → bounded channel → disk writer
 ///
 /// Realtime-safe: no allocation, no locks, no syscalls. Sink swaps arrive over
@@ -724,6 +780,10 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                     .active()
                     .map(|sink| sink.samples_per_bin)
                     .unwrap_or(0);
+                // Borrowed for the whole frame loop below. Taken here, before
+                // the loop, so the loop itself does nothing but arithmetic and
+                // atomic stores.
+                let preview_accums = record_sink.preview_accums_mut();
 
                 let mut raw_peak_l = 0.0f32;
                 let mut raw_peak_r = 0.0f32;
@@ -783,6 +843,47 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                         bin_max = f32::MIN;
                         bin_sumsq = 0.0;
                         bin_count = 0;
+                    }
+
+                    // Per-track preview bins: each armed track gets a mono mix
+                    // of *its own* input channels, matching what the disk
+                    // writer captures for it. Without this the ASIO tap filled
+                    // only the monitor-mix ring above, and the per-track rings
+                    // the UI drains stayed empty — so a take recorded through
+                    // ASIO drew no waveform at all while it ran.
+                    if preview_active && samples_per_bin > 0 {
+                        for (slot, acc) in preview_accums.iter_mut().enumerate() {
+                            let tl = frame
+                                .get(acc.l_ch)
+                                .copied()
+                                .map(T::to_monitor_f32)
+                                .unwrap_or(0.0)
+                                .clamp(-1.0, 1.0);
+                            let tr = frame
+                                .get(acc.r_ch)
+                                .copied()
+                                .map(T::to_monitor_f32)
+                                .unwrap_or(tl)
+                                .clamp(-1.0, 1.0);
+                            let tm = (tl + tr) * 0.5;
+                            acc.bin_min = acc.bin_min.min(tm);
+                            acc.bin_max = acc.bin_max.max(tm);
+                            acc.bin_sumsq += tm * tm;
+                            acc.bin_count += 1;
+                            if acc.bin_count >= samples_per_bin {
+                                let rms = (acc.bin_sumsq / acc.bin_count as f32).sqrt();
+                                shared.preview_rings[slot].push(WaveformPeak {
+                                    min: acc.bin_min,
+                                    max: acc.bin_max,
+                                    rms,
+                                });
+                                acc.reset();
+                            }
+                        }
+                    } else {
+                        for acc in preview_accums.iter_mut() {
+                            acc.reset();
+                        }
                     }
 
                     // Session-wide input peak across all channels (Settings

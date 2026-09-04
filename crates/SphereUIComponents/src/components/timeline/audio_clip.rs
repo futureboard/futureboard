@@ -699,7 +699,16 @@ pub fn audio_clip(
                     Colors::with_alpha(track_color, 0.55)
                 })
         }))
-        .children((selected && auto_crossfade_in_beats <= 0.0).then(|| {
+        // The fade handles stay on a crossfaded edge.
+        //
+        // They used to be hidden the moment an overlap produced an automatic
+        // crossfade — which is exactly the edge somebody wants to reach for. The
+        // length was then whatever the overlap happened to be and there was no
+        // way to touch it at all, so the only way to change a crossfade was to
+        // drag the clip itself and change the overlap. The manual fade already
+        // wins when it is longer than the automatic one (see `fade_in_seconds`
+        // above), so keeping the handle is what makes that reachable.
+        .children(selected.then(|| {
             fade_drag_zone(
                 clip,
                 FadeEdge::In,
@@ -710,7 +719,7 @@ pub fn audio_clip(
                 fade_in_commit,
             )
         }))
-        .children((selected && auto_crossfade_out_beats <= 0.0).then(|| {
+        .children(selected.then(|| {
             fade_drag_zone(
                 clip,
                 FadeEdge::Out,

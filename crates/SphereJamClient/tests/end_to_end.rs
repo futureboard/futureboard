@@ -33,7 +33,7 @@ use sphere_jam_client::config::{EnvSource, JamConfig};
 use sphere_jam_client::credentials::{SharedCredentials, StaticToken};
 use sphere_jam_client::ids::{JamId, StreamId};
 use sphere_jam_client::protocol::TransportKind;
-use sphere_jam_client::session::{JamSession, JamSessionOptions, JamState};
+use sphere_jam_client::session::{JamIngress, JamSession, JamSessionOptions, JamState};
 use sphere_jam_client::transport;
 
 const API: &str = "http://127.0.0.1:8090";
@@ -726,4 +726,200 @@ fn two_clients_exchange_pcm_over_a_live_jam() {
     host_api
         .close_jam(jam_id.as_str())
         .expect("the host closes the jam");
+}
+
+/// Ingress control, from the receiving side.
+///
+/// Two performers publish. The receiver joins as a DAW would — silent, then
+/// asking for one performer by name — and must hear that one and only that one.
+/// The claim being tested is bandwidth, which no assertion can observe
+/// directly; what makes it observable is that the stream nobody routed never
+/// gets a format and never reaches the sink, while the routed one does.
+///
+/// It also covers the part that is easy to get wrong: a track bound to a
+/// performer who has not published yet. The subscription is asked for before
+/// the second stream exists, and has to attach by itself when it appears.
+#[test]
+fn a_routed_receiver_hears_only_the_streams_it_asked_for() {
+    if !enabled() {
+        eprintln!("skipping the ingress test: set FUTUREBOARD_JAM_E2E=1");
+        return;
+    }
+
+    let config = config();
+    let host_api =
+        JamApiClient::new(config.clone(), credentials("hachi224")).expect("the API client starts");
+    let created = host_api
+        .create_jam(&CreateJamRequest {
+            name: "Routed Ingress".to_string(),
+            max_participants: 4,
+            ..Default::default()
+        })
+        .expect("a jam is created");
+    let jam_id = JamId::new(created.jam.id.clone());
+
+    // The publisher takes both streams: two publishers would prove the same
+    // thing and cost a second account, and what is under test is the receiver.
+    let host_sink = Arc::new(RecordingSink::new());
+    let mut host_options = JamSessionOptions::new(
+        "e2e-in-host",
+        Arc::clone(&host_sink) as Arc<dyn JamAudioSink>,
+    );
+    host_options.publish_sample_rate = PUBLISH_RATE as i32;
+    let host = JamSession::spawn(config.clone(), credentials("hachi224"), host_options)
+        .expect("the host worker starts");
+    host.join(jam_id.clone(), "").expect("the host joins");
+    wait_for("the host to connect", || {
+        host.state() == JamState::Connected
+    });
+
+    let routed_tone = Arc::new(ToneSource::new());
+    host.publish(
+        JamPublishRequest::stereo("Routed Guitar", JamPublishSourceKind::Master),
+        Arc::clone(&routed_tone) as Arc<dyn JamPublishSource>,
+    )
+    .expect("the publish is queued");
+    wait_for("the first stream to be published", || {
+        !host.snapshot().streams.is_empty()
+    });
+    let routed = StreamId::new(
+        host.snapshot()
+            .streams
+            .iter()
+            .find(|stream| stream.name == "Routed Guitar")
+            .expect("the routed stream is in the room")
+            .id
+            .clone(),
+    );
+
+    let invite = host_api
+        .create_invite(
+            jam_id.as_str(),
+            &CreateInviteRequest {
+                role: "performer".to_string(),
+                max_uses: 4,
+                ..Default::default()
+            },
+        )
+        .expect("an invite is minted");
+    let guest_api =
+        JamApiClient::new(config.clone(), credentials("mina")).expect("the API client starts");
+    let admitted = guest_api
+        .exchange_invite(&invite.secret, &created.jam.public_id)
+        .expect("the invite is exchanged");
+
+    let guest_sink = Arc::new(RecordingSink::new());
+    let mut guest_options = JamSessionOptions::new(
+        "e2e-in-guest",
+        Arc::clone(&guest_sink) as Arc<dyn JamAudioSink>,
+    );
+    guest_options.device_name = "Routing Studio".to_string();
+    // The whole point: this client chooses.
+    guest_options.ingress = JamIngress::Routed;
+
+    let guest = JamSession::spawn(config.clone(), credentials("mina"), guest_options)
+        .expect("the guest worker starts");
+    guest
+        .join(jam_id.clone(), admitted.access_token.clone())
+        .expect("the guest joins");
+    wait_for("the routed guest to connect", || {
+        guest.state() == JamState::Connected
+    });
+
+    // Nothing was routed yet, so nothing may arrive. Waited out rather than
+    // checked once: a subscription that leaked would take a moment to show.
+    std::thread::sleep(Duration::from_millis(600));
+    let quiet = guest_sink.snapshot();
+    assert_eq!(
+        quiet.frames, 0,
+        "a routed receiver that asked for nothing received {} frames",
+        quiet.frames
+    );
+
+    // Route the published performer, and a second one that does not exist yet.
+    let waiting = StreamId::new("str_not_published_yet");
+    guest
+        .subscribe(vec![routed.clone(), waiting])
+        .expect("the subscribe is queued");
+
+    wait_for("audio from the routed stream", || {
+        let heard = guest_sink.snapshot();
+        heard.frames > 4_800 && heard.peak > 0.1
+    });
+    let heard = guest_sink.snapshot();
+    eprintln!(
+        "the routed guest heard {} packets / {} frames, peak {:.3}",
+        heard.packets, heard.frames, heard.peak
+    );
+    assert!(
+        (heard.peak - TONE_AMPLITUDE).abs() < 0.02,
+        "the routed tone arrived at {:.3}",
+        heard.peak
+    );
+
+    // A second stream appears that nobody routed. It has to stay silent: this
+    // is the case that costs a band's worth of bandwidth if ingress control is
+    // only honoured at join time.
+    let unrouted_tone = Arc::new(ToneSource::new());
+    host.publish(
+        JamPublishRequest::stereo("Unrouted Keys", JamPublishSourceKind::Master),
+        Arc::clone(&unrouted_tone) as Arc<dyn JamPublishSource>,
+    )
+    .expect("the second publish is queued");
+    wait_for("the second stream to reach the room", || {
+        guest
+            .snapshot()
+            .streams
+            .iter()
+            .any(|stream| stream.name == "Unrouted Keys")
+    });
+    std::thread::sleep(Duration::from_millis(600));
+
+    // A resolved format is the observable proof that audio is on its way: it is
+    // what the server sends only to a subscriber, and what the media threads
+    // need before they will decode a packet at all.
+    let unrouted = StreamId::new(
+        guest
+            .snapshot()
+            .streams
+            .iter()
+            .find(|stream| stream.name == "Unrouted Keys")
+            .expect("the unrouted stream is listed")
+            .id
+            .clone(),
+    );
+    assert!(
+        !receiving(&guest, &unrouted),
+        "a stream nobody routed resolved a format and is arriving"
+    );
+
+    // And routing it is all it takes.
+    guest
+        .subscribe(vec![unrouted.clone()])
+        .expect("the second subscribe is queued");
+    wait_for("the second stream to start arriving", || {
+        receiving(&guest, &unrouted)
+    });
+
+    // Dropping a routing stops it again.
+    guest
+        .unsubscribe(vec![routed.clone()])
+        .expect("the unsubscribe is queued");
+    wait_for("the routed stream to stop", || !receiving(&guest, &routed));
+
+    guest.leave().expect("the guest leaves");
+    host.leave().expect("the host leaves");
+    host_api
+        .close_jam(jam_id.as_str())
+        .expect("the host closes the jam");
+}
+
+/// Whether the server has resolved a format for this stream, which is the one
+/// observable difference between a stream that is listed and one that arrives.
+fn receiving(session: &JamSession, stream: &StreamId) -> bool {
+    session
+        .snapshot()
+        .formats
+        .iter()
+        .any(|(id, _)| id == stream)
 }

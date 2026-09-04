@@ -58,6 +58,8 @@ pub fn render_project_sample(
         let clip_gain = clip.gain;
         let clip_fade_in = clip.fade_in_samples;
         let clip_fade_out = clip.fade_out_samples;
+        let clip_fade_in_curve = clip.fade_in_curve;
+        let clip_fade_out_curve = clip.fade_out_curve;
         let source = Arc::clone(&clip.source);
 
         // Resolved at build time — no id lookup or String clone per sample.
@@ -109,7 +111,14 @@ pub fn render_project_sample(
             continue;
         }
 
-        let fade = clip_fade_gain(rel, clip_duration_samples, clip_fade_in, clip_fade_out);
+        let fade = clip_fade_gain_with_curves(
+            rel,
+            clip_duration_samples,
+            clip_fade_in,
+            clip_fade_out,
+            clip_fade_in_curve,
+            clip_fade_out_curve,
+        );
         let g = clip_gain * fade;
         l *= g;
         r *= g;
@@ -322,27 +331,50 @@ fn phase_vocoder_basic_sample(
     (al * (1.0 - w) + bl * w, ar * (1.0 - w) + br * w)
 }
 
-/// Equal-power clip-fade gain for a sample at offset `rel` from the clip start.
+/// Clip-fade gain for a sample at offset `rel` from the clip start.
 ///
 /// `1.0` outside both fade regions; ramps `0→1` across the fade-in and `1→0`
-/// across the fade-out. The sine/cosine shape keeps the midpoint near -3 dB,
-/// which is the default DAW-friendly crossfade for less-correlated material.
-/// Allocation-free and safe for the realtime render path.
+/// across the fade-out, each in its own [`FadeCurve`]. Allocation-free and safe
+/// for the realtime render path.
+///
+/// The curves used to be ignored here: the project and the engine snapshot both
+/// carried an `in_curve`/`out_curve` tag, and this function rendered equal power
+/// whatever they said — so choosing a curve changed the file and nothing else.
 #[inline]
-pub(crate) fn clip_fade_gain(rel: u64, duration: u64, fade_in: u64, fade_out: u64) -> f32 {
+pub(crate) fn clip_fade_gain_with_curves(
+    rel: u64,
+    duration: u64,
+    fade_in: u64,
+    fade_out: u64,
+    in_curve: crate::runtime::FadeCurve,
+    out_curve: crate::runtime::FadeCurve,
+) -> f32 {
     let mut gain = 1.0f32;
     if fade_in > 0 && rel < fade_in {
-        let t = (rel as f32 / fade_in as f32).clamp(0.0, 1.0);
-        gain *= (t * std::f32::consts::FRAC_PI_2).sin();
+        gain *= in_curve.rising_gain(rel as f32 / fade_in as f32);
     }
     if fade_out > 0 {
         let fade_out_start = duration.saturating_sub(fade_out);
         if rel >= fade_out_start {
-            let t = ((rel - fade_out_start) as f32 / fade_out as f32).clamp(0.0, 1.0);
-            gain *= (t * std::f32::consts::FRAC_PI_2).cos().max(0.0);
+            gain *= out_curve
+                .falling_gain((rel - fade_out_start) as f32 / fade_out as f32)
+                .max(0.0);
         }
     }
     gain
+}
+
+/// [`clip_fade_gain_with_curves`] at the default curve on both edges.
+#[inline]
+pub(crate) fn clip_fade_gain(rel: u64, duration: u64, fade_in: u64, fade_out: u64) -> f32 {
+    clip_fade_gain_with_curves(
+        rel,
+        duration,
+        fade_in,
+        fade_out,
+        crate::runtime::FadeCurve::EqualPower,
+        crate::runtime::FadeCurve::EqualPower,
+    )
 }
 
 #[inline]
@@ -742,6 +774,8 @@ fn render_signalsmith_clip_segment(
         gain,
         fade_in_samples,
         fade_out_samples,
+        fade_in_curve,
+        fade_out_curve,
         time_ratio,
     ) = {
         let clip = &runtime.clips[clip_index];
@@ -754,6 +788,8 @@ fn render_signalsmith_clip_segment(
             clip.gain,
             clip.fade_in_samples,
             clip.fade_out_samples,
+            clip.fade_in_curve,
+            clip.fade_out_curve,
             clip.effective_time_ratio.clamp(0.05, 20.0) as f64,
         )
     };
@@ -849,7 +885,14 @@ fn render_signalsmith_clip_segment(
     let track = &mut runtime.tracks[track_index];
     for i in 0..frames {
         let rel = rel_start + i as u64;
-        let fade = clip_fade_gain(rel, duration_samples, fade_in_samples, fade_out_samples);
+        let fade = clip_fade_gain_with_curves(
+            rel,
+            duration_samples,
+            fade_in_samples,
+            fade_out_samples,
+            fade_in_curve,
+            fade_out_curve,
+        );
         let g = gain * fade;
         let frame_idx = frame_idx_start + i;
         track.block_l[frame_idx] += clip.stretch_output_l[i] * g;
@@ -1094,7 +1137,7 @@ fn render_project_block_interleaved_core(
             track.track_type == "audio"
                 && track.monitor_enabled
                 && track.input_source.is_routable()
-                && !track.input_source.is_jam()
+                && !track.input_source.is_internal()
         }) {
             for frame in 0..input_frames {
                 track.block_l[frame] += input_l[frame];
@@ -1123,6 +1166,63 @@ fn render_project_block_interleaved_core(
                 &mut track.block_r[..frames],
                 frames,
             );
+        }
+    }
+
+    // Track loopback input: another track's post-fader output, as this track's
+    // input. What lands here is the block the source rendered in the *previous*
+    // callback — see `crate::loopback` for why that is the design and not a
+    // shortcoming.
+    //
+    // Two passes over the index list rather than one over the tracks, because
+    // reading one track while writing another needs the two borrows split. Both
+    // are bounded by the track count and do nothing but copy.
+    if runtime.tracks.iter().any(|track| {
+        track.track_type == "audio" && track.monitor_enabled && track.input_source.is_loopback()
+    }) {
+        for index in 0..runtime.tracks.len() {
+            let track = &runtime.tracks[index];
+            if track.track_type != "audio" || !track.monitor_enabled {
+                continue;
+            }
+            let crate::runtime::RuntimeTrackInputSource::Loopback { source_index, mode } =
+                track.input_source
+            else {
+                continue;
+            };
+            let source_index = source_index as usize;
+            // A track pointed at itself would read its own previous block and
+            // build a feedback loop the user never asked for. The control
+            // thread refuses to resolve one; this is the render path's own
+            // guard, since a stale index must never be trusted.
+            if source_index == index || source_index >= runtime.tracks.len() {
+                continue;
+            }
+            {
+                let source = &runtime.tracks[source_index];
+                if !source.loopback_publish
+                    || source.loopback_out_l.len() < frames
+                    || source.loopback_out_r.len() < frames
+                {
+                    continue;
+                }
+            }
+            // Borrow the source's buffers out and put them back. `Vec::take` is
+            // a pointer swap, so this costs nothing and keeps the read of one
+            // track and the write of another out of each other's way without
+            // reaching for unsafe.
+            let source_l = std::mem::take(&mut runtime.tracks[source_index].loopback_out_l);
+            let source_r = std::mem::take(&mut runtime.tracks[source_index].loopback_out_r);
+            {
+                let track = &mut runtime.tracks[index];
+                for frame in 0..frames {
+                    let (l, r) = mode.apply(source_l[frame], source_r[frame]);
+                    track.block_l[frame] += l;
+                    track.block_r[frame] += r;
+                }
+            }
+            runtime.tracks[source_index].loopback_out_l = source_l;
+            runtime.tracks[source_index].loopback_out_r = source_r;
         }
     }
 
@@ -1163,6 +1263,8 @@ fn render_project_block_interleaved_core(
             clip_gain,
             clip_fade_in,
             clip_fade_out,
+            clip_fade_in_curve,
+            clip_fade_out_curve,
             clip_stretch_backend,
         ) = {
             let clip = &runtime.clips[clip_index];
@@ -1180,6 +1282,8 @@ fn render_project_block_interleaved_core(
                 clip.gain,
                 clip.fade_in_samples,
                 clip.fade_out_samples,
+                clip.fade_in_curve,
+                clip.fade_out_curve,
                 clip.stretch_backend,
             )
         };
@@ -1265,7 +1369,14 @@ fn render_project_block_interleaved_core(
                             clip_effective_time_ratio,
                             clip_processor,
                         );
-                        let fade = clip_fade_gain(rel, clip_duration, clip_fade_in, clip_fade_out);
+                        let fade = clip_fade_gain_with_curves(
+                            rel,
+                            clip_duration,
+                            clip_fade_in,
+                            clip_fade_out,
+                            clip_fade_in_curve,
+                            clip_fade_out_curve,
+                        );
                         let g = clip_gain * fade;
                         l *= g;
                         r *= g;
@@ -1394,6 +1505,11 @@ fn render_project_block_interleaved_core(
         // an export would capture. Atomics into a preallocated ring, and one
         // `Option` check for every track that is not being shared.
         publish_track_to_jam(runtime, track_index, frames, jam);
+        // Track loopback tap: the same post-fader signal, kept for whichever
+        // audio track reads this one as its input on the next callback. One
+        // `bool` check for every track nobody is listening to, which is almost
+        // all of them.
+        capture_track_loopback(runtime, track_index, frames);
     }
     runtime.audio_graph.pass1_source_indices = pass1_indices;
 
@@ -2875,6 +2991,36 @@ fn publish_track_to_jam(
     slot.write_planar(&track.block_l, &track.block_r, frames, runtime.sample_rate);
 }
 
+/// Keep this track's post-fader block for a track that loops it back as input.
+///
+/// Realtime-safe in the steady state: two `copy_from_slice`s into buffers that
+/// were grown on the first block a source published and never shrink. A track
+/// nobody reads pays one `bool`.
+#[inline]
+fn capture_track_loopback(runtime: &mut RuntimeProject, track_index: usize, frames: usize) {
+    let Some(track) = runtime.tracks.get_mut(track_index) else {
+        return;
+    };
+    if !track.loopback_publish {
+        // Release the buffers of a source nobody reads any more. Done here
+        // rather than on the control thread because the control thread does not
+        // own the graph the callback is holding, and a `Vec` that is already
+        // empty costs nothing to clear.
+        if !track.loopback_out_l.is_empty() {
+            track.loopback_out_l.clear();
+            track.loopback_out_r.clear();
+        }
+        return;
+    }
+    if track.loopback_out_l.len() < frames {
+        track.loopback_out_l.resize(frames, 0.0);
+        track.loopback_out_r.resize(frames, 0.0);
+    }
+    let frames = frames.min(track.block_l.len()).min(track.block_r.len());
+    track.loopback_out_l[..frames].copy_from_slice(&track.block_l[..frames]);
+    track.loopback_out_r[..frames].copy_from_slice(&track.block_r[..frames]);
+}
+
 /// Assemble one block of the Audio Jam multitrack stream.
 ///
 /// Every shared track has already rendered its post-fader block by the time
@@ -3000,6 +3146,7 @@ mod jam_input_tests {
         let mut runtime = RuntimeProject::build(snapshot, 48_000, &mut HashMap::new(), None, true)
             .expect("jam runtime");
         runtime.resolve_jam_inputs(snapshot, bus);
+        runtime.resolve_loopback_inputs(snapshot);
         runtime
     }
 
@@ -4278,3 +4425,117 @@ mod control_room_tests;
 #[cfg(test)]
 #[path = "solfege_pitch_tests.rs"]
 mod solfege_pitch_tests;
+
+/// The crossfade laws, which are the whole point of letting a clip choose one.
+///
+/// A crossfade is a *pair* of ramps, so what matters is not the shape of one
+/// but what the two sum to across the overlap. These pin both sums, because
+/// picking the wrong law is audible as a 3 dB hole or a 3 dB bulge in the
+/// middle of every edit — and until now the choice was carried in the project
+/// file and ignored by the renderer, so it could not be heard at all.
+#[cfg(test)]
+mod fade_curve_tests {
+    use super::clip_fade_gain_with_curves;
+    use crate::runtime::FadeCurve;
+
+    const LEN: u64 = 1_000;
+
+    /// Gain of a clip fading *in* over the whole of its length, at `t`.
+    fn rising(curve: FadeCurve, t: f32) -> f32 {
+        clip_fade_gain_with_curves((t * LEN as f32) as u64, LEN, LEN, 0, curve, curve)
+    }
+
+    /// Gain of a clip fading *out* over the whole of its length, at `t`.
+    fn falling(curve: FadeCurve, t: f32) -> f32 {
+        clip_fade_gain_with_curves((t * LEN as f32) as u64, LEN, 0, LEN, curve, curve)
+    }
+
+    /// Two uncorrelated takes: their *powers* add, so the power sum has to stay
+    /// flat or the middle of every crossfade drops about 3 dB.
+    #[test]
+    fn equal_power_holds_the_power_sum_flat() {
+        for step in 0..=10 {
+            let t = step as f32 / 10.0;
+            let a = falling(FadeCurve::EqualPower, t);
+            let b = rising(FadeCurve::EqualPower, t);
+            let power = a * a + b * b;
+            assert!(
+                (power - 1.0).abs() < 0.01,
+                "power sum {power} at t={t} is not flat"
+            );
+        }
+        // The signature of the law: -3 dB, not -6, at the midpoint.
+        let mid = rising(FadeCurve::EqualPower, 0.5);
+        assert!(
+            (mid - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
+            "equal-power midpoint {mid} should be ≈0.707"
+        );
+    }
+
+    /// Two halves of one continuous performance are perfectly correlated, so
+    /// their *amplitudes* add. Linear is the law that keeps that sum flat.
+    #[test]
+    fn linear_holds_the_amplitude_sum_flat() {
+        for step in 0..=10 {
+            let t = step as f32 / 10.0;
+            let sum = falling(FadeCurve::Linear, t) + rising(FadeCurve::Linear, t);
+            assert!(
+                (sum - 1.0).abs() < 0.01,
+                "amplitude sum {sum} at t={t} is not flat"
+            );
+        }
+        let mid = rising(FadeCurve::Linear, 0.5);
+        assert!(
+            (mid - 0.5).abs() < 0.01,
+            "linear midpoint {mid} should be 0.5"
+        );
+    }
+
+    /// The two edges of one clip are independent: a tail crossfading into the
+    /// next take can be equal power while the head fading up from silence is
+    /// linear.
+    #[test]
+    fn the_two_edges_carry_their_own_curve() {
+        let gain = clip_fade_gain_with_curves(
+            LEN / 4,
+            LEN,
+            LEN / 2,
+            LEN / 2,
+            FadeCurve::Linear,
+            FadeCurve::EqualPower,
+        );
+        // Half way through a linear fade-in, and clear of the fade-out.
+        assert!(
+            (gain - 0.5).abs() < 0.01,
+            "fade-in edge used the wrong law: {gain}"
+        );
+    }
+
+    #[test]
+    fn a_clip_with_no_fades_is_untouched() {
+        for curve in [FadeCurve::EqualPower, FadeCurve::Linear] {
+            assert_eq!(
+                clip_fade_gain_with_curves(LEN / 2, LEN, 0, 0, curve, curve),
+                1.0
+            );
+        }
+    }
+
+    /// The tag crosses a serialization boundary, so an unknown one has to play
+    /// rather than fail — and it must land on the default, not on silence.
+    #[test]
+    fn an_unknown_curve_tag_falls_back_to_equal_power() {
+        assert_eq!(FadeCurve::from_tag("linear"), FadeCurve::Linear);
+        assert_eq!(FadeCurve::from_tag("Equal_Power"), FadeCurve::EqualPower);
+        assert_eq!(
+            FadeCurve::from_tag("s-curve-from-2027"),
+            FadeCurve::EqualPower
+        );
+        assert_eq!(FadeCurve::from_tag(""), FadeCurve::EqualPower);
+        // And the tag round-trips, so a project saved by this build reloads
+        // with the curve it was given.
+        for curve in [FadeCurve::EqualPower, FadeCurve::Linear] {
+            assert_eq!(FadeCurve::from_tag(curve.tag()), curve);
+        }
+    }
+}

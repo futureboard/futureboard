@@ -20,11 +20,15 @@
 //! - **No client secret and no API key ship in the binary.** Sign-in happens in
 //!   the system browser against the account service; the app only ever receives
 //!   an opaque session credential for the account that signed in.
-//! - The browser hands that session back through a one-shot **loopback**
-//!   listener the app binds *before* the browser is pointed anywhere, on a port
-//!   the OS assigns. The app generates a nonce, the service echoes it, and a
-//!   callback that does not carry it is refused — so a stray page cannot plant
-//!   someone else's session in the app.
+//! - The browser hands that session back one of two ways, and the app decides
+//!   which per sign-in. An installed Studio owns the `fbrd://` scheme, so the
+//!   service redirects to `fbrd://auth/callback` and the OS delivers it (see
+//!   [`crate::deeplink`]); anything else — a `cargo run`, a portable copy —
+//!   uses a one-shot **loopback** listener the app binds *before* the browser
+//!   is pointed anywhere, on a port the OS assigns. Either way the app
+//!   generates a nonce, the service echoes it, and a callback that does not
+//!   carry it is refused — so a stray page cannot plant someone else's session
+//!   in the app.
 //! - TLS is mandatory in release builds. A debug build may point at a local
 //!   account service on loopback.
 //!
@@ -35,7 +39,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -327,6 +332,36 @@ fn apply_session(token: String, user: UserProfile) -> Result<UserProfile, String
 pub fn oauth_sign_in(provider: OAuthProvider) -> Result<UserProfile, String> {
     let base = api_base_url().ok_or("sign-in is not configured for this build")?;
 
+    // The nonce is generated here, not by the service: it is what proves the
+    // callback answers *this* attempt, so a page that guesses the port — or
+    // any page at all, for the scheme — cannot hand the app a session
+    // belonging to someone else.
+    let nonce = random_token(24);
+
+    // An installed Studio takes the URL scheme: nothing has to listen, the
+    // browser tab can close before the app has read anything, and a firewall
+    // that dislikes loopback listeners has nothing to dislike. The loopback
+    // form is what every other copy gets, and what this falls back to.
+    if crate::deeplink::scheme_registered() {
+        let receiver = register_scheme_sign_in(&nonce);
+        let authorize = format!(
+            "{base}/auth/{provider}?native={scheme}&nonce={nonce}",
+            provider = provider.as_path(),
+            scheme = crate::deeplink::SCHEME,
+            nonce = url_encode(&nonce),
+        );
+        open_in_browser(&authorize)?;
+        let token = match receiver.recv_timeout(Duration::from_secs(OAUTH_WAIT_SECS)) {
+            Ok(result) => result,
+            Err(_) => {
+                cancel_scheme_sign_in();
+                Err("timed out waiting for the browser sign-in".to_string())
+            }
+        }?;
+        let profile = fetch_profile(&token)?;
+        return apply_session(token, profile);
+    }
+
     // Bind the listener up front so the port is ours before the browser is
     // pointed at it, and let the OS pick it: a fixed port is one already-running
     // instance away from failing, and nothing about this port needs to be known
@@ -338,10 +373,6 @@ pub fn oauth_sign_in(provider: OAuthProvider) -> Result<UserProfile, String> {
         .map_err(|error| format!("could not read the local sign-in port: {error}"))?
         .port();
 
-    // The nonce is generated here, not by the service: it is what proves the
-    // callback answers *this* attempt, so a page that guesses the port cannot
-    // hand the app a session belonging to someone else.
-    let nonce = random_token(24);
     let authorize = format!(
         "{base}/auth/{provider}?native={port}&nonce={nonce}",
         provider = provider.as_path(),
@@ -353,6 +384,72 @@ pub fn oauth_sign_in(provider: OAuthProvider) -> Result<UserProfile, String> {
 
     let profile = fetch_profile(&token)?;
     apply_session(token, profile)
+}
+
+// ── Browser sign-in via the fbrd:// scheme ──────────────────────────────────
+
+/// The sign-in currently waiting for an `fbrd://auth/callback`, if any: the
+/// nonce it minted and where to deliver the answer. One at a time, because
+/// the dialog runs one at a time; a second attempt replaces the first, whose
+/// receiver then reports the wait as abandoned.
+struct PendingSchemeSignIn {
+    nonce: String,
+    reply: mpsc::Sender<Result<String, String>>,
+}
+
+fn pending_scheme_sign_in() -> &'static Mutex<Option<PendingSchemeSignIn>> {
+    static PENDING: OnceLock<Mutex<Option<PendingSchemeSignIn>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(None))
+}
+
+fn register_scheme_sign_in(nonce: &str) -> mpsc::Receiver<Result<String, String>> {
+    let (reply, receiver) = mpsc::channel();
+    if let Ok(mut pending) = pending_scheme_sign_in().lock() {
+        *pending = Some(PendingSchemeSignIn {
+            nonce: nonce.to_string(),
+            reply,
+        });
+    }
+    receiver
+}
+
+fn cancel_scheme_sign_in() {
+    if let Ok(mut pending) = pending_scheme_sign_in().lock() {
+        *pending = None;
+    }
+}
+
+/// Finish a sign-in that came back through the URL scheme.
+///
+/// Called by the shell with whatever `fbrd://auth/callback` carried. The
+/// nonce check is the whole of the trust here: the scheme is reachable from
+/// any web page, so a callback that does not carry the nonce Studio minted for
+/// the attempt currently waiting is not a sign-in, whatever session it names.
+/// Returns whether a waiting sign-in took it.
+pub fn complete_scheme_sign_in(state: &str, session: &str, error: Option<&str>) -> bool {
+    let Ok(mut pending) = pending_scheme_sign_in().lock() else {
+        return false;
+    };
+    let Some(waiting) = pending.as_ref() else {
+        debug_log("a scheme sign-in callback arrived with nothing waiting for it");
+        return false;
+    };
+    if !constant_time_eq(state.as_bytes(), waiting.nonce.as_bytes()) {
+        debug_log("a scheme sign-in callback failed verification");
+        return false;
+    }
+    let Some(waiting) = pending.take() else {
+        return false;
+    };
+    let result = match error {
+        Some(error) => Err(format!("sign-in was refused: {error}")),
+        None if session.is_empty() => {
+            Err("the sign-in response did not include a session".to_string())
+        }
+        None => Ok(session.to_string()),
+    };
+    let _ = waiting.reply.send(result);
+    true
 }
 
 /// One-shot loopback capture of the `?fbsession=` (or `?error=`) redirect.
@@ -633,7 +730,7 @@ fn url_encode(value: &str) -> String {
 }
 
 /// Parse `a=b&c=d` into pairs, percent-decoding each side.
-fn parse_query(query: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_query(query: &str) -> Vec<(String, String)> {
     query
         .split('&')
         .filter(|part| !part.is_empty())
@@ -744,6 +841,49 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
         assert_ne!(random_token(24), random_token(24));
+    }
+
+    /// The scheme is reachable from any web page, so the nonce is the only
+    /// thing that makes an `fbrd://auth/callback` a sign-in rather than an
+    /// injection.
+    #[test]
+    fn a_scheme_callback_completes_only_the_sign_in_that_minted_its_nonce() {
+        assert!(!complete_scheme_sign_in("anything", "sess", None));
+
+        let receiver = register_scheme_sign_in("the-real-nonce-value");
+        assert!(!complete_scheme_sign_in(
+            "guessed",
+            "attacker-session",
+            None
+        ));
+        assert!(
+            receiver.try_recv().is_err(),
+            "a wrong nonce must deliver nothing"
+        );
+
+        assert!(complete_scheme_sign_in(
+            "the-real-nonce-value",
+            "sess-1",
+            None
+        ));
+        assert_eq!(
+            receiver.try_recv().expect("delivered"),
+            Ok("sess-1".to_string())
+        );
+        // Consumed: a replay finds nothing waiting.
+        assert!(!complete_scheme_sign_in(
+            "the-real-nonce-value",
+            "sess-1",
+            None
+        ));
+
+        let receiver = register_scheme_sign_in("second-nonce-value-here");
+        assert!(complete_scheme_sign_in(
+            "second-nonce-value-here",
+            "",
+            Some("access_denied")
+        ));
+        assert!(receiver.try_recv().expect("delivered").is_err());
     }
 
     /// A plaintext account service would put a live session credential on the

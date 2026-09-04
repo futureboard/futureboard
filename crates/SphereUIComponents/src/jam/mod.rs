@@ -24,16 +24,28 @@
 //! only difference is the device id prefix; see
 //! [`DirectAudio::JAM_DEVICE_PREFIX`].
 //!
+//! **The jam is an output device too.** An enabled output bus bound to the
+//! jam's send ports is a publish, named after the bus; see [`egress`].
+//!
+//! **The routing decides what arrives.** Because a remote stream is only
+//! audible through an input port, a stream nobody routed was received, decoded
+//! and thrown away. So the registry drives the subscription: what this Studio
+//! asks the server to send is exactly what some enabled input connection binds.
+//! See [`ingress`].
+//!
 //! **Identity is the account, never the username.** A saved routing stores a
 //! user id; the display name follows whatever that account calls itself today.
 //!
 //! Nothing in this module is called from an audio callback.
 
+pub mod egress;
+pub mod ingress;
 pub mod publish;
 pub mod quality;
 pub mod resample;
 pub mod sink;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -45,11 +57,16 @@ use sphere_jam_client::credentials::{JamCredentialProvider, SharedCredentials};
 use sphere_jam_client::error::{JamError, Result};
 use sphere_jam_client::ids::{JamId, StreamId, UserId};
 use sphere_jam_client::protocol::{ParticipantSummary, StreamSummary};
-use sphere_jam_client::session::{JamEvent, JamSession, JamSessionOptions, JamSnapshot, JamState};
+use sphere_jam_client::session::{
+    JamEvent, JamIngress, JamSession, JamSessionOptions, JamSnapshot, JamState,
+};
 use DirectAudio::engine::SharedState;
 use DirectAudio::jam_bus::{
-    jam_device_id, publish_key_track, PUBLISH_KEY_MASTER, PUBLISH_KEY_MULTITRACK,
+    jam_device_id, publish_key_track, PUBLISH_KEY_LIVE_INPUT, PUBLISH_KEY_MASTER,
+    PUBLISH_KEY_MULTITRACK,
 };
+
+pub use egress::{JamSend, JamSendTap};
 
 use crate::audio_connections::{AudioConnectionDirection, AvailablePort, AvailablePorts};
 
@@ -234,7 +251,7 @@ pub fn available_ports() -> AvailablePorts {
             });
         }
     }
-    AvailablePorts { ports }
+    AvailablePorts { ports }.merge(egress::available_ports())
 }
 
 /// The process-wide controller.
@@ -374,6 +391,15 @@ pub struct JamController {
     quality: JamPublishQuality,
     /// Tracks the multitrack stream carries, in channel-pair order.
     multitrack_tracks: Vec<(String, String)>,
+    /// The jam streams this project's routing is pointed at, as last pushed to
+    /// the session. Held so a routing recompile — which happens on every edit
+    /// that can move a port — costs nothing unless a jam binding actually
+    /// changed.
+    routed_streams: BTreeSet<String>,
+    /// The jam sends this project's output routing names, keyed by bus id, as
+    /// last pushed to the session. Kept across a leave so joining again
+    /// restates them.
+    sends: BTreeMap<String, JamSend>,
     last_error: Option<String>,
 }
 
@@ -398,6 +424,8 @@ impl JamController {
             invite_link: None,
             quality: JamPublishQuality::default(),
             multitrack_tracks: Vec::new(),
+            routed_streams: BTreeSet::new(),
+            sends: BTreeMap::new(),
             last_error: None,
         })
     }
@@ -475,6 +503,10 @@ impl JamController {
             let mut options = JamSessionOptions::new(self.device_id.clone(), sink);
             options.device_name = device_name();
             options.publish_sample_rate = PUBLISH_SAMPLE_RATE as i32;
+            // Studio chooses. A remote stream is only audible through an input
+            // connection, so taking the whole room would decode audio the audio
+            // callback never reads — see [`ingress`].
+            options.ingress = JamIngress::Routed;
             let session = JamSession::spawn_with_clock(
                 self.config.clone(),
                 Arc::clone(&self.credentials),
@@ -486,7 +518,191 @@ impl JamController {
         let Some(session) = self.session.as_ref() else {
             return Err(JamError::Session("the jam worker is gone".to_string()));
         };
-        session.join(jam_id, access_token)
+        // A freshly spawned worker knows nothing about this project's routing.
+        // Restating it here rather than waiting for the next routing edit is
+        // what makes a track already bound to a performer arrive on join.
+        if !self.routed_streams.is_empty() {
+            let wanted: Vec<StreamId> = self
+                .routed_streams
+                .iter()
+                .map(|id| StreamId::new(id.clone()))
+                .collect();
+            session.subscribe(wanted)?;
+        }
+        session.join(jam_id, access_token)?;
+        // Sends are queued the same way: the worker publishes them as soon as
+        // the room exists, so an output bus already bound to the jam is live on
+        // join without a routing edit to remind it.
+        let sends: Vec<JamSend> = self.sends.values().cloned().collect();
+        for send in &sends {
+            if let Err(error) = self.publish_send(send) {
+                self.last_error = Some(error.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Ask the server for exactly the streams this project's routing names.
+    ///
+    /// Called on every routing recompile, so it diffs first: an edit that moved
+    /// a hardware port must not cost a round trip about jam streams that did not
+    /// change. Streams no longer routed anywhere are unsubscribed, which is
+    /// where the bandwidth is actually saved — see [`ingress`].
+    pub fn set_routed_streams(&mut self, streams: &[String]) -> Result<()> {
+        let wanted: BTreeSet<String> = streams.iter().cloned().collect();
+        if wanted == self.routed_streams {
+            return Ok(());
+        }
+        let added: Vec<StreamId> = wanted
+            .difference(&self.routed_streams)
+            .map(|id| StreamId::new(id.clone()))
+            .collect();
+        let dropped: Vec<StreamId> = self
+            .routed_streams
+            .difference(&wanted)
+            .map(|id| StreamId::new(id.clone()))
+            .collect();
+        self.routed_streams = wanted;
+
+        // Recorded even with no session open: the intent is the project's, and
+        // joining later restates it.
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        if !dropped.is_empty() {
+            session.unsubscribe(dropped)?;
+        }
+        if !added.is_empty() {
+            session.subscribe(added)?;
+        }
+        Ok(())
+    }
+
+    /// The jam streams this project's routing is pointed at.
+    pub fn routed_streams(&self) -> Vec<String> {
+        self.routed_streams.iter().cloned().collect()
+    }
+
+    /// Make what this Studio publishes match the output buses bound to the jam.
+    ///
+    /// Diffed by bus: an unchanged send costs nothing, a renamed or re-laid-out
+    /// one is republished (the name is the stream's identity in the room, and
+    /// the layout is announced per stream), and a bus that is gone or disabled
+    /// is unpublished - which is where an output bus's off switch actually
+    /// stops the bandwidth. See [`egress`].
+    pub fn set_sends(&mut self, wanted: &[JamSend]) -> Result<()> {
+        let wanted = egress::by_connection(wanted.to_vec());
+        if wanted == self.sends {
+            return Ok(());
+        }
+        let mut first_error = None;
+        let previous = std::mem::replace(&mut self.sends, wanted.clone());
+        for (id, old) in &previous {
+            if wanted.get(id) != Some(old) {
+                self.unpublish_send(old);
+            }
+        }
+        if self.session.is_some() {
+            for (id, send) in &wanted {
+                if previous.get(id) == Some(send) {
+                    continue;
+                }
+                if let Err(error) = self.publish_send(send) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        self.publish_ui_state();
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// The jam sends this project's output routing names.
+    pub fn sends(&self) -> Vec<JamSend> {
+        self.sends.values().cloned().collect()
+    }
+
+    fn send_key(tap: JamSendTap) -> &'static str {
+        match tap {
+            JamSendTap::Master => PUBLISH_KEY_MASTER,
+            JamSendTap::LiveInput => PUBLISH_KEY_LIVE_INPUT,
+        }
+    }
+
+    /// Publish one send: claim the engine tap, announce a stream named after
+    /// the bus.
+    fn publish_send(&mut self, send: &JamSend) -> Result<()> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(JamError::Session("not in a jam".to_string()));
+        };
+        let key = Self::send_key(send.tap);
+        // One stream per tap. The engine hands the same ring to every claim of
+        // one key, and two streams draining one ring would each hear half of
+        // it; refusing is the only honest answer, and the panel's own master
+        // share is the usual other claimant.
+        if self.published_keys.iter().any(|held| held == key) {
+            return Err(JamError::Audio(format!(
+                "{} is already being sent to the jam",
+                match send.tap {
+                    JamSendTap::Master => "the master mix",
+                    JamSendTap::LiveInput => "the live input",
+                }
+            )));
+        }
+        if self.shared.jam_bus.bind_publish(key).is_none() {
+            return Err(JamError::Audio(
+                "no publish slot is free in the audio engine".to_string(),
+            ));
+        }
+        self.published_keys.push(key.to_string());
+        if send.tap == JamSendTap::Master {
+            self.shared
+                .jam_bus
+                .set_master_click_published(self.quality.master_click);
+        }
+
+        let source = Arc::new(JamEngineSource::new(
+            Arc::clone(&self.shared),
+            Arc::clone(&self.clock),
+            key,
+            self.quality.sample_rate,
+        ));
+        let kind = match send.tap {
+            JamSendTap::Master => JamPublishSourceKind::Master,
+            JamSendTap::LiveInput => JamPublishSourceKind::HardwareInput {
+                connection: send.connection_id.clone(),
+            },
+        };
+        let mut request = if send.channels >= 2 {
+            JamPublishRequest::stereo(send.name.clone(), kind)
+        } else {
+            JamPublishRequest::mono(send.name.clone(), kind)
+        };
+        request.sample_format = self.quality.sample_format;
+        request.sample_rate = self.quality.sample_rate as i32;
+        match session.publish(request, source) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.published_keys.retain(|held| held != key);
+                self.shared.jam_bus.release_publish(key);
+                Err(error)
+            }
+        }
+    }
+
+    fn unpublish_send(&mut self, send: &JamSend) {
+        let key = Self::send_key(send.tap);
+        // Only a send that holds the tap releases it. The panel's own master
+        // share uses the same key, and an output bus being switched off must
+        // not silence a share the user made somewhere else.
+        if !self.published_keys.iter().any(|held| held == key) {
+            return;
+        }
+        self.unpublish_named(&send.name);
+        self.published_keys.retain(|held| held != key);
+        self.shared.jam_bus.release_publish(key);
     }
 
     /// Mint an invite for the current jam. The link is a bearer secret and is
@@ -519,6 +735,15 @@ impl JamController {
         let Some(session) = self.session.as_ref() else {
             return Err(JamError::Session("not in a jam".to_string()));
         };
+        if self
+            .published_keys
+            .iter()
+            .any(|held| held == PUBLISH_KEY_MASTER)
+        {
+            return Err(JamError::Audio(
+                "the master mix is already being sent to the jam by an output bus".to_string(),
+            ));
+        }
         if self
             .shared
             .jam_bus
@@ -792,6 +1017,22 @@ impl JamController {
             }
             if let JamEvent::StreamRemoved(stream) = event {
                 self.shared.jam_bus.release_input(stream.as_str());
+            }
+            // A refused subscription is the one ingress failure a user can act
+            // on: the performer is in the room, the track is pointed at them,
+            // and the two formats do not meet. Silence with no explanation is
+            // the failure mode this reports instead.
+            if let JamEvent::IngressChanged { refused, .. } = event {
+                if let Some(first) = refused.first() {
+                    self.last_error = Some(format!(
+                        "a jam stream could not be received: {}",
+                        if first.message.is_empty() {
+                            first.code.clone()
+                        } else {
+                            first.message.clone()
+                        }
+                    ));
+                }
             }
         }
         self.publish_ui_state();

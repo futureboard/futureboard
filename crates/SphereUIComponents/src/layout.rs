@@ -335,6 +335,9 @@ pub(crate) fn build_and_warm_audio_engine(
     schema: crate::settings::SettingsSchema,
 ) -> Result<(DirectAudio::AudioEngine, DirectAudio::EngineStats), String> {
     let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
+    // No device yet: resolving one needs an engine to enumerate through, and
+    // `AudioEngine::new` does not open anything. The chosen device is applied
+    // below, before the stream is opened for the first time.
     let audio_config = DirectAudio::EngineConfig {
         sample_rate: schema.general.project_defaults.sample_rate,
         buffer_size: schema.general.project_defaults.buffer_size,
@@ -367,7 +370,40 @@ pub(crate) fn build_and_warm_audio_engine(
 
     engine.set_pdc_enabled(schema.playback.latency_compensation);
     engine.set_dropout_protection_mode(engine_dropout_mode(schema.playback.dropout_protection));
-    let stats = match engine.start() {
+
+    // Open on the device the user actually chose.
+    //
+    // This used to open with `output_device: None` and rely on the backend's
+    // own default. WASAPI and WDM-KS have one, so nobody noticed; **ASIO does
+    // not**. An ASIO stream is opened by naming a driver, so a project opened
+    // with ASIO selected failed to open any stream at all — and because the
+    // warm-up retry re-runs the same device-less `start()`, it failed forever.
+    // The only way back was Settings, whose own sync does resolve the device
+    // and reopen, which is exactly what this now does up front.
+    let desired_output =
+        resolve_output_device_for_backend(&engine, backend, &schema.hardware.audio.device_out);
+    let open_result = match desired_output {
+        Some(device) => {
+            eprintln!(
+                "[audio] opening the configured output device: backend={backend:?} device={}",
+                schema.hardware.audio.device_out.trim()
+            );
+            let configured = DirectAudio::EngineConfig {
+                output_device: Some(device),
+                ..engine.config().clone()
+            };
+            // `reopen_with_config` is the same call the Settings sync makes. On
+            // a stream that was never opened it is simply "open with this
+            // config and start", and it stores the config, so every later
+            // `start()` — the warm-up retry included — keeps naming the device.
+            engine.reopen_with_config(configured)
+        }
+        // No device recorded for this backend, or the recorded one is not
+        // present. The backend's default is the right answer where there is
+        // one, and where there is not the error below says so.
+        None => engine.start(),
+    };
+    let stats = match open_result {
         Ok(()) => {
             let stats = engine.stats();
             eprintln!(
@@ -382,7 +418,10 @@ pub(crate) fn build_and_warm_audio_engine(
             // this opens). `StudioLayout::retry_audio_stream_warm` re-attempts
             // on the control poll, so the stream comes up on its own instead of
             // waiting for the user to press Play.
-            eprintln!("[audio] warm-up failed; the session poll will retry: {error}");
+            eprintln!(
+                "[audio] warm-up failed for backend={backend:?} device={:?};                  the session poll will retry: {error}",
+                schema.hardware.audio.device_out.trim()
+            );
             engine.stats()
         }
     };

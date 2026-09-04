@@ -62,6 +62,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       APAK_VERIFYING_KEY: ${{ secrets.APAK_VERIFYING_KEY }}
+      # The account-service base is baked in at compile time
+      # (crates/SphereUIComponents/build.rs). CI has no .env, so without
+      # this every built Studio reports "sign-in is not configured". It is
+      # a public origin, not a secret; a repository variable can override it.
+      FUTUREBOARD_AUTH_API_URL: ${{ vars.FUTUREBOARD_AUTH_API_URL || 'https://futureboard.studio' }}
       CARGO_BUILD_JOBS: 2
     strategy:
       fail-fast: false

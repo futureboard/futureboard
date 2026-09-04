@@ -742,6 +742,20 @@ pub struct RuntimeTrack {
     /// multitrack take, and the receiver sees two independent streams. Like the
     /// slot, the pair is resolved on the control thread and shipped as an index.
     pub jam_multitrack_pair: Option<u32>,
+    /// Whether some other track's input reads this track's output, so the
+    /// render pass keeps a copy of its post-fader block for the next callback.
+    ///
+    /// A `bool` rather than a slot table: the copy lives on this track, so
+    /// there is nothing to index and nothing to allocate beyond the two buffers
+    /// below. Resolved on the control thread whenever an input route changes.
+    pub loopback_publish: bool,
+    /// This track's post-fader block from the **previous** callback, kept only
+    /// while [`Self::loopback_publish`] is set.
+    ///
+    /// Grown to the block size on first use and never shrunk, so the steady
+    /// state is a `copy_from_slice` and nothing else.
+    pub loopback_out_l: Vec<f32>,
+    pub loopback_out_r: Vec<f32>,
     pub preview_mode: RuntimePreviewMode,
     pub output_track_id: Option<String>,
     /// [`Self::output_track_id`] resolved at build time
@@ -853,6 +867,19 @@ pub enum RuntimeTrackInputSource {
         slot: u32,
         mode: crate::jam_bus::JamChannelMode,
     },
+    /// Another track's post-fader output — an instrument track feeding an audio
+    /// track, so a VSTi can be monitored and recorded as audio without a
+    /// bounce. See [`crate::loopback`].
+    ///
+    /// The source is a **runtime track index**, resolved on the control thread
+    /// exactly like a jam slot, so the callback never looks an id up. What it
+    /// reads is the block the source rendered in the previous callback; see the
+    /// module docs for why that one-block delay is the point rather than a
+    /// shortcoming.
+    Loopback {
+        source_index: u32,
+        mode: crate::jam_bus::JamChannelMode,
+    },
 }
 
 impl RuntimeTrackInputSource {
@@ -897,14 +924,32 @@ impl RuntimeTrackInputSource {
         matches!(self, Self::Jam { .. })
     }
 
+    /// Whether this route reads another track's output rather than the hardware
+    /// input bus.
+    #[inline]
+    pub fn is_loopback(&self) -> bool {
+        matches!(self, Self::Loopback { .. })
+    }
+
+    /// Whether this route takes nothing from the hardware input bus.
+    ///
+    /// Both virtual sources answer yes, and the render path asks this rather
+    /// than naming them one by one: a track fed from somewhere else must not
+    /// also sum whatever is plugged into the interface, or a remote performer —
+    /// or an instrument — doubles with the room mic.
+    #[inline]
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::Jam { .. } | Self::Loopback { .. })
+    }
+
     #[inline]
     pub fn sample_from_latest(&self, latest_l: f32, latest_r: f32) -> (f32, f32) {
         match self {
             Self::None => (0.0, 0.0),
-            // A jam track is not fed by the hardware input bus, so the live
-            // input meter has nothing to show for it. Its level comes from the
-            // jam slot's own peak instead.
-            Self::Jam { .. } => (0.0, 0.0),
+            // A jam or loopback track is not fed by the hardware input bus, so
+            // the live input meter has nothing to show for it. Its level comes
+            // from the track's own post-fader meter instead.
+            Self::Jam { .. } | Self::Loopback { .. } => (0.0, 0.0),
             Self::Mono { .. } => (latest_l, latest_l),
             Self::Stereo { .. } => (latest_l, latest_r),
         }
@@ -928,7 +973,7 @@ impl RuntimeTrackInputSource {
             }
         };
         match self {
-            Self::None | Self::Jam { .. } => (0.0, 0.0),
+            Self::None | Self::Jam { .. } | Self::Loopback { .. } => (0.0, 0.0),
             Self::Mono { channel } => {
                 let mono = pick(*channel);
                 (mono, mono)
@@ -1495,6 +1540,64 @@ pub struct RuntimeSend {
     pub pre_fader: bool,
 }
 
+/// Shape of one clip fade ramp.
+///
+/// The two laws answer different questions, which is why this is a choice and
+/// not a constant:
+///
+/// * **Equal power** holds the *power* sum of a crossfade constant. Two
+///   unrelated takes fading into each other are uncorrelated, so their powers
+///   add — a linear pair would dip about 3 dB in the middle, heard as a hole.
+/// * **Linear** holds the *amplitude* sum constant. Two halves of the same
+///   continuous performance are perfectly correlated, so their amplitudes add —
+///   an equal-power pair would bulge about 3 dB in the middle instead.
+///
+/// Equal power is the default because an overlap between two different clips is
+/// the common case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FadeCurve {
+    #[default]
+    EqualPower,
+    Linear,
+}
+
+impl FadeCurve {
+    /// Parse the tag the project and the engine snapshot carry.
+    ///
+    /// Anything unrecognised is equal power rather than an error: the tag
+    /// crosses a serialization boundary, and a project written by a build that
+    /// knows a curve this one does not should still play.
+    pub fn from_tag(tag: &str) -> Self {
+        match tag.trim().to_ascii_lowercase().as_str() {
+            "linear" => Self::Linear,
+            _ => Self::EqualPower,
+        }
+    }
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::EqualPower => "equal_power",
+            Self::Linear => "linear",
+        }
+    }
+
+    /// Gain at `t` in `0..=1` along a rising ramp. The falling ramp is the same
+    /// law read backwards, which is what makes a pair of them sum correctly.
+    #[inline]
+    pub fn rising_gain(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::EqualPower => (t * std::f32::consts::FRAC_PI_2).sin(),
+            Self::Linear => t,
+        }
+    }
+
+    #[inline]
+    pub fn falling_gain(self, t: f32) -> f32 {
+        self.rising_gain(1.0 - t.clamp(0.0, 1.0))
+    }
+}
+
 pub struct RuntimeClip {
     pub id: String,
     pub track_id: String,
@@ -1541,6 +1644,12 @@ pub struct RuntimeClip {
     /// `fade_in + fade_out <= duration_samples` (see `clip_fade_gain`).
     pub fade_in_samples: u64,
     pub fade_out_samples: u64,
+    /// Shape of each ramp. Carried per edge because the two ends of a clip are
+    /// usually different jobs: the tail of one take crossfading into the head
+    /// of another wants equal power, while a fade against silence — or a cut
+    /// inside one continuous performance — wants linear.
+    pub fade_in_curve: FadeCurve,
+    pub fade_out_curve: FadeCurve,
     pub source: Arc<ClipAudioSource>,
     /// Cached preserve-pitch processor for this runtime clip/voice. Created on
     /// the control thread while building/cloning the runtime graph; the audio
@@ -1610,6 +1719,8 @@ impl Clone for RuntimeClip {
             ara_rendered: self.ara_rendered,
             fade_in_samples: self.fade_in_samples,
             fade_out_samples: self.fade_out_samples,
+            fade_in_curve: self.fade_in_curve,
+            fade_out_curve: self.fade_out_curve,
             source: Arc::clone(&self.source),
             stretch_processor: create_runtime_stretch_processor(
                 self.stretch_backend,
@@ -1800,6 +1911,54 @@ impl RuntimeProject {
                 // rather than being pointed at somebody else's stream.
                 None => RuntimeTrackInputSource::None,
             };
+        }
+    }
+
+    /// Resolve every `trk:` input route to the source track's index, and mark
+    /// exactly the tracks something reads.
+    ///
+    /// Both halves have to happen together: a track publishes its post-fader
+    /// block *because* another track reads it, so the publish flags cannot be
+    /// decided one track at a time. Run after every project sync and after any
+    /// input-route change, on the control thread.
+    ///
+    /// A route naming a track that does not exist, or naming the destination
+    /// itself, resolves to [`RuntimeTrackInputSource::None`] — the track
+    /// captures nothing and says so, rather than falling back to whatever
+    /// hardware channels the route happens to carry, or building a feedback
+    /// loop nobody asked for.
+    pub fn resolve_loopback_inputs(&mut self, snapshot: &EngineProjectSnapshot) {
+        for track in self.tracks.iter_mut() {
+            track.loopback_publish = false;
+        }
+        let mut sources: Vec<usize> = Vec::new();
+        for (index, track) in snapshot.tracks.iter().enumerate() {
+            if index >= self.tracks.len() {
+                break;
+            }
+            let Some(source_id) = track.input_source.loopback_track_id() else {
+                continue;
+            };
+            let source_index = snapshot
+                .tracks
+                .iter()
+                .position(|candidate| candidate.id == source_id)
+                .filter(|source| *source != index && *source < self.tracks.len());
+            self.tracks[index].input_source = match source_index {
+                Some(source) => {
+                    sources.push(source);
+                    RuntimeTrackInputSource::Loopback {
+                        source_index: source as u32,
+                        mode: crate::jam_bus::JamChannelMode::from_channels(
+                            &track.input_source.channels,
+                        ),
+                    }
+                }
+                None => RuntimeTrackInputSource::None,
+            };
+        }
+        for source in sources {
+            self.tracks[source].loopback_publish = true;
         }
     }
 
@@ -2625,6 +2784,12 @@ impl RuntimeProject {
                 // is live. Carrying it in the snapshot would make reopening a
                 // project start broadcasting.
                 jam_publish_slot: None,
+                // Set by `resolve_loopback_inputs` once every track's input
+                // route is known: a track publishes only because some other
+                // track reads it, which `build` cannot see one track at a time.
+                loopback_publish: false,
+                loopback_out_l: Vec::new(),
+                loopback_out_r: Vec::new(),
                 jam_multitrack_pair: None,
                 preview_mode: RuntimePreviewMode::from_str(&t.preview_mode),
                 output_track_id: t.output_track_id.clone(),
@@ -3862,10 +4027,32 @@ impl RuntimeProject {
 
     /// Point a track's post-fader output at an Audio Jam publish slot.
     #[inline]
+    /// Set whether a track keeps its post-fader block for a loopback reader.
+    ///
+    /// Clearing it also drops the buffers on the next block the callback
+    /// renders; see `capture_track_loopback`.
+    pub fn update_track_loopback_publish(&mut self, track_index: usize, publish: bool) {
+        if let Some(track) = self.tracks.get_mut(track_index) {
+            track.loopback_publish = publish;
+        }
+    }
+
+    /// Whether a track is keeping its output for a loopback reader.
+    pub fn track_loopback_publish(&self, track_index: usize) -> bool {
+        self.tracks
+            .get(track_index)
+            .is_some_and(|track| track.loopback_publish)
+    }
+
     pub fn update_track_jam_publish(&mut self, track_index: usize, slot: Option<u32>) {
         if let Some(track) = self.tracks.get_mut(track_index) {
             track.jam_publish_slot = slot;
         }
+    }
+
+    /// A track's resolved input source, for the control thread.
+    pub fn track_input_source(&self, track_index: usize) -> Option<RuntimeTrackInputSource> {
+        self.tracks.get(track_index).map(|track| track.input_source)
     }
 
     /// Which jam publish slot a track feeds, for the control thread.
@@ -5210,6 +5397,16 @@ fn build_clip_runtime(
         muted: clip.muted,
         fade_in_samples,
         fade_out_samples,
+        fade_in_curve: clip
+            .fades
+            .as_ref()
+            .map(|f| FadeCurve::from_tag(&f.in_curve))
+            .unwrap_or_default(),
+        fade_out_curve: clip
+            .fades
+            .as_ref()
+            .map(|f| FadeCurve::from_tag(&f.out_curve))
+            .unwrap_or_default(),
         source,
         stretch_processor,
         stretch_input_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
@@ -5939,6 +6136,9 @@ mod midi_tests {
             monitor_enabled: false,
             input_source: RuntimeTrackInputSource::None,
             jam_publish_slot: None,
+            loopback_publish: false,
+            loopback_out_l: Vec::new(),
+            loopback_out_r: Vec::new(),
             jam_multitrack_pair: None,
             preview_mode: RuntimePreviewMode::Stereo,
             output_track_id: None,
@@ -6211,5 +6411,163 @@ mod midi_tests {
         assert!(events.contains(&(0xB0, 123, 0, 0)));
         assert!(!p.has_active_midi_preview());
         assert!(p.bridge_panic_flush_samples > 0);
+    }
+}
+
+/// Track loopback: one track's output resolved as another track's input.
+///
+/// The resolution is where this feature is either right or a footgun — a stale
+/// index reads somebody else's audio, and a self-reference is a feedback loop —
+/// so it is pinned here rather than left to the render path's own guard.
+#[cfg(test)]
+mod loopback_resolve_tests {
+    use super::*;
+    use crate::types::{EngineRoutingSnapshot, EngineTrackSnapshot};
+
+    fn track(id: &str, track_type: &str) -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: id.to_string(),
+            track_type: track_type.to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: true,
+            input_source: Default::default(),
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+            soundfont_envelope: Default::default(),
+            soundfont_quality: Default::default(),
+            solfege_engine: None,
+        }
+    }
+
+    /// `destination`'s input names `source` through a `trk:` device id.
+    fn snapshot_with_route(source: &str, destination: &str) -> EngineProjectSnapshot {
+        let mut piano = track("piano", "instrument");
+        piano.id = "piano".to_string();
+        let mut audio = track("audio-1", "audio");
+        audio.input_source = crate::types::EngineTrackInputSourceSnapshot {
+            device_id: Some(crate::loopback::loopback_device_id(source)),
+            channels: vec![0, 1],
+        };
+        audio.id = destination.to_string();
+        EngineProjectSnapshot {
+            project_id: "loopback".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks: vec![piano, audio, track("master", "master")],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 512,
+            },
+        }
+    }
+
+    fn resolved(snapshot: &EngineProjectSnapshot) -> RuntimeProject {
+        let mut cache = HashMap::new();
+        let mut runtime =
+            RuntimeProject::build(snapshot, 48_000, &mut cache, None, true).expect("build");
+        runtime.resolve_loopback_inputs(snapshot);
+        runtime
+    }
+
+    #[test]
+    fn an_instrument_track_resolves_to_its_index_and_starts_publishing() {
+        let snapshot = snapshot_with_route("piano", "audio-1");
+        let runtime = resolved(&snapshot);
+
+        assert_eq!(
+            runtime.tracks[1].input_source,
+            RuntimeTrackInputSource::Loopback {
+                source_index: 0,
+                mode: crate::jam_bus::JamChannelMode::Stereo,
+            }
+        );
+        // The source keeps its block only because something reads it.
+        assert!(runtime.tracks[0].loopback_publish);
+        assert!(!runtime.tracks[1].loopback_publish);
+        assert!(!runtime.tracks[2].loopback_publish);
+    }
+
+    /// A route to a track that is gone captures nothing and says so. Falling
+    /// back to the hardware channels the route carries would put the interface
+    /// into a track the user pointed at an instrument.
+    #[test]
+    fn a_route_to_a_missing_track_resolves_to_nothing() {
+        let snapshot = snapshot_with_route("deleted-track", "audio-1");
+        let runtime = resolved(&snapshot);
+
+        assert_eq!(
+            runtime.tracks[1].input_source,
+            RuntimeTrackInputSource::None
+        );
+        assert!(runtime.tracks.iter().all(|track| !track.loopback_publish));
+    }
+
+    /// A track pointed at itself is a feedback loop nobody asked for, and it is
+    /// refused here rather than left to the render path to notice.
+    #[test]
+    fn a_track_cannot_loop_back_its_own_output() {
+        let snapshot = snapshot_with_route("audio-1", "audio-1");
+        let runtime = resolved(&snapshot);
+
+        assert_eq!(
+            runtime.tracks[1].input_source,
+            RuntimeTrackInputSource::None
+        );
+        assert!(runtime.tracks.iter().all(|track| !track.loopback_publish));
+    }
+
+    /// Re-resolving after the route is dropped has to stop the source
+    /// publishing, or every track that was ever a source keeps copying its
+    /// block for the rest of the session.
+    #[test]
+    fn dropping_the_route_stops_the_source_publishing() {
+        let mut snapshot = snapshot_with_route("piano", "audio-1");
+        let mut runtime = resolved(&snapshot);
+        assert!(runtime.tracks[0].loopback_publish);
+
+        snapshot.tracks[1].input_source = Default::default();
+        runtime.resolve_loopback_inputs(&snapshot);
+
+        assert!(!runtime.tracks[0].loopback_publish);
+    }
+
+    /// A mono destination folds the source rather than reading a channel the
+    /// pair does not have.
+    #[test]
+    fn the_channel_mapping_follows_the_connections_bound_channels() {
+        let mut snapshot = snapshot_with_route("piano", "audio-1");
+        snapshot.tracks[1].input_source.channels = vec![0];
+        let runtime = resolved(&snapshot);
+
+        assert_eq!(
+            runtime.tracks[1].input_source,
+            RuntimeTrackInputSource::Loopback {
+                source_index: 0,
+                mode: crate::jam_bus::JamChannelMode::Left,
+            }
+        );
     }
 }

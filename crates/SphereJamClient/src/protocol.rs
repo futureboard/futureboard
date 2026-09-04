@@ -89,6 +89,11 @@ pub mod message {
     pub const JAM_STREAM_ADDED: &str = "jam.stream_added";
     pub const JAM_STREAM_REMOVED: &str = "jam.stream_removed";
 
+    pub const JAM_STREAM_SUBSCRIBE: &str = "jam.stream_subscribe";
+    pub const JAM_STREAM_SUBSCRIBED: &str = "jam.stream_subscribed";
+    pub const JAM_STREAM_UNSUBSCRIBE: &str = "jam.stream_unsubscribe";
+    pub const JAM_STREAM_UNSUBSCRIBED: &str = "jam.stream_unsubscribed";
+
     pub const AUDIO_CAPABILITIES: &str = "audio.capabilities";
     pub const AUDIO_FORMAT_SELECTED: &str = "audio.format_selected";
 
@@ -560,10 +565,6 @@ pub struct TransportCapabilities {
     pub client_kind: String,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// One address the client may try, with the priority the server wants it tried
 /// at. `token` authorises the media plane to accept packets on this candidate
 /// and is a bearer secret — never log it.
@@ -905,6 +906,111 @@ pub struct StreamEvent {
     pub seq: u64,
 }
 
+// ── Ingress control ─────────────────────────────────────────────────────────
+
+/// How the server decides which of a room's streams reach this client.
+///
+/// The default is `Auto`, which is what a client that never subscribes gets and
+/// what the browser listener relies on. A DAW wants `Explicit`: it routes one
+/// performer to one track and should pay for that performer, not for the room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SubscriptionMode {
+    /// The server subscribes this client to everything it can decode, now and
+    /// as new streams appear.
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    /// The client is served exactly the streams it named. One published later
+    /// is announced and not sent until the client asks for it.
+    #[serde(rename = "explicit")]
+    Explicit,
+}
+
+impl SubscriptionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+/// Ask to start receiving streams, or to hand the choice back to the server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamSubscribeRequest {
+    pub jam_id: String,
+    /// Streams to start receiving, added to whatever this client already
+    /// receives. Sending any id switches the participant to `Explicit`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_ids: Vec<String>,
+    /// Return to `Auto` and take the whole room. Mutually exclusive with
+    /// `stream_ids`: the server refuses a message that sets both, because
+    /// serving one intent silently would leave the client believing the other
+    /// took effect.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all: bool,
+}
+
+/// Ask to stop receiving streams.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamUnsubscribeRequest {
+    pub jam_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_ids: Vec<String>,
+    /// Drop everything and stay explicit: silent until something is asked for.
+    /// This is what a DAW sends on joining, before it has read its routing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// One stream a subscribe could not grant.
+///
+/// Per stream rather than per message: a Studio routing four performers where
+/// one publishes a rate this client never offered should get the other three.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubscriptionRefusal {
+    #[serde(default)]
+    pub stream_id: String,
+    /// `not_found` for a stream that is not in the room or is this client's
+    /// own; `negotiation_failed` for one it cannot decode.
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// The reply to a subscribe. `stream_ids` is the whole set after the change,
+/// never a delta, and is empty under `Auto` where the server decides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamSubscribed {
+    #[serde(default)]
+    pub jam_id: String,
+    #[serde(default)]
+    pub mode: SubscriptionMode,
+    #[serde(default)]
+    pub stream_ids: Vec<String>,
+    #[serde(default)]
+    pub refused: Vec<SubscriptionRefusal>,
+}
+
+/// The reply to an unsubscribe. `dropped` names what this message actually
+/// stopped, so a receiver can release the decoder without diffing sets.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamUnsubscribed {
+    #[serde(default)]
+    pub jam_id: String,
+    #[serde(default)]
+    pub mode: SubscriptionMode,
+    #[serde(default)]
+    pub stream_ids: Vec<String>,
+    #[serde(default)]
+    pub dropped: Vec<String>,
+}
+
 // ── Connection lifecycle ────────────────────────────────────────────────────
 
 /// The first message the server sends. It reports which account this connection
@@ -956,6 +1062,90 @@ pub fn decode_error(envelope: &Envelope) -> WireError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_subscribe_names_streams_and_omits_what_it_does_not_set() {
+        let request = StreamSubscribeRequest {
+            jam_id: "jam_1".to_string(),
+            stream_ids: vec!["str_1".to_string(), "str_2".to_string()],
+            all: false,
+        };
+        let json = serde_json::to_string(&request).expect("serialises");
+        assert_eq!(
+            json,
+            r#"{"jam_id":"jam_1","stream_ids":["str_1","str_2"]}"#,
+            "an unset `all` must not be sent: the server refuses a message that              names streams and asks for the room at the same time"
+        );
+
+        let everything = StreamSubscribeRequest {
+            jam_id: "jam_1".to_string(),
+            stream_ids: Vec::new(),
+            all: true,
+        };
+        let json = serde_json::to_string(&everything).expect("serialises");
+        assert_eq!(json, r#"{"jam_id":"jam_1","all":true}"#);
+    }
+
+    #[test]
+    fn a_subscribed_reply_carries_the_whole_set_and_its_refusals() {
+        let raw = r#"{
+            "v": 1,
+            "type": "jam.stream_subscribed",
+            "payload": {
+                "jam_id": "jam_1",
+                "mode": "explicit",
+                "stream_ids": ["str_1"],
+                "refused": [
+                    {"stream_id":"str_9","code":"negotiation_failed","message":"cannot decode"}
+                ]
+            }
+        }"#;
+        let envelope: Envelope = serde_json::from_str(raw).expect("envelope parses");
+        assert_eq!(envelope.kind, message::JAM_STREAM_SUBSCRIBED);
+        let ack: StreamSubscribed = envelope.decode().expect("payload parses");
+        assert_eq!(ack.mode, SubscriptionMode::Explicit);
+        assert_eq!(ack.stream_ids, vec!["str_1".to_string()]);
+        assert_eq!(ack.refused.len(), 1);
+        assert_eq!(ack.refused[0].code, "negotiation_failed");
+    }
+
+    #[test]
+    fn an_unsubscribed_reply_reports_what_it_actually_stopped() {
+        let raw = r#"{
+            "v": 1,
+            "type": "jam.stream_unsubscribed",
+            "payload": {
+                "jam_id": "jam_1",
+                "mode": "explicit",
+                "stream_ids": [],
+                "dropped": ["str_1", "str_2"]
+            }
+        }"#;
+        let envelope: Envelope = serde_json::from_str(raw).expect("envelope parses");
+        let ack: StreamUnsubscribed = envelope.decode().expect("payload parses");
+        assert_eq!(ack.mode, SubscriptionMode::Explicit);
+        assert!(ack.stream_ids.is_empty());
+        // `dropped` is the field a receiver releases decoders from: under
+        // automatic ingress it held streams it never named, and those are
+        // exactly the ones an `all` unsubscribe stops.
+        assert_eq!(ack.dropped.len(), 2);
+    }
+
+    #[test]
+    fn an_ingress_mode_round_trips_through_the_wire_tag() {
+        assert_eq!(
+            serde_json::to_string(&SubscriptionMode::Auto).expect("serialises"),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SubscriptionMode::Explicit).expect("serialises"),
+            "\"explicit\""
+        );
+        // A reply with no mode is a server that predates ingress control, which
+        // means it is choosing.
+        let ack: StreamSubscribed = serde_json::from_str(r#"{"jam_id":"jam_1"}"#).expect("parses");
+        assert_eq!(ack.mode, SubscriptionMode::Auto);
+    }
 
     #[test]
     fn a_participant_event_from_the_server_decodes() {

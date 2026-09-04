@@ -508,6 +508,23 @@ impl EngineTrackInputSourceSnapshot {
             .is_some_and(crate::jam_bus::is_jam_device)
     }
 
+    /// Whether this route reads another track's output rather than a device.
+    ///
+    /// Like a jam route, it must never reach the capture-stream logic: there is
+    /// no device to open and no channel count to validate against a driver.
+    pub fn is_loopback(&self) -> bool {
+        self.device_id
+            .as_deref()
+            .is_some_and(crate::loopback::is_loopback_device)
+    }
+
+    /// The source track this route names, if any.
+    pub fn loopback_track_id(&self) -> Option<&str> {
+        self.device_id
+            .as_deref()
+            .and_then(crate::loopback::loopback_track_id)
+    }
+
     /// The remote stream this route names, if any.
     pub fn jam_stream_id(&self) -> Option<&str> {
         self.device_id

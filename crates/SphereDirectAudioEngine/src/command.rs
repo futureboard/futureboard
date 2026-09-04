@@ -73,6 +73,13 @@ pub enum EngineCommand {
     /// starting to share a bus must not cost the room a reload. The control
     /// thread resolves both the track id and the slot before enqueueing, so the
     /// callback only ever writes to an index.
+    /// Whether this track keeps a copy of its post-fader block for a track
+    /// that reads it as input.
+    ///
+    /// Separate from the input-route command because it lands on a *different*
+    /// track: routing B's input to A changes what B reads and what A has to
+    /// keep, and the callback's graph has to be told both.
+    SetTrackLoopbackPublish { track_index: usize, publish: bool },
     SetTrackJamPublish {
         track_index: usize,
         slot: Option<u32>,

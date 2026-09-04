@@ -251,6 +251,29 @@ fn draw_chunk_waveform_locked(
         None => waveform_cache::pick_best_samples_per_peak(pixels_per_second, meta.sample_rate),
     };
     let spp = waveform_cache::best_available_samples_per_peak_in_entry(entry, desired_spp);
+    // The level to draw from when `spp` has nothing for a column. The shipped
+    // ladder ships with the preview and is always resident, so this is what
+    // keeps a waveform on screen while the finer chunks behind a deep zoom are
+    // still being decoded — blocky for a frame or two, rather than gone.
+    let fallback_spp =
+        waveform_cache::resident_ladder_samples_per_peak(entry).filter(|ladder| *ladder != spp);
+    // Commit to the fine level only when the whole visible span is there. Half
+    // a span at one resolution and half at another shows as a step, because a
+    // min/max envelope is taller the coarser it is.
+    let spp = match fallback_spp {
+        Some(ladder)
+            if !waveform_cache::chunks_cover_peak_range(
+                entry,
+                spp,
+                sample_to_peak_index(source_start as f64, spp),
+                sample_to_peak_index(source_end.saturating_sub(1) as f64, spp) + 1,
+            ) =>
+        {
+            ladder
+        }
+        _ => spp,
+    };
+    let fallback_spp = fallback_spp.filter(|ladder| *ladder != spp);
     let output_len = SphereAudioProcessor::stretched_duration_samples(
         source_end.saturating_sub(source_start),
         &clip.stretch.to_sphere_stretch_params(state.bpm as f64),
@@ -315,10 +338,25 @@ fn draw_chunk_waveform_locked(
                 effective_time_ratio,
                 clip.stretch.reverse,
             );
-            let p0 = sample_to_peak_index(s0.min(s1), spp);
-            let p1 = sample_to_peak_index(s0.max(s1), spp).max(p0);
-            let WaveformPeak { min, max } =
-                waveform_cache::aggregate_peak_range_in_entry(entry, spp, p0, p1 + 1);
+            let (lo, hi) = (s0.min(s1), s0.max(s1));
+            let p0 = sample_to_peak_index(lo, spp);
+            let p1 = sample_to_peak_index(hi, spp).max(p0);
+            let peak = waveform_cache::aggregate_peak_range_in_entry_opt(entry, spp, p0, p1 + 1)
+                .or_else(|| {
+                    // Nothing at this level for this column. Re-index the same
+                    // source range against the coarse ladder rather than
+                    // dropping the bar: the picture is what the user is looking
+                    // at, and a blockier one beats none.
+                    let ladder = fallback_spp?;
+                    let f0 = sample_to_peak_index(lo, ladder);
+                    let f1 = sample_to_peak_index(hi, ladder).max(f0);
+                    waveform_cache::aggregate_peak_range_in_entry_opt(entry, ladder, f0, f1 + 1)
+                });
+            // Genuine silence still draws nothing; only a column with no data
+            // at any level is skipped.
+            let Some(WaveformPeak { min, max }) = peak else {
+                continue;
+            };
             if min == 0.0 && max == 0.0 {
                 continue;
             }

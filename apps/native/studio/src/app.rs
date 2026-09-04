@@ -88,6 +88,7 @@ pub fn setup(cx: &mut App) {
         set_discord_enabled(settings.general.discord_rpc_enabled);
     }));
     register_update_provider();
+    install_deep_links(cx);
 
     let theme_report = sphere_ui_components::theme::initialize_theme_system();
     let saved_theme = sphere_ui_components::settings::SettingsSchema::load_from_disk()
@@ -440,11 +441,129 @@ fn log_window_registry(cx: &App, stage: &str) {
     );
 }
 
+/// Wire the `fbrd://` scheme: own it, listen for later launches, and act on
+/// what arrives.
+///
+/// macOS delivers URLs to the running app through Apple events, which GPUI
+/// surfaces as `Application::on_open_urls` (hooked in `main`); Windows and
+/// Linux launch a new process, which `main` forwards over the relay. Both land
+/// in the same queue, drained here on the UI thread at a rate a person cannot
+/// notice and a frame does not feel.
+fn install_deep_links(cx: &mut App) {
+    use sphere_ui_components::deeplink;
+
+    deeplink::start_relay_listener();
+    deeplink::ensure_registered();
+    #[cfg(target_os = "macos")]
+    {
+        let task = cx.register_url_scheme(deeplink::SCHEME);
+        cx.spawn(async move |_cx| match task.await {
+            Ok(()) => deeplink::mark_registered(true),
+            Err(error) => boot::log(&format!("fbrd scheme registration failed: {error}")),
+        })
+        .detach();
+    }
+
+    cx.spawn(async move |cx| loop {
+        cx.background_executor()
+            .timer(Duration::from_millis(200))
+            .await;
+        let urls = deeplink::drain();
+        if urls.is_empty() {
+            continue;
+        }
+        cx.update(|cx| {
+            for url in urls {
+                handle_deep_link(&url, cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// A jam link that arrived before there was a Studio window to open it in.
+fn pending_jam_link() -> &'static std::sync::Mutex<Option<String>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn handle_deep_link(url: &str, cx: &mut App) {
+    use sphere_ui_components::deeplink::{self, DeepLink};
+
+    match deeplink::parse(url) {
+        Some(DeepLink::AuthCallback {
+            state,
+            session,
+            error,
+        }) => {
+            if !sphere_ui_components::auth::complete_scheme_sign_in(
+                &state,
+                &session,
+                error.as_deref(),
+            ) {
+                boot::log("fbrd sign-in callback ignored: nothing was waiting for it");
+            }
+        }
+        Some(DeepLink::Jam { link }) => {
+            let studio = cx.global::<NativeShellWindows>().studio;
+            match studio {
+                Some(handle) => open_jam_from_link(handle, link, cx),
+                None => {
+                    // Welcome is up, or Studio is still loading. Held until a
+                    // Studio window exists; see `store_studio_window_handle`.
+                    boot::log("fbrd jam link held until Studio opens");
+                    if let Ok(mut pending) = pending_jam_link().lock() {
+                        *pending = Some(link);
+                    }
+                }
+            }
+        }
+        None => boot::log(&format!("fbrd link not understood: {url}")),
+    }
+}
+
+/// Open the Audio Jam window in `studio` and join what `link` names.
+///
+/// Opening the window is what installs the jam controller, so it happens
+/// first and synchronously; the join is a network round trip and runs on the
+/// background pool exactly as a pasted link does.
+fn open_jam_from_link(studio: WindowHandle<StudioLayout>, link: String, cx: &mut App) {
+    let opened = studio.update(cx, |layout, _window, cx| {
+        layout.dispatch_command_id("window:audio-jam", cx);
+    });
+    if opened.is_err() {
+        boot::log("fbrd jam link: the Studio window is gone");
+        return;
+    }
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = sphere_ui_components::jam::with_controller(|controller| {
+                controller.join_with_link(&link)
+            }) {
+                boot::log(&format!(
+                    "fbrd jam link: join failed: {}",
+                    error.user_message()
+                ));
+            }
+        })
+        .detach();
+}
+
 fn store_studio_window_handle(cx: &mut App, handle: WindowHandle<StudioLayout>) {
     cx.update_global::<NativeShellWindows, _>(|shell, _| {
         shell.studio = Some(handle);
     });
     eprintln!("[StudioOpen] stored studio window handle");
+    // A jam link that arrived while Welcome was up is acted on now that there
+    // is a Studio to open the window in.
+    let held = pending_jam_link()
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.take());
+    if let Some(link) = held {
+        open_jam_from_link(handle, link, cx);
+    }
 }
 
 fn schedule_auto_update_check(cx: &mut App) {

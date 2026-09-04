@@ -20,6 +20,25 @@
 //! jam ─▶ JamAudioSink ─▶ Futureboard Audio Engine ─▶ track
 //! ```
 //!
+//! # Ingress and egress
+//!
+//! Both directions are explicit, and they are separate decisions.
+//!
+//! **Egress** is [`JamSession::publish`]: the host says what it sends and from
+//! where. Nothing leaves this client that was not published.
+//!
+//! **Ingress** is [`JamSession::subscribe`]. By default — [`JamIngress::Everything`]
+//! — the server sends this client every stream it can decode, which is what a
+//! listener wants. A DAW wants [`JamIngress::Routed`]: the session goes silent
+//! the moment it joins, and each stream a project routes to a track is asked
+//! for by name. At roughly 1.5 Mbit/s per 48 kHz stereo PCM stream, that is the
+//! difference between two routed tracks and a whole band arriving on the one
+//! link that is already the constraint.
+//!
+//! A stream that is asked for before it is published is remembered rather than
+//! refused: a track bound to a performer who has not started is a track
+//! waiting, and it attaches by itself when they publish.
+//!
 //! # Threads
 //!
 //! Three, none of them the audio thread:
@@ -91,8 +110,11 @@ pub use config::{JamConfig, JamEnv, RegionPreference};
 pub use credentials::{JamCredentialProvider, SharedCredentials};
 pub use error::{ErrorCode, JamError, Result};
 pub use ids::{DeviceId, JamId, MediaAlias, ParticipantId, StreamId, UserId};
+pub use protocol::{SubscriptionMode, SubscriptionRefusal};
 pub use registry::{JamRegistry, Participant, RemoteStream};
-pub use session::{JamCommand, JamEvent, JamSession, JamSessionOptions, JamSnapshot, JamState};
+pub use session::{
+    JamCommand, JamEvent, JamIngress, JamSession, JamSessionOptions, JamSnapshot, JamState,
+};
 
 /// A device id that is stable for this installation.
 ///
