@@ -1310,6 +1310,24 @@ mod tests {
         assert!(!should_capture_recording(false, true, true));
     }
 
+    /// The rule that makes "file size must not grow after Stop" hold for every
+    /// Stop channel: the session's own capture flag is cleared by transport
+    /// stop (`EngineInner::pause` → `end_recording_capture`), and a cleared
+    /// flag ends capture whatever the transport is doing. Before that, a Stop
+    /// that did not also call `stop_recording` left this true forever, the file
+    /// kept growing, and the next Record continued the same take.
+    #[test]
+    fn clearing_the_session_flag_ends_capture_on_every_path() {
+        for capture_on_transport in [false, true] {
+            for transport_playing in [false, true] {
+                assert!(
+                    !should_capture_recording(false, capture_on_transport, transport_playing),
+                    "capture_on_transport={capture_on_transport} playing={transport_playing}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn failed_own_stream_start_clears_recording_state() {
         let shared = SharedState::default();

@@ -181,7 +181,7 @@ impl StudioLayout {
             TransportCommand::PlayPause => {
                 if self.is_recording_active(cx) {
                     self.log_transport_debug("Spacebar", "stop_recording_and_stop_transport", cx);
-                    self.stop_native_recording(cx);
+                    self.stop_native_playback(cx);
                     return;
                 }
                 let playing = self
@@ -197,12 +197,12 @@ impl StudioLayout {
                 }
             }
             TransportCommand::Stop => {
+                // Same call as Spacebar below: `stop_native_playback` is the one
+                // Stop, and it decides whether a take has to be finalized first.
                 if self.is_recording_active(cx) {
                     self.log_transport_debug("Stop", "stop_recording_and_stop_transport", cx);
-                    self.stop_native_recording(cx);
-                } else {
-                    self.stop_native_playback(cx);
                 }
+                self.stop_native_playback(cx);
             }
             TransportCommand::ReturnToStart => self.seek_native_playhead(cx, 0.0),
             TransportCommand::ToggleLoop => {

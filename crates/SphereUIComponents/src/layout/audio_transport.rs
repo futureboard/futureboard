@@ -17,6 +17,27 @@ use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
 use super::transport_freeze_debug::{self, PlayWatchdog};
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout};
 
+/// Whether a Stop has to finalize a take before it stops the transport.
+///
+/// Every Stop channel — Spacebar, the transport button, ARA, project close, a
+/// sample-rate change, a session load — goes through
+/// [`StudioLayout::stop_native_playback`], and this is the rule it applies, so
+/// they cannot drift apart. Leaving a take running was what kept the writer
+/// consuming input after Stop and made the next Record continue the same clip.
+///
+/// Count-in is the one exclusion: it is cancelled rather than finalized, and
+/// `stop_native_recording` routes that case back through the stop path, so
+/// excluding it here is also what stops the two recursing.
+pub(super) fn stop_must_finalize_recording(
+    ui_state: &crate::layout::RecordingUiState,
+    recording_active: bool,
+) -> bool {
+    if matches!(ui_state, crate::layout::RecordingUiState::CountingIn { .. }) {
+        return false;
+    }
+    recording_active
+}
+
 /// Watchdog timeout for an in-flight native engine sync. A `load_project` that
 /// hangs (deadlock) never returns and would otherwise pin `sync_in_flight` and
 /// the "Sync native engine" task forever. Kept below the loading-session
@@ -3541,7 +3562,23 @@ impl StudioLayout {
         cx.notify();
     }
 
+    /// The one Stop.
+    ///
+    /// Spacebar, the transport Stop button, an ARA host request, a project
+    /// close, a sample-rate change and a session load all land here, and every
+    /// one of them has to produce the same lifecycle. A take that is running
+    /// must be finalized — writer flushed, file closed, clip committed, session
+    /// destroyed — never left writing into a file nobody will finish, which is
+    /// what made a second Record continue the first one's clip.
+    ///
+    /// Count-in is deliberately excluded: it is cancelled rather than
+    /// finalized, and `stop_native_recording` routes that case back through
+    /// here, so excluding it is also what keeps the two from recursing.
     pub(super) fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
+        if stop_must_finalize_recording(&self.recording.ui_state, self.is_recording_active(cx)) {
+            self.stop_native_recording(cx);
+            return;
+        }
         self.stop_hardware_midi_playback();
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
@@ -4056,5 +4093,53 @@ mod sync_gate_tests {
     fn force_beats_both_gates() {
         assert!(sync_should_build_now(true, false, Some(Duration::ZERO)));
         assert!(sync_should_build_now(true, true, Some(Duration::ZERO)));
+    }
+}
+
+#[cfg(test)]
+mod stop_lifecycle_tests {
+    use super::stop_must_finalize_recording;
+    use crate::layout::RecordingUiState;
+
+    /// Test 3 / Test 5: Spacebar and the Stop button both reach the same rule,
+    /// so a running take is finalized either way and the writer stops consuming
+    /// input at the Stop rather than at whatever the caller remembered to do.
+    #[test]
+    fn a_running_take_is_finalized_by_every_stop_channel() {
+        for state in [
+            RecordingUiState::Preparing,
+            RecordingUiState::Recording,
+            RecordingUiState::Finalizing,
+        ] {
+            assert!(
+                stop_must_finalize_recording(&state, true),
+                "{state:?} must finalize"
+            );
+        }
+    }
+
+    /// A count-in has no take yet: it is cancelled, and routing it back into the
+    /// finalize path would recurse instead of stopping.
+    #[test]
+    fn a_count_in_is_cancelled_rather_than_finalized() {
+        assert!(!stop_must_finalize_recording(
+            &RecordingUiState::CountingIn { bars: 2 },
+            true
+        ));
+    }
+
+    /// Plain playback stop stays plain: nothing to flush, nothing to commit.
+    #[test]
+    fn stopping_playback_alone_finalizes_nothing() {
+        assert!(!stop_must_finalize_recording(
+            &RecordingUiState::Idle,
+            false
+        ));
+        assert!(!stop_must_finalize_recording(
+            &RecordingUiState::Failed {
+                reason: "x".to_string()
+            },
+            false
+        ));
     }
 }

@@ -63,7 +63,7 @@ use sphere_jam_client::session::{
 use DirectAudio::engine::SharedState;
 use DirectAudio::jam_bus::{
     jam_device_id, publish_key_track, PUBLISH_KEY_LIVE_INPUT, PUBLISH_KEY_MASTER,
-    PUBLISH_KEY_MULTITRACK,
+    PUBLISH_KEY_MONITOR, PUBLISH_KEY_MULTITRACK,
 };
 
 pub use egress::{JamSend, JamSendTap};
@@ -123,6 +123,34 @@ pub struct JamStreamView {
     pub peak: f32,
     /// Round trip of the packets carrying it, in milliseconds.
     pub rtt_ms: f64,
+    /// Whether a track in *this* project listens to it.
+    ///
+    /// The difference between "in the room" and "audible here", and the one the
+    /// panel could not previously show: an unrouted stream is not subscribed,
+    /// so it is silent for a reason that has nothing to do with the network.
+    pub routed: bool,
+    /// Whether its ring is still filling its cushion rather than playing.
+    pub buffering: bool,
+    /// Underruns plus overruns on its ring since it was bound — how often the
+    /// network failed to keep the cushion.
+    pub dropouts: u64,
+}
+
+/// One stream this Studio is putting into the room, as the panel shows it.
+///
+/// Built from what the engine is actually doing rather than from what was
+/// asked for: `level` is the peak of audio that really left the tap, so a send
+/// bound to something nothing feeds reads differently from a working one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JamSendView {
+    /// The publish key — the identity, stable across a rename.
+    pub key: String,
+    /// What the room sees.
+    pub name: String,
+    /// Which engine tap it comes from, in words.
+    pub tap: String,
+    /// Peak of what left since the last UI read, linear.
+    pub level: f32,
 }
 
 impl JamStreamView {
@@ -165,8 +193,11 @@ pub struct JamUiState {
     pub packets_out: u64,
     pub participants: Vec<ParticipantSummary>,
     pub streams: Vec<JamStreamView>,
-    /// Streams this Studio is publishing.
+    /// Streams this Studio is publishing, by key.
     pub publishing: Vec<String>,
+    /// The same streams as the panel shows them: name, tap, and whether audio
+    /// is really leaving.
+    pub sending: Vec<JamSendView>,
     pub last_error: Option<String>,
     /// The most recent invite link minted from this Studio, shown once so it
     /// can be copied. Never persisted.
@@ -456,6 +487,15 @@ impl JamController {
         let jam_id = JamId::new(created.jam.id.clone());
         self.set_join_url(created.join_url.clone());
         self.join(jam_id, String::new())?;
+        // Mint the invite here rather than waiting to be asked. Creating a room
+        // is never the goal — handing somebody the link is — and making that a
+        // second deliberate gesture is most of why starting a jam feels like a
+        // procedure. A failure is not fatal: the room exists, the Invite button
+        // still works, and the error goes where the panel already reads errors.
+        if let Err(error) = self.create_invite("performer") {
+            self.last_error = Some(error.to_string());
+        }
+        self.publish_ui_state();
         Ok(code)
     }
 
@@ -536,6 +576,16 @@ impl JamController {
         let sends: Vec<JamSend> = self.sends.values().cloned().collect();
         for send in &sends {
             if let Err(error) = self.publish_send(send) {
+                self.last_error = Some(error.to_string());
+            }
+        }
+        // A default that works. Joining a room and being inaudible — with the
+        // remedy being an output bus bound to a port on a device you have to
+        // know exists — is why this reads as hard to use. When the project says
+        // nothing about what to send, send the mix; it is the one answer that
+        // is right for every room, and one click switches it off.
+        if self.published_keys.is_empty() {
+            if let Err(error) = self.publish_master() {
                 self.last_error = Some(error.to_string());
             }
         }
@@ -627,6 +677,7 @@ impl JamController {
     fn send_key(tap: JamSendTap) -> &'static str {
         match tap {
             JamSendTap::Master => PUBLISH_KEY_MASTER,
+            JamSendTap::Monitor => PUBLISH_KEY_MONITOR,
             JamSendTap::LiveInput => PUBLISH_KEY_LIVE_INPUT,
         }
     }
@@ -647,6 +698,7 @@ impl JamController {
                 "{} is already being sent to the jam",
                 match send.tap {
                     JamSendTap::Master => "the master mix",
+                    JamSendTap::Monitor => "the monitor output",
                     JamSendTap::LiveInput => "the live input",
                 }
             )));
@@ -671,6 +723,10 @@ impl JamController {
         ));
         let kind = match send.tap {
             JamSendTap::Master => JamPublishSourceKind::Master,
+            // The room does not need to know it came from a Control Room rather
+            // than a master bus; what it needs is one stereo mix from this
+            // Studio, named after the bus the user bound.
+            JamSendTap::Monitor => JamPublishSourceKind::Master,
             JamSendTap::LiveInput => JamPublishSourceKind::HardwareInput {
                 connection: send.connection_id.clone(),
             },
@@ -1074,6 +1130,44 @@ impl JamController {
         }
     }
 
+    /// What this Studio is sending, as the panel shows it.
+    ///
+    /// Built from the publish keys the controller actually holds and the engine
+    /// slots behind them, never from what was requested: a stream announced to
+    /// the room but fed by a tap with nothing on it is the failure this view
+    /// exists to make visible, and it is indistinguishable from a working one
+    /// on any list built from intent.
+    fn send_views(&self) -> Vec<JamSendView> {
+        self.published_keys
+            .iter()
+            .map(|key| {
+                let level = self
+                    .shared
+                    .jam_bus
+                    .publish_slot_for(key)
+                    .and_then(|index| self.shared.jam_bus.publish(index))
+                    .map(|slot| slot.take_peak())
+                    .unwrap_or(0.0);
+                // A bus-bound send carries the user's own name for the stream;
+                // a panel toggle has no bus, so it falls back to the tap's.
+                let bus = self
+                    .sends
+                    .values()
+                    .find(|send| Self::send_key(send.tap) == key);
+                let (name, tap) = match bus {
+                    Some(send) => (send.name.clone(), send_tap_label(send.tap).to_string()),
+                    None => publish_key_labels(key),
+                };
+                JamSendView {
+                    key: key.clone(),
+                    name,
+                    tap,
+                    level,
+                }
+            })
+            .collect()
+    }
+
     /// Rebuild the published UI state from the session snapshot and the bus.
     fn publish_ui_state(&self) {
         let session_snapshot = self
@@ -1088,6 +1182,7 @@ impl JamController {
             .or_else(|| session_snapshot.last_error.clone());
         next.invite_link = self.invite_link.clone();
         next.publishing = self.published_keys.clone();
+        next.sending = self.send_views();
         next.quality = self.quality.clone();
         next.multitrack_tracks = self.multitrack_tracks.clone();
 
@@ -1122,6 +1217,30 @@ pub const PUBLISH_SAMPLE_RATE: u32 = 48_000;
 ///
 /// Split out so it can be tested without a network: everything it needs is in
 /// the snapshot and the bus.
+/// The words for one jam send tap.
+fn send_tap_label(tap: JamSendTap) -> &'static str {
+    match tap {
+        JamSendTap::Master => "Master",
+        JamSendTap::Monitor => "Control Room",
+        JamSendTap::LiveInput => "Interface",
+    }
+}
+
+/// Display name and tap for a publish key with no output bus behind it — the
+/// panel's own Master / Arrangement toggles, and per-track shares.
+fn publish_key_labels(key: &str) -> (String, String) {
+    match key {
+        PUBLISH_KEY_MASTER => ("Master mix".to_string(), "Master".to_string()),
+        PUBLISH_KEY_MONITOR => ("Monitor output".to_string(), "Control Room".to_string()),
+        PUBLISH_KEY_LIVE_INPUT => ("Live input".to_string(), "Interface".to_string()),
+        PUBLISH_KEY_MULTITRACK => ("Arrangement".to_string(), "Tracks".to_string()),
+        other => match other.strip_prefix("track:") {
+            Some(track_id) => (format!("Track {track_id}"), "Track".to_string()),
+            None => (other.to_string(), "Engine".to_string()),
+        },
+    }
+}
+
 fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedState) -> JamUiState {
     let mut streams = Vec::with_capacity(snapshot.streams.len());
     for summary in &snapshot.streams {
@@ -1142,12 +1261,18 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
             .formats
             .iter()
             .any(|(stream_id, _)| stream_id == &id);
-        let peak = shared
+        let slot = shared
             .jam_bus
             .input_slot_for(&summary.id)
-            .and_then(|index| shared.jam_bus.input(index))
-            .map(|slot| slot.take_peak())
-            .unwrap_or(0.0);
+            .and_then(|index| shared.jam_bus.input(index));
+        let peak = slot.map(|slot| slot.take_peak()).unwrap_or(0.0);
+        // A slot that exists at all is one this project routed somewhere; the
+        // rest of the room's streams are never bound and never subscribed.
+        let routed = slot.is_some();
+        let buffering = slot.map(|slot| slot.is_priming()).unwrap_or(false);
+        let dropouts = slot
+            .map(|slot| slot.underruns().saturating_add(slot.overruns()))
+            .unwrap_or(0);
 
         streams.push(JamStreamView {
             stream_id: summary.id.clone(),
@@ -1163,6 +1288,9 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
             receiving,
             peak,
             rtt_ms: snapshot.rtt_ms,
+            routed,
+            buffering,
+            dropouts,
         });
     }
 
@@ -1193,6 +1321,7 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
         participants: snapshot.participants.clone(),
         streams,
         publishing: Vec::new(),
+        sending: Vec::new(),
         last_error: snapshot.last_error.clone(),
         invite_link: None,
         quality: JamPublishQuality::default(),
@@ -1567,5 +1696,45 @@ mod tests {
         summary.channels = 1;
         summary.channel_metadata.clear();
         assert_eq!(channel_labels(&summary), vec!["Mono"]);
+    }
+}
+
+#[cfg(test)]
+mod send_label_tests {
+    use super::{publish_key_labels, send_tap_label, JamSendTap};
+    use DirectAudio::jam_bus::{
+        PUBLISH_KEY_LIVE_INPUT, PUBLISH_KEY_MASTER, PUBLISH_KEY_MONITOR, PUBLISH_KEY_MULTITRACK,
+    };
+
+    /// Master and Monitor are different signals and must never read as the same
+    /// thing: one is the mix an export gets, the other is what the engineer is
+    /// actually hearing.
+    #[test]
+    fn master_and_monitor_are_never_labelled_the_same() {
+        assert_ne!(
+            send_tap_label(JamSendTap::Master),
+            send_tap_label(JamSendTap::Monitor)
+        );
+        assert_ne!(
+            publish_key_labels(PUBLISH_KEY_MASTER),
+            publish_key_labels(PUBLISH_KEY_MONITOR)
+        );
+    }
+
+    #[test]
+    fn every_publish_key_has_words_a_person_can_read() {
+        for key in [
+            PUBLISH_KEY_MASTER,
+            PUBLISH_KEY_MONITOR,
+            PUBLISH_KEY_LIVE_INPUT,
+            PUBLISH_KEY_MULTITRACK,
+        ] {
+            let (name, tap) = publish_key_labels(key);
+            assert!(!name.is_empty() && !tap.is_empty(), "{key}");
+            assert_ne!(name, key, "{key} is shown raw");
+        }
+        let (name, tap) = publish_key_labels("track:trk_7");
+        assert_eq!(name, "Track trk_7");
+        assert_eq!(tap, "Track");
     }
 }

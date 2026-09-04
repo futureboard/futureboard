@@ -12,10 +12,12 @@
 //! turning it off stops the stream — the same three gestures that already
 //! govern a hardware output, applied to the network.
 //!
-//! Two taps, because those are the two the callback stages every block:
+//! Three taps, because those are the three the callback stages every block:
 //!
 //! * **Master** — the mix, before the Control Room touches it. The same signal
 //!   an export gets.
+//! * **Monitor** — after the Control Room: the signal that actually leaves for
+//!   the monitoring output. "Send what I am hearing" is this one, not Master.
 //! * **Live Input** — the interface pair, before any track. How a performer
 //!   sends an instrument without arming a track for it.
 //!
@@ -29,7 +31,7 @@ use std::collections::BTreeMap;
 
 use DirectAudio::jam_bus::{
     is_jam_send_device, JAM_SEND_DEVICE_ID, JAM_SEND_PORTS, JAM_SEND_PORT_LIVE_INPUT,
-    JAM_SEND_PORT_MASTER,
+    JAM_SEND_PORT_MASTER, JAM_SEND_PORT_MONITOR,
 };
 
 use crate::audio_connections::{
@@ -44,6 +46,9 @@ pub const JAM_SEND_DEVICE_NAME: &str = "Audio Jam";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum JamSendTap {
     Master,
+    /// The Control Room output — the mix *after* monitor inserts and the
+    /// control processor, which is what the engineer is actually hearing.
+    Monitor,
     LiveInput,
 }
 
@@ -55,6 +60,9 @@ impl JamSendTap {
             i if i == JAM_SEND_PORT_LIVE_INPUT || i == JAM_SEND_PORT_LIVE_INPUT + 1 => {
                 Some(Self::LiveInput)
             }
+            i if i == JAM_SEND_PORT_MONITOR || i == JAM_SEND_PORT_MONITOR + 1 => {
+                Some(Self::Monitor)
+            }
             _ => None,
         }
     }
@@ -64,6 +72,7 @@ impl JamSendTap {
         let side = if index % 2 == 0 { "L" } else { "R" };
         match Self::for_port(index) {
             Some(Self::Master) => format!("Master {side}"),
+            Some(Self::Monitor) => format!("Monitor {side}"),
             Some(Self::LiveInput) => format!("Live Input {side}"),
             None => format!("Port {}", index + 1),
         }
@@ -173,9 +182,9 @@ mod tests {
     }
 
     #[test]
-    fn the_send_device_offers_the_two_taps_as_stereo_pairs() {
+    fn the_send_device_offers_every_tap_as_a_stereo_pair() {
         let ports = available_ports();
-        assert_eq!(ports.ports.len(), 4);
+        assert_eq!(ports.ports.len(), 6);
         assert!(ports
             .ports
             .iter()
@@ -184,6 +193,20 @@ mod tests {
         assert_eq!(ports.ports[1].port_name, "Master R");
         assert_eq!(ports.ports[2].port_name, "Live Input L");
         assert_eq!(ports.ports[3].port_name, "Live Input R");
+        assert_eq!(ports.ports[4].port_name, "Monitor L");
+        assert_eq!(ports.ports[5].port_name, "Monitor R");
+    }
+
+    /// Master and Monitor are different signals, and a send bound to the
+    /// Control Room pair has to resolve to the Control Room tap — binding it to
+    /// Master would publish the pre-monitor mix under a name that promises what
+    /// the engineer is hearing.
+    #[test]
+    fn the_monitor_pair_resolves_to_the_control_room_tap() {
+        assert_eq!(JamSendTap::for_port(4), Some(JamSendTap::Monitor));
+        assert_eq!(JamSendTap::for_port(5), Some(JamSendTap::Monitor));
+        assert_eq!(JamSendTap::for_port(0), Some(JamSendTap::Master));
+        assert_eq!(JamSendTap::for_port(6), None);
     }
 
     #[test]

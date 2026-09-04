@@ -15,6 +15,62 @@ pub struct LoopBounds {
     pub end: u64,
 }
 
+/// What the transport is doing, as one value.
+///
+/// Two independent booleans — `playing` and "a take is capturing" — can encode
+/// `playing = false, capturing = true`, and that combination is precisely the
+/// bug it used to produce: a Stop that moved the playhead flag but left the
+/// writer consuming input, so the file kept growing and the next Record
+/// continued the same take. One value cannot represent it.
+///
+/// The engine derives this from its own flags rather than storing it, so the
+/// invariant holds by construction for every caller and every backend:
+/// **capture only exists inside `Recording`, and `Recording` only exists while
+/// the transport is running.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportState {
+    /// The playhead does not advance and no take is consuming input. The
+    /// realtime graph still runs — live input, monitoring, preview, FX and
+    /// plugin tails are not the transport's business.
+    Stopped,
+    /// The playhead advances and the timeline is read.
+    Playing,
+    /// Playing, and a take is consuming input into a writer.
+    Recording,
+}
+
+impl TransportState {
+    /// Collapse the engine's two flags into the one legal state.
+    ///
+    /// Capture while stopped is not representable: it resolves to `Stopped`,
+    /// which is the answer that matches what a stopped transport must do.
+    pub fn from_flags(playing: bool, capturing: bool) -> Self {
+        match (playing, capturing) {
+            (false, _) => Self::Stopped,
+            (true, false) => Self::Playing,
+            (true, true) => Self::Recording,
+        }
+    }
+
+    /// Whether the playhead advances and timeline clips are read.
+    pub fn advances_timeline(self) -> bool {
+        matches!(self, Self::Playing | Self::Recording)
+    }
+
+    /// Whether a take may consume input this block.
+    pub fn captures_input(self) -> bool {
+        matches!(self, Self::Recording)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "Stopped",
+            Self::Playing => "Playing",
+            Self::Recording => "Recording",
+        }
+    }
+}
+
 /// Immutable transport state for UI polling and diagnostics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeTransportSnapshot {
@@ -182,5 +238,52 @@ mod tests {
         let snap = RuntimeTransportSnapshot::from_shared(&shared, &TempoMap::static_tempo(120.0));
         assert!((snap.position_seconds - 1.0).abs() < 1e-9);
         assert!((snap.position_beats - 2.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod transport_state_tests {
+    use super::TransportState;
+
+    /// The invalid state the two booleans allowed. Whatever set "capturing"
+    /// while the transport was stopped, the answer is Stopped — nothing
+    /// downstream can read it as a licence to keep writing.
+    #[test]
+    fn a_stopped_transport_never_captures() {
+        let state = TransportState::from_flags(false, true);
+        assert_eq!(state, TransportState::Stopped);
+        assert!(!state.captures_input());
+        assert!(!state.advances_timeline());
+    }
+
+    #[test]
+    fn recording_is_playing_that_also_captures() {
+        let state = TransportState::from_flags(true, true);
+        assert_eq!(state, TransportState::Recording);
+        assert!(state.captures_input());
+        assert!(state.advances_timeline());
+    }
+
+    #[test]
+    fn playing_advances_without_capturing() {
+        let state = TransportState::from_flags(true, false);
+        assert_eq!(state, TransportState::Playing);
+        assert!(!state.captures_input());
+        assert!(state.advances_timeline());
+    }
+
+    /// Capture is a strict subset of advancing: if that ever inverts, a stopped
+    /// transport is writing a file again.
+    #[test]
+    fn capture_implies_advancing() {
+        for state in [
+            TransportState::Stopped,
+            TransportState::Playing,
+            TransportState::Recording,
+        ] {
+            if state.captures_input() {
+                assert!(state.advances_timeline(), "{state:?}");
+            }
+        }
     }
 }

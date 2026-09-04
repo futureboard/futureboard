@@ -50,6 +50,32 @@ use std::sync::RwLock;
 const CAPACITY_FRAMES: usize = 1 << 14;
 const MASK: usize = CAPACITY_FRAMES - 1;
 
+/// Backlog a receiving slot holds before it starts handing blocks to the
+/// callback, in milliseconds of its own ring rate.
+///
+/// The client's jitter buffer reorders packets; it does not absorb the phase
+/// difference between a network that delivers in bursts and a device that asks
+/// for exactly one block on a hard clock. Without a cushion here the ring runs
+/// at zero backlog by construction: every block where the next packet has not
+/// landed yet is a short read, and a short read is a hole in the audio. That is
+/// the crackle. Thirty milliseconds is the same order as the hardware monitor
+/// ring's own target and costs the room nothing a network path had not already
+/// spent.
+const TARGET_MS: u64 = 30;
+
+/// The backlog a slot aims to hold, in frames.
+///
+/// Never less than two callback blocks: a cushion thinner than the thing it is
+/// cushioning is not one.
+#[inline]
+fn target_frames(sample_rate: u32, block_frames: usize) -> u64 {
+    let by_time = (sample_rate.max(1) as u64 * TARGET_MS) / 1000;
+    by_time.max((block_frames as u64).saturating_mul(2)).min(
+        // Never more than a quarter of the ring, or a resync could not recover.
+        (CAPACITY_FRAMES / 4) as u64,
+    )
+}
+
 /// How many remote streams can feed tracks at once.
 ///
 /// Fixed rather than grown on demand: the audio callback indexes this table and
@@ -124,6 +150,15 @@ pub const PUBLISH_KEY_MASTER: &str = "master";
 /// take when it exists.
 pub const PUBLISH_KEY_LIVE_INPUT: &str = "live-input";
 
+/// Publish-slot key for the Control Room / Monitor output.
+///
+/// Distinct from [`PUBLISH_KEY_MASTER`], and the difference is the reason it
+/// exists: master is the mix *before* the Control Room, which is what an export
+/// gets. This is the signal after the monitor insert chain and the control
+/// processor — what actually leaves for the monitoring output, which is what
+/// someone means by "send what I am hearing".
+pub const PUBLISH_KEY_MONITOR: &str = "monitor";
+
 /// Device id of the Audio Jam's *output* ports in Audio Connections.
 ///
 /// Where [`JAM_DEVICE_PREFIX`] makes a remote stream selectable as a track
@@ -137,8 +172,10 @@ pub const JAM_SEND_DEVICE_ID: &str = "jam-send";
 pub const JAM_SEND_PORT_MASTER: u32 = 0;
 /// Port index of the live-input tap's left channel on [`JAM_SEND_DEVICE_ID`].
 pub const JAM_SEND_PORT_LIVE_INPUT: u32 = 2;
+/// Port index of the Control Room / Monitor tap's left channel.
+pub const JAM_SEND_PORT_MONITOR: u32 = 4;
 /// Ports on the send device: two taps, a stereo pair each.
-pub const JAM_SEND_PORTS: u32 = 4;
+pub const JAM_SEND_PORTS: u32 = 6;
 
 /// Whether a device id names the jam send device.
 pub fn is_jam_send_device(device_id: &str) -> bool {
@@ -261,6 +298,12 @@ pub struct JamInputSlot {
     underruns: AtomicU64,
     /// Frames the producer overwrote before the callback read them.
     overruns: AtomicU64,
+    /// `true` while the ring is filling its cushion and contributing silence.
+    ///
+    /// Set when the slot is claimed and again on every underrun, so a stream
+    /// that falls behind rebuilds its backlog once instead of tearing a hole in
+    /// every block from then on.
+    priming: AtomicBool,
 }
 
 impl std::fmt::Debug for JamInputSlot {
@@ -296,6 +339,7 @@ impl Default for JamInputSlot {
             peak: AtomicU32::new(0),
             underruns: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
+            priming: AtomicBool::new(true),
         }
     }
 }
@@ -417,9 +461,18 @@ impl JamInputSlot {
 
     /// Consumer: mix `frames` frames into `out_l` / `out_r`.
     ///
-    /// Returns how many frames actually came from the ring. A shortfall is left
-    /// as whatever the caller had — silence on a freshly cleared block — rather
-    /// than waited for. Realtime-safe: atomics only.
+    /// Returns how many frames came from the ring — `frames` or nothing.
+    ///
+    /// **A block is whole or it is silence.** Handing back a partial block puts
+    /// a hole in the middle of the audio, and because the ring would then be
+    /// empty again next callback, it puts one in every block after it: that is
+    /// the crackle a jam listener hears. Instead the slot holds a cushion
+    /// ([`target_frames`]), starts consuming only once it has one, and on an
+    /// underrun goes back to filling rather than tearing. The listener gets a
+    /// short silence while the cushion rebuilds and then clean audio, instead
+    /// of ripped audio indefinitely.
+    ///
+    /// Realtime-safe: atomics only, no allocation, never a wait.
     #[inline]
     pub fn mix_into(
         &self,
@@ -428,7 +481,11 @@ impl JamInputSlot {
         out_r: &mut [f32],
         frames: usize,
     ) -> usize {
-        if !self.active.load(Ordering::Acquire) {
+        if !self.active.load(Ordering::Acquire) || frames == 0 {
+            return 0;
+        }
+        let want = frames.min(out_l.len()).min(out_r.len());
+        if want == 0 {
             return 0;
         }
         let write = self.write_frames.load(Ordering::Acquire);
@@ -436,14 +493,42 @@ impl JamInputSlot {
 
         // Never read a frame the producer has already lapped: the samples under
         // it belong to a much later moment.
-        let lag = write.saturating_sub(read);
-        if lag > CAPACITY_FRAMES as u64 {
-            read = write - CAPACITY_FRAMES as u64;
+        if write.saturating_sub(read) > CAPACITY_FRAMES as u64 {
+            read = write.saturating_sub(CAPACITY_FRAMES as u64);
+            self.overruns.fetch_add(1, Ordering::Relaxed);
         }
 
-        let ready = write.saturating_sub(read).min(frames as u64) as usize;
-        let usable = ready.min(out_l.len()).min(out_r.len());
-        for offset in 0..usable {
+        let target = target_frames(self.sample_rate.load(Ordering::Relaxed), want);
+        let available = write.saturating_sub(read);
+
+        if self.priming.load(Ordering::Relaxed) {
+            // Still filling the cushion. Contribute nothing and leave the read
+            // cursor where it is; the frames are not late, they are early.
+            if available < target {
+                self.read_frames.store(read, Ordering::Relaxed);
+                return 0;
+            }
+            self.priming.store(false, Ordering::Relaxed);
+        }
+
+        if available < want as u64 {
+            // The cushion is spent. One counted underrun and back to priming,
+            // rather than a torn block now and another one next callback.
+            self.underruns.fetch_add(1, Ordering::Relaxed);
+            self.priming.store(true, Ordering::Relaxed);
+            self.read_frames.store(read, Ordering::Relaxed);
+            return 0;
+        }
+
+        // Latency crept above the cushion — the network ran ahead of the device,
+        // or the callback stalled. Skip forward instead of playing further and
+        // further behind; the frames skipped are already past their moment.
+        if available > target.saturating_add(want as u64) {
+            read = write.saturating_sub(target);
+            self.overruns.fetch_add(1, Ordering::Relaxed);
+        }
+
+        for offset in 0..want {
             let index = ((read as usize).wrapping_add(offset)) & MASK;
             let left = f32::from_bits(self.left[index].load(Ordering::Relaxed));
             let right = f32::from_bits(self.right[index].load(Ordering::Relaxed));
@@ -452,16 +537,30 @@ impl JamInputSlot {
             out_r[offset] += r;
         }
         self.read_frames
-            .store(read.wrapping_add(usable as u64), Ordering::Relaxed);
-        if usable < frames {
-            self.underruns.fetch_add(1, Ordering::Relaxed);
-        }
-        usable
+            .store(read.wrapping_add(want as u64), Ordering::Relaxed);
+        want
+    }
+
+    /// Whether this slot is filling its cushion rather than playing. Diagnostic
+    /// and UI only — the callback reads the flag directly.
+    pub fn is_priming(&self) -> bool {
+        self.priming.load(Ordering::Relaxed)
+    }
+
+    /// Test seam: pretend the cushion is already full.
+    ///
+    /// A test about channel folding or capture positions is not a test about
+    /// the cushion, and should not have to write thirty milliseconds of warm-up
+    /// to ask its own question. The cushion has its own tests.
+    #[cfg(test)]
+    pub(crate) fn assume_primed(&self) {
+        self.priming.store(false, Ordering::Relaxed);
     }
 
     fn claim(&self) {
         self.write_frames.store(0, Ordering::Relaxed);
         self.read_frames.store(0, Ordering::Relaxed);
+        self.priming.store(true, Ordering::Relaxed);
         self.capture_base.store(0, Ordering::Relaxed);
         self.capture_known.store(false, Ordering::Relaxed);
         self.peak.store(0, Ordering::Relaxed);
@@ -508,6 +607,8 @@ pub struct JamPublishSlot {
     capture_known: AtomicBool,
     /// Frames the callback overwrote before the publish thread drained them.
     overruns: AtomicU64,
+    /// Max-hold peak of what was written since the last read, for the panel.
+    peak: AtomicU32,
 }
 
 impl std::fmt::Debug for JamPublishSlot {
@@ -554,6 +655,7 @@ impl JamPublishSlot {
             capture_base: AtomicI64::new(0),
             capture_known: AtomicBool::new(false),
             overruns: AtomicU64::new(0),
+            peak: AtomicU32::new(0),
         }
     }
 
@@ -563,6 +665,15 @@ impl JamPublishSlot {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate.load(Ordering::Relaxed)
+    }
+
+    /// Read and reset the max-hold peak of what actually left this slot.
+    ///
+    /// The difference between "a stream is announced" and "the room can hear
+    /// it" is exactly this number, and without it a send that is bound to a tap
+    /// nothing feeds looks identical on screen to one that is working.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
 
     /// Channels this slot is currently carrying.
@@ -624,12 +735,15 @@ impl JamPublishSlot {
             return;
         }
         let write = self.write_frames.load(Ordering::Relaxed);
+        let mut peak = f32::from_bits(self.peak.load(Ordering::Relaxed));
         for frame in 0..frames {
             let (left, right) = sample(frame);
             let index = ((write as usize).wrapping_add(frame)) & MASK;
             self.planes[0][index].store(left.to_bits(), Ordering::Relaxed);
             self.planes[1][index].store(right.to_bits(), Ordering::Relaxed);
+            peak = peak.max(left.abs()).max(right.abs());
         }
+        self.peak.store(peak.to_bits(), Ordering::Relaxed);
         self.channels.store(2, Ordering::Release);
         self.advance(write, frames, sample_rate);
     }
@@ -657,11 +771,14 @@ impl JamPublishSlot {
             return;
         }
         let write = self.write_frames.load(Ordering::Relaxed) as usize;
+        let mut peak = f32::from_bits(self.peak.load(Ordering::Relaxed));
         for frame in 0..frames {
             let index = write.wrapping_add(frame) & MASK;
             self.planes[first][index].store(left[frame].to_bits(), Ordering::Relaxed);
             self.planes[second][index].store(right[frame].to_bits(), Ordering::Relaxed);
+            peak = peak.max(left[frame].abs()).max(right[frame].abs());
         }
+        self.peak.store(peak.to_bits(), Ordering::Relaxed);
         self.staged_pairs.fetch_or(1 << pair, Ordering::Release);
     }
 
@@ -776,6 +893,7 @@ impl JamPublishSlot {
     }
 
     fn claim(&self, channels: usize) {
+        self.peak.store(0, Ordering::Relaxed);
         self.write_frames.store(0, Ordering::Relaxed);
         self.read_frames.store(0, Ordering::Relaxed);
         self.capture_base.store(0, Ordering::Relaxed);
@@ -834,6 +952,9 @@ pub struct JamAudioBus {
     /// `master_publish`: resolved once on the control thread so the callback
     /// pays one load, never a key lookup.
     live_input_publish: AtomicI32,
+    /// The Control Room / Monitor output's publish slot, or `-1`. Same
+    /// reasoning again: one load on the callback, never a key lookup.
+    monitor_publish: AtomicI32,
 }
 
 impl std::fmt::Debug for JamAudioBus {
@@ -873,6 +994,7 @@ impl Default for JamAudioBus {
             master_click: AtomicBool::new(true),
             master_publish: AtomicI32::new(-1),
             live_input_publish: AtomicI32::new(-1),
+            monitor_publish: AtomicI32::new(-1),
         }
     }
 }
@@ -922,6 +1044,19 @@ impl JamAudioBus {
     #[inline]
     pub fn live_input_publish(&self) -> Option<&JamPublishSlot> {
         let index = self.live_input_publish.load(Ordering::Acquire);
+        if index < 0 {
+            return None;
+        }
+        self.publishes.get(index as usize)
+    }
+
+    /// The Control Room / Monitor output's publish slot, if one is bound.
+    ///
+    /// One load, because the render callback asks after every block it has
+    /// finished routing through the Control Room.
+    #[inline]
+    pub fn monitor_publish(&self) -> Option<&JamPublishSlot> {
+        let index = self.monitor_publish.load(Ordering::Acquire);
         if index < 0 {
             return None;
         }
@@ -1014,6 +1149,9 @@ impl JamAudioBus {
             self.live_input_publish
                 .store(index as i32, Ordering::Release);
         }
+        if key == PUBLISH_KEY_MONITOR {
+            self.monitor_publish.store(index as i32, Ordering::Release);
+        }
         self.any_publish.store(true, Ordering::Release);
         Some(index)
     }
@@ -1056,6 +1194,9 @@ impl JamAudioBus {
         if key == PUBLISH_KEY_LIVE_INPUT {
             self.live_input_publish.store(-1, Ordering::Release);
         }
+        if key == PUBLISH_KEY_MONITOR {
+            self.monitor_publish.store(-1, Ordering::Release);
+        }
         self.any_publish.store(!keys.is_empty(), Ordering::Release);
     }
 
@@ -1078,6 +1219,7 @@ impl JamAudioBus {
         self.any_publish.store(false, Ordering::Release);
         self.master_publish.store(-1, Ordering::Release);
         self.live_input_publish.store(-1, Ordering::Release);
+        self.monitor_publish.store(-1, Ordering::Release);
     }
 
     pub fn bound_input_count(&self) -> usize {
@@ -1123,6 +1265,7 @@ mod tests {
     fn a_written_block_comes_back_through_the_callback_path() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         // Two stereo frames: (0.25, -0.25), (0.5, -0.5).
         slot.write_interleaved(&[0.25, -0.25, 0.5, -0.5], 2, 1_000, 48_000);
 
@@ -1139,6 +1282,7 @@ mod tests {
     fn the_callback_mixes_rather_than_replaces_so_a_track_can_carry_other_material() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         slot.write_interleaved(&[0.25, 0.25], 2, 0, 48_000);
 
         let mut left = vec![0.5];
@@ -1152,6 +1296,7 @@ mod tests {
     fn an_empty_slot_reads_as_silence_and_never_blocks() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         let mut left = vec![0.0; 4];
         let mut right = vec![0.0; 4];
         assert_eq!(
@@ -1175,20 +1320,158 @@ mod tests {
         assert_eq!(slot.underruns(), 0);
     }
 
+    /// The crackle, pinned. A block the network only half-filled used to be
+    /// handed over half-full, which is a hole in the audio — and because the
+    /// ring was then empty again, another hole in the next block, and the next.
+    /// It is silence and a re-prime instead: one gap while the cushion rebuilds,
+    /// then clean audio.
     #[test]
-    fn a_partial_block_fills_what_it_can_and_counts_the_shortfall() {
+    fn a_partial_block_is_silence_and_a_re_prime_rather_than_a_hole() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         slot.write_interleaved(&[1.0, 1.0], 2, 0, 48_000);
 
         let mut left = vec![0.0; 4];
         let mut right = vec![0.0; 4];
         assert_eq!(
             slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, 4),
-            1
+            0
         );
-        assert_eq!(left, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            left,
+            vec![0.0; 4],
+            "a torn block is worse than a silent one"
+        );
         assert_eq!(slot.underruns(), 1);
+        assert!(
+            slot.is_priming(),
+            "an underrun must rebuild the cushion, not keep tearing"
+        );
+        assert_eq!(
+            slot.available(),
+            1,
+            "the frame that did arrive is kept, not thrown away"
+        );
+    }
+
+    /// Frames per call in the cushion tests, and a block of that many stereo
+    /// frames of `value`.
+    const BLOCK: usize = 128;
+
+    fn stereo_block(frames: usize, value: f32) -> Vec<f32> {
+        vec![value; frames * 2]
+    }
+
+    /// Fill `slot` until it has at least a cushion, writing in `BLOCK` chunks
+    /// the way the receive thread does.
+    fn fill_cushion(slot: &JamInputSlot, sample_rate: u32) {
+        let target = target_frames(sample_rate, BLOCK);
+        let mut position = 0u64;
+        while slot.available() < target {
+            slot.write_interleaved(&stereo_block(BLOCK, 1.0), 2, position, sample_rate);
+            position += BLOCK as u64;
+        }
+    }
+
+    /// A jam that starts playing the instant the first packet lands has no
+    /// absorption at all: it is empty again by the next callback. The slot holds
+    /// a cushion first, and while it is holding one it contributes silence
+    /// rather than a trickle.
+    #[test]
+    fn a_fresh_stream_holds_a_cushion_before_it_plays() {
+        let slot = JamInputSlot::default();
+        slot.claim();
+        let mut left = vec![0.0; BLOCK];
+        let mut right = vec![0.0; BLOCK];
+
+        slot.write_interleaved(&stereo_block(BLOCK, 1.0), 2, 0, 48_000);
+        assert_eq!(
+            slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, BLOCK),
+            0,
+            "one packet is not a cushion"
+        );
+        assert_eq!(
+            slot.underruns(),
+            0,
+            "priming is not lateness — those frames are early, not missing"
+        );
+        assert!(slot.is_priming());
+
+        fill_cushion(&slot, 48_000);
+        assert_eq!(
+            slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, BLOCK),
+            BLOCK,
+            "a full cushion plays whole blocks"
+        );
+        assert!(!slot.is_priming());
+        assert_eq!(left[0], 1.0);
+    }
+
+    /// Steady state: as long as the producer keeps up, every block is whole and
+    /// nothing is counted against the stream.
+    #[test]
+    fn a_stream_that_keeps_up_plays_every_block_whole() {
+        let slot = JamInputSlot::default();
+        slot.claim();
+        fill_cushion(&slot, 48_000);
+        let mut position = 1 << 20;
+
+        for _ in 0..64 {
+            let mut left = vec![0.0; BLOCK];
+            let mut right = vec![0.0; BLOCK];
+            assert_eq!(
+                slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, BLOCK),
+                BLOCK
+            );
+            slot.write_interleaved(&stereo_block(BLOCK, 1.0), 2, position, 48_000);
+            position += BLOCK as u64;
+        }
+        assert_eq!(slot.underruns(), 0);
+        assert_eq!(slot.overruns(), 0);
+    }
+
+    /// The network ran ahead, or the callback stalled. Playing further and
+    /// further behind is worse than skipping: the frames skipped are already
+    /// past their moment.
+    #[test]
+    fn latency_creep_is_resynced_forward_to_the_cushion() {
+        let slot = JamInputSlot::default();
+        slot.claim();
+        fill_cushion(&slot, 48_000);
+        let target = target_frames(48_000, BLOCK);
+
+        // Four cushions' worth queued and nobody reading.
+        let mut position = 1 << 20;
+        while slot.available() < target * 4 {
+            slot.write_interleaved(&stereo_block(BLOCK, 1.0), 2, position, 48_000);
+            position += BLOCK as u64;
+        }
+
+        let mut left = vec![0.0; BLOCK];
+        let mut right = vec![0.0; BLOCK];
+        assert_eq!(
+            slot.mix_into(JamChannelMode::Stereo, &mut left, &mut right, BLOCK),
+            BLOCK
+        );
+        assert!(slot.overruns() >= 1, "the skip has to be visible");
+        assert!(
+            slot.available() <= target,
+            "backlog must come back down to the cushion, not stay four deep"
+        );
+    }
+
+    /// A cushion thinner than the thing it is cushioning is not one.
+    #[test]
+    fn the_cushion_is_never_thinner_than_two_callback_blocks() {
+        for (rate, block) in [(48_000u32, 1024usize), (44_100, 2048), (96_000, 64)] {
+            let target = target_frames(rate, block);
+            assert!(
+                target >= (block as u64) * 2,
+                "rate={rate} block={block} target={target}"
+            );
+            assert!(target <= (CAPACITY_FRAMES / 4) as u64);
+        }
     }
 
     #[test]
@@ -1201,6 +1484,8 @@ mod tests {
         ] {
             let slot = JamInputSlot::default();
             slot.claim();
+            slot.assume_primed();
+            slot.assume_primed();
             slot.write_interleaved(&[1.0, 0.0], 2, 0, 48_000);
             let mut left = vec![0.0];
             let mut right = vec![0.0];
@@ -1213,6 +1498,7 @@ mod tests {
     fn a_mono_stream_reaches_both_sides() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         slot.write_interleaved(&[0.75, 0.5], 1, 0, 48_000);
         let mut left = vec![0.0; 2];
         let mut right = vec![0.0; 2];
@@ -1225,6 +1511,7 @@ mod tests {
     fn the_capture_position_follows_the_publisher_not_the_arrival() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         assert_eq!(
             slot.next_capture_position(),
             None,
@@ -1246,6 +1533,7 @@ mod tests {
     fn a_gap_re_bases_the_capture_clock_instead_of_drifting() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         slot.write_interleaved(&[0.0; 4], 2, 1_000, 48_000);
         // The next block should have been tick 1002; it is 5000, because
         // packets were lost. The mapping follows the publisher.
@@ -1527,6 +1815,7 @@ mod tests {
     fn a_swapped_route_swaps_the_sides() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         slot.write_interleaved(&[1.0, -1.0], 2, 0, 48_000);
         let mut left = vec![0.0];
         let mut right = vec![0.0];
@@ -1538,6 +1827,7 @@ mod tests {
     fn a_lapped_consumer_resynchronises_instead_of_reading_stale_audio() {
         let slot = JamInputSlot::default();
         slot.claim();
+        slot.assume_primed();
         // Write more than a whole ring without reading any of it.
         let block = vec![0.0f32; 2 * 1024];
         for _ in 0..(CAPACITY_FRAMES / 1024 + 2) {

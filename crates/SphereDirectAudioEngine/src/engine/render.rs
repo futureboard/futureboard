@@ -3208,6 +3208,7 @@ mod jam_input_tests {
             20_000_000,
             48_000,
         );
+        bus.input(slot_index).expect("in range").assume_primed();
 
         let (peak_l, peak_r) = render(&mut runtime, &bus, None);
         assert!((peak_l - 0.5).abs() < 1e-6, "left was {peak_l}");
@@ -3229,6 +3230,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(slot_index).expect("in range").assume_primed();
 
         let hardware = [0.5f32; FRAMES];
         let (peak_l, _) = render(&mut runtime, &bus, Some((&hardware, &hardware)));
@@ -3259,6 +3261,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(slot_index).expect("in range").assume_primed();
 
         let hardware = [0.25f32; FRAMES];
         let (peak_l, _) = render(&mut runtime, &bus, Some((&hardware, &hardware)));
@@ -3280,6 +3283,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(slot_index).expect("in range").assume_primed();
         assert!(render(&mut runtime, &bus, None).0 > 0.5);
 
         bus.release_input(STREAM);
@@ -3319,6 +3323,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
 
         // Nothing bound yet: the tap must not run.
         render(&mut runtime, &bus, None);
@@ -3332,6 +3337,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
         render(&mut runtime, &bus, None);
 
         let mut out = Vec::new();
@@ -3369,6 +3375,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
         render(&mut runtime, &bus, None);
 
         let mut out = Vec::new();
@@ -3412,6 +3419,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
         render(&mut runtime, &bus, None);
         let mut out = Vec::new();
         assert!(bus
@@ -3446,6 +3454,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
         render(&mut runtime, &bus, None);
         let mut out = Vec::new();
         assert!(bus
@@ -3461,6 +3470,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(input_slot).expect("in range").assume_primed();
         render(&mut runtime, &bus, None);
         assert!(
             bus.publish(publish_slot)
@@ -3487,6 +3497,7 @@ mod jam_input_tests {
             0,
             48_000,
         );
+        bus.input(slot_index).expect("in range").assume_primed();
         assert_eq!(render(&mut runtime, &bus, None), (0.0, 0.0));
     }
 }

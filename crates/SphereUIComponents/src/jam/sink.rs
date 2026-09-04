@@ -264,7 +264,9 @@ mod tests {
     fn a_mono_stream_is_widened_before_it_reaches_the_ring() {
         let (shared, _clock, sink) = sink();
         let id = StreamId::new("str_mono");
-        let samples = vec![0.75f32; 128];
+        // Enough to fill the ring's cushion: a slot holds a backlog before it
+        // starts playing, so a single 128-frame packet is still priming.
+        let samples = vec![0.75f32; 4096];
         let mut mono = frame(&samples, 48_000, 0);
         mono.channels = 1;
         mono.frames = samples.len();

@@ -25,12 +25,12 @@ use gpui::{
 
 use crate::audio_connections::{
     AudioConnectionDirection, AudioConnectionId, AudioConnectionRegistry, AudioConnectionStatus,
-    AvailablePorts, ChannelLayout,
+    AvailablePorts, ChannelLayout, ConnectionPreset, PANEL_PRESETS,
 };
 use crate::components::audio_connections_panel::{
     cell_anchor_for_row, column_widths, dropdown_height, dropdown_width, layout_label,
-    AudioConnectionsPanelState, ColumnWidths, ConnectionRow, ConnectionsTab, EditableCell,
-    OpenDropdown, ROW_HEIGHT,
+    AudioConnectionsPanelState, CellAnchor, ColumnWidths, ConnectionRow, ConnectionsTab,
+    EditableCell, OpenDropdown, ROW_HEIGHT,
 };
 use crate::components::combo_box::combo_box_string_menu;
 use crate::components::controls::{fb_button, FbButtonKind};
@@ -55,6 +55,29 @@ const FOOTER_HEIGHT: f32 = 22.0;
 /// Y of the first table row, in window space.
 fn table_top() -> f32 {
     TITLEBAR_HEIGHT + SUBHEADER_HEIGHT + TABS_HEIGHT + TOOLBAR_HEIGHT + TABLE_HEADER_HEIGHT
+}
+
+/// Y of the toolbar strip, in window space.
+fn toolbar_top() -> f32 {
+    TITLEBAR_HEIGHT + SUBHEADER_HEIGHT + TABS_HEIGHT
+}
+
+/// The Presets button is the first thing in the toolbar, so its rectangle comes
+/// from the bar's own padding rather than from a measurement — the same way the
+/// table's popovers are reconstructed from the column layout. The width only
+/// left-aligns the menu and sets its floor; the labels decide how wide it ends
+/// up.
+const PRESETS_BUTTON_X: f32 = 8.0;
+const PRESETS_BUTTON_WIDTH: f32 = 84.0;
+
+/// Rectangle the preset menu hangs from.
+fn presets_anchor() -> CellAnchor {
+    CellAnchor {
+        x: PRESETS_BUTTON_X,
+        y: toolbar_top(),
+        width: PRESETS_BUTTON_WIDTH,
+        height: TOOLBAR_HEIGHT,
+    }
 }
 
 /// Smallest window that still shows the whole table plus its chrome.
@@ -144,6 +167,21 @@ pub enum ConnectionEdit {
         direction: AudioConnectionDirection,
     },
     ResetDefaults {
+        direction: AudioConnectionDirection,
+    },
+    /// The user picked a preset. Always confirmed by the layout: a preset
+    /// replaces every bus in the project, in both directions.
+    RequestApplyPreset {
+        preset: ConnectionPreset,
+    },
+    /// Already confirmed — apply it.
+    ApplyPreset {
+        preset: ConnectionPreset,
+    },
+    /// Bind this direction's buses to consecutive hardware ports. Never
+    /// confirmed: it changes port assignments, creates and removes nothing,
+    /// and the previous mapping is one Auto Map or a few clicks away.
+    AutoMap {
         direction: AudioConnectionDirection,
     },
     /// Open Preferences so hardware can be chosen without leaving the task.
@@ -696,6 +734,20 @@ impl AudioConnectionsWindow {
                 }
                 (current, options)
             }
+            OpenDropdown::Presets => (
+                // A preset is an action, not a stored value, so no row carries
+                // the selected tick.
+                String::new(),
+                PANEL_PRESETS
+                    .iter()
+                    .map(|preset| {
+                        (
+                            preset.label(),
+                            ConnectionEdit::RequestApplyPreset { preset: *preset },
+                        )
+                    })
+                    .collect(),
+            ),
             OpenDropdown::AddBus => return None,
         };
 
@@ -1181,6 +1233,35 @@ impl Render for AudioConnectionsWindow {
             )
         };
 
+        // Presets replace every bus in both directions, so the menu sits at
+        // the head of the bar, away from the per-row Duplicate/Remove pair.
+        let presets_open = self.panel.is_dropdown_open(&OpenDropdown::Presets);
+        let presets_button = {
+            toolbar_button(
+                "audio-connections-presets",
+                format!("Presets {}", if presets_open { "▴" } else { "▾" }),
+                has_project,
+                cx.listener(|this, _event: &gpui::MouseDownEvent, _w, cx| {
+                    // Stop here so the click that opens the menu is not also
+                    // read as a click outside it.
+                    cx.stop_propagation();
+                    this.panel
+                        .toggle_dropdown_at(OpenDropdown::Presets, presets_anchor());
+                    cx.notify();
+                }),
+            )
+        };
+
+        let auto_map_button = {
+            let on_edit = self.on_edit.clone();
+            toolbar_button(
+                "audio-connections-auto-map",
+                "Auto Map".to_string(),
+                has_project,
+                move |_e, w, cx| on_edit(&ConnectionEdit::AutoMap { direction }, w, cx),
+            )
+        };
+
         let reset_button = {
             let on_edit = self.on_edit.clone();
             toolbar_button(
@@ -1203,6 +1284,15 @@ impl Render for AudioConnectionsWindow {
             .flex_none()
             .border_b(px(1.0))
             .border_color(Colors::border_default())
+            .child(presets_button)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(1.0))
+                    .h(px(14.0))
+                    .mx(px(3.0))
+                    .bg(Colors::border_subtle()),
+            )
             .child(toolbar_button(
                 "audio-connections-add-mono",
                 "Add Mono".to_string(),
@@ -1226,6 +1316,7 @@ impl Render for AudioConnectionsWindow {
             .child(duplicate_button)
             .child(remove_button)
             .child(div().flex_1().min_w(px(0.0)))
+            .child(auto_map_button)
             .child(reset_button);
 
         // ── Table ───────────────────────────────────────────────────────────
@@ -1435,6 +1526,36 @@ mod tests {
             .split_once("#[cfg(test)]")
             .map(|(implementation, _)| implementation)
             .expect("this file has a test module")
+    }
+
+    /// The preset menu belongs to the toolbar, not to a table cell, so its
+    /// anchor has to sit in the toolbar strip — one row lower and it would open
+    /// over the column headers it is not attached to.
+    #[test]
+    fn the_preset_menu_hangs_from_the_toolbar_strip() {
+        let anchor = presets_anchor();
+        assert_eq!(anchor.y, toolbar_top());
+        assert_eq!(
+            anchor.y + anchor.height,
+            table_top() - TABLE_HEADER_HEIGHT,
+            "the menu opens directly below the toolbar"
+        );
+        assert!(anchor.x >= 0.0 && anchor.width > 0.0);
+    }
+
+    /// Applying a preset discards buses in both directions, so it must go
+    /// through the layout's confirmation path — never straight to `ApplyPreset`.
+    #[test]
+    fn the_preset_menu_raises_a_request_rather_than_applying_directly() {
+        let source = implementation_source();
+        assert!(
+            source.contains("ConnectionEdit::RequestApplyPreset { preset: *preset }"),
+            "the menu must raise the confirmable request"
+        );
+        assert!(
+            !source.contains("ConnectionEdit::ApplyPreset {"),
+            "only the layout, after confirming, may raise ApplyPreset"
+        );
     }
 
     // ── Window shape and lifecycle ──────────────────────────────────────────

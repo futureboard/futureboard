@@ -683,6 +683,7 @@ impl JamWindow {
 
         if state.connected {
             list = list.child(self.sharing_section(state, cx));
+            list = list.child(self.flow_section(state));
             list = list.child(self.quality_section(state, cx));
         }
 
@@ -908,6 +909,79 @@ impl JamWindow {
                         mode.detail().to_string()
                     }),
             )
+    }
+
+    /// What is actually leaving this Studio right now.
+    ///
+    /// The controls above say what was asked for; this says what is happening.
+    /// The two are not the same thing, and the gap between them is where every
+    /// "I am in the room and nobody can hear me" goes: a send bound to a tap
+    /// nothing feeds is announced, listed, and silent. A level that never moves
+    /// is the symptom, so the level is the row.
+    fn flow_section(&self, state: &JamUiState) -> impl IntoElement {
+        let mut section = div().flex().flex_col().child(fb_section_header(format!(
+            "Leaving this Studio · {}",
+            state.sending.len()
+        )));
+
+        if state.sending.is_empty() {
+            return section.child(
+                div()
+                    .py(px(space::BASE))
+                    .text_size(px(typography::UI_XS))
+                    .text_color(Colors::text_muted())
+                    .child("Nothing is being sent. The room cannot hear this Studio."),
+            );
+        }
+
+        for send in &state.sending {
+            let silent = send.level <= 0.0001;
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(space::BASE))
+                    .mt(px(space::TIGHT))
+                    .pl(px(space::BASE))
+                    .border_l(px(2.0))
+                    .border_color(if silent {
+                        Colors::border_subtle()
+                    } else {
+                        Colors::accent_primary()
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(typography::UI_SM))
+                                    .child(send.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(typography::UI_XS))
+                                    .text_color(if silent {
+                                        Colors::accent_warning()
+                                    } else {
+                                        Colors::text_muted()
+                                    })
+                                    .child(if silent {
+                                        format!("{} · no signal", send.tap)
+                                    } else {
+                                        format!("{} · live", send.tap)
+                                    }),
+                            ),
+                    )
+                    .child(div().flex_none().child(level_meter(send.level))),
+            );
+        }
+        section
     }
 
     /// Depth, rate, and what the two of them cost.
@@ -1142,6 +1216,13 @@ impl JamWindow {
                             .text_size(px(typography::UI_XS))
                             .text_color(Colors::text_muted())
                             .child(format),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(typography::UI_XS))
+                            .text_color(stream_health_tone(stream))
+                            .child(stream_health(stream)),
                     ),
             )
             .child(
@@ -1420,6 +1501,38 @@ fn link_diagnostics(state: &JamUiState) -> String {
     )
 }
 
+/// One line saying why a stream in the room is or is not audible here.
+///
+/// The four states are genuinely different problems and used to look identical:
+/// nobody routed it, the server has not resolved a format, its ring is still
+/// filling, or it is playing and has been dropping. A listener who cannot hear
+/// a performer needs to know which one before they can do anything about it.
+fn stream_health(stream: &JamStreamView) -> String {
+    if !stream.routed {
+        return "Not routed to a track — create one to hear it".to_string();
+    }
+    if !stream.receiving {
+        return "Waiting for a format from the server".to_string();
+    }
+    if stream.buffering {
+        return "Buffering".to_string();
+    }
+    if stream.dropouts > 0 {
+        return format!("Playing · {} dropout(s)", stream.dropouts);
+    }
+    "Playing".to_string()
+}
+
+fn stream_health_tone(stream: &JamStreamView) -> gpui::Rgba {
+    if !stream.routed || !stream.receiving {
+        Colors::text_muted()
+    } else if stream.buffering || stream.dropouts > 0 {
+        Colors::accent_warning()
+    } else {
+        Colors::text_faint()
+    }
+}
+
 fn status_tone(state: &JamUiState) -> (gpui::Rgba, &'static str) {
     if state.connected {
         (Colors::status_success(), "Connected")
@@ -1506,6 +1619,9 @@ mod tests {
             receiving: true,
             peak: 0.0,
             rtt_ms: 0.0,
+            routed: true,
+            buffering: false,
+            dropouts: 0,
         }
     }
 
@@ -1577,5 +1693,78 @@ mod tests {
         };
         let (_, label) = status_tone(&state);
         assert_eq!(label, "Reconnecting");
+    }
+}
+
+#[cfg(test)]
+mod flow_visibility_tests {
+    use super::{stream_health, JamStreamView};
+
+    fn stream() -> JamStreamView {
+        JamStreamView {
+            stream_id: "str_1".to_string(),
+            user_id: "usr_1".to_string(),
+            device_id: "studio".to_string(),
+            handle: "@nut".to_string(),
+            display_name: "Nut".to_string(),
+            stream_name: "Guitar".to_string(),
+            channels: 2,
+            channel_labels: Vec::new(),
+            sample_rate: 48_000,
+            codec: "pcm".to_string(),
+            receiving: true,
+            peak: 0.5,
+            rtt_ms: 12.0,
+            routed: true,
+            buffering: false,
+            dropouts: 0,
+        }
+    }
+
+    /// "I cannot hear them" has four different causes and they used to look
+    /// identical on screen. Each one has to say which it is, because the fix
+    /// differs every time: route it, wait for the server, wait for the buffer,
+    /// or look at the network.
+    #[test]
+    fn every_reason_a_stream_is_inaudible_reads_differently() {
+        let unrouted = JamStreamView {
+            routed: false,
+            ..stream()
+        };
+        assert!(stream_health(&unrouted).contains("Not routed"));
+
+        let no_format = JamStreamView {
+            receiving: false,
+            ..stream()
+        };
+        assert!(stream_health(&no_format).contains("format"));
+
+        let buffering = JamStreamView {
+            buffering: true,
+            ..stream()
+        };
+        assert_eq!(stream_health(&buffering), "Buffering");
+
+        let glitching = JamStreamView {
+            dropouts: 7,
+            ..stream()
+        };
+        assert!(stream_health(&glitching).contains('7'));
+
+        assert_eq!(stream_health(&stream()), "Playing");
+    }
+
+    /// Routing is asked about first: an unrouted stream is not subscribed, so
+    /// every other reading of it is a consequence rather than the cause.
+    #[test]
+    fn routing_is_reported_before_anything_downstream_of_it() {
+        let nothing_works = JamStreamView {
+            routed: false,
+            receiving: false,
+            buffering: true,
+            dropouts: 99,
+            ..stream()
+        };
+        assert!(stream_health(&nothing_works).contains("Not routed"));
     }
 }

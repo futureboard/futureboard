@@ -356,13 +356,26 @@ impl StudioLayout {
                 self.confirm_audio_connection_reset(*direction, cx);
                 return;
             }
+            ConnectionEdit::RequestApplyPreset { preset } => {
+                self.confirm_audio_connection_preset(*preset, cx);
+                return;
+            }
             _ => {}
         }
 
         let ports = crate::audio_connections::current_available_ports();
-        let device_id = {
+        let (device_id, output_device_id) = {
             let settings = self.settings.read(cx);
-            settings.current.hardware.audio.device_in.trim().to_string()
+            (
+                settings.current.hardware.audio.device_in.trim().to_string(),
+                settings
+                    .current
+                    .hardware
+                    .audio
+                    .device_out
+                    .trim()
+                    .to_string(),
+            )
         };
 
         let mutation = self.timeline.update(cx, |timeline, cx| {
@@ -443,9 +456,60 @@ impl StudioLayout {
                     }
                     mutation
                 }
+                ConnectionEdit::ApplyPreset { preset } => {
+                    // A preset replaces both directions, so every bus in the
+                    // project is a removal and every referencing track is
+                    // affected — the same unassign rules as Remove, applied
+                    // wholesale rather than to one id.
+                    let removed: Vec<crate::audio_connections::AudioConnectionId> = timeline
+                        .state
+                        .audio_connections
+                        .all()
+                        .iter()
+                        .map(|connection| connection.id.clone())
+                        .collect();
+                    let affected: Vec<String> = timeline
+                        .state
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            track
+                                .routing
+                                .audio_input_connection_id
+                                .as_ref()
+                                .is_some_and(|id| removed.contains(id))
+                        })
+                        .map(|track| track.id.clone())
+                        .collect();
+                    let mutation = timeline.state.audio_connections.apply_preset(
+                        *preset,
+                        &ports,
+                        &device_id,
+                        &output_device_id,
+                        &affected,
+                    );
+                    for id in &removed {
+                        timeline.state.unassign_audio_connection(id);
+                        timeline.state.unassign_output_connection(id);
+                    }
+                    mutation
+                }
+                ConnectionEdit::AutoMap { direction } => {
+                    let selected = match direction {
+                        crate::audio_connections::AudioConnectionDirection::Input => &device_id,
+                        crate::audio_connections::AudioConnectionDirection::Output => {
+                            &output_device_id
+                        }
+                    };
+                    timeline
+                        .state
+                        .audio_connections
+                        .auto_map(*direction, &ports, selected)
+                }
                 // Handled above, before this closure runs.
                 ConnectionEdit::RequestRemove { .. }
                 | ConnectionEdit::RequestResetDefaults { .. }
+                | ConnectionEdit::RequestApplyPreset { .. }
                 | ConnectionEdit::OpenAudioDeviceSetup => {
                     crate::audio_connections::ConnectionMutation::default()
                 }
@@ -612,6 +676,49 @@ impl StudioLayout {
             ConnectionEdit::ResetDefaults { direction },
             cx,
         );
+    }
+
+    /// Confirm applying a preset, then apply it.
+    ///
+    /// Always asks, and for a bigger reason than Reset Defaults does: a preset
+    /// replaces the buses in *both* directions, including ones the user built
+    /// by hand on the tab they are not looking at.
+    fn confirm_audio_connection_preset(
+        &mut self,
+        preset: crate::audio_connections::ConnectionPreset,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::audio_connections_window::ConnectionEdit;
+        use crate::components::message_box_dialog::{MessageBoxKind, MessageBoxOptions};
+
+        let (buses, affected) = {
+            let timeline = self.timeline.read(cx);
+            let buses = timeline.state.audio_connections.len();
+            let affected = timeline
+                .state
+                .tracks
+                .iter()
+                .filter(|track| track.routing.audio_input_connection_id.is_some())
+                .count();
+            (buses, affected)
+        };
+        let label = preset.label();
+        let options = MessageBoxOptions {
+            kind: MessageBoxKind::Warning,
+            title: "Apply Connection Preset".to_string(),
+            message: format!("Apply the {label} preset?"),
+            detail: Some(format!(
+                concat!(
+                    "All {} existing input and output bus(es) are replaced. ",
+                    "{} track reference(s) may be unassigned."
+                ),
+                buses, affected
+            )),
+            buttons: vec!["Apply".to_string(), "Cancel".to_string()],
+            default_id: 1,
+            cancel_id: Some(1),
+        };
+        self.confirm_audio_connection_edit(options, ConnectionEdit::ApplyPreset { preset }, cx);
     }
 
     /// Ask, and apply `edit` only if the first button was chosen.

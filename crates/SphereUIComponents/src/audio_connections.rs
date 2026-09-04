@@ -1679,6 +1679,157 @@ impl ConnectionMutation {
 /// UI while [`ChannelLayout::Custom`] stays in the model.
 pub const PANEL_LAYOUTS: [ChannelLayout; 2] = [ChannelLayout::Mono, ChannelLayout::Stereo];
 
+/// A ready-made bus set for the Audio Connections page.
+///
+/// A preset describes **both directions at once**, because that is how an
+/// interface is described: "2×2" is two ins and two outs, not two buses on
+/// whichever tab happens to be in front. Applying one replaces the project's
+/// buses, so the window always confirms first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionPreset {
+    /// `channels` in and `channels` out, laid out as stereo pairs: 2×2 is one
+    /// pair each way, 8×8 is four.
+    StereoPairs { channels: usize },
+    /// Two mono buses plus one stereo bus over the same first two ports — the
+    /// small-interface setup, where the two inputs are recorded separately or
+    /// as a pair without re-patching.
+    TwoMonoOneStereo,
+    /// One mono bus per port the device exposes.
+    AllMono,
+    /// One stereo bus per consecutive pair of ports.
+    AllStereo,
+}
+
+/// Presets the toolbar offers, in menu order.
+pub const PANEL_PRESETS: [ConnectionPreset; 6] = [
+    ConnectionPreset::StereoPairs { channels: 2 },
+    ConnectionPreset::StereoPairs { channels: 4 },
+    ConnectionPreset::StereoPairs { channels: 8 },
+    ConnectionPreset::TwoMonoOneStereo,
+    ConnectionPreset::AllMono,
+    ConnectionPreset::AllStereo,
+];
+
+impl ConnectionPreset {
+    /// Menu label. `2 × 2` rather than `2x2`, to read as a channel count and
+    /// not as a file name.
+    pub fn label(self) -> String {
+        match self {
+            Self::StereoPairs { channels } => format!("{channels} × {channels}"),
+            Self::TwoMonoOneStereo => "2 Mono + 1 Stereo".to_string(),
+            Self::AllMono => "All Mono".to_string(),
+            Self::AllStereo => "All Stereo".to_string(),
+        }
+    }
+
+    /// The buses this preset makes for one direction on one device.
+    ///
+    /// A preset never invents hardware: 8×8 on a two-input interface produces
+    /// the pairs that fit and nothing else, the same rule `default_template`
+    /// follows. Bindings come from the ports the device actually reports, so a
+    /// driver whose ports are not named `Input 1…n` still binds correctly.
+    pub fn connections(
+        self,
+        direction: AudioConnectionDirection,
+        ports: &AvailablePorts,
+        device_id: &str,
+    ) -> Vec<AudioConnection> {
+        let mut available = ports.ports_for(device_id, direction);
+        available.sort_by_key(|port| port.port_index);
+        let count = available.len();
+
+        let mut built = Vec::new();
+        let push = |first: usize, layout: ChannelLayout, built: &mut Vec<AudioConnection>| {
+            if let Some(connection) = preset_bus(direction, layout, device_id, &available, first) {
+                built.push(connection);
+            }
+        };
+
+        match self {
+            Self::StereoPairs { channels } => {
+                for first in (0..channels.min(count)).step_by(2) {
+                    push(first, ChannelLayout::Stereo, &mut built);
+                }
+            }
+            Self::TwoMonoOneStereo => {
+                for first in 0..2.min(count) {
+                    push(first, ChannelLayout::Mono, &mut built);
+                }
+                push(0, ChannelLayout::Stereo, &mut built);
+            }
+            Self::AllMono => {
+                for first in 0..count {
+                    push(first, ChannelLayout::Mono, &mut built);
+                }
+            }
+            Self::AllStereo => {
+                for first in (0..count).step_by(2) {
+                    push(first, ChannelLayout::Stereo, &mut built);
+                }
+            }
+        }
+        built
+    }
+}
+
+/// One preset bus, bound to `layout.channel_count()` consecutive ports starting
+/// at `first`. `None` when the device does not expose that many ports, which is
+/// how a preset trims itself to the hardware.
+///
+fn preset_bus(
+    direction: AudioConnectionDirection,
+    layout: ChannelLayout,
+    device_id: &str,
+    available: &[&AvailablePort],
+    first: usize,
+) -> Option<AudioConnection> {
+    let channels = layout.channel_count();
+    let slice = available.get(first..first + channels)?;
+    let name = preset_bus_name(direction, layout, first, channels);
+    let mut connection = AudioConnection::new(name, direction, layout);
+    connection.device_id = Some(device_id.to_string());
+    connection.port_bindings = slice
+        .iter()
+        .enumerate()
+        .map(|(channel, port)| AudioPortBinding {
+            logical_channel: channel,
+            physical_port_id: AudioPortId::new(
+                &port.device_id,
+                port.port_name.clone(),
+                port.port_index,
+            ),
+        })
+        .collect();
+    Some(connection)
+}
+
+/// Bus name for a preset row, in the same style as the default template:
+/// `Mono Input 1`, `Stereo Input 1-2`, `Main Output 1-2`, `Stereo Output 3-4`.
+///
+/// The stereo bus over the first two output ports is the Main Output, whichever
+/// preset built it — that is the bus a project's Master is expected to find.
+fn preset_bus_name(
+    direction: AudioConnectionDirection,
+    layout: ChannelLayout,
+    first: usize,
+    channels: usize,
+) -> String {
+    let first_channel = first + 1;
+    let last_channel = first + channels;
+    let range = if channels > 1 {
+        format!("{first_channel}-{last_channel}")
+    } else {
+        format!("{first_channel}")
+    };
+    match (direction, layout) {
+        (AudioConnectionDirection::Input, ChannelLayout::Mono) => format!("Mono Input {range}"),
+        (AudioConnectionDirection::Input, _) => format!("Stereo Input {range}"),
+        (AudioConnectionDirection::Output, ChannelLayout::Mono) => format!("Mono Output {range}"),
+        (AudioConnectionDirection::Output, _) if first == 0 => format!("Main Output {range}"),
+        (AudioConnectionDirection::Output, _) => format!("Stereo Output {range}"),
+    }
+}
+
 impl AudioConnectionRegistry {
     /// The display name of a bus's device — the human-readable endpoint name
     /// when the device is present, the stored id as a last resort so a
@@ -1941,6 +2092,148 @@ impl AudioConnectionRegistry {
             affected_track_ids: referencing_tracks.to_vec(),
             warnings: Vec::new(),
             needs_routing_rebuild: true,
+        }
+    }
+
+    /// Replace every bus in the project with one preset's bus set.
+    ///
+    /// Both directions at once: a preset names an interface shape, so applying
+    /// "4 × 4" while the Inputs tab is in front must still build the four
+    /// outputs. A direction whose device is not selected — or does not expose
+    /// enough ports — contributes nothing and says so in the warnings, rather
+    /// than creating rows that could only ever read Port Missing.
+    pub fn apply_preset(
+        &mut self,
+        preset: ConnectionPreset,
+        ports: &AvailablePorts,
+        input_device: &str,
+        output_device: &str,
+        referencing_tracks: &[String],
+    ) -> ConnectionMutation {
+        let mut changed: Vec<AudioConnectionId> = self
+            .all()
+            .iter()
+            .map(|connection| connection.id.clone())
+            .collect();
+        for id in changed.clone() {
+            self.remove(&id);
+        }
+
+        let mut warnings = Vec::new();
+        for (direction, selected) in [
+            (AudioConnectionDirection::Input, input_device),
+            (AudioConnectionDirection::Output, output_device),
+        ] {
+            let label = direction.tag();
+            let Some(device_id) = ports
+                .matching_device_id(selected, direction)
+                .map(str::to_string)
+            else {
+                warnings.push(format!(
+                    "No {label} device is available, so no {label} buses were created."
+                ));
+                continue;
+            };
+            let built = preset.connections(direction, ports, &device_id);
+            if built.is_empty() {
+                warnings.push(format!(
+                    "The {label} device exposes too few ports for this preset."
+                ));
+            }
+            for connection in built {
+                changed.push(self.add(connection));
+            }
+        }
+
+        self.revalidate(ports);
+        ConnectionMutation {
+            changed,
+            affected_track_ids: referencing_tracks.to_vec(),
+            warnings,
+            needs_routing_rebuild: true,
+        }
+    }
+
+    /// Bind every bus in one direction to consecutive ports on the current
+    /// device, in table order and honouring each bus's own layout.
+    ///
+    /// Auto Map never creates or removes a bus: it answers "wire what I already
+    /// have to the hardware", which is the part that is tedious by hand on an
+    /// eight-input interface. A bus the remaining ports cannot fill is left
+    /// unbound and named in the warnings rather than half-bound, because a
+    /// stereo bus with only a Left port is worse than an honest Unassigned.
+    pub fn auto_map(
+        &mut self,
+        direction: AudioConnectionDirection,
+        ports: &AvailablePorts,
+        selected_device: &str,
+    ) -> ConnectionMutation {
+        let label = direction.tag();
+        let Some(device_id) = ports
+            .matching_device_id(selected_device, direction)
+            .map(str::to_string)
+        else {
+            return ConnectionMutation {
+                warnings: vec![format!("No {label} device is available to map to.")],
+                ..ConnectionMutation::nothing()
+            };
+        };
+        let mut available = ports.ports_for(&device_id, direction);
+        available.sort_by_key(|port| port.port_index);
+
+        let ids: Vec<AudioConnectionId> = self
+            .by_direction(direction)
+            .into_iter()
+            .map(|connection| connection.id.clone())
+            .collect();
+        let mut cursor = 0usize;
+        let mut changed = Vec::new();
+        let mut unfilled = Vec::new();
+        for id in ids {
+            let Some(connection) = self.get_mut(&id) else {
+                continue;
+            };
+            let channels = connection.channel_layout.channel_count();
+            connection.device_id = Some(device_id.clone());
+            match available.get(cursor..cursor + channels) {
+                Some(slice) => {
+                    connection.port_bindings = slice
+                        .iter()
+                        .enumerate()
+                        .map(|(channel, port)| AudioPortBinding {
+                            logical_channel: channel,
+                            physical_port_id: AudioPortId::new(
+                                &port.device_id,
+                                port.port_name.clone(),
+                                port.port_index,
+                            ),
+                        })
+                        .collect();
+                    cursor += channels;
+                }
+                None => {
+                    connection.port_bindings.clear();
+                    unfilled.push(connection.name.clone());
+                }
+            }
+            changed.push(id);
+        }
+
+        let mut warnings = Vec::new();
+        if !unfilled.is_empty() {
+            warnings.push(format!(
+                "The {label} device has only {} port(s); left unassigned: {}.",
+                available.len(),
+                unfilled.join(", ")
+            ));
+        }
+        self.revalidate(ports);
+        let needs_routing_rebuild = !changed.is_empty();
+        ConnectionMutation {
+            changed,
+            affected_track_ids: Vec::new(),
+            warnings,
+            needs_routing_rebuild,
         }
     }
 
@@ -2479,5 +2772,298 @@ mod mutation_api_tests {
             .update_enabled(&ghost, false, &ports())
             .did_change());
         assert!(registry.duplicate_connection(&ghost, &ports()).0.is_none());
+    }
+}
+
+#[cfg(test)]
+mod preset_and_auto_map_tests {
+    use super::*;
+
+    fn ports(inputs: u32, outputs: u32) -> AvailablePorts {
+        AvailablePorts::for_device("dev-1", "Interface", inputs, outputs)
+    }
+
+    fn names(
+        registry: &AudioConnectionRegistry,
+        direction: AudioConnectionDirection,
+    ) -> Vec<String> {
+        registry
+            .by_direction(direction)
+            .iter()
+            .map(|connection| connection.name.clone())
+            .collect()
+    }
+
+    fn bound_ports(connection: &AudioConnection) -> Vec<u32> {
+        let mut ordered: Vec<_> = connection.port_bindings.iter().collect();
+        ordered.sort_by_key(|binding| binding.logical_channel);
+        ordered
+            .iter()
+            .map(|binding| binding.physical_port_id.port_index)
+            .collect()
+    }
+
+    /// The menu is built straight from this list, so its order and its labels
+    /// are the product surface.
+    #[test]
+    fn the_preset_menu_offers_the_advertised_set() {
+        let labels: Vec<String> = PANEL_PRESETS.iter().map(|preset| preset.label()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "2 × 2",
+                "4 × 4",
+                "8 × 8",
+                "2 Mono + 1 Stereo",
+                "All Mono",
+                "All Stereo"
+            ]
+        );
+    }
+
+    /// The whole point of the preset menu: "4 × 4" is an interface shape, so it
+    /// has to build the outputs even though the Inputs tab is what was in front
+    /// when it was picked.
+    #[test]
+    fn a_preset_builds_both_directions_at_once() {
+        let ports = ports(8, 8);
+        let mut registry = AudioConnectionRegistry::new();
+
+        registry.apply_preset(
+            ConnectionPreset::StereoPairs { channels: 4 },
+            &ports,
+            "dev-1",
+            "dev-1",
+            &[],
+        );
+
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Input),
+            vec!["Stereo Input 1-2", "Stereo Input 3-4"]
+        );
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Output),
+            vec!["Main Output 1-2", "Stereo Output 3-4"]
+        );
+        let inputs = registry.by_direction(AudioConnectionDirection::Input);
+        assert_eq!(bound_ports(inputs[0]), vec![0, 1]);
+        assert_eq!(bound_ports(inputs[1]), vec![2, 3]);
+    }
+
+    /// A preset never invents hardware — the same rule the default template
+    /// follows, so 8 × 8 on a 2-in/2-out box is one pair each way.
+    #[test]
+    fn a_preset_trims_itself_to_the_ports_the_device_has() {
+        let ports = ports(2, 2);
+        let mut registry = AudioConnectionRegistry::new();
+
+        let mutation = registry.apply_preset(
+            ConnectionPreset::StereoPairs { channels: 8 },
+            &ports,
+            "dev-1",
+            "dev-1",
+            &[],
+        );
+
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Input),
+            vec!["Stereo Input 1-2"]
+        );
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Output),
+            vec!["Main Output 1-2"]
+        );
+        assert!(mutation.warnings.is_empty(), "one pair still fits");
+    }
+
+    #[test]
+    fn two_mono_one_stereo_covers_the_first_pair_both_ways() {
+        let ports = ports(2, 2);
+        let mut registry = AudioConnectionRegistry::new();
+
+        registry.apply_preset(
+            ConnectionPreset::TwoMonoOneStereo,
+            &ports,
+            "dev-1",
+            "dev-1",
+            &[],
+        );
+
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Input),
+            vec!["Mono Input 1", "Mono Input 2", "Stereo Input 1-2"]
+        );
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Output),
+            vec!["Mono Output 1", "Mono Output 2", "Main Output 1-2"]
+        );
+    }
+
+    #[test]
+    fn all_mono_and_all_stereo_follow_the_port_count() {
+        let ports = ports(4, 4);
+
+        let mut mono = AudioConnectionRegistry::new();
+        mono.apply_preset(ConnectionPreset::AllMono, &ports, "dev-1", "dev-1", &[]);
+        assert_eq!(
+            names(&mono, AudioConnectionDirection::Input),
+            vec![
+                "Mono Input 1",
+                "Mono Input 2",
+                "Mono Input 3",
+                "Mono Input 4"
+            ]
+        );
+
+        let mut stereo = AudioConnectionRegistry::new();
+        stereo.apply_preset(ConnectionPreset::AllStereo, &ports, "dev-1", "dev-1", &[]);
+        assert_eq!(
+            names(&stereo, AudioConnectionDirection::Input),
+            vec!["Stereo Input 1-2", "Stereo Input 3-4"]
+        );
+    }
+
+    /// Applying a preset is a replacement, so the caller has to be told which
+    /// track references it just invalidated — the same contract as a removal.
+    #[test]
+    fn applying_a_preset_replaces_the_existing_buses_and_reports_the_tracks() {
+        let ports = ports(4, 4);
+        let mut registry = AudioConnectionRegistry::default_template(&ports, "dev-1");
+        let before = registry.len();
+        assert!(before > 0);
+
+        let mutation = registry.apply_preset(
+            ConnectionPreset::StereoPairs { channels: 2 },
+            &ports,
+            "dev-1",
+            "dev-1",
+            &["track-1".to_string()],
+        );
+
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Input),
+            vec!["Stereo Input 1-2"]
+        );
+        assert_eq!(mutation.affected_track_ids, vec!["track-1"]);
+        assert!(mutation.needs_routing_rebuild);
+        assert!(
+            mutation.changed.len() >= before,
+            "every old bus is a change"
+        );
+    }
+
+    #[test]
+    fn a_preset_with_no_device_creates_nothing_and_says_why() {
+        let mut registry = AudioConnectionRegistry::new();
+
+        let mutation = registry.apply_preset(
+            ConnectionPreset::StereoPairs { channels: 2 },
+            &AvailablePorts::default(),
+            "nothing",
+            "nothing",
+            &[],
+        );
+
+        assert!(registry.is_empty());
+        assert_eq!(mutation.warnings.len(), 2, "one per direction");
+    }
+
+    // ── Auto Map ────────────────────────────────────────────────────────────
+
+    /// Auto Map walks the table in order and gives each bus as many consecutive
+    /// ports as its own layout needs.
+    #[test]
+    fn auto_map_binds_buses_in_order_and_honours_each_layout() {
+        let ports = ports(4, 4);
+        let mut registry = AudioConnectionRegistry::new();
+        registry.add(AudioConnection::new(
+            "A",
+            AudioConnectionDirection::Input,
+            ChannelLayout::Stereo,
+        ));
+        registry.add(AudioConnection::new(
+            "B",
+            AudioConnectionDirection::Input,
+            ChannelLayout::Mono,
+        ));
+
+        let mutation = registry.auto_map(AudioConnectionDirection::Input, &ports, "dev-1");
+
+        let inputs = registry.by_direction(AudioConnectionDirection::Input);
+        assert_eq!(bound_ports(inputs[0]), vec![0, 1]);
+        assert_eq!(bound_ports(inputs[1]), vec![2]);
+        assert!(mutation.warnings.is_empty());
+        assert!(mutation.needs_routing_rebuild);
+    }
+
+    /// Half a stereo bus is worse than an honest Unassigned, so a bus the
+    /// remaining ports cannot fill is left unbound and named.
+    #[test]
+    fn auto_map_leaves_a_bus_it_cannot_fill_unbound_and_warns() {
+        let ports = ports(3, 3);
+        let mut registry = AudioConnectionRegistry::new();
+        for name in ["A", "B"] {
+            registry.add(AudioConnection::new(
+                name,
+                AudioConnectionDirection::Input,
+                ChannelLayout::Stereo,
+            ));
+        }
+
+        let mutation = registry.auto_map(AudioConnectionDirection::Input, &ports, "dev-1");
+
+        let inputs = registry.by_direction(AudioConnectionDirection::Input);
+        assert_eq!(bound_ports(inputs[0]), vec![0, 1]);
+        assert!(
+            inputs[1].port_bindings.is_empty(),
+            "a stereo bus is never half-bound"
+        );
+        assert_eq!(mutation.warnings.len(), 1);
+        assert!(mutation.warnings[0].contains('B'));
+    }
+
+    /// Auto Map answers "wire what I have", never "give me different buses".
+    #[test]
+    fn auto_map_creates_and_removes_nothing_and_leaves_the_other_direction_alone() {
+        let ports = ports(4, 4);
+        let mut registry = AudioConnectionRegistry::default_template(&ports, "dev-1");
+        let inputs_before = names(&registry, AudioConnectionDirection::Input);
+        let outputs_before: Vec<Vec<u32>> = registry
+            .by_direction(AudioConnectionDirection::Output)
+            .iter()
+            .map(|connection| bound_ports(connection))
+            .collect();
+
+        registry.auto_map(AudioConnectionDirection::Input, &ports, "dev-1");
+
+        assert_eq!(
+            names(&registry, AudioConnectionDirection::Input),
+            inputs_before
+        );
+        let outputs_after: Vec<Vec<u32>> = registry
+            .by_direction(AudioConnectionDirection::Output)
+            .iter()
+            .map(|connection| bound_ports(connection))
+            .collect();
+        assert_eq!(outputs_after, outputs_before);
+    }
+
+    #[test]
+    fn auto_map_with_no_device_changes_nothing_and_says_why() {
+        let mut registry = AudioConnectionRegistry::new();
+        registry.add(AudioConnection::new(
+            "A",
+            AudioConnectionDirection::Input,
+            ChannelLayout::Stereo,
+        ));
+
+        let mutation = registry.auto_map(
+            AudioConnectionDirection::Input,
+            &AvailablePorts::default(),
+            "nothing",
+        );
+
+        assert!(!mutation.did_change());
+        assert_eq!(mutation.warnings.len(), 1);
     }
 }

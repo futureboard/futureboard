@@ -438,7 +438,15 @@ impl StudioLayout {
             .map(|d| d.as_millis())
             .unwrap_or(0)
             .to_string();
-        let session_id = format!("rec-{timestamp}");
+        // A take id must be new on every Record, including two presses inside
+        // the same millisecond: the id names the file and the take, and a
+        // collision is how a second take lands on the first one's material.
+        let session_id = {
+            static RECORD_SESSION_SEQ: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let seq = RECORD_SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("rec-{timestamp}-{seq}")
+        };
         let project_name = self.project_session.name.clone();
 
         if !midi_tracks.is_empty() {

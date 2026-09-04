@@ -324,6 +324,9 @@ pub enum OpenDropdown {
         logical_channel: usize,
     },
     AddBus,
+    /// The toolbar's preset menu. Anchored to the toolbar rather than to a
+    /// table cell, because a preset replaces the whole table.
+    Presets,
 }
 
 /// Whether removing a bus needs confirmation.

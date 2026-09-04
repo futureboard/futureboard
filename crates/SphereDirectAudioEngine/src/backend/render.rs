@@ -61,11 +61,6 @@ fn metronome_debug_enabled() -> bool {
 static POST_PLAY_CALLBACK_LOGS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
-pub(crate) fn post_stop_tail_samples(sample_rate: u32) -> u64 {
-    (sample_rate as u64).saturating_mul(4)
-}
-
-#[inline]
 fn log_post_play_callback(step: &str) {
     let remaining = POST_PLAY_CALLBACK_LOGS.load(Ordering::Relaxed);
     if remaining == 0 || !transport_freeze_debug_enabled() {
@@ -154,17 +149,11 @@ pub struct LocalAudioState {
     pub monitor_input_l: Vec<f32>,
     pub monitor_input_r: Vec<f32>,
     pub render_path_logged: bool,
-    /// Samples of instrument processing still owed after the last preview note
-    /// went off, so the plugin's release tail renders out instead of being cut
-    /// dead when transport is stopped. Counts down per block; refreshed while a
-    /// preview note is held.
-    pub preview_tail_samples: u64,
-    /// Samples of graph processing still owed after transport stop/pause so
-    /// instruments, delays, reverbs, and bridged plugin tails decay naturally
-    /// instead of being hard-cut as soon as the playhead stops.
-    pub stop_tail_samples: u64,
     /// Last logged preview-note count (gates PreviewRenderWake spam).
     pub prev_logged_preview_notes: u32,
+    /// Blocks since the last stopped-transport heartbeat line. Diagnostics
+    /// only; see `log_stopped_graph_heartbeat`.
+    pub stopped_heartbeat_blocks: u64,
     /// Blocks until next PreviewRenderWake log while preview is active.
     pub preview_wake_log_cooldown: u32,
     pub metronome_enabled: bool,
@@ -219,9 +208,8 @@ impl LocalAudioState {
             monitor_input_l: vec![0.0; monitor_capacity],
             monitor_input_r: vec![0.0; monitor_capacity],
             render_path_logged: false,
-            preview_tail_samples: 0,
-            stop_tail_samples: 0,
             prev_logged_preview_notes: u32::MAX,
+            stopped_heartbeat_blocks: 0,
             preview_wake_log_cooldown: 0,
             metronome_enabled: false,
             metronome_ts_num: 4,
@@ -565,8 +553,6 @@ pub fn drain_commands(
                 runtime.bridge_editor_active = old.bridge_editor_active.clone();
                 // The panic the all_notes_off above pushed into the (preserved)
                 // sinks still needs flushing through the new graph.
-                runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
-                runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
                 // Keep the live master-fader ramp continuous across media/control
                 // graph swaps (clip mute/gain sync). Prefer the live master
                 // atomic (authoritative fader position) so a fresh runtime that
@@ -651,7 +637,6 @@ pub fn drain_commands(
                     POST_PLAY_CALLBACK_LOGS.store(5, Ordering::Relaxed);
                 }
                 local.playing_local = true;
-                local.stop_tail_samples = 0;
                 shared.playing.store(true, Ordering::Relaxed);
                 let old_state = crate::engine::AudioEngineState::from_u8(shared.engine_state.swap(
                     crate::engine::AudioEngineState::Running as u8,
@@ -688,7 +673,6 @@ pub fn drain_commands(
                 }
                 local.playing_local = false;
                 shared.playing.store(false, Ordering::Relaxed);
-                local.stop_tail_samples = post_stop_tail_samples(runtime.sample_rate);
                 let old_state = crate::engine::AudioEngineState::from_u8(shared.engine_state.swap(
                     crate::engine::AudioEngineState::Paused as u8,
                     Ordering::Relaxed,
@@ -700,8 +684,9 @@ pub fn drain_commands(
                 }
                 runtime.all_notes_off("stop");
                 // Drop latency-compensated pre-stop audio immediately so Stop
-                // cuts at the command. Plugin release / reverb still ring out
-                // via `stop_tail_samples`; only the PDC rings are cleared.
+                // cuts the timeline at the command. Plugin release and reverb
+                // tails are untouched: the graph keeps running, so they ring
+                // out on their own. Only the PDC rings are cleared.
                 runtime.reset_pdc_delay_lines();
             }
             EngineCommand::Seek { position_seconds } => {
@@ -858,17 +843,10 @@ pub fn drain_commands(
                 ack.store(true, Ordering::Release);
             }
             EngineCommand::SetBridgeEditorActive { track_id, active } => {
+                // Bookkeeping only. Closing an editor no longer has to buy the
+                // graph a window to drain the host's note-offs: the graph runs
+                // every block, so the bridge handshake is always alive.
                 runtime.set_bridge_editor_active(&track_id, active);
-                if !active {
-                    // UI/control path command consumed on the realtime callback.
-                    // The plugin editor's own VSTi keyboard is internal to the
-                    // bridged host, so closing the editor does not show up as an
-                    // engine MIDI preview. Keep the graph/bridge handshake alive
-                    // long enough for the host to drain note-off and release tails.
-                    local.preview_tail_samples = local
-                        .preview_tail_samples
-                        .max(post_stop_tail_samples(runtime.sample_rate));
-                }
             }
             EngineCommand::SetTrackVolume { track_id, value } => {
                 // Whether the id matched is the whole question when a fader
@@ -1089,38 +1067,51 @@ pub fn fill_output_f32(
     frames
 }
 
-/// Reasons the output callback must keep producing audio while the transport is
-/// stopped (engine `Paused`).
+/// One line per second while the transport is stopped, under
+/// `FUTUREBOARD_AUDIO_CALLBACK_DEBUG=1`.
 ///
-/// Extracted and tested because the failure mode is silent: a case missing from
-/// this list does not break a build or trip an assert, it just makes a feature
-/// inaudible. The Browser audition was exactly that — the callback body has a
-/// dedicated audition-only path, but this predicate did not list the voice, so
-/// the early silence return fired first and a clicked sample never made a
-/// sound.
-///
-/// Note this is deliberately a *superset* of `graph_wake_active` further down:
-/// an audition wakes the **output**, but must not wake the **graph**, since it
-/// is a decoded buffer summed into the master rather than anything that needs
-/// every track's plugin chain pulled through a block of silence.
-fn paused_preview_wake(
+/// It answers, in order, the questions a "the engine went quiet after Stop"
+/// report needs: is the callback still being called, is the engine in a
+/// rendering state, is the graph actually processing, is the input callback
+/// still delivering samples, is the MIDI preview queue being consumed, and is a
+/// recorder still consuming input. A silent engine that keeps printing this
+/// line is a graph problem; a line that stops printing is a device/stream
+/// problem. Formatting only ever happens behind the flag.
+fn log_stopped_graph_heartbeat(
     runtime: &RuntimeProject,
-    local: &LocalAudioState,
+    shared: &Arc<SharedState>,
+    local: &mut LocalAudioState,
+    frames_in_block: u64,
     software_monitoring: bool,
-) -> bool {
-    runtime.has_active_midi_preview()
-        || runtime.bridge_panic_flush_samples > 0
-        || runtime.bridge_preview_tail_samples > 0
-        || runtime.has_bridge_editor_active()
-        || runtime.has_ara_renderers()
-        || local.preview_tail_samples > 0
-        || local.stop_tail_samples > 0
-        || software_monitoring
-        || !local.audition.is_idle()
-        || runtime
-            .tracks
-            .iter()
-            .any(|t| !t.midi_block_events.is_empty())
+) {
+    let sample_rate = runtime.sample_rate.max(1) as u64;
+    let blocks_per_second = sample_rate / frames_in_block.max(1);
+    local.stopped_heartbeat_blocks = local.stopped_heartbeat_blocks.saturating_add(1);
+    if local.stopped_heartbeat_blocks < blocks_per_second.max(1) {
+        return;
+    }
+    local.stopped_heartbeat_blocks = 0;
+    let preview_notes: usize = runtime
+        .midi_tracks
+        .iter()
+        .map(|mt| mt.preview_active.len())
+        .sum();
+    let queued_midi: usize = runtime
+        .tracks
+        .iter()
+        .map(|t| t.midi_block_events.len())
+        .sum();
+    eprintln!(
+        "[RealtimeGraph] transport=stopped callbacks={} state={} graph=rendering          input_frames={} monitoring={} preview_notes={} queued_midi={} recorder={}",
+        shared.output_cb_count.load(Ordering::Relaxed),
+        crate::engine::AudioEngineState::from_u8(shared.engine_state.load(Ordering::Relaxed))
+            .as_str(),
+        shared.input_frames_received.load(Ordering::Relaxed),
+        software_monitoring,
+        preview_notes,
+        queued_midi,
+        shared.recording_active.load(Ordering::Relaxed),
+    );
 }
 
 fn fill_output_f32_inner(
@@ -1142,22 +1133,15 @@ fn fill_output_f32_inner(
     let software_monitoring = shared.monitor_enabled_any.load(Ordering::Relaxed)
         && shared.live_input_active.load(Ordering::Relaxed)
         && shared.input_ring.is_active();
+    // Engine lifecycle, not transport lifecycle. `Paused` renders: the timeline
+    // is what stops, and live input, monitoring, MIDI preview, instruments,
+    // inserts, sends, master FX and plugin tails all keep running. Only a
+    // project teardown, a device swap or a suspended engine is hard silence.
     if engine_state.outputs_silence() {
-        // Paused still services MIDI preview, the post-panic bridge flush, and
-        // open plugin editors: those need the block/handshake loop alive so
-        // bridged VSTi hosts keep draining MIDI and producing audio while the
-        // transport is stopped. Every other non-Running state (loading /
-        // closing / device switch / suspended) is hard silence.
-        let preview_wake = matches!(engine_state, crate::engine::AudioEngineState::Paused)
-            && paused_preview_wake(runtime, local, software_monitoring);
-        // When preview_wake holds, fall through to the normal body with the
-        // transport treated as stopped — only preview/flush processing runs.
-        if !preview_wake {
+        {
             for sample in data.iter_mut() {
                 *sample = 0.0;
             }
-            local.preview_tail_samples = 0;
-            local.stop_tail_samples = 0;
             local.prev_peak_l = 0.0;
             local.prev_peak_r = 0.0;
             shared
@@ -1229,105 +1213,13 @@ fn fill_output_f32_inner(
         }
     }
 
-    let pending_midi = channels > 0
-        && runtime
-            .tracks
-            .iter()
-            .any(|t| !t.midi_block_events.is_empty());
     let frames_in_block = data.len().checked_div(channels).unwrap_or(0) as u64;
-    let has_preview = runtime.has_active_midi_preview();
-    if transport_playing {
-        // Transport drives processing while playing; don't carry a stale tail.
-        local.preview_tail_samples = 0;
-        local.stop_tail_samples = 0;
-        // Playing blocks request/drain the bridge anyway — flush is implicit.
-        runtime.bridge_panic_flush_samples = 0;
-    } else if has_preview || pending_midi {
-        // A preview note is held (or its on/off just queued) — keep enough tail
-        // queued to render the instrument's release after the eventual note-off.
-        local.preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
-    }
-    // Post-panic flush: keep requesting bridge blocks until the host has had
-    // time to drain the panic CCs (stop/seek/mute) — counted down per block.
-    let panic_flush = runtime.bridge_panic_flush_samples > 0;
-    if !transport_playing && panic_flush {
-        runtime.bridge_panic_flush_samples = runtime
-            .bridge_panic_flush_samples
-            .saturating_sub(frames_in_block);
-    }
-    let bridge_preview_tail = runtime.bridge_preview_tail_samples > 0;
-    if !transport_playing && bridge_preview_tail {
-        runtime.bridge_preview_tail_samples = runtime
-            .bridge_preview_tail_samples
-            .saturating_sub(frames_in_block);
-    }
-    // An open external plugin editor keeps the graph rendering while stopped
-    // so the plugin's own UI keyboard stays audible (parity with the legacy
-    // callback path).
-    let bridge_editor_wakeup = runtime.has_bridge_editor_active();
-    // ARA's only host-to-plug-in transport channel is the per-block process
-    // context, so an ARA-bound track keeps the graph running while stopped —
-    // see `RuntimeProject::has_ara_renderers`. The block itself is silent: a
-    // playback renderer sounds nothing with `playing` clear.
-    let ara_wakeup = runtime.has_ara_renderers();
-    let audition_active = !local.audition.is_idle();
-    // Reasons the *graph* has to run while the transport is stopped. A Browser
-    // preview is deliberately not one of them: it is a decoded buffer mixed
-    // into the master output, so pulling every track's plugin chain through a
-    // block of silence just to audition it only buys xruns on a loaded project.
-    let graph_wake_active = has_preview
-        || pending_midi
-        || panic_flush
-        || bridge_preview_tail
-        || bridge_editor_wakeup
-        || ara_wakeup
-        || local.preview_tail_samples > 0
-        || local.stop_tail_samples > 0
-        || software_monitoring;
-    let preview_render_active = graph_wake_active || audition_active;
-    if preview_render_active
-        && !transport_playing
-        && (has_preview || pending_midi || local.preview_tail_samples > 0)
-    {
-        let active_notes: usize = runtime
-            .midi_tracks
-            .iter()
-            .map(|mt| mt.preview_active.len())
-            .sum();
-        let active_u32 = active_notes as u32;
-        let changed = active_u32 != local.prev_logged_preview_notes;
-        if changed {
-            if callback_debug_enabled() {
-                eprintln!(
-                    "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
-                    local.prev_logged_preview_notes, active_u32, local.preview_tail_samples
-                );
-            }
-            local.prev_logged_preview_notes = active_u32;
-            local.preview_wake_log_cooldown = 0;
-        } else if active_notes > 0 && callback_debug_enabled() {
-            local.preview_wake_log_cooldown = local.preview_wake_log_cooldown.saturating_add(1);
-            let sr = runtime.sample_rate.max(1);
-            let log_interval_blocks = (sr / frames_in_block.max(1) as u32).max(1);
-            if local.preview_wake_log_cooldown >= log_interval_blocks {
-                local.preview_wake_log_cooldown = 0;
-                eprintln!(
-                    "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
-                    active_notes, local.preview_tail_samples
-                );
-            }
-        }
-        // Once no note is held and nothing is queued, the remaining tail is pure
-        // decay — count it down so processing eventually stops.
-        if !has_preview && !pending_midi {
-            local.preview_tail_samples = local.preview_tail_samples.saturating_sub(frames_in_block);
-            if local.preview_tail_samples == 0 {
-                local.prev_logged_preview_notes = u32::MAX;
-            }
-        }
-    }
-    if !transport_playing && local.stop_tail_samples > 0 {
-        local.stop_tail_samples = local.stop_tail_samples.saturating_sub(frames_in_block);
+    // Diagnostics only. Nothing below gates rendering on these any more: the
+    // graph runs every block the engine renders, so a preview note, a live
+    // input, an open editor or a decaying reverb tail cannot be missed by a
+    // predicate that forgot to list it.
+    if callback_debug_enabled() && !transport_playing {
+        log_stopped_graph_heartbeat(runtime, shared, local, frames_in_block, software_monitoring);
     }
 
     let monitor_input_ready = if shared.live_input_active.load(Ordering::Relaxed) {
@@ -1370,13 +1262,8 @@ fn fill_output_f32_inner(
         && !shared.jam_bus.master_click_published();
     let mut click_deferred = false;
 
-    if channels >= 2 && (transport_playing || preview_render_active) {
-        frames = if !transport_playing && !graph_wake_active {
-            // Audition-only block: the graph would render silence, so hand the
-            // rest of this callback a zeroed buffer instead of processing it.
-            data.fill(0.0);
-            frames_in_block
-        } else {
+    if channels >= 2 {
+        frames = {
             // One call for both input sources. A jam-routed track draws from
             // the jam bus whether or not a capture stream is open, because a
             // remote performer does not depend on this machine having an
@@ -1444,13 +1331,6 @@ fn fill_output_f32_inner(
         // Live monitoring is mixed below via the input ring (single, clean
         // path) — the old per-block sample-and-hold monitor was removed because
         // it held one input sample across the whole output block (warble).
-
-        if !transport_playing
-            && runtime.bridge_preview_tail_samples > 0
-            && data.iter().any(|sample| sample.abs() > 0.00001)
-        {
-            runtime.bridge_preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
-        }
     } else if channels >= 2 {
         let metronome_graph_max_samples = metronome_graph_max_latency_samples(runtime);
         let metronome_delay_samples = metronome_compensation_delay_samples(runtime);
@@ -1563,6 +1443,18 @@ fn fill_output_f32_inner(
     // pair. Because this lives in the device callback and export renders the
     // graph directly, no stage below can reach exported or recorded audio.
     apply_control_room(data, channels, runtime, shared, local);
+
+    // Audio Jam Monitor tap. Deliberately *after* the Control Room, which is
+    // the whole difference from the master tap above: master is the mix an
+    // export gets, this is the signal that actually leaves for the monitoring
+    // output. "Send what I am hearing" means this one.
+    //
+    // One atomic load when nobody is sending it.
+    if channels >= 2 {
+        if let Some(slot) = shared.jam_bus.monitor_publish() {
+            slot.write_interleaved(data, channels, runtime.sample_rate);
+        }
+    }
 
     // Meter the final output after playback, software monitoring, and bridge
     // contributions have all been summed. This avoids under-reporting monitor
@@ -2544,65 +2436,65 @@ mod jam_master_click_tests {
 }
 
 #[cfg(test)]
-mod paused_preview_wake_tests {
-    use super::*;
-    use crate::audio_file::AudioFileBuffer;
+mod realtime_graph_lifecycle_tests {
+    use crate::engine::AudioEngineState;
 
-    fn silent_source(frames: usize) -> Box<AudioFileBuffer> {
-        Box::new(AudioFileBuffer {
-            sample_rate: 48_000,
-            channels: 2,
-            frames,
-            samples: vec![0.0; frames * 2],
-        })
-    }
-
-    /// Nothing to preview: the callback is free to return hard silence.
+    /// The bug this replaced: rendering used to be gated on a hand-written list
+    /// of "reasons to wake while paused", and anything missing from that list —
+    /// a Browser audition, a live input, a VSTi preview after its window
+    /// expired — was simply inaudible with no error anywhere. A stopped
+    /// transport now renders unconditionally, so there is no list to forget.
     #[test]
-    fn idle_engine_does_not_wake() {
-        let runtime = RuntimeProject::default();
-        let local = LocalAudioState::new(48_000.0);
-        assert!(!paused_preview_wake(&runtime, &local, false));
-    }
-
-    /// The regression: a Browser audition is only ever started with the
-    /// transport stopped, so if it does not wake the paused callback the sample
-    /// is decoded, started, and then never mixed.
-    #[test]
-    fn active_audition_wakes_the_paused_callback() {
-        let runtime = RuntimeProject::default();
-        let mut local = LocalAudioState::new(48_000.0);
-        local.audition.start(silent_source(48_000), 48_000);
-
+    fn a_stopped_transport_still_renders_the_realtime_graph() {
+        assert!(AudioEngineState::Paused.renders_graph());
+        assert!(!AudioEngineState::Paused.outputs_silence());
         assert!(
-            !local.audition.is_idle(),
-            "audition voice should be live after start"
-        );
-        assert!(
-            paused_preview_wake(&runtime, &local, false),
-            "a live Browser audition must keep the stopped callback producing audio"
+            !AudioEngineState::Paused.renders_transport(),
+            "stopped means the timeline stops, not the engine"
         );
     }
 
-    /// Stopping the preview releases the voice through a fade, so the wake has
-    /// to hold until that fade has finished rather than cutting immediately.
+    /// Playback and the mid-play project rebuild both render everything.
     #[test]
-    fn releasing_audition_still_wakes_until_the_fade_completes() {
-        let runtime = RuntimeProject::default();
-        let mut local = LocalAudioState::new(48_000.0);
-        local.audition.start(silent_source(48_000), 48_000);
-        local.audition.stop(48_000);
-        assert!(
-            paused_preview_wake(&runtime, &local, false),
-            "the release tail must stay audible or the preview ends in a click"
-        );
+    fn running_and_loading_render_the_graph_and_the_transport() {
+        for state in [AudioEngineState::Running, AudioEngineState::LoadingProject] {
+            assert!(state.renders_graph(), "{state:?} must render");
+            assert!(state.renders_transport(), "{state:?} must advance");
+            assert!(!state.outputs_silence());
+        }
     }
 
-    /// Software monitoring is an independent reason to stay awake.
+    /// The only states that may go hard silent are the ones with nothing to
+    /// render into or from.
     #[test]
-    fn software_monitoring_wakes_without_an_audition() {
-        let runtime = RuntimeProject::default();
-        let local = LocalAudioState::new(48_000.0);
-        assert!(paused_preview_wake(&runtime, &local, true));
+    fn only_teardown_states_output_silence() {
+        for state in [
+            AudioEngineState::ClosingProject,
+            AudioEngineState::DeviceSwitching,
+            AudioEngineState::Suspended,
+        ] {
+            assert!(state.outputs_silence(), "{state:?} must be silent");
+            assert!(!state.renders_graph());
+            assert!(!state.renders_transport());
+        }
+    }
+
+    /// `renders_transport` is strictly narrower than `renders_graph`: every
+    /// state that advances the timeline also renders, never the other way
+    /// round. If that inverts, a stopped transport is rendering timeline audio.
+    #[test]
+    fn transport_rendering_implies_graph_rendering() {
+        for state in [
+            AudioEngineState::Running,
+            AudioEngineState::Paused,
+            AudioEngineState::LoadingProject,
+            AudioEngineState::ClosingProject,
+            AudioEngineState::DeviceSwitching,
+            AudioEngineState::Suspended,
+        ] {
+            if state.renders_transport() {
+                assert!(state.renders_graph(), "{state:?}");
+            }
+        }
     }
 }

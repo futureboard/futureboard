@@ -1860,25 +1860,13 @@ pub struct RuntimeProject {
         String,
         std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>,
     >,
-    /// Tracks whose external-bridge plugin editor is open — keeps the audio
-    /// callback rendering while stopped so VSTi internal keyboards stay audible.
+    /// Tracks whose external-bridge plugin editor is open. Bookkeeping for the
+    /// UI/bridge handshake; it no longer decides whether the graph renders,
+    /// because the graph renders whenever the engine does.
     pub bridge_editor_active: std::collections::HashSet<String>,
-    /// Samples of post-panic processing still owed to bridged plugin hosts.
-    /// Set whenever panic MIDI (note-offs + CC 64/123/120) is pushed into a
-    /// bridge sink's ring: the host only drains that ring while blocks are
-    /// being requested, so the callback must keep the handshake alive for this
-    /// long after a stop/seek/mute panic or the VSTi's voices stay stuck until
-    /// the next play. Counted down by the callback while the transport is
-    /// stopped; transient, never persisted.
-    pub bridge_panic_flush_samples: u64,
     /// Control Room / Listen Bus configuration and per-block scratch. Read
     /// only by the realtime device callback — see [`RuntimeMonitor`].
     pub monitor: RuntimeMonitor,
-    /// Samples of post-preview release-tail processing still owed to bridged
-    /// plugin hosts after a note-off / sustain-off while transport is stopped.
-    /// Unlike `bridge_editor_active`, this is armed by MIDI itself, so closing
-    /// the editor does not decide whether a VSTi release tail can keep rendering.
-    pub bridge_preview_tail_samples: u64,
 }
 
 impl RuntimeProject {
@@ -3084,8 +3072,6 @@ impl RuntimeProject {
             // freshly built project (preserved across reloads in drain_commands).
             plugin_bridge_sinks: std::collections::HashMap::new(),
             bridge_editor_active: std::collections::HashSet::new(),
-            bridge_panic_flush_samples: 0,
-            bridge_preview_tail_samples: 0,
         };
         // Resolve cross-entity indices once, on this worker thread, so the
         // audio callback never does an id lookup per block.
@@ -3550,7 +3536,6 @@ impl RuntimeProject {
         if bridged {
             self.push_bridge_preview_midi(plugin_instance_id, 0x80 | channel, pitch, 0, "note_off");
             self.set_preview_active(track_id, channel, pitch, false);
-            self.arm_bridge_preview_tail();
             return;
         }
         if self.queue_preview_event(
@@ -3583,7 +3568,6 @@ impl RuntimeProject {
                 value,
                 "control_change",
             );
-            self.arm_bridge_preview_tail();
             return;
         }
         let _ = self.queue_preview_event(
@@ -3625,7 +3609,6 @@ impl RuntimeProject {
                     sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, 0);
                 }
             }
-            self.arm_bridge_panic_flush();
         }
         if let Some(mt) = self
             .midi_tracks
@@ -3672,25 +3655,6 @@ impl RuntimeProject {
         self.midi_tracks
             .iter()
             .any(|mt| !mt.preview_active.is_empty())
-    }
-
-    /// Arm the post-panic flush window after panic MIDI was pushed into a
-    /// bridge sink. ~250 ms of kept-alive block requests is plenty: the host
-    /// drains the ring on the first requested block and CC 120 (All Sound Off)
-    /// silences voices immediately; the rest of the window absorbs a host that
-    /// is momentarily stalled behind an editor open/close.
-    pub fn arm_bridge_panic_flush(&mut self) {
-        self.bridge_panic_flush_samples = (self.sample_rate.max(1) as u64) / 4;
-    }
-
-    /// Arm a stopped-transport render window for bridged preview note releases.
-    /// Four seconds matches the existing post-stop tail window; the callback
-    /// refreshes it while output remains audible, so long synth releases are not
-    /// hard-cut just because the plugin editor is closed.
-    pub fn arm_bridge_preview_tail(&mut self) {
-        self.bridge_preview_tail_samples = self
-            .bridge_preview_tail_samples
-            .max((self.sample_rate.max(1) as u64).saturating_mul(4));
     }
 
     fn queue_preview_event(
@@ -4215,12 +4179,11 @@ impl RuntimeProject {
     /// the instance the moment the transport stops therefore freezes the
     /// plug-in's idea of the transport at the last block it saw — its editor
     /// playhead stops following seeks, and its own play button keeps toggling
-    /// against a stale "still playing" state. So an ARA-bound track is a reason
-    /// to keep the graph running while stopped, exactly like an open bridged
-    /// editor is.
+    /// against a stale "still playing" state. The graph now runs every block
+    /// the engine renders, so that context arrives on its own; this stays as
+    /// the query the ARA plumbing asks about bound renderers.
     ///
-    /// Realtime-safe: a length check per track, no allocation, no locking —
-    /// the same shape as the `midi_block_events` scan in `paused_preview_wake`.
+    /// Realtime-safe: a length check per track, no allocation, no locking.
     pub fn has_ara_renderers(&self) -> bool {
         self.tracks
             .iter()
@@ -4415,9 +4378,6 @@ fn push_all_notes_off_for_track(
             sink.push_midi(0xB0 | (ch & 0x0F), 123, 0, sample_offset);
             sink.push_midi(0xB0 | (ch & 0x0F), 120, 0, sample_offset);
         }
-        // The host only drains the ring while blocks are requested — keep the
-        // handshake alive past this panic so it is actually delivered.
-        project.arm_bridge_panic_flush();
         return;
     }
     for &(channel, pitch) in active {
@@ -6356,9 +6316,6 @@ mod midi_tests {
             );
         }
         assert!(p.midi_tracks[0].active.is_empty());
-        // The callback must keep requesting bridge blocks so the host actually
-        // drains this panic while the transport is stopped.
-        assert!(p.bridge_panic_flush_samples > 0);
     }
 
     #[test]
@@ -6379,11 +6336,13 @@ mod midi_tests {
                 (0x80, 64, 0, 0),
             ]
         );
-        assert!(p.bridge_preview_tail_samples > 0);
     }
 
+    /// The release tail needs no window of its own: the graph renders every
+    /// block the engine renders, so a bridged instrument's release is still
+    /// being processed long after the note-off, editor open or not.
     #[test]
-    fn bridge_preview_note_off_arms_release_tail_without_editor() {
+    fn bridge_preview_note_off_reaches_the_host_without_editor() {
         let (mut p, sink) = bridged_project();
         p.bridge_preview_note_on("track-1", "insert-1", 0, 67, 96);
         sink.take();
@@ -6392,14 +6351,10 @@ mod midi_tests {
 
         assert_eq!(sink.take(), vec![(0x80, 67, 0, 0)]);
         assert!(!p.has_active_midi_preview());
-        assert_eq!(
-            p.bridge_preview_tail_samples,
-            (p.sample_rate as u64).saturating_mul(4)
-        );
     }
 
     #[test]
-    fn preview_all_notes_off_releases_held_notes_and_arms_flush() {
+    fn preview_all_notes_off_releases_held_notes() {
         let (mut p, sink) = bridged_project();
         p.bridge_preview_note_on("track-1", "insert-1", 0, 72, 90);
         sink.take();
@@ -6410,7 +6365,6 @@ mod midi_tests {
         assert_eq!(events[0], (0x80, 72, 0, 0));
         assert!(events.contains(&(0xB0, 123, 0, 0)));
         assert!(!p.has_active_midi_preview());
-        assert!(p.bridge_panic_flush_samples > 0);
     }
 }
 

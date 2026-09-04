@@ -237,30 +237,40 @@ impl AudioEngineState {
         }
     }
 
-    /// Whether this state means the engine cannot produce audio at all.
+    /// Whether the realtime graph runs this block.
     ///
-    /// `LoadingProject` is deliberately **not** one of them. It means "the
-    /// control thread is building the next graph"; the graph the callback is
-    /// holding is untouched and still perfectly renderable until the swap
-    /// arrives, and the swap itself preserves the transport (see the
-    /// `LoadProject` arm in `backend::render`).
+    /// This is a question about the **engine**, not about the transport, and
+    /// the distinction is the whole point: a stopped transport still has to
+    /// process live input, monitoring, MIDI preview, instruments, insert FX,
+    /// sends, master FX, plugin tails and metering. Only the timeline stops.
     ///
-    /// Treating it as silence is what made playback stop mid-song: the UI
-    /// re-syncs the project whenever it goes dirty — including while playing —
-    /// and with plug-ins loaded that rebuild takes seconds. The mix went hard
-    /// silent for the whole of it, and every path that failed to send the
-    /// command left the state stuck, so the only way back was pressing Play,
-    /// whose `StartTransport` forces `Running`.
-    pub fn outputs_silence(self) -> bool {
-        !matches!(self, Self::Running | Self::LoadingProject)
+    /// `Paused` therefore renders. The three states that do not are the ones
+    /// where there is genuinely nothing to render into or from: the project is
+    /// being torn down, the device is being swapped, or the engine is
+    /// suspended.
+    ///
+    /// `LoadingProject` renders too. It means "the control thread is building
+    /// the next graph"; the graph the callback is holding is untouched and
+    /// still perfectly renderable until the swap arrives, and the swap itself
+    /// preserves the transport (see the `LoadProject` arm in `backend::render`).
+    pub fn renders_graph(self) -> bool {
+        matches!(self, Self::Running | Self::LoadingProject | Self::Paused)
     }
 
-    /// Whether the transport may advance and the graph may be rendered.
+    /// Whether this state means the engine cannot produce audio at all.
     ///
-    /// The same set as [`Self::outputs_silence`] read the other way round, and
-    /// the reason both exist: `Paused` outputs silence *by default* but still
-    /// wakes the graph for MIDI preview, so the two questions have different
-    /// answers there and the render path asks them separately.
+    /// The inverse of [`Self::renders_graph`]. Treating too much as silence is
+    /// what made playback stop mid-song and what made a stopped transport kill
+    /// preview, monitoring and live FX: every path that failed to send the
+    /// waking command left the engine mute, so the only way back was pressing
+    /// Play, whose `StartTransport` forces `Running`.
+    pub fn outputs_silence(self) -> bool {
+        !self.renders_graph()
+    }
+
+    /// Whether the **transport** may advance: the playhead moves and timeline
+    /// clips are read. Strictly narrower than [`Self::renders_graph`], because
+    /// `Paused` renders the graph without advancing the timeline.
     pub fn renders_transport(self) -> bool {
         matches!(self, Self::Running | Self::LoadingProject)
     }
@@ -1375,13 +1385,55 @@ impl EngineInner {
         self.send_command(EngineCommand::StartTransport)
     }
 
+    /// Stop the transport.
+    ///
+    /// Stopping the transport is also the end of input capture. Recording keeps
+    /// its own lifecycle — the take is finalized by [`Self::stop_recording`],
+    /// which the caller still owns and which is what produces the clip — but no
+    /// path may leave the writer consuming input after the transport has
+    /// stopped, however it stopped: Space, the Stop button, a project close, a
+    /// device change, a control surface, a remote command. Ending capture here
+    /// is what makes "the file stops growing at Stop" true for every one of
+    /// them instead of only for the paths that remembered to ask.
     pub fn pause(&self) -> Result<(), SphereAudioError> {
+        self.end_recording_capture();
         // Eagerly clear the shared transport flag so UI playhead / polls stop
         // at the command without waiting for the next audio callback drain.
-        // The audio thread still applies StopTransport (notes-off, PDC clear,
-        // post-stop tail) when it drains the queue.
+        // The audio thread still applies StopTransport (notes-off, PDC clear)
+        // when it drains the queue.
         self.shared.playing.store(false, Ordering::Relaxed);
         self.send_command(EngineCommand::StopTransport)
+    }
+
+    /// What the transport is doing, as one value rather than as two flags that
+    /// can disagree. See [`crate::transport::TransportState`].
+    pub fn transport_state(&self) -> crate::transport::TransportState {
+        crate::transport::TransportState::from_flags(
+            self.shared.playing.load(Ordering::Relaxed),
+            self.shared.recording_active.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Stop the active take consuming input without finalizing it.
+    ///
+    /// The session stays alive so `stop_recording` can still flush the writer
+    /// and hand back the take; it simply stops growing. Split from
+    /// `stop_recording` because the two answer different questions: this one is
+    /// "the transport stopped", that one is "give me the take".
+    fn end_recording_capture(&self) {
+        let Some(session) = self.recording.lock().as_ref().map(|session| {
+            session.recording_active.store(false, Ordering::Relaxed);
+            session.started_at
+        }) else {
+            return;
+        };
+        self.shared.recording_active.store(false, Ordering::Relaxed);
+        if recording_debug_enabled() {
+            eprintln!(
+                "[recording] capture ended by transport stop after {:.3}s; take awaits finalize",
+                session.elapsed().as_secs_f64()
+            );
+        }
     }
 
     pub fn seek(&self, position_seconds: f64) -> Result<(), SphereAudioError> {
@@ -3341,6 +3393,12 @@ impl EngineInner {
             });
         match session {
             Ok(session) => {
+                if recording_debug_enabled() {
+                    eprintln!(
+                        "[recording] session started tracks={} start_beat={:.3}",
+                        session.track_count, session.start_beat
+                    );
+                }
                 *guard = Some(session);
                 drop(guard);
                 // Ensure the output stream runs so monitoring is audible.
@@ -3432,10 +3490,26 @@ impl EngineInner {
     }
 
     /// Stop the active recording, finalize WAV files, and return per-track results.
+    /// Finalize the active take and hand back its results.
+    ///
+    /// Takes the session out of the engine, so the next Record always builds a
+    /// new one: new take id, new file, new clip. There is no path that reuses a
+    /// writer, and a second call without a second Record reports "no active
+    /// recording session" rather than quietly appending to the last take.
     pub fn stop_recording(&self) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
         let session = self.recording.lock().take().ok_or_else(|| {
             SphereAudioError::NativeError("No active recording session".to_string())
         })?;
+        // Belt and braces with `pause`: whichever arrives first, the writer has
+        // stopped consuming input before a single sample of finalization work.
+        session.recording_active.store(false, Ordering::Relaxed);
+        self.shared.recording_active.store(false, Ordering::Relaxed);
+        if recording_debug_enabled() {
+            eprintln!(
+                "[recording] session finalizing after {:.3}s",
+                session.started_at.elapsed().as_secs_f64()
+            );
+        }
 
         // ASIO tap: detach the record sink from the session input callback so
         // the callback releases its channel senders on the next block. The
@@ -3850,6 +3924,27 @@ impl EngineInner {
         &self,
         snapshot: &EngineProjectSnapshot,
     ) -> Result<(), SphereAudioError> {
+        // Single-capture-stream invariant. While a take is running, the
+        // recording stream *is* the live input: it owns the endpoint, and it is
+        // what sets `live_input_active` and fills `input_ring` — see
+        // `recording::start_recording_with_config`.
+        //
+        // Re-opening a standalone stream here would put a second client on the
+        // same device, and `stop_live_input_stream` on the way would reset the
+        // very ring the recorder is filling and clear `monitor_enabled_any`
+        // under it. That is why a take could record nothing: recording needs an
+        // armed track, an armed track makes `wants_live_input` true, and any
+        // project sync during the take — the auto-save before Record is enough
+        // to cause one — walked straight into this.
+        //
+        // Declining costs nothing: `stop_recording` restores this stream from
+        // the last snapshot as soon as the take is finalized.
+        if !live_input_sync_may_touch_stream(self.recording.lock().is_some()) {
+            if recording_debug_enabled() {
+                eprintln!("[recording] live-input sync declined: the take owns the capture device");
+            }
+            return Ok(());
+        }
         // Jam-routed tracks are excluded throughout: they take no hardware
         // input, so they must not open a capture stream, must not pin a device,
         // and must not count as a conflicting route against a track that does.
@@ -3903,7 +3998,14 @@ impl EngineInner {
                 && !track.input_source.is_jam()
         });
 
-        let wants_live_input = desired_track.is_some();
+        // A jam send bound to the Live Input pair is a request for the interface,
+        // exactly as an armed track is. Without this the capture stream is never
+        // opened, the input ring never goes active, and the tap in the render
+        // callback has nothing to publish — the room hears silence and nothing
+        // on screen says why. It is why "send my mic" only ever worked when a
+        // track happened to be armed for something else.
+        let jam_wants_live_input = self.shared.jam_bus.live_input_publish().is_some();
+        let wants_live_input = desired_track.is_some() || jam_wants_live_input;
 
         // Any track that explicitly wants monitoring (not just record-arm) —
         // gates whether the render callback mixes the input bus to the output.
@@ -4908,6 +5010,27 @@ fn audition_decode_worker(requests: Arc<AuditionRequests>, engine: std::sync::We
     }
 }
 
+/// `FUTUREBOARD_RECORDING_DEBUG=1` traces the recording session lifecycle:
+/// where a take starts, where its capture ends, and which path ended it. Cached
+/// so no hot path reads the environment.
+/// Whether a project sync may open, close, or rebuild the standalone capture
+/// stream.
+///
+/// One rule, named so it cannot be deleted by accident: **never while a take
+/// owns the capture device.** The recording stream is the live input for the
+/// duration of a take — it holds the endpoint, sets `live_input_active` and
+/// fills `input_ring` — so a sync that rebuilt the standalone stream would put
+/// a second client on the device and reset the ring under the recorder.
+#[inline]
+pub(crate) fn live_input_sync_may_touch_stream(take_owns_capture_device: bool) -> bool {
+    !take_owns_capture_device
+}
+
+fn recording_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some())
+}
+
 fn transport_freeze_debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("FUTUREBOARD_TRANSPORT_FREEZE_DEBUG").is_some())
@@ -5156,8 +5279,6 @@ where
                             runtime.bridge_editor_active = old.bridge_editor_active.clone();
                             // The panic pushed into the preserved sinks above
                             // still needs flushing through the new graph.
-                            runtime.bridge_panic_flush_samples = old.bridge_panic_flush_samples;
-                            runtime.bridge_preview_tail_samples = old.bridge_preview_tail_samples;
                             // Keep the live master-fader ramp continuous across
                             // media/control graph swaps (clip mute/gain sync).
                             runtime.smoothed_master_gain =
@@ -5243,7 +5364,6 @@ where
                                 );
                             }
                             playing_local = true;
-                            metronome.stop_tail_samples = 0;
                             shared.playing.store(true, Ordering::Relaxed);
                             // Position MIDI cursors at the start beat and clear
                             // any stale active notes so play-from is clean.
@@ -5272,8 +5392,6 @@ where
                                 eprintln!("[SphereAudio callback] StopTransport");
                             }
                             playing_local = false;
-                            metronome.stop_tail_samples =
-                                crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
                             shared.playing.store(false, Ordering::Relaxed);
                             // Release held notes so nothing is left stuck.
                             runtime.all_notes_off("stop");
@@ -5432,14 +5550,8 @@ where
                         EngineCommand::SetBridgeEditorActive { track_id, active } => {
                             runtime.set_bridge_editor_active(&track_id, active);
                             if !active {
-                                // The plugin editor's VSTi keyboard lives inside the bridged host,
-                                // not the engine preview tracker. Closing the editor must keep the
-                                // stopped-transport graph alive long enough to drain note-off/release.
-                                metronome.preview_tail_samples = metronome
-                                    .preview_tail_samples
-                                    .max(crate::backend::render::post_stop_tail_samples(
-                                        runtime.sample_rate,
-                                    ));
+                                // Bookkeeping only: the graph runs every block,
+                                // so the bridge handshake is always alive.
                             }
                         }
                         EngineCommand::SetTrackVolume { track_id, value } => {
@@ -5624,135 +5736,44 @@ where
                     );
                 }
 
-                let pending_midi = ch > 0
-                    && runtime
-                        .tracks
-                        .iter()
-                        .any(|t| !t.midi_block_events.is_empty());
-                let frames_in_block = data.len().checked_div(ch).unwrap_or(0) as u64;
-                let has_preview = runtime.has_active_midi_preview();
-                if playing_local {
-                    metronome.preview_tail_samples = 0;
-                    metronome.stop_tail_samples = 0;
-                    // Playing blocks drive the bridge anyway — flush is implicit.
-                    runtime.bridge_panic_flush_samples = 0;
-                } else if has_preview || pending_midi {
-                    // Keep release-tail processing queued past the note-off so a
-                    // stopped-transport preview doesn't cut the instrument dead.
-                    metronome.preview_tail_samples =
-                        crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
-                }
-                // Post-panic flush: keep the bridge handshake alive after a
-                // stop/seek/mute panic so the host drains the panic CCs instead
-                // of leaving VSTi voices stuck until the next play.
-                let panic_flush = runtime.bridge_panic_flush_samples > 0;
-                if !playing_local && panic_flush {
-                    runtime.bridge_panic_flush_samples = runtime
-                        .bridge_panic_flush_samples
-                        .saturating_sub(frames_in_block);
-                }
-                let bridge_preview_tail = runtime.bridge_preview_tail_samples > 0;
-                if !playing_local && bridge_preview_tail {
-                    runtime.bridge_preview_tail_samples = runtime
-                        .bridge_preview_tail_samples
-                        .saturating_sub(frames_in_block);
-                }
-                let bridge_editor_wakeup = runtime.has_bridge_editor_active();
-                // ARA reaches the plug-in only through the per-block process
-                // context, so a bound instance keeps the graph awake while
-                // stopped — see `RuntimeProject::has_ara_renderers`.
-                let ara_wakeup = runtime.has_ara_renderers();
-                let audition_active = !audition.is_idle();
-                // Park the Browser preview playhead here as well: the mix below
-                // is skipped entirely on idle blocks, so the sentinel would
-                // otherwise stay at the last played position.
+                // Park the Browser preview playhead every block.
                 shared.publish_audition_position(audition.position_seconds());
-                // A Browser preview is mixed into the master output and needs
-                // nothing from the graph, so it is not a graph wake reason —
-                // see the DAUx path for the same split.
-                let graph_wake_active = has_preview
-                    || pending_midi
-                    || panic_flush
-                    || bridge_preview_tail
-                    || metronome.preview_tail_samples > 0
-                    || metronome.stop_tail_samples > 0
-                    || bridge_editor_wakeup
-                    || ara_wakeup;
-                let preview_render_active = graph_wake_active || audition_active;
-                if preview_render_active
-                    && !playing_local
-                    && (has_preview || pending_midi || metronome.preview_tail_samples > 0)
-                {
-                    let active_notes: usize = runtime
+                // Diagnostics only. Nothing below gates rendering on these any
+                // more: the graph runs every block the engine renders.
+                if !playing_local && callback_debug_enabled() {
+                    let active_notes: u32 = runtime
                         .midi_tracks
                         .iter()
-                        .map(|mt| mt.preview_active.len())
+                        .map(|mt| mt.preview_active.len() as u32)
                         .sum();
-                    let active_u32 = active_notes as u32;
-                    let changed = active_u32 != metronome.prev_logged_preview_notes;
-                    if changed {
+                    if active_notes != metronome.prev_logged_preview_notes {
+                        metronome.prev_logged_preview_notes = active_notes;
                         eprintln!(
-                            "[PreviewRenderWake] active_preview_notes changed {} -> {} tail_samples={}",
-                            metronome.prev_logged_preview_notes,
-                            active_u32,
-                            metronome.preview_tail_samples
+                            "[RealtimeGraph] transport=stopped active_preview_notes={active_notes} rendering=true"
                         );
-                        metronome.prev_logged_preview_notes = active_u32;
-                        metronome.preview_wake_log_cooldown = 0;
-                    } else if active_notes > 0 {
-                        metronome.preview_wake_log_cooldown =
-                            metronome.preview_wake_log_cooldown.saturating_add(1);
-                        let sr = runtime.sample_rate.max(1);
-                        let log_interval_blocks =
-                            (sr / frames_in_block.max(1) as u32).max(1);
-                        if metronome.preview_wake_log_cooldown >= log_interval_blocks {
-                            metronome.preview_wake_log_cooldown = 0;
-                            eprintln!(
-                                "[PreviewRenderWake] active_preview_notes={} tail_samples={} rendering_while_stopped=true",
-                                active_notes, metronome.preview_tail_samples
-                            );
-                        }
                     }
-                    if !has_preview && !pending_midi {
-                        metronome.preview_tail_samples =
-                            metronome.preview_tail_samples.saturating_sub(frames_in_block);
-                        if metronome.preview_tail_samples == 0 {
-                            metronome.prev_logged_preview_notes = u32::MAX;
-                        }
-                    }
-                }
-                if !playing_local && metronome.stop_tail_samples > 0 {
-                    metronome.stop_tail_samples =
-                        metronome.stop_tail_samples.saturating_sub(frames_in_block);
                 }
 
-                if ch >= 2 && (playing_local || preview_render_active) {
+                if ch >= 2 {
                     let frames_needed = data.len() / ch;
                     let scratch_len = frames_needed * ch;
                     if block_scratch.len() < scratch_len {
                         block_scratch.resize(scratch_len, 0.0);
                     }
                     let scratch = &mut block_scratch[..scratch_len];
-                    frames = if !playing_local && !graph_wake_active {
-                        // Audition-only block: the graph would render silence,
-                        // so zero the scratch instead of processing it.
-                        scratch.fill(0.0);
-                        frames_needed as u64
-                    } else {
-                        render_project_block_interleaved(
-                            &mut runtime,
-                            base_sample,
-                            master_vol,
-                            scratch,
-                            ch,
-                            playing_local,
-                            shared.time_sig_num.load(Ordering::Relaxed),
-                            shared.time_sig_den.load(Ordering::Relaxed),
-                            loop_bounds,
-                        )
-                    };
+                    let _ = frames_needed;
+                    frames = render_project_block_interleaved(
+                        &mut runtime,
+                        base_sample,
+                        master_vol,
+                        scratch,
+                        ch,
+                        playing_local,
+                        shared.time_sig_num.load(Ordering::Relaxed),
+                        shared.time_sig_den.load(Ordering::Relaxed),
+                        loop_bounds,
+                    );
                     audition.mix_into(scratch, ch);
-                    shared.publish_audition_position(audition.position_seconds());
                     if !render_path_logged {
                         render_path_logged = true;
                         if callback_debug_enabled() {
@@ -5831,13 +5852,6 @@ where
                         peak_r = peak_r.max(r.abs());
                         sum_sq_l += l * l;
                         sum_sq_r += r * r;
-                    }
-                    if !playing_local
-                        && runtime.bridge_preview_tail_samples > 0
-                        && peak_l.max(peak_r) > 0.00001
-                    {
-                        runtime.bridge_preview_tail_samples =
-                            crate::backend::render::post_stop_tail_samples(runtime.sample_rate);
                     }
                 } else if ch >= 2 {
                     let metronome_graph_max_samples =
@@ -6088,6 +6102,24 @@ mod live_input_tests {
                 buffer_size: 256,
             },
         }
+    }
+
+    /// The regression this guard exists for: recording needs an armed track, an
+    /// armed track makes a live-input sync want the capture device, and any
+    /// project sync during a take — the auto-save before Record is enough to
+    /// cause one — used to walk straight in, stop the stream the recorder was
+    /// feeding, and open a second client on the same endpoint. The take then
+    /// recorded nothing.
+    #[test]
+    fn a_running_take_owns_the_capture_device() {
+        assert!(
+            !live_input_sync_may_touch_stream(true),
+            "a project sync must not rebuild the capture stream under a take"
+        );
+        assert!(
+            live_input_sync_may_touch_stream(false),
+            "with no take running the sync is the only thing that owns the stream"
+        );
     }
 
     #[test]
@@ -7862,6 +7894,7 @@ mod engine_state_rendering_tests {
             AudioEngineState::Suspended,
         ] {
             assert!(state.outputs_silence(), "{state:?} must output silence");
+            assert!(!state.renders_graph(), "{state:?} must not render");
             assert!(
                 !state.renders_transport(),
                 "{state:?} must not advance the transport"
@@ -7869,13 +7902,15 @@ mod engine_state_rendering_tests {
         }
     }
 
-    /// `Paused` is the one state where the two questions differ: it outputs
-    /// silence by default, and the render path still wakes the graph from it
-    /// for MIDI preview and the post-panic bridge flush. A stale `playing_local`
-    /// left over from a graph swap must never drive rendering here.
+    /// `Paused` is the one state where the two questions differ, and the
+    /// difference is the point: the timeline stops, the engine does not. Live
+    /// input, monitoring, MIDI preview, instruments, FX and plugin tails all
+    /// keep processing. A stale `playing_local` left over from a graph swap
+    /// must still never advance the transport here.
     #[test]
-    fn paused_is_silent_and_never_advances_the_transport() {
-        assert!(AudioEngineState::Paused.outputs_silence());
+    fn paused_renders_the_graph_and_never_advances_the_transport() {
+        assert!(AudioEngineState::Paused.renders_graph());
+        assert!(!AudioEngineState::Paused.outputs_silence());
         assert!(!AudioEngineState::Paused.renders_transport());
     }
 
