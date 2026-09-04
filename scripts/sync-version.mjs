@@ -15,6 +15,8 @@
  *   and the FileVersion / ProductVersion strings.
  * - packaging/windows/installer.iss and the Professional installer (when its
  *   private checkout is present): `#define MyAppVersion`.
+ * - .github/workflows/release.yml: the release tag the dispatch form is
+ *   prefilled with.
  * - packaging/aur/PKGBUILD and .SRCINFO: `pkgver` (AUR forbids `-`, so a
  *   pre-release such as `2026.9.1-beta1.2` becomes `2026.9.1_beta1.2`) and
  *   `_appver` (the exact release asset name).
@@ -364,6 +366,24 @@ const targets = [
         `$1${version}$3`,
         "#define MyAppVersion",
         "installer-pro.iss",
+      );
+      return { text: r.text, from: r.from, to: version };
+    },
+  },
+  {
+    // The dispatch form for a release build is prefilled with this default, so
+    // a stale one attaches a freshly built installer to whatever tag was
+    // current months ago. Syncing it here is what keeps the release trigger
+    // honest without anybody remembering to.
+    name: ".github/workflows/release.yml",
+    path: path.join(repoRoot, ".github", "workflows", "release.yml"),
+    transform: (current) => {
+      const r = replaceRequired(
+        current,
+        /^(        default: ")([^"]*)(")$/m,
+        `$1${version}$3`,
+        "release tag default",
+        "release.yml",
       );
       return { text: r.text, from: r.from, to: version };
     },
