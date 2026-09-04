@@ -34,7 +34,7 @@
 #endif
 
 #ifndef MyAppVersion
-#define MyAppVersion "2026.9.3-beta1.2"
+#define MyAppVersion "2026.9.4-beta1.2"
 #endif
 
 #define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
@@ -200,6 +200,37 @@ Root: HKA; \
     ValueName: ""; \
     ValueData: """{app}\{#MyAppExeName}"" ""%1"""; \
     Tasks: fileassoc_fbproj
+
+; The fbrd:// URL scheme. The account service hands a desktop sign-in back as
+; `fbrd://auth/callback?...`, and a jam invite on a web page is
+; `fbrd://jam/j/<code>#<secret>`; both must reach the installed Studio. The app
+; also writes the per-user form of these keys when it runs, so a portable copy
+; works too — the installer's job is the all-users install, where HKCU is not
+; the right hive. No task: a Studio that cannot be signed into is not optional.
+Root: HKA; \
+    Subkey: "Software\Classes\fbrd"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "URL:Futureboard Studio"; \
+    Flags: uninsdeletekey
+
+Root: HKA; \
+    Subkey: "Software\Classes\fbrd"; \
+    ValueType: string; \
+    ValueName: "URL Protocol"; \
+    ValueData: ""
+
+Root: HKA; \
+    Subkey: "Software\Classes\fbrd\DefaultIcon"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "{app}\{#MyAppExeName},0"
+
+Root: HKA; \
+    Subkey: "Software\Classes\fbrd\shell\open\command"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; \
