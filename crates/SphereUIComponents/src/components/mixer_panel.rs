@@ -41,7 +41,7 @@ use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, 
 use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::panel::FxSlotDrag;
-use crate::components::reorder::{drag_handle, drop_over_highlight};
+use crate::components::reorder::drop_over_highlight;
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
     is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
@@ -492,22 +492,17 @@ fn insert_chip(
     let remove_pair = (track_id_owned.clone(), slot_id.clone());
 
     // Drag payload carries the stable plugin_instance_id, so reorder identity
-    // follows the instance rather than the visual index. The grip and the chip
-    // body both start the same drag; child controls occlude their own clicks.
-    let drag_payload = FxSlotDrag {
+    // follows the instance rather than the visual index.
+    //
+    // The slot itself is the handle. A separate grip column cost six of the
+    // eighty-eight pixels on every row to say what the pointer already says by
+    // picking the row up — and it made the plug-in's name, the thing the user
+    // is actually aiming at, the one part of the row that did not drag.
+    let chip_drag_payload = FxSlotDrag {
         track_id: track_id_owned.clone(),
         insert_id: slot_id.clone(),
         display_name: slot.display_name.clone(),
     };
-    let chip_drag_payload = drag_payload.clone();
-    let handle = drag_handle()
-        .id(gpui::SharedString::from(format!(
-            "mixer-fx-drag-{track_id}-{slot_id}"
-        )))
-        .occlude()
-        .on_drag(drag_payload, |drag, _offset, _window, cx| {
-            cx.new(|_| drag.clone())
-        });
 
     // Drop target: dropping a compatible drag onto this chip moves it into the
     // gap *above* this slot (`insertion_index == insert_index`, the slot's full
@@ -584,8 +579,6 @@ fn insert_chip(
             on_open(&open_target, w, cx);
         })
         .occlude()
-        // Grip drag handle (leftmost) mirrors the whole-chip drag affordance.
-        .child(handle)
         .child(div().flex_1().min_w(px(0.0)).truncate().child(display))
         // In-circuit pip. A slot is either in the signal path or it is not, and
         // that is the one thing about it readable without stopping to read.
@@ -880,6 +873,17 @@ fn master_inserts_section(
     )
 }
 
+/// One send: where it goes, and how much of this channel goes there.
+///
+/// # Why there is no dB printed on it
+///
+/// The old row carried "+0.0 dB" beside every target name. Four sends on a
+/// channel meant the same four characters repeated down an 88 px column, and at
+/// unity — which is where a send sits until someone moves it — the number was
+/// saying nothing at all. What the eye needs from a rack of sends is *which
+/// ones are up*, and a level bar answers that in one glance where four decimal
+/// numbers do not. The exact value is a hover away, in the tooltip, for the
+/// moment it actually matters.
 fn send_chip(
     track_id: &str,
     send_index: usize,
@@ -895,21 +899,13 @@ fn send_chip(
     } else {
         SlotTone::Bypassed.colors(base)
     };
-    let drag_payload = SendSlotDrag {
+    let hover_bg = Colors::composite(bg, Colors::state_hover());
+    // The whole row is the drag handle, as with an insert slot.
+    let chip_drag_payload = SendSlotDrag {
         track_id: track_id.to_string(),
         send_id: send.id.clone(),
         target_name: target_name.to_string(),
     };
-    let chip_drag_payload = drag_payload.clone();
-    let handle = drag_handle()
-        .id(gpui::SharedString::from(format!(
-            "mixer-send-drag-{}-{}",
-            track_id, send.id
-        )))
-        .occlude()
-        .on_drag(drag_payload, |drag, _offset, _window, cx| {
-            cx.new(|_| drag.clone())
-        });
     let can_drop_track = track_id.to_string();
     let drop_track = track_id.to_string();
     let reorder = callbacks.on_reorder_send.clone();
@@ -923,6 +919,7 @@ fn send_chip(
     } else {
         format!("{:+.1} dB", send.gain_db)
     };
+    let tooltip = format!("{target_name} · {gain_label}");
     div()
         .id(gpui::SharedString::from(format!("send-chip-{}", send.id)))
         .can_drop(move |dragged, _window, _cx| {
@@ -942,75 +939,78 @@ fn send_chip(
         })
         .flex()
         .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(px(2.0))
-        .px(px(3.0))
-        .h(px(26.0))
+        .flex_col()
+        .justify_center()
+        .gap(px(1.0))
+        .px(px(4.0))
+        .py(px(2.0))
+        .h(px(console::SEND_SLOT_H))
         .rounded(px(crate::theme::radius::MICRO))
         .bg(bg)
-        .text_size(px(type_scale::LABEL))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(text)
+        .hover(move |style| style.bg(hover_bg))
         .cursor(gpui::CursorStyle::PointingHand)
+        .tooltip(strip_tooltip(tooltip))
         .on_drag(chip_drag_payload, |drag, _offset, _window, cx| {
             cx.new(|_| drag.clone())
         })
-        .child(handle)
         .child(
             div()
                 .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap(px(0.0))
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .w_full()
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().truncate().child(format!("→ {target_name}")))
-                        .child(
-                            div()
-                                .ml(px(3.0))
-                                .text_size(px(type_scale::CAPTION))
-                                .text_color(Colors::text_muted())
-                                .child(gain_label),
-                        ),
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_size(px(type_scale::LABEL))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(text)
+                        .child(target_name.to_string()),
                 )
-                .child(crate::components::slider::compact_slider_with_reset(
-                    format!("mixer-send-gain-{}-{}", track_id, send.id),
-                    gain_norm,
-                    Colors::accent_primary(),
-                    move |value, window, cx| {
-                        let gain_db = (*value * 66.0 - 60.0).clamp(-60.0, 6.0);
-                        gain_change(
-                            &(gain_pair.0.clone(), gain_pair.1.clone(), gain_db),
-                            window,
-                            cx,
-                        );
-                    },
-                    Some(move |window: &mut gpui::Window, cx: &mut gpui::App| {
-                        gain_reset(
-                            &(gain_reset_pair.0.clone(), gain_reset_pair.1.clone(), 0.0),
-                            window,
-                            cx,
-                        );
-                    }),
-                )),
+                .child(
+                    div()
+                        .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
+                        .flex_none()
+                        .text_size(px(type_scale::LABEL))
+                        .text_color(Colors::text_faint())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .child("×")
+                        .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
+                            on_remove(&remove_pair, w, cx);
+                        })
+                        .occlude(),
+                ),
         )
-        .child(
-            div()
-                .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
-                .text_size(px(type_scale::LABEL))
-                .text_color(Colors::text_faint())
-                .px(px(2.0))
-                .child("×")
-                .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
-                    on_remove(&remove_pair, w, cx);
-                })
-                .occlude(),
-        )
+        // The level itself. It is the row's second line rather than a control
+        // squeezed in beside the name, so a rack of sends reads as a small
+        // bar chart of how much of this channel is going where.
+        .child(crate::components::slider::compact_slider_with_reset(
+            format!("mixer-send-gain-{}-{}", track_id, send.id),
+            gain_norm,
+            if send.enabled {
+                Colors::accent_primary()
+            } else {
+                Colors::text_disabled()
+            },
+            move |value, window, cx| {
+                let gain_db = (*value * 66.0 - 60.0).clamp(-60.0, 6.0);
+                gain_change(
+                    &(gain_pair.0.clone(), gain_pair.1.clone(), gain_db),
+                    window,
+                    cx,
+                );
+            },
+            Some(move |window: &mut gpui::Window, cx: &mut gpui::App| {
+                gain_reset(
+                    &(gain_reset_pair.0.clone(), gain_reset_pair.1.clone(), 0.0),
+                    window,
+                    cx,
+                );
+            }),
+        ))
 }
 
 fn send_drop_end(track_id: &str, gap: usize, callbacks: &MixerCallbacks) -> impl IntoElement {

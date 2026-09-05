@@ -33,7 +33,7 @@ use crate::components::inspector::{
     inspector_select, inspector_value, InspectorSelectOption,
 };
 use crate::components::inspector_kit;
-use crate::components::reorder::{drag_handle, drop_over_highlight};
+use crate::components::reorder::drop_over_highlight;
 use crate::components::slider::{bipolar_slider_with_drag_callbacks, slider_with_drag_callbacks};
 use crate::components::solfege_editor::SolfegePitchSummary;
 use crate::components::text_input::{
@@ -193,6 +193,14 @@ pub struct InspectorCallbacks {
     pub on_open_soundfont_player: StrCb,
     pub open_routing_combo: Option<InspectorRoutingCombo>,
     pub on_toggle_routing_combo: RoutingComboToggleCb,
+    /// Sections the user has folded, by the stable id `section_card` is given.
+    ///
+    /// Held by the owner rather than by the panel because the panel is rebuilt
+    /// from scratch on every selection change, and a fold that forgets itself
+    /// the moment you click another track is a fold nobody would use.
+    pub collapsed_sections: std::collections::HashSet<String>,
+    /// Folds or unfolds one section, by that same id.
+    pub on_toggle_section: StrCb,
 }
 
 /// Width of the docked Inspector column. Mirrors the constant in
@@ -620,39 +628,33 @@ fn format_pan(i18n: I18n, pan: f32) -> String {
 }
 
 /// Clickable M/S/R/I-style state badge.
-fn toggle_badge(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<String>,
-    active: bool,
-    accent: gpui::Rgba,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+/// A collapsible inspector card.
+///
+/// `id` is the section's stable name, which is also the key the collapsed set
+/// is stored under — so a section stays folded across selections and restarts
+/// rather than springing open every time the panel rebuilds.
+fn section_card(
+    id: &'static str,
+    title: impl Into<String>,
+    callbacks: &InspectorCallbacks,
+    body: impl IntoElement,
 ) -> impl IntoElement {
-    let label = label.into();
-    let (bg, fg) = if active {
-        (accent, Colors::on_accent())
-    } else {
-        (
-            Colors::with_alpha(Colors::text_primary(), 0.05),
-            Colors::text_secondary(),
-        )
-    };
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .min_w(px(28.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .bg(bg)
-        .text_color(fg)
-        .text_size(px(typography::DENSE_LABEL))
-        .font_weight(gpui::FontWeight::BOLD)
-        .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.opacity(0.85))
-        .on_click(on_click)
-        .child(label)
+    let expanded = !callbacks.collapsed_sections.contains(id);
+    let toggle = callbacks.on_toggle_section.clone();
+    inspector_kit::ins_card(
+        title,
+        Some(inspector_kit::InsCardSwitch {
+            id: gpui::ElementId::Name(format!("inspector-section-{id}").into()),
+            on: expanded,
+            on_toggle: std::sync::Arc::new(move |w, cx| toggle(&id.to_string(), w, cx)),
+        }),
+        body,
+    )
+}
+
+/// A stack of rows, for a card body built up one child at a time.
+fn section_rows() -> gpui::Div {
+    div().flex().flex_col().gap(px(inspector_kit::CARD_ROW_GAP))
 }
 
 /// The Inspector's track-colour control: the shared color picker, hosted by
@@ -1309,13 +1311,11 @@ fn routing_section(
     instrument_targets: &[(String, String)],
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
-    let mut section = inspector_kit::ins_section_container().child(
-        inspector_kit::ins_section_header(assets::ICON_ROUTE_PATH, "ROUTING"),
-    );
+    let mut rows = section_rows();
 
     match track.track_type {
         TrackType::Audio => {
-            section = section
+            rows = rows
                 .child(fb_form_row("Format", format_selector(track, callbacks)))
                 .child(fb_form_row(
                     "Input",
@@ -1324,7 +1324,7 @@ fn routing_section(
                 .child(fb_form_row("Output", output_selector(track, callbacks)));
         }
         TrackType::Instrument => {
-            section = section
+            rows = rows
                 .child(fb_form_row(
                     "MIDI Input",
                     midi_input_selector(track, callbacks),
@@ -1336,7 +1336,7 @@ fn routing_section(
                 .child(fb_form_row("Output", output_selector(track, callbacks)));
         }
         TrackType::Midi => {
-            section = section
+            rows = rows
                 .child(fb_form_row(
                     "MIDI Input",
                     midi_input_selector(track, callbacks),
@@ -1351,13 +1351,13 @@ fn routing_section(
                 ));
         }
         TrackType::Bus | TrackType::Return | TrackType::Group | TrackType::Master => {
-            section = section.child(fb_form_row("Output", output_selector(track, callbacks)));
+            rows = rows.child(fb_form_row("Output", output_selector(track, callbacks)));
         }
         // A Video track has no audio path, so it exposes no routing controls.
         TrackType::Video => {}
     }
 
-    section
+    section_card("routing", "Routing", callbacks, rows)
 }
 
 fn compact_action_button(
@@ -1392,150 +1392,95 @@ fn plugin_state_label(slot: &InsertSlotState) -> String {
     }
 }
 
-fn format_chip(label: &'static str) -> impl IntoElement {
-    div()
-        .flex_shrink_0()
-        .px(px(6.0))
-        .py(px(2.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_input())
-        .text_size(px(typography::DENSE_CAPTION))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(Colors::text_secondary())
-        .child(label)
-}
-
-fn insert_action_row(
-    track_id: &str,
-    slot: &InsertSlotState,
-    slot_index: usize,
-    callbacks: &InspectorCallbacks,
-    can_move_up: bool,
-    can_move_down: bool,
-    is_instrument: bool,
-) -> impl IntoElement {
-    let track_open = track_id.to_string();
-    let slot_open = slot.id.clone();
-    let slot_open_index = slot_index;
-    let open = callbacks.on_open_insert_editor.clone();
-    let track_replace = track_id.to_string();
-    let replace = callbacks.on_open_insert_picker.clone();
-    let track_bypass = track_id.to_string();
-    let slot_bypass = slot.id.clone();
-    let bypass = callbacks.on_toggle_insert_bypass.clone();
-    let track_enable = track_id.to_string();
-    let slot_enable = slot.id.clone();
-    let enable = callbacks.on_toggle_insert_enabled.clone();
-    let track_remove = track_id.to_string();
-    let slot_remove = slot.id.clone();
-    let remove = callbacks.on_remove_insert.clone();
-    let track_up = track_id.to_string();
-    let slot_up = slot.id.clone();
-    let move_up = callbacks.on_move_insert.clone();
-    let track_down = track_id.to_string();
-    let slot_down = slot.id.clone();
-    let move_down = callbacks.on_move_insert.clone();
-
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(4.0))
-        .child(compact_action_button(
-            "insert-open-editor",
-            "Open",
-            true,
-            move |_, w, cx| {
-                open(
-                    &(track_open.clone(), slot_open_index, slot_open.clone()),
-                    w,
-                    cx,
-                )
-            },
-        ))
-        .child(compact_action_button(
-            "insert-replace",
-            "Replace",
-            true,
-            move |_, w, cx| replace(&(track_replace.clone(), slot_index, is_instrument), w, cx),
-        ))
-        .child(compact_action_button(
-            "insert-bypass",
-            if slot.bypassed { "Unbypass" } else { "Bypass" },
-            true,
-            move |_, w, cx| bypass(&(track_bypass.clone(), slot_bypass.clone()), w, cx),
-        ))
-        .child(compact_action_button(
-            "insert-enable",
-            if slot.enabled { "Disable" } else { "Enable" },
-            true,
-            move |_, w, cx| enable(&(track_enable.clone(), slot_enable.clone()), w, cx),
-        ))
-        .child(compact_action_button(
-            "insert-remove",
-            "Remove",
-            true,
-            move |_, w, cx| remove(&(track_remove.clone(), slot_remove.clone()), w, cx),
-        ))
-        .child(compact_action_button(
-            "insert-move-up",
-            "Up",
-            can_move_up,
-            move |_, w, cx| move_up(&(track_up.clone(), slot_up.clone(), true), w, cx),
-        ))
-        .child(compact_action_button(
-            "insert-move-down",
-            "Down",
-            can_move_down,
-            move |_, w, cx| move_down(&(track_down.clone(), slot_down.clone(), false), w, cx),
-        ))
-}
-
+/// One plug-in in a chain.
+///
+/// ```txt
+///   ⏻  Pro-Q 4                              ⚙  🗑
+///   │   │                                   │   └ remove
+///   │   └ name — press to open the editor   └ open the editor
+///   └ in circuit / bypassed
+/// ```
+///
+/// # Why it is one row
+///
+/// The old slot was three stacked rows: a header with a grip and a format chip,
+/// a "State: Ready" line, and seven wrapped buttons — Open, Replace, Bypass,
+/// Enable, Remove, Up, Down. Four slots filled the panel, and the two commands
+/// anyone actually reaches for were the hardest to find in it.
+///
+/// So: the power pip carries bypass, the name carries open, and the two glyphs
+/// on the right carry the settings and the bin. Order matters — the destructive
+/// one is last, furthest from the name the pointer arrives at. Up and Down are
+/// gone because the row *drags*: reordering by dragging the thing you are
+/// reordering needs no buttons and no aim, and the drop line shows where it
+/// lands. Replace is gone too; removing and adding is the same two gestures
+/// without a command that silently discards a plug-in's state.
+///
+/// Everything a slot can say that is not one of those four lives in the
+/// tooltip: the format, the load state, and why it failed if it did.
+#[allow(clippy::too_many_arguments)]
 fn plugin_slot_row(
     track: &TrackState,
     slot: &InsertSlotState,
     slot_index: usize,
     display_index: usize,
     callbacks: &InspectorCallbacks,
-    can_move_up: bool,
-    can_move_down: bool,
+    _can_move_up: bool,
+    _can_move_down: bool,
     is_instrument: bool,
 ) -> impl IntoElement {
-    // Drag source: the grip handle carries the stable plugin_instance_id, so
-    // reorder identity follows the instance — never the visual index — and
-    // bypass / preset / editor / automation state come along untouched (the
-    // model only reorders existing slots, see `set_insert_order`).
+    let _ = is_instrument;
+    let name = plugin_slot_name(Some(slot), "Empty Slot");
+    let bypassed = slot.bypassed || !slot.enabled;
+    let failed = matches!(
+        slot.load_status,
+        InsertLoadStatus::Missing(_) | InsertLoadStatus::Failed(_)
+    );
+
+    // Drag source: the whole row, carrying the stable plugin_instance_id so
+    // reorder identity follows the instance and never the visual index.
     let drag_payload = FxSlotDrag {
         track_id: track.id.clone(),
         insert_id: slot.id.clone(),
-        display_name: plugin_slot_name(Some(slot), "Empty Slot"),
+        display_name: name.clone(),
     };
-    let handle = drag_handle()
-        .id(("fx-drag-handle", slot_index))
-        .on_drag(drag_payload, |drag, _offset, _window, cx| {
-            cx.new(|_| drag.clone())
-        });
-
-    // Drop target: dropping a compatible drag onto this row moves it into the
-    // gap *above* this slot (`insertion_index == slot_index`). `can_drop`
-    // restricts drops to the same track, and `drag_over` paints the accent
-    // drop-position line. The row is NOT a drag source, so the action buttons
-    // and right-click keep their own hit-testing (only the handle drags).
+    // Drop target: a drop on this row moves the dragged slot into the gap
+    // *above* it. Same-track guarded, and the shared accent line shows where.
     let drop_track = track.id.clone();
     let can_drop_track = track.id.clone();
     let reorder = callbacks.on_reorder_insert.clone();
-    let gap = slot_index;
+
+    let open = callbacks.on_open_insert_editor.clone();
+    let open_target = (track.id.clone(), slot_index, slot.id.clone());
+    let bypass = callbacks.on_toggle_insert_bypass.clone();
+    let bypass_target = (track.id.clone(), slot.id.clone());
+    let remove = callbacks.on_remove_insert.clone();
+    let remove_target = (track.id.clone(), slot.id.clone());
+    let editor_target = open_target.clone();
+    let open_editor = callbacks.on_open_insert_editor.clone();
+
+    let tooltip = format!(
+        "{name} · {} · {}",
+        plugin_format_label(slot),
+        plugin_state_label(slot)
+    );
+
+    let rest = Colors::composite(Colors::surface_card(), Colors::state_recessed());
+    let hover = Colors::composite(rest, Colors::state_hover());
 
     div()
-        .id(("fx-drop-row", slot_index))
+        .id(("fx-slot", slot_index))
         .flex()
-        .flex_col()
-        .gap(px(5.0))
-        .py(px(7.0))
-        .border_t(px(1.0))
-        .border_color(Colors::border_subtle())
+        .flex_row()
+        .items_center()
+        .gap(px(space::SNUG))
+        .h(px(crate::theme::size::PROMINENT))
+        .px(px(space::SNUG))
+        .rounded(px(crate::theme::radius::CONTROL))
+        .bg(rest)
+        .hover(move |style| style.bg(hover))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .tooltip(crate::components::controls::fb_tooltip(tooltip))
         .can_drop(move |dragged, _window, _cx| {
             dragged
                 .downcast_ref::<FxSlotDrag>()
@@ -1545,49 +1490,108 @@ fn plugin_slot_row(
         .on_drop::<FxSlotDrag>(move |drag, window, cx| {
             if drag.track_id == drop_track {
                 reorder(
-                    &(drop_track.clone(), drag.insert_id.clone(), gap),
+                    &(drop_track.clone(), drag.insert_id.clone(), slot_index),
                     window,
                     cx,
                 );
             }
         })
+        .on_drag(drag_payload, |drag, _offset, _window, cx| {
+            cx.new(|_| drag.clone())
+        })
+        // Bypass. A power symbol, not a word: it is the one control on the row
+        // whose state has to be readable without reading.
         .child(
             div()
+                .id(("fx-slot-bypass", slot_index))
                 .flex()
-                .flex_row()
+                .flex_none()
                 .items_center()
-                .gap(px(6.0))
-                .child(handle)
+                .justify_center()
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(crate::theme::radius::CONTROL))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|style| style.bg(Colors::state_hover()))
                 .child(
-                    div()
-                        .w(px(18.0))
-                        .text_size(px(typography::DENSE_LABEL))
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(Colors::text_faint())
-                        .child(display_index.to_string()),
+                    svg()
+                        .path(assets::ICON_POWER_PATH)
+                        .w(px(13.0))
+                        .h(px(13.0))
+                        .text_color(if failed {
+                            Colors::status_error()
+                        } else if bypassed {
+                            Colors::text_disabled()
+                        } else {
+                            Colors::state_monitor()
+                        }),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_primary())
-                        .child(plugin_slot_name(Some(slot), "Empty Slot")),
-                )
-                .child(format_chip(plugin_format_label(slot))),
+                .on_click(move |_, w, cx| bypass(&bypass_target, w, cx))
+                .occlude(),
         )
-        .child(kv_row("State", plugin_state_label(slot)))
-        .child(insert_action_row(
-            &track.id,
-            slot,
-            slot_index,
-            callbacks,
-            can_move_up,
-            can_move_down,
-            is_instrument,
+        .child(
+            div()
+                .flex_none()
+                .w(px(14.0))
+                .text_size(px(typography::DENSE_CAPTION))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(Colors::text_faint())
+                .child(display_index.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(typography::UI_XS))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(if failed {
+                    Colors::status_error()
+                } else if bypassed {
+                    Colors::text_disabled()
+                } else {
+                    Colors::text_primary()
+                })
+                .child(name),
+        )
+        .child(slot_icon_button(
+            ("fx-slot-open", slot_index),
+            assets::ICON_SLIDERS_HORIZONTAL_PATH,
+            Colors::text_secondary(),
+            move |w, cx| open_editor(&editor_target, w, cx),
         ))
+        .child(slot_icon_button(
+            ("fx-slot-remove", slot_index),
+            assets::ICON_TRASH_PATH,
+            Colors::text_faint(),
+            move |w, cx| remove(&remove_target, w, cx),
+        ))
+        // Pressing anywhere else on the row opens the editor, so the name is a
+        // target and not just a label.
+        .on_click(move |_, w, cx| open(&open_target, w, cx))
+}
+
+/// One glyph button on a plug-in slot.
+fn slot_icon_button(
+    id: impl Into<gpui::ElementId>,
+    icon: &'static str,
+    tone: gpui::Rgba,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(20.0))
+        .h(px(20.0))
+        .rounded(px(crate::theme::radius::CONTROL))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|style| style.bg(Colors::state_hover()))
+        .child(svg().path(icon).w(px(13.0)).h(px(13.0)).text_color(tone))
+        .on_click(move |_, w, cx| on_click(w, cx))
+        .occlude()
 }
 
 fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpui::AnyElement {
@@ -1599,11 +1603,7 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
     } else {
         plugin_slot_name(slot, "No Instrument")
     };
-    let mut section = inspector_kit::ins_section_container()
-        .child(inspector_kit::ins_section_header(
-            assets::ICON_MUSIC_PATH,
-            "INSTRUMENT",
-        ))
+    let mut section = section_rows()
         .child(kv_row("Plugin", slot_name))
         .child(kv_row(
             "Format",
@@ -1631,8 +1631,10 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
                 "VSTi Outputs",
                 vsti_output_selector(slot, callbacks),
             ))
-            .child(insert_action_row(
-                &track.id, slot, 0, callbacks, false, false, true,
+            // The instrument is a chain of one, so it gets the same row every
+            // effect gets: power, name, editor, bin.
+            .child(plugin_slot_row(
+                track, slot, 0, 1, callbacks, false, false, true,
             ));
     } else if track.solfege.is_some() {
         section = section.child(kv_row("Details", "Open the Solfege tab"));
@@ -1656,7 +1658,7 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
         ));
     }
 
-    section.into_any_element()
+    section_card("instrument", "Instrument", callbacks, section).into_any_element()
 }
 
 /// Dedicated right-dock panel for the native Solfege instrument. Keeping this
@@ -2056,17 +2058,15 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
     } else {
         0
     };
-    let mut section = inspector_kit::ins_section_container().child(
-        inspector_kit::ins_section_header(assets::ICON_PLUG_PATH, "INSERT EFFECTS"),
-    );
+    let mut rows = section_rows();
 
     let effects = track.effect_inserts();
     if effects.is_empty() {
-        section = section.child(kv_row("Effects", "No Effects"));
+        rows = rows.child(inspector_kit::ins_value_muted("No effects"));
     } else {
         for (offset, slot) in effects.iter().enumerate() {
             let slot_index = effect_start + offset;
-            section = section.child(plugin_slot_row(
+            rows = rows.child(plugin_slot_row(
                 track,
                 slot,
                 slot_index,
@@ -2084,7 +2084,7 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
         let end_can_track = track.id.clone();
         let end_reorder = callbacks.on_reorder_insert.clone();
         let end_gap = track.inserts.len();
-        section = section.child(
+        rows = rows.child(
             div()
                 .id("fx-drop-end")
                 .h(px(8.0))
@@ -2109,12 +2109,17 @@ fn insert_effects_section(track: &TrackState, callbacks: &InspectorCallbacks) ->
     let track_id = track.id.clone();
     let next_slot = track.inserts.len().max(effect_start);
     let picker = callbacks.on_open_insert_picker.clone();
-    section.child(compact_action_button(
-        "effect-add",
-        "Add Effect",
-        true,
-        move |_, w, cx| picker(&(track_id.clone(), next_slot, false), w, cx),
-    ))
+    section_card(
+        "inserts",
+        "Insert Effects",
+        callbacks,
+        rows.child(compact_action_button(
+            "effect-add",
+            "Add Effect",
+            true,
+            move |_, w, cx| picker(&(track_id.clone(), next_slot, false), w, cx),
+        )),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2287,7 +2292,12 @@ fn track_inspector(
             )
     };
 
-    // ── M / S / R / I toggles ───────────────────────────────────────────
+    // ── M / S / I / R ───────────────────────────────────────────────────
+    //
+    // The console's colours, the same four this track already wears in the
+    // mixer: blue mute, amber solo, green input, red record. A player reads the
+    // colour before the letter, so the two views must not disagree about which
+    // is which.
     let state_row = {
         let mute = callbacks.on_toggle_mute.clone();
         let solo = callbacks.on_toggle_solo.clone();
@@ -2297,34 +2307,34 @@ fn track_inspector(
         div()
             .flex()
             .flex_row()
-            .gap(px(4.0))
-            .child(toggle_badge(
-                "inspector-mute",
+            .gap(px(space::SNUG))
+            .child(inspector_kit::ins_state_button(
+                "inspector-mute".into(),
                 i18n.tr("inspector.badge.mute"),
                 track.muted,
-                Colors::accent_warning(),
+                Colors::state_mute(),
                 move |_, w, cx| mute(&t1, w, cx),
             ))
-            .child(toggle_badge(
-                "inspector-solo",
+            .child(inspector_kit::ins_state_button(
+                "inspector-solo".into(),
                 i18n.tr("inspector.badge.solo"),
                 track.solo,
-                Colors::accent_success(),
+                Colors::state_solo(),
                 move |_, w, cx| solo(&t2, w, cx),
             ))
-            .child(toggle_badge(
-                "inspector-arm",
-                i18n.tr("inspector.badge.record"),
-                track.armed,
-                Colors::accent_danger(),
-                move |_, w, cx| arm(&t3, w, cx),
-            ))
-            .child(toggle_badge(
-                "inspector-input",
+            .child(inspector_kit::ins_state_button(
+                "inspector-input".into(),
                 i18n.tr("inspector.badge.input"),
                 track.input_monitor.is_active(track.armed),
-                Colors::accent_primary(),
+                Colors::state_monitor(),
                 move |_, w, cx| input(&t4, w, cx),
+            ))
+            .child(inspector_kit::ins_state_button(
+                "inspector-arm".into(),
+                i18n.tr("inspector.badge.record"),
+                track.armed,
+                Colors::state_arm(),
+                move |_, w, cx| arm(&t3, w, cx),
             ))
     };
 
@@ -2335,14 +2345,15 @@ fn track_inspector(
             track.name.clone(),
             type_label.clone(),
         ))
-        // ── Basic ────────────────────────────────────────────────────────
-        .child(
-            inspector_kit::ins_section_container()
-                .child(inspector_kit::ins_section_header(
-                    assets::ICON_SLIDERS_HORIZONTAL_PATH,
-                    i18n.tr("inspector.section.track"),
+        .child(section_card(
+            "track",
+            &i18n.tr("inspector.section.track"),
+            callbacks,
+            section_rows()
+                .child(fb_form_row(
+                    i18n.tr("inspector.field.type"),
+                    inspector_kit::ins_value(type_label),
                 ))
-                .child(kv_row(i18n.tr("inspector.field.type"), type_label))
                 .child(fb_form_row(
                     "Name",
                     text_field_with_callbacks(name_input, name_focused, name_callbacks),
@@ -2351,7 +2362,7 @@ fn track_inspector(
                 .child(fb_form_row(i18n.tr("inspector.field.pan"), pan_row))
                 .child(fb_form_row("Color", color_field(color_picker)))
                 .child(fb_form_row(i18n.tr("inspector.section.state"), state_row)),
-        )
+        ))
         .child(routing_section(
             track,
             connections,
@@ -2365,13 +2376,11 @@ fn track_inspector(
             matches!(track.track_type, TrackType::Audio | TrackType::Instrument),
             |this| this.child(insert_effects_section(track, callbacks)),
         )
-        // ── Contents counts ────────────────────────────────────────────────
-        .child(
-            inspector_kit::ins_section_container()
-                .child(inspector_kit::ins_section_header(
-                    assets::ICON_LAYERS_PATH,
-                    "CONTENTS",
-                ))
+        .child(section_card(
+            "contents",
+            "Contents",
+            callbacks,
+            section_rows()
                 .child(kv_row(
                     i18n.tr("inspector.field.clips"),
                     track.clips.len().to_string(),
@@ -2383,22 +2392,16 @@ fn track_inspector(
                     track.automation_lanes.len().to_string(),
                 ))
                 .child(kv_row("Automation Points", automation_points.to_string())),
-        )
+        ))
 }
 
-/// Section card. Sections without a more specific glyph use the sliders mark,
-/// which is the panel's own icon — see `inspector_section_icon` for the ones
-/// that carry their own semantics (routing, effects, contents).
+/// A clip-inspector section.
+///
+/// Same card as a track's, minus the fold: a clip inspector is three short
+/// sections that all fit at once, so a switch on each would be a control with
+/// nothing to gain by pressing it.
 fn inspector_section(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
-    inspector_section_icon(assets::ICON_SLIDERS_HORIZONTAL_PATH, label, child)
-}
-
-fn inspector_section_icon(
-    icon: &'static str,
-    label: impl Into<String>,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    inspector_kit::ins_section(icon, label, child)
+    inspector_kit::ins_card(label, None, child)
 }
 
 fn compact_property_row(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {

@@ -79,7 +79,9 @@ pub struct TimelineRegionDragUpdate {
     pub end_beat: f64,
 }
 
-#[derive(Clone, Debug)]
+/// A loop grab in progress: which edge (or the body) the press took, where the
+/// loop was when it started, and how far into it the pointer went down.
+#[derive(Clone, Copy, Debug)]
 pub struct TimelineLoopDrag {
     pub mode: TimelineRegionDragMode,
     pub start_beat: f32,
@@ -87,10 +89,57 @@ pub struct TimelineLoopDrag {
     pub pointer_offset_x: f32,
 }
 
-impl Render for TimelineLoopDrag {
-    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        Empty
+/// What a press on the ruler is doing.
+///
+/// # Why one gesture and not two drag sources
+///
+/// The ruler used to be two overlapping drag surfaces: the markings area, which
+/// scrubs the playhead, and the loop region drawn on top of it, which moved and
+/// resized the loop. The deeper element always won, so a press *inside the loop*
+/// could never move the playhead — the loop swallowed it, and the one place in
+/// the arrangement a user most often wants to drop the playhead was the one
+/// place they could not.
+///
+/// Dragging the playhead is the ruler's primary gesture, so it is now the
+/// unmodified one, everywhere along the bar. Moving the loop is the deliberate,
+/// occasional one, so it takes a modifier: **Alt-drag**, on the loop's body to
+/// slide it or within [`LOOP_EDGE_GRAB_PX`] of an end to stretch it.
+///
+/// Deciding this once at mouse-down, rather than letting two `on_drag` sources
+/// race, is what makes the rule hold: the loop overlay is now painted only, and
+/// a press it does not claim reaches the ruler underneath untouched.
+#[derive(Clone, Copy, Debug)]
+enum RulerGesture {
+    Scrub,
+    Loop(TimelineLoopDrag),
+}
+
+/// How near an end of the loop counts as grabbing that end rather than the body.
+const LOOP_EDGE_GRAB_PX: f32 = 8.0;
+
+/// Which part of the loop an Alt-press at `local_x` took, if any.
+///
+/// The edges win over the body, and a loop narrower than two grab zones still
+/// resolves: the half the pointer is on decides, so a two-beat loop zoomed out
+/// to twelve pixels can still be stretched from either end.
+fn loop_grab_mode(local_x: f32, left_x: f32, right_x: f32) -> Option<TimelineRegionDragMode> {
+    if local_x < left_x - LOOP_EDGE_GRAB_PX || local_x > right_x + LOOP_EDGE_GRAB_PX {
+        return None;
     }
+    let near_start = (local_x - left_x).abs() <= LOOP_EDGE_GRAB_PX;
+    let near_end = (local_x - right_x).abs() <= LOOP_EDGE_GRAB_PX;
+    Some(match (near_start, near_end) {
+        (true, true) => {
+            if local_x - left_x <= right_x - local_x {
+                TimelineRegionDragMode::Start
+            } else {
+                TimelineRegionDragMode::End
+            }
+        }
+        (true, false) => TimelineRegionDragMode::Start,
+        (false, true) => TimelineRegionDragMode::End,
+        (false, false) => TimelineRegionDragMode::Move,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -249,6 +298,26 @@ pub fn timeline_ruler(
     // Resolved once per frame from last frame's measurement, so every handler
     // built below shares one origin.
     let lane_origin = state.lane_origin_x();
+    // The loop's span in the same lane-local pixels the press reports, resolved
+    // once so the mouse-down handler is a comparison and not a projection.
+    let loop_span = state.transport.loop_enabled.then(|| {
+        let start = state
+            .transport
+            .loop_start_beats
+            .min(state.transport.loop_end_beats);
+        let end = state
+            .transport
+            .loop_start_beats
+            .max(state.transport.loop_end_beats);
+        (start, end, state.beats_to_x(start), state.beats_to_x(end))
+    });
+    // What the press in flight is doing. Set once at mouse-down and read by the
+    // one drag handler; see `RulerGesture`.
+    let gesture_kind = std::rc::Rc::new(std::cell::Cell::new(RulerGesture::Scrub));
+    let gesture_down = gesture_kind.clone();
+    let gesture_move = gesture_kind.clone();
+    let gesture_up = gesture_kind.clone();
+    let gesture_up_out = gesture_kind.clone();
     let on_region_drag_move = on_region_drag.clone();
     // Both drag closures only map pointer x -> snapped beats, so they capture
     // this frame's geometry instead of a deep clone of the whole project.
@@ -439,12 +508,31 @@ pub fn timeline_ruler(
                 .child(lane_origin_probe(origin_probe))
                 // Debug: outline the ruler content clip rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
                 .children(crate::perf::debug_clip_outline())
-                // Seek timeline position on click
+                // The press decides what this drag is: Alt on the loop takes the
+                // loop, anything else takes the playhead. See `RulerGesture`.
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     move |event: &gpui::MouseDownEvent, window, cx| {
                         let x: f32 = event.position.x.into();
                         let click_x = x - lane_origin;
+                        if event.modifiers.alt {
+                            if let Some((start, end, left_x, right_x)) = loop_span {
+                                if let Some(mode) = loop_grab_mode(click_x, left_x, right_x) {
+                                    gesture_down.set(RulerGesture::Loop(TimelineLoopDrag {
+                                        mode,
+                                        start_beat: start,
+                                        end_beat: end,
+                                        pointer_offset_x: click_x - left_x,
+                                    }));
+                                    // Alt-pressing the loop must not also move the
+                                    // playhead: the press belongs to the loop now.
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    return;
+                                }
+                            }
+                        }
+                        gesture_down.set(RulerGesture::Scrub);
                         on_seek_clone(
                             &click_x,
                             crate::layout::SeekReason::TimelineClick,
@@ -474,14 +562,45 @@ pub fn timeline_ruler(
                     move |event: &gpui::DragMoveEvent<RulerSeekDrag>, window, cx| {
                         let x: f32 = event.event.position.x.into();
                         let ox: f32 = event.bounds.origin.x.into();
-                        let click_x = (x - ox).max(0.0);
+                        let local_x = (x - ox).max(0.0);
+                        if let RulerGesture::Loop(drag) = gesture_move.get() {
+                            let beat_at_x = |x: f32| {
+                                state_for_loop_drag
+                                    .snap_beats(state_for_loop_drag.x_to_beats(x))
+                                    .max(0.0)
+                            };
+                            let (start_beat, end_beat) = match drag.mode {
+                                TimelineRegionDragMode::Move => {
+                                    let length = (drag.end_beat - drag.start_beat).max(1.0e-3);
+                                    let start = beat_at_x(local_x - drag.pointer_offset_x);
+                                    (start, start + length)
+                                }
+                                TimelineRegionDragMode::Start => {
+                                    (beat_at_x(local_x), drag.end_beat)
+                                }
+                                TimelineRegionDragMode::End => {
+                                    (drag.start_beat, beat_at_x(local_x))
+                                }
+                            };
+                            on_loop_drag_move(
+                                &TimelineLoopDragUpdate {
+                                    start_beat,
+                                    end_beat,
+                                },
+                                window,
+                                cx,
+                            );
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            return;
+                        }
                         if !scrub_active_drag.swap(true, std::sync::atomic::Ordering::Relaxed) {
                             if let Some(cb) = scrub_begin.as_ref() {
                                 cb(window, cx);
                             }
                         }
                         on_seek_drag(
-                            &click_x,
+                            &local_x,
                             crate::layout::SeekReason::UserDragging,
                             window,
                             cx,
@@ -493,6 +612,7 @@ pub fn timeline_ruler(
                 .on_mouse_up(
                     gpui::MouseButton::Left,
                     move |_: &gpui::MouseUpEvent, window, cx| {
+                        gesture_up.set(RulerGesture::Scrub);
                         if scrub_active_up.swap(false, std::sync::atomic::Ordering::Relaxed) {
                             if let Some(cb) = scrub_end.as_ref() {
                                 cb(window, cx);
@@ -503,6 +623,7 @@ pub fn timeline_ruler(
                 .on_mouse_up_out(
                     gpui::MouseButton::Left,
                     move |_: &gpui::MouseUpEvent, window, cx| {
+                        gesture_up_out.set(RulerGesture::Scrub);
                         if scrub_active_up_out.swap(false, std::sync::atomic::Ordering::Relaxed) {
                             if let Some(cb) = scrub_end_out.as_ref() {
                                 cb(window, cx);
@@ -533,38 +654,6 @@ pub fn timeline_ruler(
                         on_region_drag_move(
                             &TimelineRegionDragUpdate {
                                 region_id: drag.region_id.clone(),
-                                start_beat,
-                                end_beat,
-                            },
-                            window,
-                            cx,
-                        );
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    },
-                )
-                .on_drag_move::<TimelineLoopDrag>(
-                    move |event: &gpui::DragMoveEvent<TimelineLoopDrag>, window, cx| {
-                        let drag = event.drag(cx);
-                        let x: f32 = event.event.position.x.into();
-                        let ox: f32 = event.bounds.origin.x.into();
-                        let local_x = (x - ox).max(0.0);
-                        let beat_at_x = |x: f32| {
-                            state_for_loop_drag
-                                .snap_beats(state_for_loop_drag.x_to_beats(x))
-                                .max(0.0)
-                        };
-                        let (start_beat, end_beat) = match drag.mode {
-                            TimelineRegionDragMode::Move => {
-                                let length = (drag.end_beat - drag.start_beat).max(1.0e-3);
-                                let start = beat_at_x(local_x - drag.pointer_offset_x);
-                                (start, start + length)
-                            }
-                            TimelineRegionDragMode::Start => (beat_at_x(local_x), drag.end_beat),
-                            TimelineRegionDragMode::End => (drag.start_beat, beat_at_x(local_x)),
-                        };
-                        on_loop_drag_move(
-                            &TimelineLoopDragUpdate {
                                 start_beat,
                                 end_beat,
                             },
@@ -804,97 +893,6 @@ pub fn timeline_ruler(
                         .text_color(text_color)
                         .child(label)
                 }))
-                .children(if state.transport.loop_enabled {
-                    let start = state
-                        .transport
-                        .loop_start_beats
-                        .min(state.transport.loop_end_beats);
-                    let end = state
-                        .transport
-                        .loop_start_beats
-                        .max(state.transport.loop_end_beats);
-                    let lx = state.beats_to_x(start);
-                    let rx = state.beats_to_x(end);
-                    let width = (rx - lx).max(1.0);
-                    if lx > ruler_grid_width + 24.0 || lx + width < -24.0 {
-                        None
-                    } else {
-                        let body_drag = TimelineLoopDrag {
-                            mode: TimelineRegionDragMode::Move,
-                            start_beat: start,
-                            end_beat: end,
-                            pointer_offset_x: 0.0,
-                        };
-                        let start_drag = TimelineLoopDrag {
-                            mode: TimelineRegionDragMode::Start,
-                            start_beat: start,
-                            end_beat: end,
-                            pointer_offset_x: 0.0,
-                        };
-                        let end_drag = TimelineLoopDrag {
-                            mode: TimelineRegionDragMode::End,
-                            start_beat: start,
-                            end_beat: end,
-                            pointer_offset_x: 0.0,
-                        };
-                        Some(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(px(lx))
-                                .w(px(width))
-                                .id("ruler-loop-hit")
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                })
-                                .on_drag(body_drag, |drag, offset, _window, cx| {
-                                    cx.new(|_| TimelineLoopDrag {
-                                        pointer_offset_x: offset.x.into(),
-                                        ..drag.clone()
-                                    })
-                                })
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .top_0()
-                                        .bottom_0()
-                                        .w(px(8.0))
-                                        .id("ruler-loop-start-hit")
-                                        .cursor(gpui::CursorStyle::ResizeLeft)
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                        })
-                                        .on_drag(start_drag, |drag, _offset, _window, cx| {
-                                            cx.new(|_| drag.clone())
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .right_0()
-                                        .top_0()
-                                        .bottom_0()
-                                        .w(px(8.0))
-                                        .id("ruler-loop-end-hit")
-                                        .cursor(gpui::CursorStyle::ResizeRight)
-                                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                                            window.prevent_default();
-                                            cx.stop_propagation();
-                                        })
-                                        .on_drag(end_drag, |drag, _offset, _window, cx| {
-                                            cx.new(|_| drag.clone())
-                                        }),
-                                ),
-                        )
-                    }
-                } else {
-                    None
-                })
                 // Tempo markers — lightweight BPM labels anchored to the bottom
                 // of the ruler so they never collide with the bar/beat labels at
                 // the top. Visible whenever the project has tempo automation,
@@ -968,4 +966,64 @@ pub fn timeline_ruler(
                     )
                 })),
         )
+}
+
+#[cfg(test)]
+mod loop_grab_tests {
+    use super::*;
+
+    /// The whole point of the Alt gesture is that it is *precise*: the press has
+    /// to land on the loop to take it, so a press anywhere else on the ruler
+    /// still moves the playhead even with Alt down.
+    #[test]
+    fn a_press_clear_of_the_loop_takes_nothing() {
+        assert!(loop_grab_mode(10.0, 100.0, 200.0).is_none());
+        assert!(loop_grab_mode(300.0, 100.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn the_body_slides_and_the_ends_stretch() {
+        assert_eq!(
+            loop_grab_mode(150.0, 100.0, 200.0),
+            Some(TimelineRegionDragMode::Move)
+        );
+        assert_eq!(
+            loop_grab_mode(102.0, 100.0, 200.0),
+            Some(TimelineRegionDragMode::Start)
+        );
+        assert_eq!(
+            loop_grab_mode(198.0, 100.0, 200.0),
+            Some(TimelineRegionDragMode::End)
+        );
+    }
+
+    /// Just outside an end still grabs that end: the loop's edge is a 2 px line,
+    /// and asking for pixel-exact aim on it would make stretching a chore.
+    #[test]
+    fn the_grab_zone_reaches_outside_the_loop() {
+        assert_eq!(
+            loop_grab_mode(94.0, 100.0, 200.0),
+            Some(TimelineRegionDragMode::Start)
+        );
+        assert_eq!(
+            loop_grab_mode(206.0, 100.0, 200.0),
+            Some(TimelineRegionDragMode::End)
+        );
+    }
+
+    /// A loop zoomed down to a few pixels has two overlapping grab zones. It
+    /// still has to be stretchable from either end, so the half the pointer is
+    /// on decides — rather than one end always winning and the other becoming
+    /// unreachable.
+    #[test]
+    fn a_tiny_loop_still_resolves_to_the_nearer_end() {
+        assert_eq!(
+            loop_grab_mode(101.0, 100.0, 106.0),
+            Some(TimelineRegionDragMode::Start)
+        );
+        assert_eq!(
+            loop_grab_mode(105.0, 100.0, 106.0),
+            Some(TimelineRegionDragMode::End)
+        );
+    }
 }

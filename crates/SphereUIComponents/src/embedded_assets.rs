@@ -95,6 +95,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_MENU_PATH => Some(assets::icons::MENU.as_bytes()),
             assets::ICON_SEARCH_PATH => Some(assets::icons::SEARCH.as_bytes()),
             assets::ICON_POWER_PATH => Some(assets::icons::POWER.as_bytes()),
+            assets::ICON_TRASH_PATH => Some(assets::icons::TRASH.as_bytes()),
             assets::ICON_CHEVRON_LEFT_PATH => Some(assets::icons::CHEVRON_LEFT.as_bytes()),
             assets::ICON_CLOSE_SMALL_PATH => Some(assets::icons::X.as_bytes()),
 

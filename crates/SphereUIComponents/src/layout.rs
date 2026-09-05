@@ -501,6 +501,10 @@ pub struct StudioLayout {
     /// are currently bound to. Grouped into
     /// [`input_ops::InspectorNameEditState`] (decomposition slice).
     inspector_name_edit: input_ops::InspectorNameEditState,
+    /// Inspector sections the user has folded, by section id. Owned here rather
+    /// than in the panel: the panel is rebuilt from scratch whenever the
+    /// selection changes, so a fold kept there would not survive a click.
+    pub(crate) inspector_collapsed_sections: std::collections::HashSet<String>,
     /// UI-only selected plugin insert `(track_id, insert_id)` driving the
     /// Plugin Insert inspector target. Pure selection — never marks dirty.
     selected_insert: Option<(String, String)>,
@@ -1160,6 +1164,7 @@ impl StudioLayout {
             mixer_tree_filter_input: TextInputState::new("mixer-tree-filter", cx.focus_handle())
                 .with_placeholder("Filter channels…"),
             inspector_name_edit: input_ops::InspectorNameEditState::new(cx),
+            inspector_collapsed_sections: std::collections::HashSet::new(),
             selected_insert: None,
             plugin_picker: PluginPickerState::closed(),
             plugin_picker_search_input: TextInputState::new(

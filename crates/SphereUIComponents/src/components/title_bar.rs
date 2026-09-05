@@ -261,6 +261,61 @@ pub fn window_control_button(
     button
 }
 
+/// The window title, doubling as the window's drag handle.
+///
+/// The title used to be a `flex_shrink_0` block beside a separate draggable
+/// spacer, and that fails twice on a long title. It cannot shrink, so the text
+/// runs under the window controls instead of truncating; and because it cannot
+/// shrink it squeezes the spacer — the only draggable strip on the bar — down to
+/// nothing, so the window stops being movable at all. A plug-in editor's title
+/// is "Audio 1 - PSE Stereo - Insert 1 — Futureboard Studio": long is the normal
+/// case there, not the edge case.
+///
+/// So the title *is* the drag region. It takes the free space, truncates inside
+/// it, and carries both halves of window dragging: `WindowControlArea::Drag`,
+/// which is what the Win32 caption hit-test reads (and what makes double-click
+/// to maximise and the system window menu work), and `start_window_move` for
+/// the platforms that need the move started explicitly.
+pub fn draggable_title(
+    icon_path: Option<&'static str>,
+    text: impl Into<SharedString>,
+    weight: gpui::FontWeight,
+) -> Div {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .window_control_area(WindowControlArea::Drag)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _cx| {
+            window.start_window_move();
+        });
+    if let Some(path) = icon_path {
+        row = row.child(
+            svg()
+                .path(path)
+                .w(px(13.0))
+                .h(px(13.0))
+                .flex_shrink_0()
+                .text_color(Colors::accent_primary()),
+        );
+    }
+    row.child(
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .text_size(px(CHROME_TITLE_SIZE))
+            .font(theme::ui_font())
+            .font_weight(weight)
+            .text_color(Colors::text_primary())
+            .child(text.into()),
+    )
+}
+
 pub fn draggable_spacer() -> Div {
     div()
         .flex_1()
@@ -293,28 +348,10 @@ pub fn external_window_titlebar_with_icon(
     let on_close = on_close.clone();
     let title_text = crate::platform_chrome::branded_window_title(&title.into());
 
-    let mut title_row = div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .h_full()
-        .flex_shrink_0();
-    if let Some(path) = icon_path.filter(|_| policy.show_titlebar_icon()) {
-        title_row = title_row.child(
-            svg()
-                .path(path)
-                .w(px(13.0))
-                .h(px(13.0))
-                .text_color(Colors::accent_primary()),
-        );
-    }
-    title_row = title_row.child(
-        div()
-            .text_size(px(CHROME_TITLE_SIZE))
-            .font(theme::ui_font())
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(Colors::text_primary())
-            .child(title_text),
+    let title_row = draggable_title(
+        icon_path.filter(|_| policy.show_titlebar_icon()),
+        title_text,
+        gpui::FontWeight::SEMIBOLD,
     );
 
     let mut bar = div()
@@ -331,8 +368,7 @@ pub fn external_window_titlebar_with_icon(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_titlebar())
-        .child(title_row)
-        .child(draggable_spacer());
+        .child(title_row);
 
     if policy.show_window_controls {
         bar = bar
@@ -428,19 +464,7 @@ pub fn external_window_titlebar_compact(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_titlebar())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .h_full()
-                .flex_shrink_0()
-                .text_size(px(CHROME_TITLE_SIZE))
-                .font(theme::ui_font())
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_primary())
-                .child(title_text),
-        )
-        .child(draggable_spacer())
+        .child(draggable_title(None, title_text, gpui::FontWeight::MEDIUM))
         .children(close_button)
 }
 
@@ -468,19 +492,7 @@ pub fn chromeless_window_titlebar(
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_titlebar())
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .h_full()
-                .flex_shrink_0()
-                .text_size(px(CHROME_TITLE_SIZE))
-                .font(theme::ui_font())
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_primary())
-                .child(title_text),
-        )
-        .child(draggable_spacer())
+        .child(draggable_title(None, title_text, gpui::FontWeight::MEDIUM))
         .children(on_close.map(|on_close| {
             div()
                 .id(close_id)

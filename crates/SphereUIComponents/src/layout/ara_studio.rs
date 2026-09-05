@@ -24,6 +24,23 @@ pub(crate) struct AraPluginChoice {
     pub class_id: String,
 }
 
+/// How long the teardown waits for the plug-in's editor view to come down
+/// before closing its document regardless.
+///
+/// Sixteen frames was not a budget, it was a guess, and it was short of what
+/// a real editor needs: `remove_window` only *asks* for the window, the
+/// close runs on the next turn of the platform's message loop, and
+/// `IPlugView::removed()` inside a large editor (Melodyne rebuilding its
+/// analysis view, say) is not a 16 ms call. Missing the window meant the
+/// document was destroyed under a live view, which is the crash-or-hang this
+/// whole sequence exists to avoid.
+///
+/// Two seconds is long enough for that to finish and short enough that a
+/// plug-in which is never going to let go does not look like a permanent
+/// hang. Polling continues to be cheap: it is one atomic read per frame.
+const VIEW_RELEASE_POLLS: u32 = 120;
+const VIEW_RELEASE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
 impl StudioLayout {
     /// ARA-capable plug-ins from the scanned catalog, sorted for display.
     ///
@@ -245,14 +262,15 @@ impl StudioLayout {
 
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            for _ in 0..16 {
+            let mut released = false;
+            for _ in 0..VIEW_RELEASE_POLLS {
                 // Both owners, not just the docked one. A popped-out editor
                 // holds its view in a window of its own, and the docked host
                 // reports "not attached" for the whole time it is popped out —
                 // so waiting on that alone let the very first poll answer
                 // "released" and destroy the document under the window that
                 // still had a view on it.
-                let released = this
+                released = this
                     .update(cx, |layout, cx| {
                         !layout.ara_editor.read(cx).is_attached()
                             && !layout.ara.view_is_attached(&key)
@@ -261,7 +279,25 @@ impl StudioLayout {
                 if released {
                     break;
                 }
-                executor.timer(std::time::Duration::from_millis(16)).await;
+                executor.timer(VIEW_RELEASE_POLL_INTERVAL).await;
+            }
+            if !released {
+                // Said out loud, and not behind a debug flag. Closing the
+                // document while a view is still on it is the state that hangs
+                // or crashes the app, and the teardown below is about to do it
+                // anyway — `AraSessions::close` detaches the view itself first,
+                // but if that call is the one that never returns, this is the
+                // line that says the app was already in the bad state before it
+                // started. A freeze report with this line above it and no
+                // `[ara-close] ... done` line after it names the culprit
+                // exactly; without it the log looks like a clean teardown that
+                // simply stopped.
+                eprintln!(
+                    "[ara-close] WARNING: '{}' still holds its editor view after {:?}; \
+                     closing the document anyway",
+                    key.plugin_id,
+                    VIEW_RELEASE_POLL_INTERVAL * VIEW_RELEASE_POLLS,
+                );
             }
             let _ = this.update(cx, |layout, cx| {
                 let Some(engine) = layout.audio_bridge.engine.clone() else {

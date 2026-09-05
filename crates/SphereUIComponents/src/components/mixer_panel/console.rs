@@ -61,8 +61,11 @@ use crate::theme::Colors;
 pub(crate) const TOP_ROW_H: f32 = 16.0;
 /// Rack caption ("INSERTS", "SENDS").
 pub(crate) const RACK_LABEL_H: f32 = 14.0;
-/// One insert or send slot.
+/// One insert slot.
 pub(crate) const SLOT_H: f32 = 17.0;
+/// One send slot: a target line over its level bar. Taller than an insert
+/// because it carries a control as well as a name.
+pub(crate) const SEND_SLOT_H: f32 = 28.0;
 /// Output / routing row.
 pub(crate) const IO_ROW_H: f32 = 20.0;
 /// Pan knob and its readout.

@@ -36,6 +36,7 @@ pub mod icons {
     pub const SEARCH: &str = include_str!("../../../packages/shared/lucide/icons/search.svg");
     pub const X: &str = include_str!("../../../packages/shared/lucide/icons/x.svg");
     pub const POWER: &str = include_str!("../../../packages/shared/lucide/icons/power.svg");
+    pub const TRASH: &str = include_str!("../../../packages/shared/lucide/icons/trash-2.svg");
     pub const CHEVRON_LEFT: &str =
         include_str!("../../../packages/shared/lucide/icons/chevron-left.svg");
 
@@ -183,6 +184,7 @@ pub const TIMELINE_SCROLL_PATH: &str = "icons/timelinescroll.svg";
 // Plug-in editor chrome. `ICON_X_PATH` is the window-control close, drawn to
 // match the titlebar buttons; a tab's own close is the lighter lucide glyph.
 pub const ICON_POWER_PATH: &str = "icons/power.svg";
+pub const ICON_TRASH_PATH: &str = "icons/trash-2.svg";
 pub const ICON_CHEVRON_LEFT_PATH: &str = "icons/chevron-left.svg";
 pub const ICON_CLOSE_SMALL_PATH: &str = "icons/x.svg";
 

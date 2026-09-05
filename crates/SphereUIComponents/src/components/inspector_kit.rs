@@ -54,6 +54,21 @@ pub const ROW_GAP: f32 = space::SNUG;
 /// height (`size::COMFORTABLE` for inputs); this only keeps a text-only row
 /// from collapsing.
 pub const ROW_MIN_HEIGHT: f32 = size::DEFAULT;
+/// Padding inside a card. Roomier than a plain section: the card is the only
+/// frame in the panel now, so it carries the breathing room the removed inner
+/// borders used to fake.
+pub const CARD_PAD: f32 = space::LOOSE;
+/// Corner of a card. Generous enough to read as a panel rather than as a box.
+pub const CARD_RADIUS: f32 = 14.0;
+/// Gap between a card's rows.
+pub const CARD_ROW_GAP: f32 = space::SNUG;
+/// The header switch.
+pub const SWITCH_W: f32 = 34.0;
+pub const SWITCH_H: f32 = 18.0;
+pub const SWITCH_KNOB: f32 = 14.0;
+/// One round latching state button (M / S / I / R).
+pub const STATE_BUTTON: f32 = 28.0;
+
 /// Glyph size for a section header or an inline row icon. Sized to sit on the
 /// same optical weight as 11–12 px text rather than to compete with it.
 pub const ICON: f32 = 13.0;
@@ -169,10 +184,12 @@ pub fn ins_section_header(icon: &'static str, title: impl Into<String>) -> impl 
         .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle()))
 }
 
-/// A section card: the one surface level inside the panel.
+/// A section card with a leading glyph, for the dock tabs that identify their
+/// sections by icon (Solfège, Settings).
 ///
-/// Separated from the panel by *value* and a hairline, not by shadow — on a
-/// dark plane a blurred shadow has no dynamic range left to spend.
+/// Same surface as [`ins_card`] — value, not a border: the fill difference is
+/// what separates it from the panel, and an outline on top of that is a second
+/// edge saying the same thing.
 pub fn ins_section(
     icon: &'static str,
     title: impl Into<String>,
@@ -181,12 +198,10 @@ pub fn ins_section(
     div()
         .flex()
         .flex_col()
-        .gap(px(ROW_GAP))
-        .p(px(SECTION_PAD))
-        .rounded(px(radius::SURFACE))
+        .gap(px(CARD_ROW_GAP))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
         .bg(Colors::surface_card())
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
         .child(ins_section_header(icon, title))
         .child(div().flex().flex_col().gap(px(ROW_GAP)).child(child))
 }
@@ -201,12 +216,10 @@ pub fn ins_section_container() -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(ROW_GAP))
-        .p(px(SECTION_PAD))
-        .rounded(px(radius::SURFACE))
+        .gap(px(CARD_ROW_GAP))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
         .bg(Colors::surface_card())
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
 }
 
 /// Section card whose header carries a trailing control (an Add button, a
@@ -221,12 +234,10 @@ pub fn ins_section_with_action(
     div()
         .flex()
         .flex_col()
-        .gap(px(ROW_GAP))
-        .p(px(SECTION_PAD))
-        .rounded(px(radius::SURFACE))
+        .gap(px(CARD_ROW_GAP))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
         .bg(Colors::surface_card())
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
         .child(
             div()
                 .flex()
@@ -238,6 +249,184 @@ pub fn ins_section_with_action(
                 .child(div().flex_shrink_0().child(action)),
         )
         .child(div().flex().flex_col().gap(px(ROW_GAP)).child(child))
+}
+
+// ── The card ─────────────────────────────────────────────────────────────────
+
+/// A section card, with its title, its rule, and its switch.
+///
+/// # The shape, and why
+///
+/// ```txt
+/// ┌─────────────────────────────────────────┐
+/// │  TRACK ─────────────────────────  (●──) │  ← title, rule, switch
+/// │  Type                             Audio │  ← label left, value right
+/// │  Name        ( Audio Track 1 UwU      ) │  ← controls are pills
+/// │  Volume      ────────────●──   +00 dB   │
+/// └─────────────────────────────────────────┘
+/// ```
+///
+/// The rule between the title and the switch is doing real work: it ties the
+/// two ends of a 30 px header together so the switch reads as belonging to
+/// *this* section rather than floating above the next one, and it gives the eye
+/// a horizontal line to travel when scanning a stack of cards for a heading.
+///
+/// The switch collapses the section. Every section can be collapsed and none of
+/// them has a natural on/off of its own, so one meaning covers all of them —
+/// and a control that means one thing everywhere is worth more than five that
+/// each mean something local.
+pub fn ins_card(
+    title: impl Into<String>,
+    switch: Option<InsCardSwitch>,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    let collapsed = switch.as_ref().is_some_and(|switch| !switch.on);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(CARD_ROW_GAP))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
+        .bg(Colors::surface_card())
+        .child(ins_card_header(title, switch))
+        .when(!collapsed, |card| {
+            card.child(div().flex().flex_col().gap(px(CARD_ROW_GAP)).child(body))
+        })
+}
+
+/// The switch on a card's header.
+pub struct InsCardSwitch {
+    pub id: gpui::ElementId,
+    /// `true` = expanded. The switch reads as "this section is showing".
+    pub on: bool,
+    pub on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut App)>,
+}
+
+fn ins_card_header(title: impl Into<String>, switch: Option<InsCardSwitch>) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(space::LOOSE))
+        .h(px(size::DENSE))
+        .flex_shrink_0()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(typography::UI_XS))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(Colors::text_primary())
+                .child(title.into().to_uppercase()),
+        )
+        .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle()))
+        .children(switch.map(|switch| ins_switch(switch.id, switch.on, switch.on_toggle)))
+}
+
+/// The pill switch: a track with a knob that slides.
+///
+/// Reads as a physical state rather than a checkbox because it is setting how
+/// the panel *is*, not recording an answer — and because at this size a tick in
+/// a box is a 10 px target while this is a 34 px one.
+pub fn ins_switch(
+    id: gpui::ElementId,
+    on: bool,
+    on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut App)>,
+) -> impl IntoElement {
+    let track = if on {
+        Colors::accent_primary()
+    } else {
+        Colors::composite(Colors::surface_card(), Colors::state_recessed())
+    };
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .flex_shrink_0()
+        .items_center()
+        .w(px(SWITCH_W))
+        .h(px(SWITCH_H))
+        .px(px(2.0))
+        .rounded(px(radius::PILL))
+        .bg(track)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(div().flex_1().when(on, |spacer| spacer.min_w(px(0.0))))
+        .child(
+            div()
+                .flex_none()
+                .w(px(SWITCH_KNOB))
+                .h(px(SWITCH_KNOB))
+                .rounded(px(radius::PILL))
+                .bg(if on {
+                    Colors::on_color(Colors::accent_primary())
+                } else {
+                    Colors::text_muted()
+                }),
+        )
+        .when(on, |row| row.flex_row_reverse())
+        .on_click(move |_, window, cx| on_toggle(window, cx))
+}
+
+/// The panel's control surface: a pill.
+///
+/// Every control that takes a value — a name field, a routing menu, a hex code —
+/// wears this, so a column of them reads as one instrument panel rather than as
+/// five widgets that happen to be stacked. Sliders and the state buttons are the
+/// deliberate exceptions: their own shape already says what they do.
+pub fn ins_pill() -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(size::DEFAULT))
+        .px(px(space::LOOSE))
+        .rounded(px(radius::PILL))
+        .bg(Colors::composite(
+            Colors::surface_card(),
+            Colors::state_recessed(),
+        ))
+        .text_size(px(typography::UI_XS))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_primary())
+}
+
+/// A round latching button — the M/S/I/R row.
+///
+/// Round because these four are the only controls in the panel that are pressed
+/// rather than set, and because a row of circles is countable at a glance in a
+/// way a row of rounded rectangles is not.
+pub fn ins_state_button(
+    id: gpui::ElementId,
+    label: impl Into<String>,
+    on: bool,
+    semantic: gpui::Rgba,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let rest = Colors::composite(Colors::surface_card(), Colors::state_recessed());
+    let hover = Colors::composite(if on { semantic } else { rest }, Colors::state_hover());
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(STATE_BUTTON))
+        .h(px(STATE_BUTTON))
+        .rounded(px(radius::PILL))
+        .bg(if on { semantic } else { rest })
+        .when(!on, |button| {
+            button.border(px(1.0)).border_color(Colors::border_normal())
+        })
+        .text_size(px(typography::UI_XS))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(if on {
+            Colors::on_color(semantic)
+        } else {
+            Colors::text_secondary()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(move |style| style.bg(hover))
+        .on_click(on_click)
+        .child(label.into())
 }
 
 // ── Rows ─────────────────────────────────────────────────────────────────────
