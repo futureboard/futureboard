@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    div, px, svg, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, img, px, svg, App, InteractiveElement, IntoElement, ObjectFit, ParentElement,
+    StatefulInteractiveElement, Styled, StyledImage, Window,
 };
 
 use crate::assets;
@@ -176,6 +176,98 @@ pub fn combo_box_menu<T: Copy + PartialEq + 'static>(
         }))
 }
 
+/// The visual that leads a menu row.
+///
+/// A menu of endpoint names is a wall of text in which "Focusrite USB ASIO",
+/// "Audio Jam", and a person are the same shape. The glyph is what makes the
+/// *kind* of thing readable before the name is: hardware, a network send, or
+/// somebody's face.
+#[derive(Clone)]
+pub enum MenuGlyph {
+    /// No leading visual. Rows still align, so a menu may mix this with others.
+    None,
+    /// An asset-path SVG, tinted with the row's own text colour.
+    Svg(&'static str),
+    /// A downloaded picture, drawn as a circle. See
+    /// [`crate::account::profile_picture`].
+    Picture(Arc<gpui::Image>),
+    /// A monogram, for a person whose picture is missing or has not landed yet.
+    /// Never more than two characters.
+    Monogram(String),
+}
+
+/// One row of a menu: what it says, and what it is.
+#[derive(Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub glyph: MenuGlyph,
+}
+
+impl MenuItem {
+    pub fn new(label: impl Into<String>, glyph: MenuGlyph) -> Self {
+        Self {
+            label: label.into(),
+            glyph,
+        }
+    }
+
+    pub fn plain(label: impl Into<String>) -> Self {
+        Self::new(label, MenuGlyph::None)
+    }
+}
+
+/// Size of a menu row's leading visual, in logical units. One number for every
+/// kind so the labels line up whatever the row is showing.
+const GLYPH_SIZE: f32 = 14.0;
+
+fn render_glyph(glyph: &MenuGlyph, tint: gpui::Rgba) -> gpui::AnyElement {
+    let frame = div().flex_none().w(px(GLYPH_SIZE)).h(px(GLYPH_SIZE));
+    match glyph {
+        MenuGlyph::None => frame.into_any_element(),
+        MenuGlyph::Svg(path) => frame
+            .child(
+                svg()
+                    .path(*path)
+                    .w(px(GLYPH_SIZE - 2.0))
+                    .h(px(GLYPH_SIZE - 2.0))
+                    .text_color(tint),
+            )
+            .flex()
+            .items_center()
+            .justify_center()
+            .into_any_element(),
+        MenuGlyph::Picture(image) => frame
+            .rounded(px(GLYPH_SIZE / 2.0))
+            .overflow_hidden()
+            .child(
+                img(gpui::ImageSource::Image(image.clone()))
+                    .object_fit(ObjectFit::Cover)
+                    .w(px(GLYPH_SIZE))
+                    .h(px(GLYPH_SIZE)),
+            )
+            .into_any_element(),
+        MenuGlyph::Monogram(text) => frame
+            .rounded(px(GLYPH_SIZE / 2.0))
+            .bg(Colors::surface_control_hover())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(7.5))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(Colors::text_secondary())
+            .child(text.chars().take(2).collect::<String>().to_uppercase())
+            .into_any_element(),
+    }
+}
+
+/// The same leading visual as a menu row, for the control that opens it.
+///
+/// A cell and its menu showing the same glyph is what makes the assignment
+/// legible without opening anything.
+pub fn cell_glyph(glyph: &MenuGlyph, tint: gpui::Rgba) -> gpui::AnyElement {
+    render_glyph(glyph, tint)
+}
+
 pub fn combo_box_string_menu(
     id: impl Into<gpui::ElementId>,
     position: crate::overlay::OverlayPosition,
@@ -183,7 +275,34 @@ pub fn combo_box_string_menu(
     options: &[String],
     on_select: Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let deduped = dedupe_preserve_order(options);
+    let items: Vec<MenuItem> = dedupe_preserve_order(options)
+        .into_iter()
+        .map(MenuItem::plain)
+        .collect();
+    combo_box_icon_menu(id, position, selected, &items, on_select)
+}
+
+/// The same menu, with a leading glyph per row.
+///
+/// Rows are deduplicated by **label**, exactly as the string form is: the label
+/// is what the caller's lookup is keyed by, so two rows that read the same are
+/// one row however differently they are illustrated.
+pub fn combo_box_icon_menu(
+    id: impl Into<gpui::ElementId>,
+    position: crate::overlay::OverlayPosition,
+    selected: &str,
+    items: &[MenuItem],
+    on_select: Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let options: Vec<String> = items.iter().map(|item| item.label.clone()).collect();
+    let deduped: Vec<MenuItem> = {
+        let mut seen = HashSet::new();
+        items
+            .iter()
+            .filter(|item| seen.insert(item.label.clone()))
+            .cloned()
+            .collect()
+    };
     combobox_debug(&format!(
         "open options={} unique={} selected={selected}",
         options.len(),
@@ -221,10 +340,16 @@ pub fn combo_box_string_menu(
         .id(id)
         .overflow_y_scroll()
         .occlude()
-        .children(deduped.iter().enumerate().map(|(index, option)| {
+        .children(deduped.iter().enumerate().map(|(index, item)| {
+            let option = &item.label;
             let active = option == selected;
             let value = option.clone();
             let on_select = on_select.clone();
+            let tint = if active {
+                Colors::accent_primary()
+            } else {
+                Colors::text_muted()
+            };
             div()
                 .id(("combo-box-string-option", index))
                 .min_h(px(25.0))
@@ -234,8 +359,7 @@ pub fn combo_box_string_menu(
                 .py(px(4.0))
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap(px(8.0))
+                .gap(px(7.0))
                 .bg(if active {
                     Colors::accent_muted()
                 } else {
@@ -255,6 +379,7 @@ pub fn combo_box_string_menu(
                 .cursor(gpui::CursorStyle::PointingHand)
                 .hover(|s| s.bg(Colors::surface_control_hover()))
                 .on_click(move |_, window, cx| on_select(value.clone(), window, cx))
+                .child(render_glyph(&item.glyph, tint))
                 .child(
                     div()
                         .min_w(px(0.0))

@@ -64,10 +64,10 @@ pub struct MixerStripGeom {
     pub height: f32,
     /// Strip background (already resolved for selected / alternating row).
     pub bg: Rgba,
-    /// Top accent bar colour (track colour, or master accent).
-    pub accent: Rgba,
-    /// Right separator line colour (already resolved stronger when selected, so
-    /// selection is reproduced faithfully via `bg` + `separator` — no extra bar).
+    /// Name-plate fill at the foot of the strip: the track's colour, and the
+    /// only place a strip is coloured. See `mixer_panel::console`.
+    pub plate: Rgba,
+    /// Right separator line colour.
     pub separator: Rgba,
     pub selected: bool,
     pub is_master: bool,
@@ -85,7 +85,7 @@ impl MixerStripGeom {
         q(self.width).hash(hasher);
         q(self.height).hash(hasher);
         hash_rgba(self.bg, hasher);
-        hash_rgba(self.accent, hasher);
+        hash_rgba(self.plate, hasher);
         hash_rgba(self.separator, hasher);
         self.selected.hash(hasher);
         self.is_master.hash(hasher);
@@ -107,8 +107,8 @@ pub struct MixerRenderSnapshot {
     pub viewport: MixerRenderViewport,
     pub strips: Vec<MixerStripGeom>,
     pub master: Option<MixerStripGeom>,
-    /// Height of the top accent bar.
-    pub accent_bar_h: f32,
+    /// Height of the name plate at the foot of each strip.
+    pub plate_h: f32,
     /// Width of the right separator line.
     pub separator_w: f32,
     /// Hash of every static field (strip set/size/colour/selection + viewport
@@ -121,21 +121,16 @@ impl MixerRenderSnapshot {
         viewport: MixerRenderViewport,
         strips: Vec<MixerStripGeom>,
         master: Option<MixerStripGeom>,
-        accent_bar_h: f32,
+        plate_h: f32,
         separator_w: f32,
     ) -> Self {
-        let static_key = Self::compute_static_key(
-            &viewport,
-            &strips,
-            master.as_ref(),
-            accent_bar_h,
-            separator_w,
-        );
+        let static_key =
+            Self::compute_static_key(&viewport, &strips, master.as_ref(), plate_h, separator_w);
         Self {
             viewport,
             strips,
             master,
-            accent_bar_h,
+            plate_h,
             separator_w,
             static_key,
         }
@@ -145,7 +140,7 @@ impl MixerRenderSnapshot {
         viewport: &MixerRenderViewport,
         strips: &[MixerStripGeom],
         master: Option<&MixerStripGeom>,
-        accent_bar_h: f32,
+        plate_h: f32,
         separator_w: f32,
     ) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -155,7 +150,7 @@ impl MixerRenderSnapshot {
         // scroll_x is deliberately part of the static key NOT being included:
         // scrolling only shifts the paint transform, it never rebuilds geometry.
         viewport.master_x.map(q).hash(&mut hasher);
-        q(accent_bar_h).hash(&mut hasher);
+        q(plate_h).hash(&mut hasher);
         q(separator_w).hash(&mut hasher);
         strips.len().hash(&mut hasher);
         for strip in strips {
@@ -204,7 +199,7 @@ mod tests {
             width: 88.0,
             height: 320.0,
             bg: rgba(0.1),
-            accent: rgba(0.5),
+            plate: rgba(0.5),
             separator: rgba(0.0),
             selected,
             is_master: false,
@@ -294,11 +289,11 @@ mod tests {
         let base =
             MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
 
-        // A track recolour changes bg / accent / separator; each must rebuild the
+        // A track recolour changes bg / plate / separator; each must rebuild the
         // static batch or the strip would keep painting its old colour.
         for mutate in [
             (|s: &mut MixerStripGeom| s.bg = rgba(0.9)) as fn(&mut MixerStripGeom),
-            (|s: &mut MixerStripGeom| s.accent = rgba(0.9)) as fn(&mut MixerStripGeom),
+            (|s: &mut MixerStripGeom| s.plate = rgba(0.9)) as fn(&mut MixerStripGeom),
             (|s: &mut MixerStripGeom| s.separator = rgba(0.9)) as fn(&mut MixerStripGeom),
         ] {
             let mut s = strip(0.0, false, 0.1);

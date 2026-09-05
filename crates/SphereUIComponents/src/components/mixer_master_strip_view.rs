@@ -7,7 +7,6 @@ use gpui::{Context, IntoElement, Render, Window};
 use crate::components::mixer_panel::{mixer_master_strip_pinned, MixerCallbacks, MixerSplit};
 use crate::components::timeline::timeline::Timeline;
 use crate::i18n::I18n;
-use crate::theme::Colors;
 
 pub struct MixerMasterStripView {
     timeline: gpui::Entity<Timeline>,
@@ -81,11 +80,9 @@ impl Render for MixerMasterStripView {
         let meter_sig = strip_meter_signature(&master, &monitor);
         self.last_meter_sig = meter_sig;
 
-        let accent = Colors::accent_primary();
         let on_master = self.callbacks.on_master_volume_change.clone();
         let i18n = I18n::from_app(cx);
         mixer_master_strip_pinned(
-            accent,
             &master,
             &monitor,
             on_master,

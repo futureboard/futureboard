@@ -37,7 +37,7 @@
 //! and it is only ever a backstop — ownership is what keeps double claims from
 //! happening in the first place.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -172,6 +172,50 @@ pub fn claim(source: TransportKeySource, time_ms: Option<u32>) -> bool {
     accepted
 }
 
+/// Whether the Space key-up now on its way belongs to the transport.
+///
+/// GPUI activates a focused, clickable element on the **key-up** of Space or
+/// Enter — the keyboard equivalent of a click (see `div.rs`, "Press enter,
+/// space to trigger click"). `Window::prevent_default` cannot stop that from
+/// the key-down, because `default_prevented` is cleared for every platform
+/// input event, so a key-down's veto is already gone by the time the key-up is
+/// dispatched.
+///
+/// That is one press doing two opposite things: click Play with the mouse (which
+/// focuses it), then press Space — the key-down pauses, and the key-up presses
+/// the still-focused Play or Record button again. It reads as the transport
+/// re-arming itself, and it keeps happening because the button stays focused.
+///
+/// So the key-down claims the key-up as well: whoever routed Space to the
+/// transport sets this, and the key-up handler takes it and swallows the event
+/// before it reaches the focused control. Enter is untouched — buttons keep
+/// their keyboard activation, they just do not answer to the transport key.
+static KEY_UP_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Claim the key-up of the Space press being handled right now.
+///
+/// Called from every key-down path that turns Space into a transport command,
+/// including auto-repeats: the key-up of a held Space is still the transport's.
+pub fn claim_space_key_up() {
+    KEY_UP_CLAIMED.store(true, Ordering::Relaxed);
+}
+
+/// Drop a claim left over from an earlier press.
+///
+/// Called at the top of a key-down handler for a *fresh* press (not a repeat).
+/// A key-up can only follow a key-down, so this bounds a claim's life to the
+/// press that made it: one lost key-up — the window deactivating mid-press, say
+/// — cannot make the next unrelated key-up disappear.
+pub fn forget_space_key_up() {
+    KEY_UP_CLAIMED.store(false, Ordering::Relaxed);
+}
+
+/// Take the claim. `true` means this key-up is the transport's and the handler
+/// must swallow it rather than let it activate whatever holds focus.
+pub fn take_space_key_up_claim() -> bool {
+    KEY_UP_CLAIMED.swap(false, Ordering::Relaxed)
+}
+
 /// Take the presses waiting to become transport commands.
 ///
 /// Drained by exactly one caller — `StudioLayout::poll_native_audio`. More than
@@ -225,6 +269,30 @@ mod tests {
         assert!(claim(TransportKeySource::NativeBridge, None));
         assert!(!claim(TransportKeySource::NativeBridge, None));
         assert_eq!(take(), 1);
+    }
+
+    /// One press, one toggle — the key-up must not add a second one by
+    /// clicking whatever the mouse left focused.
+    #[test]
+    fn a_claimed_key_up_is_swallowed_exactly_once() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        forget_space_key_up();
+        assert!(!take_space_key_up_claim());
+        claim_space_key_up();
+        assert!(take_space_key_up_claim());
+        // The transport took it; a second key-up (a different key, or one that
+        // arrived without its press) is nobody's but the focused control's.
+        assert!(!take_space_key_up_claim());
+    }
+
+    /// A press whose key-up never arrived — the window deactivated mid-press —
+    /// must not cost the next press's key-up.
+    #[test]
+    fn a_new_press_drops_a_stale_claim() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        claim_space_key_up();
+        forget_space_key_up();
+        assert!(!take_space_key_up_claim());
     }
 
     #[test]

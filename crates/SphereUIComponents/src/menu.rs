@@ -178,6 +178,30 @@ mod tests {
         }
     }
 
+    /// Every window Studio can open on its own — one that needs no track and no
+    /// selection — has to be reachable from the Window menu. A window with a
+    /// dispatch arm and no menu entry exists only for whoever already knows its
+    /// command id, which is nobody.
+    #[test]
+    fn every_standalone_window_is_in_the_window_menu() {
+        let commands = commands();
+        for command in [
+            "window:big-clock",
+            "window:timecode",
+            "floatingwindow:routing-matrix",
+            "floatingwindow:mixer",
+            "window:video-player",
+            "window:audio-jam",
+            "window:extensions",
+            "panel:toggle-bottom",
+        ] {
+            assert!(
+                commands.iter().any(|found| found == command),
+                "{command} opens a window but appears in no menu"
+            );
+        }
+    }
+
     /// A malformed manifest degrades to the fallback shell rather than
     /// panicking, so this is worth asserting rather than assuming: if the
     /// embedded JSON ever stops parsing, every menu silently empties.

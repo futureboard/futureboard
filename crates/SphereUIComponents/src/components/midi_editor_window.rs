@@ -153,6 +153,9 @@ impl MidiEditorWindow {
         let window_id = window.window_handle().window_id();
         let mods = event.keystroke.modifiers;
         let command_modifier = mods.control || mods.alt || mods.platform || mods.function;
+        if !event.is_held {
+            crate::components::transport_key::forget_space_key_up();
+        }
         let vkbd_consumed = self.virtual_keyboard.update(cx, |keyboard, cx| {
             keyboard.handle_key_down(
                 window_id,
@@ -173,6 +176,10 @@ impl MidiEditorWindow {
         }
         let key = event.keystroke.key.as_str();
         if key == "space" && !mods.control && !mods.alt && !mods.platform && !mods.function {
+            // Claim the key-up as well, or GPUI turns it into a click on whatever
+            // this window focused last (see `transport_key::claim_space_key_up`).
+            crate::components::transport_key::claim_space_key_up();
+            window.prevent_default();
             cx.stop_propagation();
             midi_editor_debug("command dispatch transport:play-pause");
             (self.dispatch_command)("transport:play-pause", cx);
@@ -251,6 +258,12 @@ impl Render for MidiEditorWindow {
                     let _ = virtual_keyboard.update(cx, |keyboard, cx| {
                         keyboard.handle_key_up(window_id, event.keystroke.key.as_str(), cx)
                     });
+                    // Swallow the transport key's own key-up so it does not also
+                    // press whatever control holds focus in this window.
+                    if crate::components::transport_key::take_space_key_up_claim() {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
                 }
             })
             .child(div().w(px(0.0)).h(px(0.0)).track_focus(&self.focus_handle))

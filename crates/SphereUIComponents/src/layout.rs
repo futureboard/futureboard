@@ -2338,6 +2338,16 @@ impl StudioLayout {
             "window:audio-jam" | "jam:open" => {
                 self.open_jam_window(owner_bounds, cx);
             }
+            "window:big-clock" | "view:big-clock" => self.open_clock_window(
+                components::clock_window::ClockKind::BigClock,
+                owner_bounds,
+                cx,
+            ),
+            "window:timecode" | "view:timecode" => self.open_clock_window(
+                components::clock_window::ClockKind::Timecode,
+                owner_bounds,
+                cx,
+            ),
 
             "track:add" | "track:show-add-dialog" | "project:add-track" => {
                 self.open_add_track_external_window(AddTrackKind::Audio, owner_bounds, cx)

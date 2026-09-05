@@ -19,9 +19,13 @@
 //! * The master block is pinned to the right edge and has its own bordered
 //!   gutter so the empty middle (when track count is small) reads as
 //!   intentional, not as floating dead space.
-//! * Strip internals are a vertical stack with explicit shared insert/send
-//!   viewport heights; only the lower pan/fader area grows to fill remaining
-//!   height.
+//! * Strip internals are a vertical stack in fixed console order — type row,
+//!   inserts, sends, I/O, pan, fader bay, toggles, name plate — so a row of
+//!   strips reads across as well as down. Only the two racks resize; every
+//!   other row is the same height on every strip, which is what keeps all the
+//!   faders in one bay and all the plates on one baseline.
+//! * The track colour appears once per strip, as the name plate's fill. See
+//!   [`console`] for the rest of the visual rules.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -31,7 +35,7 @@ use gpui::{
 use std::collections::HashSet;
 
 use crate::assets;
-use crate::components::fader::{db_scale_column, db_value_pill, fader_with_drag_callbacks};
+use crate::components::fader::fader_with_drag_callbacks;
 use crate::components::knob::knob_bipolar;
 use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
 use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
@@ -50,9 +54,11 @@ use crate::i18n::I18n;
 use crate::theme::{typography, Colors};
 
 mod callbacks;
+mod console;
 mod drag;
 mod split;
 pub use callbacks::*;
+use console::{type_scale, RackPlus, SlotTone, ToggleState};
 use drag::{MixerScrollDrag, SendSlotDrag};
 pub use split::*;
 
@@ -69,14 +75,6 @@ fn mixer_strip_is_selected(track_id: &str, primary: Option<&str>, selected_ids: 
 /// Maximum insert slots per track. Once reached, the trailing empty "+ Add
 /// Insert" slot and the INSERTS header "+" are hidden/disabled.
 const MAX_INSERT_SLOTS: usize = 8;
-
-/// Optional clickable "+" affordance for a [`section_header`]. `None` renders
-/// the inert decorative plus (used by SENDS and the master strip); `Some`
-/// renders an interactive, hit-tested plus that runs `on_click`.
-struct HeaderPlus {
-    id: gpui::SharedString,
-    on_click: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
-}
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
 
@@ -120,108 +118,6 @@ pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
         )
 }
 
-// ─── Section header ──────────────────────────────────────────────────────────
-
-fn section_header(
-    label: impl Into<String>,
-    _accent: gpui::Rgba,
-    plus: Option<HeaderPlus>,
-) -> impl IntoElement {
-    let label = label.into();
-
-    // The trailing "+" — interactive when `plus` is Some, otherwise an inert
-    // decorative glyph. Interactive variant carries its own id + occlude so the
-    // strip's track-select mouse handler can't swallow the click.
-    let plus_el: gpui::AnyElement = match plus {
-        Some(HeaderPlus { id, on_click }) => div()
-            .id(id)
-            .w(px(12.0))
-            .h(px(12.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(crate::theme::radius::CONTROL))
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_control_hover()))
-            .child(
-                svg()
-                    .path(assets::ICON_PLUS_PATH)
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .text_color(Colors::text_muted()),
-            )
-            .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
-                on_click(w, cx);
-            })
-            .occlude()
-            .into_any_element(),
-        None => div()
-            .w(px(12.0))
-            .h(px(12.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(crate::theme::radius::CONTROL))
-            .child(
-                svg()
-                    .path(assets::ICON_PLUS_PATH)
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .text_color(Colors::text_faint()),
-            )
-            .into_any_element(),
-    };
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .flex_none()
-        .gap(px(3.0))
-        .h(px(SEC_SECTION_HEADER_H))
-        .px(px(5.0))
-        // A caption plus a hairline rule, not a coloured tick. The 2px accent
-        // bar in front of every section title put the signal colour on pure
-        // decoration in a strip where cyan already means selection and routing.
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap(px(crate::theme::space::SNUG))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(crate::theme::typography::DENSE_LABEL))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        // Was `text_faint` at caption size, which left the only
-                        // labels telling INSERTS from SENDS below the strip's
-                        // own borders in contrast.
-                        .text_color(Colors::text_secondary())
-                        .child(label),
-                )
-                .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle())),
-        )
-        .child(plus_el)
-}
-
-fn empty_slot(i18n: I18n) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .mx(px(4.0))
-        .py(px(2.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .text_size(px(8.0))
-        .text_color(Colors::text_muted())
-        .child(i18n.tr("mixer.insert.empty"))
-}
-
 fn mixer_track_type_label(track_type: TrackType, i18n: I18n) -> String {
     match track_type {
         TrackType::Audio => i18n.tr("mixer.track-type.audio"),
@@ -235,88 +131,22 @@ fn mixer_track_type_label(track_type: TrackType, i18n: I18n) -> String {
     }
 }
 
-// ─── M/S/R/I buttons ────────────────────────────────────────────────────────
-
-/// Visual state of an M/S/R/I toggle.
+/// The channel toggles: M/S/R/I over PFL/AFL.
 ///
-/// `Implied` is neither on nor off: this channel's own flag is clear, but the
-/// engine is treating it as engaged because a parent decided for it — a VSTi
-/// multi-out channel under its instrument's solo. It reads as a tinted outline
-/// rather than a solid fill, so "sounding because of the parent" never looks
-/// like "someone clicked this". The button still toggles this channel's own
-/// flag, which is why it keeps full button affordance.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToggleState {
-    Off,
-    Implied,
-    On,
-}
-
-impl From<bool> for ToggleState {
-    fn from(active: bool) -> Self {
-        if active {
-            ToggleState::On
-        } else {
-            ToggleState::Off
-        }
-    }
-}
-
-fn msri_button(
-    id: gpui::ElementId,
-    label: &'static str,
-    state: ToggleState,
-    active_bg: gpui::Rgba,
-    active_fg: gpui::Rgba,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    let mut btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(16.0))
-        .flex_1()
-        .min_w(px(0.0))
-        .rounded(px(crate::theme::radius::CONTROL))
-        .text_size(px(typography::DENSE_CAPTION))
-        .font_weight(gpui::FontWeight::BOLD)
-        .id(id)
-        .cursor(gpui::CursorStyle::PointingHand)
-        .on_mouse_down(gpui::MouseButton::Left, on_click)
-        .child(label);
-
-    match state {
-        ToggleState::On => {
-            btn = btn.bg(active_bg).text_color(active_fg);
-        }
-        ToggleState::Implied => {
-            btn = btn
-                .bg(Colors::with_alpha(active_bg, 0.22))
-                .border(px(1.0))
-                .border_color(Colors::with_alpha(active_bg, 0.7))
-                .text_color(active_bg)
-                .hover(|s| s.bg(Colors::with_alpha(active_bg, 0.34)));
-        }
-        ToggleState::Off => {
-            btn = btn
-                .bg(Colors::button_bg())
-                .border(px(1.0))
-                .border_color(Colors::button_border())
-                .text_color(Colors::button_text_muted())
-                .hover(|s| s.bg(Colors::button_bg_hover()));
-        }
-    }
-    btn
-}
-
-/// M/S/R/I row. `solo_implied` is set only for a VSTi multi-out channel whose
-/// parent instrument is soloed: the engine sounds the channel, so its S reads
-/// as engaged-by-parent even though `track.solo` is clear.
+/// Colours are the console's, not the app's: blue mute, amber solo, red record,
+/// green input. Those four are close to universal across desks and DAWs, and a
+/// player glancing down a row of strips reads the colour well before the
+/// letter. The app accent stays out of it — cyan already means selection here.
+///
+/// `solo_implied` is set only for a VSTi multi-out channel whose parent
+/// instrument is soloed: the engine sounds the channel, so its S reads as
+/// engaged-by-parent even though `track.solo` is clear.
 fn button_row(
     track: &TrackState,
     callbacks: &MixerCallbacks,
     id_num: usize,
     solo_implied: bool,
+    base: gpui::Rgba,
 ) -> impl IntoElement {
     let track_id = track.id.clone();
     let solo_state = if track.solo {
@@ -368,68 +198,67 @@ fn button_row(
         .flex()
         .flex_row()
         .w_full()
-        .h(px(16.0))
         .gap(px(2.0))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-m-btn", id_num).into(),
             "M",
             track.muted.into(),
-            Colors::accent_warning(),
-            Colors::text_inverse(),
+            Colors::state_mute(),
+            base,
             on_mute,
         ))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-s-btn", id_num).into(),
             "S",
             solo_state,
-            Colors::accent_success(),
-            Colors::text_inverse(),
+            Colors::state_solo(),
+            base,
             on_solo,
         ))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-r-btn", id_num).into(),
             "R",
             track.armed.into(),
-            Colors::accent_danger(),
-            Colors::text_inverse(),
+            Colors::state_arm(),
+            base,
             on_arm,
         ))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-i-btn", id_num).into(),
             "I",
             track.input_monitor.is_active(track.armed).into(),
-            Colors::accent_primary(),
-            Colors::text_inverse(),
+            Colors::state_monitor(),
+            base,
             on_input,
         ));
     let listen_row = div()
         .flex()
         .flex_row()
         .w_full()
-        .h(px(16.0))
         .gap(px(2.0))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-pfl-btn", id_num).into(),
             "PFL",
             (track.listen == ListenMode::Pfl).into(),
             Colors::accent_primary(),
-            Colors::text_inverse(),
+            base,
             on_pfl,
         ))
-        .child(msri_button(
+        .child(console::toggle(
             ("mix-afl-btn", id_num).into(),
             "AFL",
             (track.listen == ListenMode::Afl).into(),
             Colors::accent_primary(),
-            Colors::text_inverse(),
+            base,
             on_afl,
         ));
 
     div()
         .flex()
         .flex_col()
+        .flex_none()
         .w_full()
-        .h(px(SEC_BUTTONS_H))
+        .h(px(console::BUTTONS_H))
         .gap(px(2.0))
         .px(px(4.0))
         .justify_center()
@@ -445,65 +274,40 @@ fn vsti_output_group_key(track_id: &str, insert_id: &str) -> String {
     format!("{track_id}:{insert_id}")
 }
 
-fn strip_header(
+/// The row above the racks: what kind of channel this is, and the expander for
+/// an instrument's multi-output group.
+///
+/// Logic spends this slot on the channel-strip Setting menu. This spends it on
+/// what the model actually has, and on nothing else — the name and number moved
+/// to the plate at the foot of the strip, where the colour is, so the eye has
+/// one place to look to answer "which channel is this".
+fn strip_top_row(
     track: &TrackState,
-    index: usize,
     vsti_output_group: Option<(&str, bool, usize, &MixerCallbacks)>,
     i18n: I18n,
 ) -> impl IntoElement {
     let type_label = mixer_track_type_label(track.track_type, i18n);
-    let channel_label = i18n.tr_vars("mixer.channel", &[("nn", format!("{:02}", index + 1))]);
 
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
-        .h(px(SEC_HEADER_H))
-        .pr(px(5.0))
+        .flex_none()
+        .gap(px(3.0))
+        .h(px(console::TOP_ROW_H))
+        .pl(px(5.0))
+        .pr(px(3.0))
         .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        // Full-height colour edge rather than a floating 20 px pill. At 88 px
-        // wide a channel's identity has to be findable while scanning a row of
-        // strips, and a continuous edge does that without spending width.
-        .child(div().w(px(3.0)).h_full().flex_shrink_0().bg(track.color))
+        .border_color(console::rule())
         .child(
             div()
-                .flex()
-                .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .truncate()
-                        .text_size(px(typography::UI_XS))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child(track.name.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(3.0))
-                        .child(
-                            div()
-                                .text_size(px(typography::DENSE_CAPTION))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_muted())
-                                .child(type_label),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(typography::DENSE_CAPTION))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_muted())
-                                .child(channel_label),
-                        ),
-                ),
+                .truncate()
+                .text_size(px(type_scale::CAPTION))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child(type_label),
         )
         .children(
             vsti_output_group.map(|(group_key, expanded, count, callbacks)| {
@@ -517,18 +321,26 @@ fn strip_header(
                     .flex_none()
                     .items_center()
                     .justify_center()
-                    .w(px(18.0))
-                    .h(px(20.0))
-                    .rounded(px(crate::theme::radius::CONTROL))
-                    .border(px(1.0))
-                    .border_color(Colors::border_default())
+                    .gap(px(2.0))
+                    .h(px(13.0))
+                    .px(px(3.0))
+                    .rounded(px(crate::theme::radius::MICRO))
                     .bg(if count > 0 {
-                        Colors::accent_muted()
+                        Colors::state_hover()
                     } else {
-                        Colors::button_bg()
+                        gpui::transparent_black().into()
                     })
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|s| s.bg(Colors::surface_control_hover()))
+                    .hover(|s| s.bg(Colors::state_pressed()))
+                    .when(count > 0, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(type_scale::CAPTION))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(Colors::text_muted())
+                                .child(format!("{count}")),
+                        )
+                    })
                     .child(
                         svg()
                             .path(if expanded {
@@ -536,9 +348,9 @@ fn strip_header(
                             } else {
                                 assets::ICON_CHEVRON_RIGHT_PATH
                             })
-                            .w(px(11.0))
-                            .h(px(11.0))
-                            .text_color(Colors::text_primary()),
+                            .w(px(9.0))
+                            .h(px(9.0))
+                            .text_color(Colors::text_muted()),
                     )
                     .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
                         toggle(&group_key, w, cx);
@@ -652,6 +464,7 @@ fn insert_chip(
     insert_index: usize,
     slot: &InsertSlotState,
     callbacks: &MixerCallbacks,
+    base: gpui::Rgba,
 ) -> impl IntoElement {
     let track_id_owned = track_id.to_string();
     let slot_id = slot.id.clone();
@@ -662,17 +475,17 @@ fn insert_chip(
     let on_bypass = callbacks.on_toggle_insert_bypass.clone();
     let on_remove = callbacks.on_remove_insert.clone();
 
-    let (bg, text) = match &slot.load_status {
-        InsertLoadStatus::Ready if !bypassed => (Colors::accent_muted(), Colors::text_primary()),
-        InsertLoadStatus::Ready => (Colors::button_bg(), Colors::text_muted()),
-        InsertLoadStatus::Loading => (Colors::button_bg(), Colors::text_muted()),
-        InsertLoadStatus::Missing(_) | InsertLoadStatus::Failed(_) => (
-            Colors::with_alpha(Colors::status_error(), 0.16),
-            Colors::status_error(),
-        ),
-        InsertLoadStatus::Disabled => (Colors::button_bg(), Colors::text_muted()),
-        InsertLoadStatus::Empty => (Colors::button_bg(), Colors::slot_empty_text()),
+    // A loaded plug-in is the lightest thing in the rack and a bypassed one
+    // sinks back into the well, so the chain reads as a signal path at a glance
+    // rather than as eight identically-outlined chips.
+    let tone = match &slot.load_status {
+        InsertLoadStatus::Ready if !bypassed => SlotTone::Active,
+        InsertLoadStatus::Ready | InsertLoadStatus::Disabled => SlotTone::Bypassed,
+        InsertLoadStatus::Loading | InsertLoadStatus::Empty => SlotTone::Pending,
+        InsertLoadStatus::Missing(_) | InsertLoadStatus::Failed(_) => SlotTone::Failed,
     };
+    let (bg, text) = tone.colors(base);
+    let hover_bg = Colors::composite(bg, Colors::state_hover());
 
     let id_owned = slot_id.clone();
     let bypass_pair = (track_id_owned.clone(), slot_id.clone());
@@ -751,12 +564,12 @@ fn insert_chip(
         .flex_row()
         .items_center()
         .gap(px(3.0))
-        .mx(px(2.0))
         .px(px(4.0))
-        .h(px(18.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .h(px(console::SLOT_H))
+        .rounded(px(crate::theme::radius::MICRO))
         .bg(bg)
-        .text_size(px(typography::DENSE_CAPTION))
+        .hover(move |style| style.bg(hover_bg))
+        .text_size(px(type_scale::LABEL))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -774,20 +587,21 @@ fn insert_chip(
         // Grip drag handle (leftmost) mirrors the whole-chip drag affordance.
         .child(handle)
         .child(div().flex_1().min_w(px(0.0)).truncate().child(display))
-        // Bypass dot — small interactive square.
+        // In-circuit pip. A slot is either in the signal path or it is not, and
+        // that is the one thing about it readable without stopping to read.
         .child(
             div()
                 .id(gpui::SharedString::from(format!(
                     "insert-bypass-{}",
                     bypass_pair.1
                 )))
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded(px(crate::theme::radius::CONTROL))
+                .w(px(5.0))
+                .h(px(9.0))
+                .rounded(px(crate::theme::radius::MICRO))
                 .bg(if bypassed {
-                    Colors::text_faint()
+                    Colors::text_disabled()
                 } else {
-                    Colors::status_success()
+                    Colors::state_monitor()
                 })
                 .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
                     on_bypass(&bypass_pair, w, cx);
@@ -801,8 +615,8 @@ fn insert_chip(
                     "insert-remove-{}",
                     remove_pair.1
                 )))
-                .text_size(px(typography::DENSE_LABEL))
-                .text_color(Colors::text_muted())
+                .text_size(px(type_scale::LABEL))
+                .text_color(Colors::text_faint())
                 .px(px(2.0))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .child("×")
@@ -867,20 +681,18 @@ fn add_insert_button(
         .items_center()
         .justify_center()
         .gap(px(3.0))
-        .mx(px(2.0))
         .px(px(4.0))
-        .h(px(18.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .h(px(console::SLOT_H))
+        .rounded(px(crate::theme::radius::MICRO))
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::border_default())
-        .bg(Colors::button_bg())
-        .text_size(px(typography::DENSE_CAPTION))
-        .text_color(Colors::text_muted())
+        .border_color(Colors::border_subtle())
+        .text_size(px(type_scale::LABEL))
+        .text_color(Colors::text_faint())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
-            s.bg(Colors::button_bg_hover())
-                .border_color(Colors::accent_primary())
+            s.bg(Colors::state_hover())
+                .border_color(Colors::border_strong())
                 .text_color(Colors::text_secondary())
         })
         .can_drop(|dragged, _window, _cx| {
@@ -903,7 +715,7 @@ fn add_insert_button(
                 .path(assets::ICON_PLUS_PATH)
                 .w(px(8.0))
                 .h(px(8.0))
-                .text_color(Colors::text_muted()),
+                .text_color(Colors::text_faint()),
         )
         .child("Insert")
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
@@ -923,9 +735,9 @@ fn is_plugin_preset_path(path: &std::path::Path) -> bool {
 
 fn inserts_section(
     track: &TrackState,
-    _index: usize,
     callbacks: &MixerCallbacks,
     height_px: f32,
+    base: gpui::Rgba,
     i18n: I18n,
 ) -> impl IntoElement {
     let effect_start = if track.track_type == TrackType::Instrument {
@@ -936,11 +748,11 @@ fn inserts_section(
     let used = track.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
 
-    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(1.0)).px(px(3.0));
     let effects = track.effect_inserts();
     for (offset, slot) in effects.iter().enumerate() {
         let insert_index = effect_start + offset;
-        chips = chips.child(insert_chip(&track.id, insert_index, slot, callbacks));
+        chips = chips.child(insert_chip(&track.id, insert_index, slot, callbacks, base));
     }
     // Drop-at-end zone below the last chip (gap == full insert-chain length, so
     // the instrument slot at index 0 is counted). Only meaningful once a slot
@@ -954,14 +766,14 @@ fn inserts_section(
         chips = chips.child(add_insert_button(&track.id, used, callbacks));
     }
 
-    // Header "+" adds to the next available slot for *this* track; hidden
-    // (inert) once the rack is full.
+    // Header "+" adds to the next available slot for *this* track; gone once
+    // the rack is full, rather than sitting there greyed and unpressable.
     let header_plus = if at_max {
         None
     } else {
         let track_id = track.id.clone();
         let on_add = callbacks.on_add_insert.clone();
-        Some(HeaderPlus {
+        Some(RackPlus {
             id: gpui::SharedString::from(format!("insert-header-add-{}", track.id)),
             on_click: std::sync::Arc::new(move |w, cx| {
                 eprintln!("[mixer] INSERTS header + clicked track={track_id} slot={used}");
@@ -970,6 +782,29 @@ fn inserts_section(
         })
     };
 
+    rack(
+        gpui::SharedString::from(format!("insert-slot-scroll-{}", track.id)),
+        i18n.tr("mixer.section.inserts"),
+        header_plus,
+        height_px,
+        base,
+        chips,
+    )
+}
+
+/// A rack: caption, then a recessed well the slots scroll inside.
+///
+/// The well is the strip's only sunken surface. It is what tells the eye where
+/// the plug-in chain starts and ends without drawing a box around each slot in
+/// it — which is the difference between a console and a list of buttons.
+fn rack(
+    scroll_id: gpui::SharedString,
+    label: String,
+    plus: Option<RackPlus>,
+    height_px: f32,
+    base: gpui::Rgba,
+    body: gpui::Div,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -977,38 +812,39 @@ fn inserts_section(
         .h(px(height_px))
         .overflow_hidden()
         .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        .child(section_header(
-            i18n.tr("mixer.section.inserts"),
-            track.color,
-            header_plus,
-        ))
+        .border_color(console::rule())
+        .child(console::rack_label(label, plus))
         .child(
             div()
-                .id(gpui::SharedString::from(format!(
-                    "insert-slot-scroll-{}",
-                    track.id
-                )))
+                .id(scroll_id)
                 .flex_1()
                 .min_h_0()
+                .py(px(2.0))
+                .bg(console::well(base))
                 .overflow_y_scroll()
-                .child(chips),
+                .child(body),
         )
 }
 
 fn master_inserts_section(
-    accent: gpui::Rgba,
     master: &MasterBusState,
     callbacks: &MixerCallbacks,
     height_px: f32,
+    base: gpui::Rgba,
     i18n: I18n,
 ) -> impl IntoElement {
     let used = master.inserts.len();
     let at_max = used >= MAX_INSERT_SLOTS;
 
-    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(1.0)).px(px(3.0));
     for (insert_index, slot) in master.inserts.iter().enumerate() {
-        chips = chips.child(insert_chip(MASTER_TRACK_ID, insert_index, slot, callbacks));
+        chips = chips.child(insert_chip(
+            MASTER_TRACK_ID,
+            insert_index,
+            slot,
+            callbacks,
+            base,
+        ));
     }
     if !master.inserts.is_empty() {
         chips = chips.child(insert_drop_end(
@@ -1025,7 +861,7 @@ fn master_inserts_section(
         None
     } else {
         let on_add = callbacks.on_add_insert.clone();
-        Some(HeaderPlus {
+        Some(RackPlus {
             id: gpui::SharedString::from("insert-header-add-master"),
             on_click: std::sync::Arc::new(move |w, cx| {
                 eprintln!("[mixer] INSERTS header + clicked track=master slot={used}");
@@ -1034,27 +870,14 @@ fn master_inserts_section(
         })
     };
 
-    div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .h(px(height_px))
-        .overflow_hidden()
-        .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        .child(section_header(
-            i18n.tr("mixer.section.inserts"),
-            accent,
-            header_plus,
-        ))
-        .child(
-            div()
-                .id("insert-slot-scroll-master")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(chips),
-        )
+    rack(
+        gpui::SharedString::from("insert-slot-scroll-master"),
+        i18n.tr("mixer.section.inserts"),
+        header_plus,
+        height_px,
+        base,
+        chips,
+    )
 }
 
 fn send_chip(
@@ -1063,13 +886,14 @@ fn send_chip(
     send: &SendSlotState,
     target_name: &str,
     callbacks: &MixerCallbacks,
+    base: gpui::Rgba,
 ) -> impl IntoElement {
     let remove_pair = (track_id.to_string(), send.id.clone());
     let on_remove = callbacks.on_remove_send.clone();
     let (bg, text) = if send.enabled {
-        (Colors::accent_muted(), Colors::text_primary())
+        SlotTone::Active.colors(base)
     } else {
-        (Colors::button_bg(), Colors::text_muted())
+        SlotTone::Bypassed.colors(base)
     };
     let drag_payload = SendSlotDrag {
         track_id: track_id.to_string(),
@@ -1121,12 +945,11 @@ fn send_chip(
         .flex_row()
         .items_center()
         .gap(px(2.0))
-        .mx(px(2.0))
         .px(px(3.0))
         .h(px(26.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .rounded(px(crate::theme::radius::MICRO))
         .bg(bg)
-        .text_size(px(typography::DENSE_CAPTION))
+        .text_size(px(type_scale::LABEL))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(text)
         .cursor(gpui::CursorStyle::PointingHand)
@@ -1150,8 +973,8 @@ fn send_chip(
                         .child(
                             div()
                                 .ml(px(3.0))
-                                .text_size(px(7.0))
-                                .text_color(Colors::text_secondary())
+                                .text_size(px(type_scale::CAPTION))
+                                .text_color(Colors::text_muted())
                                 .child(gain_label),
                         ),
                 )
@@ -1179,8 +1002,8 @@ fn send_chip(
         .child(
             div()
                 .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
-                .text_size(px(typography::DENSE_LABEL))
-                .text_color(Colors::text_muted())
+                .text_size(px(type_scale::LABEL))
+                .text_color(Colors::text_faint())
                 .px(px(2.0))
                 .child("×")
                 .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
@@ -1231,20 +1054,18 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
         .items_center()
         .justify_center()
         .gap(px(3.0))
-        .mx(px(2.0))
         .px(px(4.0))
-        .h(px(18.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .h(px(console::SLOT_H))
+        .rounded(px(crate::theme::radius::MICRO))
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::border_default())
-        .bg(Colors::button_bg())
-        .text_size(px(typography::DENSE_CAPTION))
-        .text_color(Colors::text_muted())
+        .border_color(Colors::border_subtle())
+        .text_size(px(type_scale::LABEL))
+        .text_color(Colors::text_faint())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
-            s.bg(Colors::button_bg_hover())
-                .border_color(Colors::accent_primary())
+            s.bg(Colors::state_hover())
+                .border_color(Colors::border_strong())
                 .text_color(Colors::text_secondary())
         })
         .child(
@@ -1252,7 +1073,7 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
                 .path(assets::ICON_PLUS_PATH)
                 .w(px(8.0))
                 .h(px(8.0))
-                .text_color(Colors::text_muted()),
+                .text_color(Colors::text_faint()),
         )
         .child("Send")
         .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
@@ -1268,11 +1089,12 @@ fn sends_section(
     all_tracks: &[TrackState],
     callbacks: &MixerCallbacks,
     height_px: f32,
+    base: gpui::Rgba,
     i18n: I18n,
 ) -> impl IntoElement {
     // Bus/return strips carry an aux-send rack so chained send/return paths
     // (bus → return, return → bus) are available from the mixer.
-    let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
+    let mut chips = div().flex().flex_col().flex_none().gap(px(1.0)).px(px(3.0));
     for (send_index, send) in track.sends.iter().enumerate() {
         // Resolve the live target name (handles renames) with the stored
         // label as a fallback.
@@ -1287,6 +1109,7 @@ fn sends_section(
             send,
             &target_name,
             callbacks,
+            base,
         ));
     }
     if !track.sends.is_empty() {
@@ -1294,90 +1117,83 @@ fn sends_section(
     }
     chips = chips.child(add_send_button(&track.id, callbacks));
 
-    div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .h(px(height_px))
-        .overflow_hidden()
-        .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        .child(section_header(
-            i18n.tr("mixer.section.sends"),
-            track.color,
-            None,
-        ))
-        .child(
-            div()
-                .id(gpui::SharedString::from(format!(
-                    "send-slot-scroll-{}",
-                    track.id
-                )))
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(chips),
-        )
+    rack(
+        gpui::SharedString::from(format!("send-slot-scroll-{}", track.id)),
+        i18n.tr("mixer.section.sends"),
+        None,
+        height_px,
+        base,
+        chips,
+    )
 }
 
-fn pan_section(
-    track: &TrackState,
-    callbacks: &MixerCallbacks,
-    _is_selected: bool,
-) -> impl IntoElement {
+/// Pan, with its value printed under the knob.
+///
+/// The old row spent its second line on a static "L … R" legend, which says
+/// nothing a bipolar knob has not already said with its centre tick. The
+/// position does need saying — "is that dead centre or two degrees off?" is not
+/// answerable from a 26 px disc — so the number takes the line instead.
+fn pan_section(track: &TrackState, callbacks: &MixerCallbacks) -> impl IntoElement {
     let track_id = track.id.clone();
     let pan_cb = callbacks.on_pan_change.clone();
     let on_pan_change = move |new_pan: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
         pan_cb(&(track_id.clone(), *new_pan), w, cx);
     };
 
-    // Match web MixerPanel pan row: knob only, then a tight L/R legend (no caption
-    // under the disk — center is shown by the bipolar tick + arc).
     div()
         .flex()
         .flex_col()
+        .flex_none()
         .items_center()
         .justify_center()
         .gap(px(2.0))
-        .h(px(SEC_PAN_H))
-        .py(px(5.0))
+        .h(px(console::PAN_H))
+        .py(px(4.0))
         .border_b(px(1.0))
-        .border_color(Colors::border_default())
+        .border_color(console::rule())
         .child(knob_bipolar(
             format!("mix-pan-{}", track.id),
             track.pan,
             -1.0,
             1.0,
-            Colors::accent_primary(),
+            // Neutral, not the app accent: there is a pan knob on every strip,
+            // and twenty cyan arcs across the panel is the same wall of colour
+            // the coloured strip borders were, moved twenty pixels down.
+            Colors::text_secondary(),
             None,
             0.0,
             on_pan_change,
         ))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .px(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(7.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_secondary())
-                        .child("L"),
-                )
-                .child(
-                    div()
-                        .text_size(px(7.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_secondary())
-                        .child("R"),
-                ),
+                .text_size(px(type_scale::CAPTION))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(Colors::text_muted())
+                .child(format_pan(track.pan)),
         )
 }
 
+/// `C`, `L34`, `R100` — the console shorthand, not a signed float. A pan is a
+/// side and an amount, and reading "-0.34" forces the eye to decode which side
+/// negative means.
+fn format_pan(pan: f32) -> String {
+    let amount = (pan.abs() * 100.0).round() as i32;
+    if amount == 0 {
+        "C".to_string()
+    } else if pan < 0.0 {
+        format!("L{amount}")
+    } else {
+        format!("R{amount}")
+    }
+}
+
+/// The fader bay: cap, meter, and the channel's gain printed under both.
+///
+/// The meter sits hard against the fader, the way it does on a desk, so the
+/// hand that moves the cap and the eye that reads the level are working in one
+/// place. The dB value goes *below* the pair rather than above it: it is the
+/// result of the gesture, and putting the result at the end of the travel is
+/// what makes the bay read top-to-bottom as one control.
 fn fader_area(
     track: &TrackState,
     callbacks: &MixerCallbacks,
@@ -1409,17 +1225,68 @@ fn fader_area(
         reset_cb(&(reset_id.clone(), volume::db_to_norm(0.0)), w, cx);
     };
 
+    fader_bay(
+        fader_with_drag_callbacks(
+            format!("mix-fader-{}", track.id),
+            display_vol,
+            Some(on_vol_start),
+            Some(on_vol_preview),
+            Some(on_vol_commit),
+            Some(on_vol_reset),
+        )
+        .into_any_element(),
+        meter_surface(
+            track.meter_level_l,
+            track.meter_level_r,
+            track.meter_peak_hold_l,
+            track.meter_peak_hold_r,
+            track.meter_clip,
+        )
+        .into_any_element(),
+        db_str,
+        is_selected || automation_reading,
+        has_volume_automation.then_some(automation_reading),
+    )
+}
+
+/// The shared bay every strip's fader sits in — channel, VSTi sub-strip, Master
+/// and Control Room alike, so the four never drift apart.
+///
+/// `automation` is `Some(reading)` only when the channel has volume automation:
+/// `true` while the fader is following it, `false` while the user's hand owns
+/// the value. A channel with no automation shows no badge at all rather than a
+/// permanently dark one.
+fn fader_bay(
+    fader: gpui::AnyElement,
+    meter: gpui::AnyElement,
+    db_text: String,
+    highlight: bool,
+    automation: Option<bool>,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
         .flex_1()
-        .min_h(px(SEC_FADER_MIN_H))
+        .min_h(px(console::FADER_MIN_H))
         .items_center()
         .w_full()
-        .px(px(4.0))
+        .px(px(3.0))
         .pt(px(5.0))
-        .pb(px(6.0))
-        .gap(px(5.0))
+        .pb(px(3.0))
+        .gap(px(3.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_stretch()
+                .justify_center()
+                .gap(px(3.0))
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(fader)
+                .child(meter),
+        )
         .child(
             div()
                 .flex()
@@ -1427,95 +1294,41 @@ fn fader_area(
                 .items_center()
                 .justify_center()
                 .gap(px(3.0))
-                .child(db_value_pill(db_str, is_selected || automation_reading))
-                .when(has_volume_automation, |this| {
-                    this.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(14.0))
-                            .min_w(px(16.0))
-                            .px(px(3.0))
-                            .rounded(px(crate::theme::radius::CONTROL))
-                            .bg(if automation_reading {
-                                Colors::accent_muted()
-                            } else {
-                                Colors::button_bg()
-                            })
-                            .border(px(1.0))
-                            .border_color(if automation_reading {
-                                Colors::accent_primary()
-                            } else {
-                                Colors::border_default()
-                            })
-                            .text_size(px(8.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(if automation_reading {
-                                Colors::text_primary()
-                            } else {
-                                Colors::text_muted()
-                            })
-                            .child("A"),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(2.0))
-                .flex_1()
-                .min_h_0()
                 .w_full()
-                .justify_center()
-                .child(db_scale_column())
+                .h(px(13.0))
                 .child(
                     div()
+                        .text_size(px(type_scale::VALUE))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(if highlight {
+                            Colors::text_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .child(db_text),
+                )
+                .children(automation.map(|reading| {
+                    div()
                         .flex()
-                        .flex_row()
-                        .h_full()
                         .items_center()
                         .justify_center()
-                        .child(fader_with_drag_callbacks(
-                            format!("mix-fader-{}", track.id),
-                            display_vol,
-                            Colors::accent_primary(),
-                            Some(on_vol_start),
-                            Some(on_vol_preview),
-                            Some(on_vol_commit),
-                            Some(on_vol_reset),
-                        )),
-                )
-                .child(meter_surface(
-                    track.meter_level_l,
-                    track.meter_level_r,
-                    track.meter_peak_hold_l,
-                    track.meter_peak_hold_r,
-                    track.meter_clip,
-                )),
-        )
-}
-
-fn strip_footer(name: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(SEC_FOOTER_H))
-        .px(px(4.0))
-        .border_t(px(1.0))
-        .border_color(Colors::border_default())
-        .bg(Colors::surface_panel_alt())
-        .child(
-            div()
-                .w_full()
-                .min_w(px(0.0))
-                .truncate()
-                .text_size(px(typography::DENSE_LABEL))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_secondary())
-                .child(name.to_string()),
+                        .h(px(11.0))
+                        .px(px(3.0))
+                        .rounded(px(crate::theme::radius::MICRO))
+                        .bg(if reading {
+                            Colors::state_automation()
+                        } else {
+                            Colors::state_hover()
+                        })
+                        .text_size(px(type_scale::CAPTION))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(if reading {
+                            Colors::on_color(Colors::state_automation())
+                        } else {
+                            Colors::text_muted()
+                        })
+                        .child("A")
+                })),
         )
 }
 
@@ -1545,82 +1358,27 @@ fn output_button(
     track_id: &str,
     label: String,
     id_num: usize,
+    base: gpui::Rgba,
     on_open: std::sync::Arc<
         dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
 ) -> impl IntoElement {
     let track_id = track_id.to_string();
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(22.0))
-        .px(px(4.0))
-        .child(
-            div()
-                .id(("mix-output-btn", id_num))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .gap(px(4.0))
-                .h(px(16.0))
-                .px(px(6.0))
-                .max_w_full()
-                .min_w(px(0.0))
-                .rounded(px(crate::theme::radius::CONTROL))
-                .bg(Colors::button_bg())
-                .border(px(1.0))
-                .border_color(Colors::border_default())
-                .cursor(gpui::CursorStyle::PointingHand)
-                .hover(|s| {
-                    s.bg(Colors::surface_control_hover())
-                        .border_color(Colors::border_strong())
-                })
-                // A bare "None" at the foot of a strip names nothing. The
-                // route glyph identifies the pill as the channel's output
-                // without spending any of the 88 px on a word.
-                .child(
-                    svg()
-                        .path(assets::ICON_ROUTE_PATH)
-                        .w(px(9.0))
-                        .h(px(9.0))
-                        .flex_shrink_0()
-                        .text_color(Colors::text_faint()),
-                )
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(typography::DENSE_CAPTION))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_secondary())
-                        .child(label),
-                )
-                .child(
-                    svg()
-                        .path(assets::ICON_CHEVRON_DOWN_PATH)
-                        .w(px(9.0))
-                        .h(px(9.0))
-                        .flex_shrink_0()
-                        .text_color(Colors::text_faint()),
-                )
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    move |event: &gpui::MouseDownEvent, w, cx| {
-                        let x: f32 = event.position.x.into();
-                        // Drop the menu just below the button instead of at the
-                        // click point, so it doesn't cover the button/footer.
-                        // The click lands inside the 16px pill; offsetting by ~half
-                        // its height clears the pill's bottom edge. The overlay
-                        // positioner still flips upward if it can't fit below.
-                        let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
-                        on_open(&(track_id.clone(), x, y), w, cx);
-                        cx.stop_propagation();
-                    },
-                )
-                .occlude(),
-        )
+    console::io_button(
+        ("mix-output-btn", id_num).into(),
+        None,
+        label,
+        base,
+        move |event: &gpui::MouseDownEvent, w, cx| {
+            let x: f32 = event.position.x.into();
+            // Drop the menu just below the button instead of at the click
+            // point, so it doesn't cover the button itself. The overlay
+            // positioner still flips upward if it can't fit below.
+            let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
+            on_open(&(track_id.clone(), x, y), w, cx);
+            cx.stop_propagation();
+        },
+    )
 }
 
 // ─── Vertical split handle ───────────────────────────────────────────────────
@@ -1703,9 +1461,10 @@ fn channel_strip(
     split: &MixerSplit,
     strip_available_px: f32,
     vsti_group_expanded: Option<bool>,
-    // When true the GPU primitive layer owns the strip background, top accent
-    // bar, and right separator — the strip container omits them so the batched
-    // canvas behind shows through. Inner sections keep their native styling.
+    // When true the GPU primitive layer owns the strip background, the name
+    // plate fill, and the right separator — the strip container omits them so
+    // the batched canvas behind shows through. Inner sections keep their own
+    // styling.
     gpu_decor: bool,
     i18n: I18n,
 ) -> impl IntoElement {
@@ -1718,18 +1477,9 @@ fn channel_strip(
         hasher.finish() as usize
     };
 
-    let strip_bg = if is_selected {
-        Colors::surface_card_selected()
-    } else if index % 2 == 0 {
-        Colors::surface_panel()
-    } else {
-        Colors::surface_panel_alt()
-    };
-    let border_col = if is_selected {
-        Colors::accent_primary()
-    } else {
-        Colors::border_default()
-    };
+    // Every surface inside the strip is resolved against this one fill, so a
+    // selected strip lifts as a whole rather than growing a coloured outline.
+    let base = console::strip_surface(is_selected);
 
     let select_id = track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
@@ -1767,15 +1517,16 @@ fn channel_strip(
         .h_full()
         .overflow_hidden()
         .when(!gpu_decor, |s| {
-            s.bg(strip_bg)
+            let hover = Colors::composite(base, Colors::state_hover());
+            s.bg(base)
                 .border_r(px(1.0))
-                .border_color(border_col)
-                .hover(|h| h.bg(Colors::surface_hover()))
+                .border_color(console::rule())
+                .hover(move |h| h.bg(hover))
         })
         .id(("mix-strip", id_num))
-        // Select during capture so occluding child controls (header, inserts,
-        // pan and fader) cannot delay or swallow channel selection. The child
-        // still receives the same event and performs its own action normally.
+        // Select during capture so occluding child controls (racks, pan and
+        // fader) cannot delay or swallow channel selection. The child still
+        // receives the same event and performs its own action normally.
         .capture_any_mouse_down(on_select_strip)
         .when_some(on_context, |this, cb| {
             this.on_mouse_down(
@@ -1787,33 +1538,30 @@ fn channel_strip(
                 },
             )
         })
-        // Top accent line (GPU layer paints it when gpu_decor is on)
-        .when(!gpu_decor, |s| {
-            s.child(div().w_full().h(px(2.0)).bg(track.color))
-        })
-        .child(strip_header(
+        .child(strip_top_row(
             track,
-            index,
             vsti_group.as_ref().map(|(group_key, expanded, count)| {
                 (group_key.as_str(), *expanded, *count, callbacks)
             }),
             i18n,
         ))
-        .child(inserts_section(track, index, callbacks, insert_h, i18n))
+        .child(inserts_section(track, callbacks, insert_h, base, i18n))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,
             split,
         ))
-        .child(sends_section(track, all_tracks, callbacks, send_h, i18n))
+        .child(sends_section(
+            track, all_tracks, callbacks, send_h, base, i18n,
+        ))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::SendFader,
             split,
         ))
-        // ── Lower Control — pan / fader / meter / M·S·R·I + PFL·AFL. Takes the
-        // remaining height; the fader area is the flex_1 child so it absorbs
-        // growth and shrinks first when space is tight (pan + buttons stay fixed).
+        // ── Lower console — I/O, pan, fader bay, toggles. Takes the remaining
+        // height; the fader bay is the flex_1 child so it absorbs growth and
+        // gives way first when space is tight.
         .child(
             div()
                 .flex()
@@ -1822,17 +1570,24 @@ fn channel_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                .child(pan_section(track, callbacks, is_selected))
+                .child(output_button(
+                    &track.id,
+                    output_routing_label(track, all_tracks),
+                    id_num,
+                    base,
+                    callbacks.on_open_output_picker.clone(),
+                ))
+                .child(pan_section(track, callbacks))
                 .child(fader_area(track, callbacks, is_selected))
-                .child(button_row(track, callbacks, id_num, false)),
+                .child(button_row(track, callbacks, id_num, false, base)),
         )
-        .child(output_button(
-            &track.id,
-            output_routing_label(track, all_tracks),
-            id_num,
-            callbacks.on_open_output_picker.clone(),
+        .child(console::name_plate(
+            track.color,
+            Some(index + 1),
+            track.name.clone(),
+            is_selected,
+            gpu_decor,
         ))
-        .child(strip_footer(&track.name))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1840,7 +1595,6 @@ fn vsti_output_sub_strip(
     parent_track: &TrackState,
     child_track: &TrackState,
     all_tracks: &[TrackState],
-    track_index: usize,
     insert_id: &str,
     bus_index: u8,
     bus_counts: &[u8],
@@ -1896,6 +1650,12 @@ fn vsti_output_sub_strip(
         }
     }
     let is_selected = focus_highlight || selected_track_id == Some(child_track.id.as_str());
+    // A sunken body is what marks these as children of the instrument above
+    // them. The parent's colour used to bracket the group with tinted side
+    // borders; it now reaches them the way it reaches every other strip —
+    // through the plate at the foot, which carries the parent's colour because
+    // the bus belongs to the parent's instrument.
+    let base = console::sub_strip_surface(is_selected);
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
@@ -1923,24 +1683,11 @@ fn vsti_output_sub_strip(
         .h_full()
         .overflow_hidden()
         .when(!gpu_decor, |s| {
-            // Multi-output sub-strips must read as grouped children of their
-            // instrument parent, not independent channels: a sunken/nested
-            // background plus left+right separators tinted in the parent track
-            // colour bracket the group, distinct from the neutral separators
-            // between top-level strips.
-            s.bg(if is_selected {
-                Colors::surface_card_selected()
-            } else {
-                Colors::surface_canvas()
-            })
-            .border_l(px(1.0))
-            .border_r(px(1.0))
-            .border_color(if is_selected {
-                Colors::accent_primary()
-            } else {
-                Colors::with_alpha(parent_track.color, 0.45)
-            })
-            .hover(|h| h.bg(Colors::surface_hover()))
+            let hover = Colors::composite(base, Colors::state_hover());
+            s.bg(base)
+                .border_r(px(1.0))
+                .border_color(console::rule())
+                .hover(move |h| h.bg(hover))
         })
         .id(("mix-vsti-sub-strip", id_num))
         .capture_any_mouse_down(on_select_strip)
@@ -1954,22 +1701,19 @@ fn vsti_output_sub_strip(
                 },
             )
         })
-        .when(!gpu_decor, |s| {
-            s.child(div().w_full().h(px(2.0)).bg(parent_track.color))
-        })
         // Real callbacks: mute / solo / volume / pan all target the child track
         // id (via button_row / pan_section / fader_area below), so S/M and the
         // fader operate per output bus.
-        .child(strip_header(&sub_track, track_index, None, i18n))
+        .child(strip_top_row(&sub_track, None, i18n))
         // Real per-bus insert rack: the backing child track is a genuine Bus
         // model track, so its FX chain is added/bypassed/reordered by child
         // track id and processed by the engine's pass-2 routing chain for
         // this output bus only (Add Insert opens the Effects picker).
         .child(inserts_section(
             child_track,
-            track_index,
             callbacks,
             insert_h,
+            base,
             i18n,
         ))
         .child(vertical_split_handle(
@@ -1982,6 +1726,7 @@ fn vsti_output_sub_strip(
             all_tracks,
             callbacks,
             send_h,
+            base,
             i18n,
         ))
         .child(vertical_split_handle(
@@ -1997,21 +1742,39 @@ fn vsti_output_sub_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                .child(pan_section(&sub_track, callbacks, is_selected))
+                .child(output_button(
+                    &child_track.id,
+                    output_routing_label(child_track, all_tracks),
+                    id_num,
+                    base,
+                    callbacks.on_open_output_picker.clone(),
+                ))
+                .child(pan_section(&sub_track, callbacks))
                 .child(fader_area(&sub_track, callbacks, is_selected))
                 // Solo on the parent instrument sounds every one of its output
                 // channels (engine: `has_soloed_vsti_output_parent`), so this
                 // channel's S shows the inherited state rather than sitting
                 // dark while the channel is plainly audible.
-                .child(button_row(&sub_track, callbacks, id_num, parent_track.solo)),
+                .child(button_row(
+                    &sub_track,
+                    callbacks,
+                    id_num,
+                    parent_track.solo,
+                    base,
+                )),
         )
-        .child(strip_footer(&bus_label))
+        .child(console::name_plate(
+            parent_track.color,
+            None,
+            bus_label,
+            is_selected,
+            gpu_decor,
+        ))
 }
 
 // ─── Master block ───────────────────────────────────────────────────────────
 
 pub(crate) fn master_strip(
-    accent: gpui::Rgba,
     master: &MasterBusState,
     on_master_vol_change: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
     callbacks: &MixerCallbacks,
@@ -2020,6 +1783,7 @@ pub(crate) fn master_strip(
     i18n: I18n,
 ) -> impl IntoElement {
     let db_str = volume::format_db(master.volume);
+    let base = console::pinned_surface();
     let on_start_cb = callbacks.on_master_volume_drag_start.clone();
     let on_master_start = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
         on_start_cb(v, w, cx);
@@ -2036,7 +1800,7 @@ pub(crate) fn master_strip(
     let on_master_reset = move |w: &mut gpui::Window, cx: &mut gpui::App| {
         on_reset_cb(&volume::db_to_norm(0.0), w, cx);
     };
-    let (insert_h, _send_h) = clamp_mixer_section_heights_for_strip(
+    let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
         split.send_px,
         strip_available_px.max(STRIP_MIN_HEIGHT),
@@ -2050,19 +1814,18 @@ pub(crate) fn master_strip(
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
         .overflow_hidden()
-        .bg(Colors::surface_panel_alt())
+        .bg(base)
         .border_l(px(1.0))
-        .border_color(Colors::border_default())
-        .child(div().w_full().h(px(2.0)).bg(accent))
-        .child(pinned_strip_header(
-            accent,
-            i18n.tr("mixer.master.label"),
-            i18n.tr("mixer.master.bus-label"),
-        ))
+        .border_color(Colors::master_strip_border())
+        .child(pinned_top_row(i18n.tr("mixer.master.bus-label")))
         .child(master_inserts_section(
-            accent, master, callbacks, insert_h, i18n,
+            master, callbacks, insert_h, base, i18n,
         ))
-        // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
+        // The master takes no sends, but it keeps their slot: every fixed row
+        // below this point then lands on the same baseline as the channels
+        // beside it, which is the whole reason the mixer reads as one console
+        // and not as a row of strips plus two odd ones on the end.
+        .child(pinned_rack_spacer(send_h + SEC_SPLITTER_H * 2.0))
         .child(
             div()
                 .flex()
@@ -2071,84 +1834,99 @@ pub(crate) fn master_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                // Master skips pan. This row states the bus format only — a
-                // caption, not a control: it used to be an accent-bordered chip
-                // that read as an armed toggle nobody could press.
+                // Output destination — a logical Output Audio Connection, never
+                // a raw hardware pair. Same slot as a channel strip's picker.
+                .child(control_room_output_button(
+                    "master-output",
+                    i18n.tr("mixer.master.output"),
+                    master.output_label.clone(),
+                    base,
+                    callbacks.on_master_output_picker.clone(),
+                ))
+                // The master has no pan. This row states the bus format only —
+                // a caption, not a control: it used to be an accent-bordered
+                // chip that read as an armed toggle nobody could press.
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .flex_none()
                         .items_center()
                         .justify_center()
-                        .h(px(SEC_PAN_H))
-                        .border_b(px(1.0))
-                        .border_color(Colors::border_default())
+                        .h(px(console::PAN_H))
                         .px(px(5.0))
-                        .child(strip_caption(i18n.tr("mixer.stereo"))),
+                        .border_b(px(1.0))
+                        .border_color(console::rule())
+                        .child(console::caption(i18n.tr("mixer.stereo"))),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(SEC_FADER_MIN_H))
-                        .items_center()
-                        .w_full()
-                        .px(px(4.0))
-                        .pt(px(5.0))
-                        .pb(px(6.0))
-                        .gap(px(5.0))
-                        .child(db_value_pill(db_str.clone(), true))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(2.0))
-                                .flex_1()
-                                .min_h_0()
-                                .w_full()
-                                .justify_center()
-                                .child(db_scale_column())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .h_full()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(fader_with_drag_callbacks(
-                                            "mix-fader-master",
-                                            master.volume,
-                                            accent,
-                                            Some(on_master_start),
-                                            Some(on_master_preview),
-                                            Some(on_master_commit),
-                                            Some(on_master_reset),
-                                        )),
-                                )
-                                .child(meter_surface(
-                                    master.meter_level_l,
-                                    master.meter_level_r,
-                                    master.meter_peak_hold_l,
-                                    master.meter_peak_hold_r,
-                                    master.meter_clip,
-                                )),
-                        ),
-                )
-                // Master has no M/S/R/I; the row is kept empty so the fader,
-                // meter, and footer stay on the same baselines as every channel
-                // strip beside it.
-                .child(div().h(px(SEC_BUTTONS_H)).w_full().flex_none()),
+                .child(fader_bay(
+                    fader_with_drag_callbacks(
+                        "mix-fader-master",
+                        master.volume,
+                        Some(on_master_start),
+                        Some(on_master_preview),
+                        Some(on_master_commit),
+                        Some(on_master_reset),
+                    )
+                    .into_any_element(),
+                    meter_surface(
+                        master.meter_level_l,
+                        master.meter_level_r,
+                        master.meter_peak_hold_l,
+                        master.meter_peak_hold_r,
+                        master.meter_clip,
+                    )
+                    .into_any_element(),
+                    db_str,
+                    true,
+                    None,
+                ))
+                // No M/S/R/I on the master; the row is kept so the plate below
+                // stays on the channel strips' baseline.
+                .child(div().h(px(console::BUTTONS_H)).w_full().flex_none()),
         )
-        // Output destination — a logical Output Audio Connection, never a raw
-        // hardware pair. Same slot as a channel strip's output picker.
-        .child(control_room_output_button(
-            "master-output",
-            i18n.tr("mixer.master.output"),
-            master.output_label.clone(),
-            callbacks.on_master_output_picker.clone(),
+        .child(console::name_plate(
+            console::master_plate_fill(),
+            None,
+            i18n.tr("mixer.master.label"),
+            false,
+            false,
         ))
-        .child(strip_footer(&i18n.tr("mixer.master.label")))
+}
+
+/// The pinned strips' top row: what bus this is. Same height and rule as a
+/// channel's type row, so the two kinds of strip start on the same line.
+fn pinned_top_row(bus_label: String) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .h(px(console::TOP_ROW_H))
+        .px(px(5.0))
+        .border_b(px(1.0))
+        .border_color(console::rule())
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .text_size(px(type_scale::CAPTION))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child(bus_label),
+        )
+}
+
+/// Holds a rack's worth of height on a pinned strip that has no such rack, so
+/// the rows below it stay level with the channel strips.
+fn pinned_rack_spacer(height_px: f32) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(height_px))
+        .border_b(px(1.0))
+        .border_color(console::rule())
 }
 
 /// Tooltip body for a pinned-strip control. The strips are 88 px wide, so every
@@ -2181,40 +1959,26 @@ fn strip_tooltip(
     move |_window, cx| cx.new(|_| StripTooltip(text.clone())).into()
 }
 
-/// Quiet, non-interactive caption used where a pinned strip states a fact
-/// (channel format) rather than offering a control. Deliberately has no chip,
-/// border, or hover: only real controls get button chrome on these strips.
-fn strip_caption(text: String) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w_full()
-        .text_size(px(typography::DENSE_CAPTION))
-        .line_height(px(11.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .truncate()
-        .text_color(Colors::text_muted())
-        .child(text)
-}
-
-/// One Control Room selector row: a quiet label and a value chip that opens a
-/// picker. Used for the Monitor Source so it reads as one control group.
+/// The Monitor Source row: a caption and the routing it names.
 ///
-/// The chip carries the full affordance set of a real dropdown — chevron, hover,
-/// pointer cursor, and a tooltip with the untruncated value — because clicking
-/// it is the only way to change the routing.
+/// `accent_value` marks a source the user is hearing *because a Listen tap
+/// overrode their choice* — the one case where the value on screen is not the
+/// one they picked, and the only reason this row is ever coloured.
 fn control_room_selector(
     id: &str,
     label: String,
     value: String,
     accent_value: bool,
+    base: gpui::Rgba,
     on_click: Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App)>>,
 ) -> impl IntoElement {
-    let clickable = on_click.is_some();
     let tooltip_value = value.clone();
+    let text_color = if accent_value {
+        Colors::accent_primary()
+    } else {
+        Colors::text_secondary()
+    };
     div()
-        .id(gpui::ElementId::Name(id.to_string().into()))
         .flex()
         .flex_col()
         .w_full()
@@ -2225,72 +1989,61 @@ fn control_room_selector(
                 .w_full()
                 .min_w(px(0.0))
                 .truncate()
-                .text_size(px(7.5))
-                .line_height(px(9.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_secondary())
-                .child(label),
+                .text_size(px(type_scale::CAPTION))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_faint())
+                .child(label.to_uppercase()),
         )
-        .child(
+        .children(on_click.map(|cb| {
+            let rest = console::well(base);
+            let hover = Colors::composite(rest, Colors::state_hover());
             div()
+                .id(gpui::ElementId::Name(id.to_string().into()))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(3.0))
                 .w_full()
                 .min_w(px(0.0))
+                .h(px(16.0))
                 .px(px(4.0))
-                .py(px(2.0))
-                .rounded(px(crate::theme::radius::CONTROL))
-                .bg(Colors::button_bg())
-                .border(px(1.0))
-                .border_color(if accent_value {
-                    Colors::accent_primary()
-                } else {
-                    Colors::border_default()
-                })
-                .when(clickable, |chip| {
-                    chip.cursor(gpui::CursorStyle::PointingHand).hover(|s| {
-                        s.bg(Colors::surface_control_hover())
-                            .border_color(Colors::border_strong())
-                    })
-                })
+                .rounded(px(crate::theme::radius::MICRO))
+                .bg(rest)
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(move |s| s.bg(hover))
+                .tooltip(strip_tooltip(tooltip_value))
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_size(px(typography::DENSE_CAPTION))
-                        .line_height(px(11.0))
-                        .text_color(Colors::text_primary())
+                        .text_size(px(type_scale::LABEL))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(text_color)
                         .child(value),
                 )
-                .when(clickable, |chip| {
-                    chip.child(
-                        svg()
-                            .path(assets::ICON_CHEVRON_DOWN_PATH)
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .flex_shrink_0()
-                            .text_color(Colors::text_faint()),
-                    )
-                }),
-        )
-        .when(clickable, |row| row.tooltip(strip_tooltip(tooltip_value)))
-        .when_some(on_click, |row, cb| {
-            row.on_mouse_down(
-                gpui::MouseButton::Left,
-                move |event: &gpui::MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    let x: f32 = event.position.x.into();
-                    let y: f32 = event.position.y.into();
-                    cb(&(x, y), window, cx);
-                },
-            )
-        })
+                .child(
+                    svg()
+                        .path(assets::ICON_CHEVRON_DOWN_PATH)
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .flex_shrink_0()
+                        .text_color(Colors::text_faint()),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    move |event: &gpui::MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        let x: f32 = event.position.x.into();
+                        let y: f32 = event.position.y.into();
+                        cb(&(x, y), window, cx);
+                    },
+                )
+                .occlude()
+        }))
 }
 
-/// Output-routing button for a pinned strip, in the same slot and shape as a
+/// Output-routing row for a pinned strip, in the same slot and shape as a
 /// channel strip's [`output_button`] so all three read as one control.
 ///
 /// Master and Monitor previously repeated their output name as a static chip
@@ -2300,163 +2053,71 @@ fn control_room_output_button(
     id: &str,
     label: String,
     value: String,
+    base: gpui::Rgba,
     on_open: Option<std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App)>>,
-) -> impl IntoElement {
-    let clickable = on_open.is_some();
+) -> gpui::AnyElement {
+    let Some(cb) = on_open else {
+        // No picker wired: state the destination rather than offering a button
+        // that does nothing when pressed.
+        return div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(console::IO_ROW_H))
+            .px(px(6.0))
+            .child(console::caption(value))
+            .into_any_element();
+    };
     let tooltip_value = format!("{label}: {value}");
     div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(22.0))
-        .px(px(4.0))
-        .child(
-            div()
-                .id(gpui::ElementId::Name(id.to_string().into()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .gap(px(4.0))
-                .h(px(16.0))
-                .px(px(6.0))
-                .max_w_full()
-                .min_w(px(0.0))
-                .rounded(px(crate::theme::radius::CONTROL))
-                .bg(Colors::button_bg())
-                .border(px(1.0))
-                .border_color(Colors::border_default())
-                .when(clickable, |button| {
-                    button
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|s| {
-                            s.bg(Colors::surface_control_hover())
-                                .border_color(Colors::border_strong())
-                        })
-                        .tooltip(strip_tooltip(tooltip_value))
-                })
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(typography::DENSE_CAPTION))
-                        .line_height(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_muted())
-                        .child(value),
-                )
-                .when(clickable, |button| {
-                    button.child(
-                        svg()
-                            .path(assets::ICON_CHEVRON_DOWN_PATH)
-                            .w(px(9.0))
-                            .h(px(9.0))
-                            .flex_shrink_0()
-                            .text_color(Colors::text_faint()),
-                    )
-                })
-                .when_some(on_open, |button, cb| {
-                    button
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            move |event: &gpui::MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                let x: f32 = event.position.x.into();
-                                // Same drop as a channel strip's output picker:
-                                // the menu opens under the pill, not over it.
-                                let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
-                                cb(&(x, y), window, cx);
-                            },
-                        )
-                        .occlude()
-                }),
-        )
+        .id(gpui::ElementId::Name(format!("{id}-row").into()))
+        .tooltip(strip_tooltip(tooltip_value))
+        .child(console::io_button(
+            gpui::ElementId::Name(id.to_string().into()),
+            None,
+            value,
+            base,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let x: f32 = event.position.x.into();
+                // Same drop as a channel strip's output picker: the menu opens
+                // under the button, not over it.
+                let y: f32 = f32::from(event.position.y) + OUTPUT_BUTTON_MENU_DROP;
+                cb(&(x, y), window, cx);
+            },
+        ))
+        .into_any_element()
 }
 
-/// Two-line pinned-strip header (name + bus caption). Both lines truncate and
-/// carry explicit line heights: the captions are 7.5 px, and scripts with tall
-/// marks (Thai, Lao) otherwise collide with the name above them.
-/// Master / Monitor header.
-///
-/// Deliberately the same construction as [`strip_header`] — full-bleed colour
-/// edge, name, then a quieter second line. The pinned strips sit against the
-/// channel strips and used a floating pill and a 7.5 px sub-label, so the two
-/// halves of one mixer did not read as the same instrument.
-fn pinned_strip_header(accent: gpui::Rgba, name: String, bus_label: String) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .h(px(SEC_HEADER_H))
-        .pr(px(5.0))
-        .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        .child(div().w(px(3.0)).h_full().flex_shrink_0().bg(accent))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(typography::UI_XS))
-                        .line_height(px(13.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_size(px(typography::DENSE_CAPTION))
-                        .line_height(px(10.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_muted())
-                        .child(bus_label),
-                ),
-        )
-}
-
-/// A Control Room toggle (Mute / Dim / Mono).
+/// A Control Room toggle (Mute / Dim / Mono), in the channel toggles' shape so
+/// the pinned strips read as part of the same desk.
 fn control_room_toggle(
     id: &str,
     label: &str,
     active: bool,
-    active_color: gpui::Rgba,
+    semantic: gpui::Rgba,
+    base: gpui::Rgba,
     on_toggle: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App)>,
 ) -> impl IntoElement {
+    let rest = console::well(base);
+    let hover = Colors::composite(rest, Colors::state_hover());
+    let on_hover = Colors::composite(semantic, Colors::state_hover());
     div()
         .id(gpui::ElementId::Name(id.to_string().into()))
         .flex()
         .flex_1()
+        .min_w(px(0.0))
         .items_center()
         .justify_center()
         .h(px(15.0))
-        .rounded(px(crate::theme::radius::CONTROL))
+        .rounded(px(crate::theme::radius::MICRO))
         .cursor(gpui::CursorStyle::PointingHand)
-        .bg(if active {
-            Colors::with_alpha(active_color, 0.22)
-        } else {
-            Colors::button_bg()
-        })
-        .border(px(1.0))
-        .border_color(if active {
-            active_color
-        } else {
-            Colors::border_default()
-        })
-        .text_size(px(8.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .bg(if active { semantic } else { rest })
+        .hover(move |s| s.bg(if active { on_hover } else { hover }))
+        .text_size(px(type_scale::CAPTION))
+        .font_weight(gpui::FontWeight::BOLD)
         .text_color(if active {
-            active_color
+            Colors::on_color(semantic)
         } else {
             Colors::text_muted()
         })
@@ -2489,7 +2150,6 @@ fn control_room_toggle(
 /// monitoring output, so it reflects monitor gain, dim, mono, and monitor
 /// inserts — not the master bus level.
 pub(crate) fn monitor_strip(
-    accent: gpui::Rgba,
     monitor: &MonitorBusState,
     callbacks: &MixerCallbacks,
     split: &MixerSplit,
@@ -2497,6 +2157,7 @@ pub(crate) fn monitor_strip(
     i18n: I18n,
 ) -> impl IntoElement {
     let db_str = volume::format_db(monitor.volume);
+    let base = console::pinned_surface();
     let on_volume = callbacks.on_monitor_volume_change.clone();
     let on_preview = on_volume.clone();
     let on_monitor_preview = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
@@ -2514,8 +2175,9 @@ pub(crate) fn monitor_strip(
         on_reset(&volume::db_to_norm(0.0), w, cx);
     };
 
-    // Same section split as `master_strip`, so both pinned strips align.
-    let (section_h, _send_h) = clamp_mixer_section_heights_for_strip(
+    // Same section split as `master_strip`, so both pinned strips align with
+    // the channels and with each other.
+    let (source_h, send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
         split.send_px,
         strip_available_px.max(STRIP_MIN_HEIGHT),
@@ -2537,38 +2199,33 @@ pub(crate) fn monitor_strip(
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
         .overflow_hidden()
-        .bg(Colors::surface_panel_alt())
+        .bg(base)
         .border_l(px(1.0))
-        .border_color(Colors::border_default())
-        .child(div().w_full().h(px(2.0)).bg(accent))
-        .child(pinned_strip_header(
-            accent,
-            i18n.tr("mixer.monitor.label"),
-            i18n.tr("mixer.monitor.bus-label"),
-        ))
-        // Routing section — Source only. Occupies Master's insert slot so the
-        // two pinned strips stay on matching baselines; Output moved down to the
-        // shared output-picker row, where every other strip keeps it.
+        .border_color(console::rule())
+        .child(pinned_top_row(i18n.tr("mixer.monitor.bus-label")))
+        // Routing — Source only. Occupies the channels' insert rack so the two
+        // pinned strips stay on matching baselines with them.
         .child(
             div()
                 .flex()
                 .flex_col()
-                .h(px(section_h))
+                .flex_none()
+                .h(px(source_h))
                 .overflow_hidden()
                 .px(px(5.0))
                 .py(px(4.0))
-                .gap(px(5.0))
                 .border_b(px(1.0))
-                .border_color(Colors::border_default())
+                .border_color(console::rule())
                 .child(control_room_selector(
                     "monitor-source",
                     i18n.tr("mixer.monitor.source"),
                     source_value,
                     monitor.listen_active,
+                    base,
                     callbacks.on_monitor_source_picker.clone(),
                 )),
         )
-        // Lower control: Mute/Dim/Mono, fader cluster, output label.
+        .child(pinned_rack_spacer(send_h + SEC_SPLITTER_H * 2.0))
         .child(
             div()
                 .flex()
@@ -2577,108 +2234,96 @@ pub(crate) fn monitor_strip(
                 .min_h(px(LOWER_CONTROL_MIN_H))
                 .overflow_hidden()
                 .w_full()
-                // Monitor has no pan; the control toggles take that row so the
-                // vertical rhythm matches Master.
+                .child(control_room_output_button(
+                    "monitor-output",
+                    i18n.tr("mixer.monitor.output"),
+                    monitor.output_name.clone(),
+                    base,
+                    callbacks.on_monitor_output_picker.clone(),
+                ))
+                // The Control Room has no pan. What it has instead is the room
+                // itself: how loud, how quiet, and in how many speakers.
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .flex_none()
                         .items_center()
                         .justify_center()
-                        .gap(px(3.0))
-                        .h(px(SEC_PAN_H))
+                        .h(px(console::PAN_H))
                         .px(px(4.0))
                         .border_b(px(1.0))
-                        .border_color(Colors::border_default())
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .w_full()
-                                .gap(px(3.0))
-                                .child(control_room_toggle(
-                                    "monitor-mute",
-                                    &i18n.tr("mixer.monitor.mute"),
-                                    monitor.mute,
-                                    Colors::status_error(),
-                                    callbacks.on_monitor_toggle_mute.clone(),
-                                ))
-                                .child(control_room_toggle(
-                                    "monitor-dim",
-                                    &i18n.tr("mixer.monitor.dim"),
-                                    monitor.dim,
-                                    Colors::accent_primary(),
-                                    callbacks.on_monitor_toggle_dim.clone(),
-                                )),
-                        )
-                        .child(div().flex().flex_row().w_full().child(control_room_toggle(
+                        .border_color(console::rule())
+                        .child(console::caption(i18n.tr("mixer.monitor.label"))),
+                )
+                .child(fader_bay(
+                    fader_with_drag_callbacks(
+                        "mix-fader-monitor",
+                        monitor.volume,
+                        Some(on_monitor_start),
+                        Some(on_monitor_preview),
+                        Some(on_monitor_commit),
+                        Some(on_monitor_reset),
+                    )
+                    .into_any_element(),
+                    meter_surface(
+                        monitor.meter_level_l,
+                        monitor.meter_level_r,
+                        monitor.meter_peak_hold_l,
+                        monitor.meter_peak_hold_r,
+                        monitor.meter_clip,
+                    )
+                    .into_any_element(),
+                    db_str,
+                    monitor.dim || monitor.mute,
+                    None,
+                ))
+                // Mute / Dim / Mono take the channels' toggle row: same slot,
+                // same shape, and the three controls a monitor path actually
+                // has instead of the four a channel has.
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_none()
+                        .items_center()
+                        .w_full()
+                        .h(px(console::BUTTONS_H))
+                        .px(px(4.0))
+                        .gap(px(2.0))
+                        .child(control_room_toggle(
+                            "monitor-mute",
+                            &i18n.tr("mixer.monitor.mute"),
+                            monitor.mute,
+                            Colors::state_arm(),
+                            base,
+                            callbacks.on_monitor_toggle_mute.clone(),
+                        ))
+                        .child(control_room_toggle(
+                            "monitor-dim",
+                            &i18n.tr("mixer.monitor.dim"),
+                            monitor.dim,
+                            Colors::state_solo(),
+                            base,
+                            callbacks.on_monitor_toggle_dim.clone(),
+                        ))
+                        .child(control_room_toggle(
                             "monitor-mono",
                             &i18n.tr("mixer.monitor.mono"),
                             monitor.mono,
-                            Colors::accent_primary(),
+                            Colors::state_mute(),
+                            base,
                             callbacks.on_monitor_toggle_mono.clone(),
-                        ))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(SEC_FADER_MIN_H))
-                        .items_center()
-                        .w_full()
-                        .px(px(4.0))
-                        .pt(px(5.0))
-                        .pb(px(6.0))
-                        .gap(px(5.0))
-                        .child(db_value_pill(db_str.clone(), monitor.dim || monitor.mute))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(2.0))
-                                .flex_1()
-                                .min_h_0()
-                                .w_full()
-                                .justify_center()
-                                .child(db_scale_column())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .h_full()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(fader_with_drag_callbacks(
-                                            "mix-fader-monitor",
-                                            monitor.volume,
-                                            accent,
-                                            Some(on_monitor_start),
-                                            Some(on_monitor_preview),
-                                            Some(on_monitor_commit),
-                                            Some(on_monitor_reset),
-                                        )),
-                                )
-                                .child(meter_surface(
-                                    monitor.meter_level_l,
-                                    monitor.meter_level_r,
-                                    monitor.meter_peak_hold_l,
-                                    monitor.meter_peak_hold_r,
-                                    monitor.meter_clip,
-                                )),
-                        ),
-                )
-                // Mute/Dim/Mono already took the pan row; this row stays empty so
-                // the fader, meter, and footer align with the strips beside it.
-                .child(div().h(px(SEC_BUTTONS_H)).w_full().flex_none()),
+                        )),
+                ),
         )
-        .child(control_room_output_button(
-            "monitor-output",
-            i18n.tr("mixer.monitor.output"),
-            monitor.output_name.clone(),
-            callbacks.on_monitor_output_picker.clone(),
+        .child(console::name_plate(
+            console::monitor_plate_fill(),
+            None,
+            i18n.tr("mixer.monitor.label"),
+            false,
+            false,
         ))
-        .child(strip_footer(&i18n.tr("mixer.monitor.label")))
 }
 
 // ─── Public: Mixer Panel ─────────────────────────────────────────────────────
@@ -3126,25 +2771,13 @@ pub(crate) fn build_mixer_render_snapshot(
                 let track = &tracks[track_index];
                 let selected =
                     mixer_strip_is_selected(&track.id, selected_track_id, selected_track_ids);
-                let bg = if selected {
-                    Colors::surface_card_selected()
-                } else if track_index % 2 == 0 {
-                    Colors::surface_panel()
-                } else {
-                    Colors::surface_panel_alt()
-                };
-                let separator = if selected {
-                    Colors::accent_primary()
-                } else {
-                    Colors::border_default()
-                };
                 MixerStripGeom {
                     x,
                     width: STRIP_WIDTH,
                     height: strip_height,
-                    bg,
-                    accent: track.color,
-                    separator,
+                    bg: console::strip_surface(selected),
+                    plate: track.color,
+                    separator: console::rule(),
                     selected,
                     is_master: false,
                     meter_l: track.meter_level_l,
@@ -3165,17 +2798,9 @@ pub(crate) fn build_mixer_render_snapshot(
                     x,
                     width: STRIP_WIDTH,
                     height: strip_height,
-                    bg: if selected {
-                        Colors::surface_card_selected()
-                    } else {
-                        Colors::surface_panel_alt()
-                    },
-                    accent: parent.color,
-                    separator: if selected {
-                        Colors::accent_primary()
-                    } else {
-                        Colors::border_default()
-                    },
+                    bg: console::sub_strip_surface(selected),
+                    plate: parent.color,
+                    separator: console::rule(),
                     selected,
                     is_master: false,
                     meter_l: child.meter_level_l,
@@ -3192,8 +2817,11 @@ pub(crate) fn build_mixer_render_snapshot(
         scroll_x,
         master_x: None,
     };
-    // accent bar = 2px (matches the strip top accent line); separator = 1px.
-    MixerRenderSnapshot::new(viewport, strips, None, 2.0, 1.0)
+    // The batched layer owns the strip's two flat fills: the body, and the name
+    // plate at its foot. Both are painted at the same heights the div layer
+    // would have used, so turning the GPU path on or off changes nothing on
+    // screen. See `console::name_plate`.
+    MixerRenderSnapshot::new(viewport, strips, None, console::PLATE_H, 1.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3220,7 +2848,6 @@ pub fn mixer_panel(
     crate::perf::count("mixer_shell_layout_count", 1);
 
     let track_count = tracks.len();
-    let accent = Colors::accent_primary();
     let on_master = callbacks.on_master_volume_change.clone();
     let strip_available_px = (viewport_height - 30.0).max(STRIP_MIN_HEIGHT);
 
@@ -3242,9 +2869,8 @@ pub fn mixer_panel(
             .flex_1()
             .min_h_0()
             .child(mixer_center_lightweight(viewport_width, strip_available_px))
-            .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
+            .child(div().w(px(1.0)).h_full().bg(console::rule()))
             .child(mixer_master_strip_pinned(
-                accent,
                 master,
                 monitor,
                 on_master,
@@ -3300,7 +2926,6 @@ pub fn mixer_panel(
     );
 
     let master_block = mixer_master_strip_pinned(
-        accent,
         master,
         monitor,
         on_master,
@@ -3316,7 +2941,7 @@ pub fn mixer_panel(
         .flex_1()
         .min_h_0()
         .child(strip_row)
-        .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
+        .child(div().w(px(1.0)).h_full().bg(console::rule()))
         .child(master_block);
 
     if gpu_active {
@@ -3459,7 +3084,6 @@ pub(crate) fn mixer_strip_scroller(
                     parent,
                     &tracks[child_index],
                     tracks,
-                    parent_index,
                     &parent.inserts[insert_index].id,
                     bus_index,
                     &bus_counts,
@@ -3577,7 +3201,6 @@ pub(crate) fn mixer_strip_scroller(
 /// `MixerMasterStripView` entity and the detached Mixer Window both route
 /// here, so the two strips can never drift apart between them.
 pub(crate) fn mixer_master_strip_pinned(
-    accent: gpui::Rgba,
     master: &MasterBusState,
     monitor: &MonitorBusState,
     on_master: std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -3593,7 +3216,6 @@ pub(crate) fn mixer_master_strip_pinned(
         .flex_none()
         .h_full()
         .child(master_strip(
-            accent,
             master,
             on_master,
             callbacks,
@@ -3601,9 +3223,7 @@ pub(crate) fn mixer_master_strip_pinned(
             strip_available_px,
             i18n,
         ))
-        .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
         .child(monitor_strip(
-            accent,
             monitor,
             callbacks,
             split,

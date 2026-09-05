@@ -106,6 +106,13 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "file:export-arrangement",
       },
       {
+        id: "file.export_midi",
+        label: "Export MIDI File...",
+        accelerator: "Ctrl+Alt+E",
+        icon: "download",
+        action: "file:export-midi",
+      },
+      {
         type: "separator",
         id: "file.sep.close",
       },
@@ -294,6 +301,33 @@ export const APP_MENUS: AppMenuGroup[] = [
         label: "Fit Notes",
         icon: "maximize-2",
         action: "midi:fit-notes",
+      },
+      {
+        type: "separator",
+        id: "midi.sep.accent",
+      },
+      {
+        id: "midi.analyze_accent",
+        label: "Analyze Accent",
+        icon: "wand-sparkles",
+        action: "solfege:analyze-accent",
+        description:
+          "Estimate how strongly each note should be emphasised, keeping accents edited by hand",
+      },
+      {
+        id: "midi.analyze_accent_replace",
+        label: "Analyze Accent (Replace All)",
+        icon: "wand-sparkles",
+        action: "solfege:analyze-accent-replace-all",
+        description: "Re-analyse every note, discarding accents edited by hand",
+      },
+      {
+        id: "midi.apply_accent",
+        label: "Apply Accent to Performance",
+        icon: "audio-waveform",
+        action: "solfege:apply-accent",
+        description:
+          "Write the analysed accents into note timing, velocity and the Dynamics lane",
       },
     ],
   },
@@ -592,10 +626,27 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "panel:toggle-mixer",
       },
       {
+        id: "window.show_bottom_panel",
+        label: "Show Bottom Panel",
+        icon: "panel-bottom",
+        checked: true,
+        action: "panel:toggle-bottom",
+        description:
+          "Show or hide the bottom dock itself, whichever tab is in it",
+      },
+      {
         id: "window.float_mixer",
         label: "Open Mixer in Window",
         icon: "external-link",
         action: "floatingwindow:mixer",
+      },
+      {
+        id: "window.routing_matrix",
+        label: "Routing Matrix",
+        icon: "route",
+        action: "floatingwindow:routing-matrix",
+        description:
+          "Cross-point grid of every track against Main, the buses and the returns, for toggling sends",
       },
       {
         id: "window.video_player",
@@ -612,6 +663,26 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "window:audio-jam",
         description:
           "Play with other Futureboard accounts over the network, and route their streams to tracks",
+      },
+      {
+        type: "separator",
+        id: "window.sep.clocks",
+      },
+      {
+        id: "window.big_clock",
+        label: "Big Clock",
+        icon: "clock",
+        action: "window:big-clock",
+        description:
+          "The playhead in bars and beats, large enough to read from across the room",
+      },
+      {
+        id: "window.timecode",
+        label: "Timecode",
+        icon: "timer",
+        action: "window:timecode",
+        description:
+          "The same clock led by SMPTE timecode, at 24, 25, 29.97 DF or 30 fps",
       },
       {
         type: "separator",

@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// Which edition of Futureboard Studio to build and stage.
 ///
@@ -221,4 +221,18 @@ mod tests {
             Some("futureboard_native/professional,sphere_directaudioengine/asio")
         );
     }
+}
+
+/// The host target triple, parsed from `rustc -vV`'s `host:` line.
+pub fn host_target() -> Result<String> {
+    let output =
+        std::process::Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string()))
+            .arg("-vV")
+            .output()
+            .context("failed to run rustc -vV")?;
+    let text = String::from_utf8(output.stdout).context("rustc -vV output was not UTF-8")?;
+    text.lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(|host| host.trim().to_string())
+        .ok_or_else(|| anyhow!("rustc -vV did not report a host triple"))
 }

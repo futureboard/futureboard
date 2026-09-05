@@ -54,20 +54,10 @@ impl GpuiPaintMixerRenderer {
     fn rebuild_static(&mut self, snapshot: &MixerRenderSnapshot) {
         let mut quads: Vec<Quad> = Vec::with_capacity(snapshot.strips.len() * 4 + 4);
         for strip in &snapshot.strips {
-            push_static_strip(
-                &mut quads,
-                strip,
-                snapshot.accent_bar_h,
-                snapshot.separator_w,
-            );
+            push_static_strip(&mut quads, strip, snapshot.plate_h, snapshot.separator_w);
         }
         if let Some(master) = &snapshot.master {
-            push_static_strip(
-                &mut quads,
-                master,
-                snapshot.accent_bar_h,
-                snapshot.separator_w,
-            );
+            push_static_strip(&mut quads, master, snapshot.plate_h, snapshot.separator_w);
         }
         self.static_quads = Arc::new(quads);
     }
@@ -171,7 +161,7 @@ impl MixerRenderer for GpuiPaintMixerRenderer {
     }
 }
 
-fn push_static_strip(quads: &mut Vec<Quad>, strip: &MixerStripGeom, accent_bar_h: f32, sep_w: f32) {
+fn push_static_strip(quads: &mut Vec<Quad>, strip: &MixerStripGeom, plate_h: f32, sep_w: f32) {
     let scrolls = !strip.is_master;
     // Background.
     quads.push(Quad {
@@ -182,13 +172,15 @@ fn push_static_strip(quads: &mut Vec<Quad>, strip: &MixerStripGeom, accent_bar_h
         color: strip.bg,
         scrolls,
     });
-    // Top accent bar.
+    // Name plate at the foot of the strip — the strip's one piece of colour.
+    // The div layer draws the number and name over this quad and paints no fill
+    // of its own, so the two layers can never disagree about the colour.
     quads.push(Quad {
         x: strip.x,
-        y: 0.0,
+        y: (strip.height - plate_h).max(0.0),
         w: strip.width,
-        h: accent_bar_h,
-        color: strip.accent,
+        h: plate_h.min(strip.height),
+        color: strip.plate,
         scrolls,
     });
     // Right separator line (already resolved stronger when selected).

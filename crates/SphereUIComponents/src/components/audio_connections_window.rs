@@ -32,7 +32,7 @@ use crate::components::audio_connections_panel::{
     AudioConnectionsPanelState, CellAnchor, ColumnWidths, ConnectionRow, ConnectionsTab,
     EditableCell, OpenDropdown, ROW_HEIGHT,
 };
-use crate::components::combo_box::combo_box_string_menu;
+use crate::components::combo_box::{combo_box_icon_menu, MenuGlyph, MenuItem};
 use crate::components::controls::{fb_button, FbButtonKind};
 use crate::components::text_input::{text_field, TextInputState};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
@@ -88,6 +88,54 @@ pub fn window_min_size() -> (f32, f32) {
     let width = ColumnWidths::min_total() + 2.0;
     let height = table_top() + 3.0 * ROW_HEIGHT + FOOTER_HEIGHT;
     (width, height)
+}
+
+/// The glyph for a device or port, by what it actually is.
+///
+/// A menu of endpoint names is a wall of text in which an interface, the jam
+/// send, and a person in the room are the same shape. The kind should be
+/// readable before the name is — and for a jam stream the kind is *a person*,
+/// so it is their face rather than any icon.
+fn device_glyph(device_id: &str, direction: AudioConnectionDirection) -> MenuGlyph {
+    use crate::audio_connections::AudioConnectionDirection::*;
+
+    // A jam port is a person, whatever else is or is not known about them, so
+    // the kind is decided by the device id and never by what the room snapshot
+    // happens to hold. A stream whose publisher has left — or one seen a frame
+    // before the snapshot catches up — still draws a person rather than
+    // borrowing an audio interface's microphone.
+    if DirectAudio::jam_bus::is_jam_device(device_id) {
+        return match crate::jam::stream_identity(device_id) {
+            // The picture if it has landed, their initials until it does.
+            // Never a blank hole and never a spinner: the row is readable
+            // either way and simply gets better a frame later.
+            Some(identity) => match crate::account::profile_picture(&identity.avatar_url) {
+                Some(image) => MenuGlyph::Picture(image),
+                None => MenuGlyph::Monogram(identity.monogram),
+            },
+            None => MenuGlyph::Svg(crate::assets::ICON_USER_PATH),
+        };
+    }
+    if DirectAudio::jam_bus::is_jam_send_device(device_id) {
+        return MenuGlyph::Svg(crate::assets::ICON_ROUTE_PATH);
+    }
+    match direction {
+        Input => MenuGlyph::Svg(crate::assets::ICON_MIC_PATH),
+        Output => MenuGlyph::Svg(crate::assets::ICON_VOLUME_2_PATH),
+    }
+}
+
+/// The glyph for the row that clears an assignment.
+fn unassigned_glyph() -> MenuGlyph {
+    MenuGlyph::Svg(crate::assets::ICON_MINUS_PATH)
+}
+
+/// The glyph for a channel layout.
+fn layout_glyph(layout: ChannelLayout) -> MenuGlyph {
+    match layout {
+        ChannelLayout::Mono => MenuGlyph::Svg(crate::assets::ICON_CIRCLE_DOT_PATH),
+        _ => MenuGlyph::Svg(crate::assets::ICON_AUDIO_LINES_PATH),
+    }
 }
 
 /// What running the Audio Connections command again should do.
@@ -380,6 +428,7 @@ impl AudioConnectionsWindow {
         &self,
         element_id: gpui::ElementId,
         text: String,
+        glyph: MenuGlyph,
         cell_kind: EditableCell,
         row_index: usize,
         columns: &ColumnWidths,
@@ -427,6 +476,17 @@ impl AudioConnectionsWindow {
                 cell.cursor(gpui::CursorStyle::PointingHand)
                     .hover(move |s| s.bg(hover_fill))
             })
+            // The same glyph the menu row carries, so the assignment reads as
+            // what it is without opening anything: an interface, the jam send,
+            // or the person whose stream this cell is bound to.
+            .child(crate::components::combo_box::cell_glyph(
+                &glyph,
+                if available {
+                    Colors::text_muted()
+                } else {
+                    Colors::accent_warning()
+                },
+            ))
             .child(
                 div()
                     .flex_1()
@@ -658,100 +718,117 @@ impl AudioConnectionsWindow {
         let registry = &self.snapshot.registry;
         let ports = &self.snapshot.ports;
 
-        // (label, edit) pairs. The first entry is always Unassigned.
-        let (selected, options): (String, Vec<(String, ConnectionEdit)>) = match &dropdown {
-            OpenDropdown::Layout(id) => (
-                layout_label(registry.get(id)?.channel_layout),
-                crate::audio_connections::PANEL_LAYOUTS
-                    .iter()
-                    .map(|layout| {
-                        (
-                            layout_label(*layout),
-                            ConnectionEdit::SetLayout {
-                                id: id.clone(),
-                                layout: *layout,
-                            },
-                        )
-                    })
-                    .collect(),
-            ),
-            OpenDropdown::Device(id) => {
-                let current = registry
-                    .device_display_name(id, ports)
-                    .unwrap_or_else(|| "Unassigned".to_string());
-                let mut options = vec![(
-                    "Unassigned".to_string(),
-                    ConnectionEdit::SetDevice {
-                        id: id.clone(),
-                        device_id: None,
-                    },
-                )];
-                for (device_id, label, _available) in registry.device_choices(id, ports) {
-                    options.push((
-                        label,
+        // (label, glyph, edit) triples. The first entry is always Unassigned.
+        let (selected, options): (String, Vec<(String, MenuGlyph, ConnectionEdit)>) =
+            match &dropdown {
+                OpenDropdown::Layout(id) => (
+                    layout_label(registry.get(id)?.channel_layout),
+                    crate::audio_connections::PANEL_LAYOUTS
+                        .iter()
+                        .map(|layout| {
+                            (
+                                layout_label(*layout),
+                                layout_glyph(*layout),
+                                ConnectionEdit::SetLayout {
+                                    id: id.clone(),
+                                    layout: *layout,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                OpenDropdown::Device(id) => {
+                    let current = registry
+                        .device_display_name(id, ports)
+                        .unwrap_or_else(|| "Unassigned".to_string());
+                    let mut options = vec![(
+                        "Unassigned".to_string(),
+                        unassigned_glyph(),
                         ConnectionEdit::SetDevice {
                             id: id.clone(),
-                            device_id: Some(device_id),
+                            device_id: None,
                         },
-                    ));
+                    )];
+                    let direction = registry
+                        .get(id)
+                        .map(|connection| connection.direction)
+                        .unwrap_or(AudioConnectionDirection::Input);
+                    for (device_id, label, _available) in registry.device_choices(id, ports) {
+                        let glyph = device_glyph(&device_id, direction);
+                        options.push((
+                            label,
+                            glyph,
+                            ConnectionEdit::SetDevice {
+                                id: id.clone(),
+                                device_id: Some(device_id),
+                            },
+                        ));
+                    }
+                    (current, options)
                 }
-                (current, options)
-            }
-            OpenDropdown::Port {
-                connection_id,
-                logical_channel,
-            } => {
-                let connection = registry.get(connection_id)?;
-                let current = connection
-                    .binding(*logical_channel)
-                    .map(|binding| binding.physical_port_id.port_name.clone())
-                    .unwrap_or_else(|| "Unassigned".to_string());
-                let mut options = vec![(
-                    "Unassigned".to_string(),
-                    ConnectionEdit::SetPort {
-                        id: connection_id.clone(),
-                        logical_channel: *logical_channel,
-                        port: None,
-                    },
-                )];
-                // One entry per channel the selected endpoint actually
-                // reports — never a fixed two-channel list.
-                for (port, label, _available) in
-                    registry.port_choices(connection_id, *logical_channel, ports)
-                {
-                    options.push((
-                        label,
+                OpenDropdown::Port {
+                    connection_id,
+                    logical_channel,
+                } => {
+                    let connection = registry.get(connection_id)?;
+                    let current = connection
+                        .binding(*logical_channel)
+                        .map(|binding| binding.physical_port_id.port_name.clone())
+                        .unwrap_or_else(|| "Unassigned".to_string());
+                    let mut options = vec![(
+                        "Unassigned".to_string(),
+                        unassigned_glyph(),
                         ConnectionEdit::SetPort {
                             id: connection_id.clone(),
                             logical_channel: *logical_channel,
-                            port: Some(AudioPortId::new(
-                                port.device_id.clone(),
-                                port.port_name.clone(),
-                                port.port_index,
-                            )),
+                            port: None,
                         },
-                    ));
+                    )];
+                    // One entry per channel the selected endpoint actually
+                    // reports — never a fixed two-channel list.
+                    for (port, label, _available) in
+                        registry.port_choices(connection_id, *logical_channel, ports)
+                    {
+                        let glyph = device_glyph(&port.device_id, connection.direction);
+                        options.push((
+                            label,
+                            glyph,
+                            ConnectionEdit::SetPort {
+                                id: connection_id.clone(),
+                                logical_channel: *logical_channel,
+                                port: Some(AudioPortId::new(
+                                    port.device_id.clone(),
+                                    port.port_name.clone(),
+                                    port.port_index,
+                                )),
+                            },
+                        ));
+                    }
+                    (current, options)
                 }
-                (current, options)
-            }
-            OpenDropdown::Presets => (
-                // A preset is an action, not a stored value, so no row carries
-                // the selected tick.
-                String::new(),
-                PANEL_PRESETS
-                    .iter()
-                    .map(|preset| {
-                        (
-                            preset.label(),
-                            ConnectionEdit::RequestApplyPreset { preset: *preset },
-                        )
-                    })
-                    .collect(),
-            ),
-            OpenDropdown::AddBus => return None,
-        };
+                OpenDropdown::Presets => (
+                    // A preset is an action, not a stored value, so no row carries
+                    // the selected tick.
+                    String::new(),
+                    PANEL_PRESETS
+                        .iter()
+                        .map(|preset| {
+                            (
+                                preset.label(),
+                                MenuGlyph::Svg(crate::assets::ICON_LAYERS_PATH),
+                                ConnectionEdit::RequestApplyPreset { preset: *preset },
+                            )
+                        })
+                        .collect(),
+                ),
+                OpenDropdown::AddBus => return None,
+            };
 
-        let labels: Vec<String> = options.iter().map(|(label, _)| label.clone()).collect();
+        let labels: Vec<String> = options.iter().map(|(label, _, _)| label.clone()).collect();
+        let items: Vec<MenuItem> = options
+            .iter()
+            .map(|(label, glyph, _)| MenuItem::new(label.clone(), glyph.clone()))
+            .collect();
         // Sized to its content: as tall as its rows (until it must scroll), and
         // wide enough for the longest label — a menu the width of a 110 px port
         // column truncated every real endpoint name and read as cropped.
@@ -780,8 +857,10 @@ impl AudioConnectionsWindow {
         );
 
         let on_edit = self.on_edit.clone();
-        let lookup: std::collections::HashMap<String, ConnectionEdit> =
-            options.into_iter().collect();
+        let lookup: std::collections::HashMap<String, ConnectionEdit> = options
+            .into_iter()
+            .map(|(label, _, edit)| (label, edit))
+            .collect();
         let on_select: std::sync::Arc<dyn Fn(String, &mut Window, &mut gpui::App) + 'static> = {
             let entity = cx.entity().clone();
             std::sync::Arc::new(move |value: String, window, cx| {
@@ -796,7 +875,7 @@ impl AudioConnectionsWindow {
         };
 
         Some(
-            combo_box_string_menu(
+            combo_box_icon_menu(
                 "audio-connections-dropdown",
                 crate::overlay::OverlayPosition {
                     x: placement.origin.x,
@@ -805,7 +884,7 @@ impl AudioConnectionsWindow {
                     max_height: Some(placement.size.height),
                 },
                 &selected,
-                &labels,
+                &items,
                 on_select,
             )
             .into_any_element(),
@@ -831,6 +910,21 @@ impl AudioConnectionsWindow {
         let focused_cell = row.selected.then_some(self.panel.focused_cell).flatten();
         let device_ok = !matches!(row.status, AudioConnectionStatus::DeviceMissing);
         let port_ok = !matches!(row.status, AudioConnectionStatus::PortMissing);
+        // What this row is bound to, resolved once: the Device and both port
+        // cells all show it, and for a jam stream it is a face rather than an
+        // icon. An unassigned row carries no glyph — there is nothing to
+        // illustrate, and a placeholder would read as an assignment.
+        let row_glyph = self
+            .snapshot
+            .registry
+            .get(&row.id)
+            .and_then(|connection| {
+                connection
+                    .device_id
+                    .as_ref()
+                    .map(|device_id| device_glyph(device_id, connection.direction))
+            })
+            .unwrap_or(MenuGlyph::None);
 
         // Selection is fill plus a leading-edge marker (never a border change,
         // which would reflow the row); hover lifts whichever fill is at rest.
@@ -919,6 +1013,7 @@ impl AudioConnectionsWindow {
             .child(self.combo_cell(
                 ("audio-connection-config", index).into(),
                 layout_label(row.layout),
+                layout_glyph(row.layout),
                 EditableCell::Configuration,
                 index,
                 columns,
@@ -930,6 +1025,7 @@ impl AudioConnectionsWindow {
             .child(self.combo_cell(
                 ("audio-connection-device", index).into(),
                 row.device_label.clone(),
+                row_glyph.clone(),
                 EditableCell::Device,
                 index,
                 columns,
@@ -941,6 +1037,7 @@ impl AudioConnectionsWindow {
             .child(self.combo_cell(
                 ("audio-connection-left", index).into(),
                 row.left_port.clone(),
+                row_glyph.clone(),
                 EditableCell::LeftPort,
                 index,
                 columns,
@@ -959,6 +1056,7 @@ impl AudioConnectionsWindow {
                     .combo_cell(
                         ("audio-connection-right", index).into(),
                         text,
+                        row_glyph.clone(),
                         EditableCell::RightPort,
                         index,
                         columns,
@@ -2008,5 +2106,68 @@ mod tests {
         assert!(panel
             .rows(&AudioConnectionRegistry::new(), &ports)
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dropdown_glyph_tests {
+    use super::{device_glyph, layout_glyph, unassigned_glyph};
+    use crate::audio_connections::{AudioConnectionDirection, ChannelLayout};
+    use crate::components::combo_box::MenuGlyph;
+
+    fn svg_path(glyph: &MenuGlyph) -> Option<&'static str> {
+        match glyph {
+            MenuGlyph::Svg(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The point of the glyph column: an interface, a network send and a person
+    /// must not read as the same kind of thing.
+    #[test]
+    fn each_kind_of_endpoint_gets_its_own_glyph() {
+        let input = device_glyph("Focusrite USB ASIO", AudioConnectionDirection::Input);
+        let output = device_glyph("Focusrite USB ASIO", AudioConnectionDirection::Output);
+        let send = device_glyph("jam-send", AudioConnectionDirection::Output);
+
+        assert_ne!(
+            svg_path(&input),
+            svg_path(&output),
+            "capture is not playback"
+        );
+        assert_ne!(
+            svg_path(&output),
+            svg_path(&send),
+            "the jam send is not an audio interface"
+        );
+        assert_ne!(svg_path(&input), svg_path(&unassigned_glyph()));
+    }
+
+    /// A stream with nobody resolvable behind it still has to draw something —
+    /// the row must never be a blank column that shifts the label.
+    /// A stream whose publisher is not resolvable — they left, or the snapshot
+    /// has not caught up — is still a person. Falling back to the direction
+    /// icon would put a microphone on somebody's port.
+    #[test]
+    fn an_unresolved_jam_stream_still_draws_a_person() {
+        let jam = device_glyph("jam:str_unknown", AudioConnectionDirection::Input);
+        let hardware = device_glyph("Focusrite USB ASIO", AudioConnectionDirection::Input);
+        assert_ne!(
+            svg_path(&jam),
+            svg_path(&hardware),
+            "a jam port must never borrow an interface's glyph"
+        );
+        assert!(matches!(
+            jam,
+            MenuGlyph::Monogram(_) | MenuGlyph::Picture(_) | MenuGlyph::Svg(_)
+        ));
+    }
+
+    #[test]
+    fn mono_and_stereo_are_told_apart() {
+        assert_ne!(
+            svg_path(&layout_glyph(ChannelLayout::Mono)),
+            svg_path(&layout_glyph(ChannelLayout::Stereo))
+        );
     }
 }

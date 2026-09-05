@@ -1,0 +1,30 @@
+[package]
+name = "jamsession"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Standalone Audio Jam client — join a room, hear it, send this machine into it."
+
+[[bin]]
+name = "FutureboardJam"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+sphere_directaudioengine.workspace = true
+sphere_ui_components = { workspace = true, default-features = false, features = [
+    "gpu-renderer",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_linux = { workspace = true, features = ["wayland", "x11"] }
+
+[lints]
+workspace = true

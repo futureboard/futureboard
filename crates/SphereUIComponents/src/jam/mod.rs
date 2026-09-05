@@ -57,9 +57,10 @@ use sphere_jam_client::credentials::{JamCredentialProvider, SharedCredentials};
 use sphere_jam_client::error::{JamError, Result};
 use sphere_jam_client::ids::{JamId, StreamId, UserId};
 use sphere_jam_client::protocol::{ParticipantSummary, StreamSummary};
-use sphere_jam_client::session::{
-    JamEvent, JamIngress, JamSession, JamSessionOptions, JamSnapshot, JamState,
-};
+use sphere_jam_client::session::{JamEvent, JamSession, JamSessionOptions, JamSnapshot, JamState};
+// What a host takes from the room is the host's choice, so the type that names
+// it belongs to this facade as much as the controller does.
+pub use sphere_jam_client::session::JamIngress;
 use DirectAudio::engine::SharedState;
 use DirectAudio::jam_bus::{
     jam_device_id, publish_key_track, PUBLISH_KEY_LIVE_INPUT, PUBLISH_KEY_MASTER,
@@ -67,6 +68,10 @@ use DirectAudio::jam_bus::{
 };
 
 pub use egress::{JamSend, JamSendTap};
+// The façade owns the error type too. A caller that reaches this module for the
+// controller should not also have to depend on the jam client crate to name
+// what the controller returns.
+pub use sphere_jam_client::error::{JamError as Error, Result as JamResult};
 
 use crate::audio_connections::{AudioConnectionDirection, AvailablePort, AvailablePorts};
 
@@ -83,6 +88,8 @@ pub use sink::JamEngineSink;
 pub const MASTER_STREAM_NAME: &str = "Studio Master";
 /// See [`MASTER_STREAM_NAME`].
 pub const MULTITRACK_STREAM_NAME: &str = "Studio Multitrack";
+/// See [`MASTER_STREAM_NAME`]. The live input pair, sent as one stream.
+pub const LIVE_INPUT_STREAM_NAME: &str = "Live Input";
 
 /// The account token Studio already holds.
 ///
@@ -111,6 +118,10 @@ pub struct JamStreamView {
     /// The `@handle` of the publisher, for display only.
     pub handle: String,
     pub display_name: String,
+    /// The publisher's profile picture, as the account service serves it.
+    /// Empty when they have none. Display only; fetch it with
+    /// [`crate::account::prefetch_profile_picture`].
+    pub avatar_url: String,
     pub stream_name: String,
     pub channels: usize,
     pub channel_labels: Vec<String>,
@@ -251,6 +262,62 @@ pub fn snapshot() -> JamUiState {
         .unwrap_or_default()
 }
 
+/// Who is behind a jam device id, for a menu row that has to show a face
+/// rather than a device name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JamStreamIdentity {
+    /// The person, as they would be introduced: their display name when the
+    /// room knows one, else their handle.
+    pub person: String,
+    /// Profile picture URL, empty when they have none.
+    pub avatar_url: String,
+    /// Two characters to stand in for the picture while it is downloading, or
+    /// for good if they have none.
+    pub monogram: String,
+}
+
+/// The person publishing the stream a jam device id names.
+///
+/// `None` for a hardware device, for the jam *send* device, and for a stream
+/// that has left the room — all three are cases where there is no face to show
+/// and the caller falls back to an icon.
+pub fn stream_identity(device_id: &str) -> Option<JamStreamIdentity> {
+    let stream_id = DirectAudio::jam_bus::jam_stream_id(device_id)?;
+    let state = snapshot();
+    let stream = state
+        .streams
+        .iter()
+        .find(|stream| stream.stream_id == stream_id)?;
+    let person = if stream.display_name.trim().is_empty() {
+        stream.handle.clone()
+    } else {
+        stream.display_name.clone()
+    };
+    Some(JamStreamIdentity {
+        monogram: monogram_for(&person),
+        person,
+        avatar_url: stream.avatar_url.clone(),
+    })
+}
+
+/// Initials for a name, at most two characters.
+///
+/// Word initials when the name has words to take them from ("Aria Kim" → AK),
+/// otherwise the first two characters, which is the honest answer for a handle
+/// like `@nut` and for scripts that do not have word-initial conventions.
+fn monogram_for(person: &str) -> String {
+    let trimmed = person.trim().trim_start_matches('@');
+    let initials: String = trimmed
+        .split_whitespace()
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .collect();
+    if initials.chars().count() >= 2 {
+        return initials.to_uppercase();
+    }
+    trimmed.chars().take(2).collect::<String>().to_uppercase()
+}
+
 /// Jam streams as Audio Connections input ports.
 ///
 /// This is what makes a remote performer selectable in the same Input menu a
@@ -301,13 +368,34 @@ fn controller() -> &'static Mutex<Option<JamController>> {
 /// remote performer keep playing after the window is closed, and the routing
 /// layer reads the same snapshot to decide what is still selectable.
 pub fn install(shared: Arc<SharedState>, engine: Option<DirectAudio::AudioEngine>) -> Result<()> {
+    install_with_ingress(shared, engine, JamIngress::Routed)
+}
+
+/// Install the controller, choosing what arrives from the room.
+///
+/// The two hosts want opposite defaults, and neither is wrong:
+///
+/// * **Studio** takes only what a track is routed to ([`JamIngress::Routed`]).
+///   A remote stream is audible through an input connection or not at all, so
+///   taking the whole room would decode audio the callback never reads and make
+///   a project with two routed tracks pay for a six-piece band.
+/// * **A jam client** takes the room ([`JamIngress::Everything`]). There is no
+///   project to route through, and a listener who has to ask for each performer
+///   before hearing any of them has joined a room that is silent for a reason
+///   nothing on screen explains.
+pub fn install_with_ingress(
+    shared: Arc<SharedState>,
+    engine: Option<DirectAudio::AudioEngine>,
+    ingress: JamIngress,
+) -> Result<()> {
     let mut guard = controller()
         .lock()
         .map_err(|_| JamError::Session("the jam controller lock was poisoned".to_string()))?;
     if guard.is_some() {
         return Ok(());
     }
-    let created = JamController::new(shared, engine)?;
+    let mut created = JamController::new(shared, engine)?;
+    created.ingress = ingress;
     created.publish_ui_state();
     *guard = Some(created);
     drop(guard);
@@ -427,6 +515,8 @@ pub struct JamController {
     /// that can move a port — costs nothing unless a jam binding actually
     /// changed.
     routed_streams: BTreeSet<String>,
+    /// What this host takes from the room. See [`install_with_ingress`].
+    ingress: JamIngress,
     /// The jam sends this project's output routing names, keyed by bus id, as
     /// last pushed to the session. Kept across a leave so joining again
     /// restates them.
@@ -456,6 +546,7 @@ impl JamController {
             quality: JamPublishQuality::default(),
             multitrack_tracks: Vec::new(),
             routed_streams: BTreeSet::new(),
+            ingress: JamIngress::Routed,
             sends: BTreeMap::new(),
             last_error: None,
         })
@@ -476,8 +567,21 @@ impl JamController {
             .unwrap_or(JamState::Disconnected)
     }
 
+    /// Clear the last failure.
+    ///
+    /// Called at the head of every action a person takes, because an error is a
+    /// report about an attempt and not a property of the room. Without this the
+    /// banner outlives what it described: a failure during Create stayed on
+    /// screen through a successful join, a successful invite and a live stream,
+    /// which is worse than saying nothing — it tells somebody their working
+    /// session is broken.
+    fn clear_error(&mut self) {
+        self.last_error = None;
+    }
+
     /// Create a jam and join it. Returns the shareable code.
     pub fn create_and_join(&mut self, name: &str) -> Result<String> {
+        self.clear_error();
         let created = self.api.create_jam(&CreateJamRequest {
             name: name.to_string(),
             region: self.config.preferred_region.wire_value().to_string(),
@@ -486,14 +590,23 @@ impl JamController {
         let code = created.jam.public_id.clone();
         let jam_id = JamId::new(created.jam.id.clone());
         self.set_join_url(created.join_url.clone());
-        self.join(jam_id, String::new())?;
+        self.join(jam_id.clone(), String::new())?;
         // Mint the invite here rather than waiting to be asked. Creating a room
         // is never the goal — handing somebody the link is — and making that a
         // second deliberate gesture is most of why starting a jam feels like a
         // procedure. A failure is not fatal: the room exists, the Invite button
         // still works, and the error goes where the panel already reads errors.
-        if let Err(error) = self.create_invite("performer") {
-            self.last_error = Some(error.to_string());
+        // Against the id the REST call just returned, never the session's:
+        // the join above is queued, not finished, so the session has no jam id
+        // to give for some time yet.
+        //
+        // A failure here is logged, not raised. This invite is a convenience
+        // the user did not ask for, the room it belongs to is up and working,
+        // and the Invite button is still there — putting it in the error banner
+        // reports a healthy session as a broken one, which is exactly what it
+        // did.
+        if let Err(error) = self.create_invite_for(&jam_id, "performer") {
+            eprintln!("[jam] the opening invite could not be minted: {error}");
         }
         self.publish_ui_state();
         Ok(code)
@@ -502,6 +615,7 @@ impl JamController {
     /// Follow an invite link: exchange the secret, then join what it admitted
     /// this account to.
     pub fn join_with_invite(&mut self, code: &str, secret: &str) -> Result<()> {
+        self.clear_error();
         let exchanged = self.api.exchange_invite(secret, code)?;
         let jam_id = JamId::new(exchanged.jam.id.clone());
         self.join(jam_id, exchanged.access_token)
@@ -522,6 +636,7 @@ impl JamController {
     /// a jam this account cannot enter fails as a permission error, which is
     /// the truth, instead of as "invalid link".
     pub fn join_with_link(&mut self, link: &str) -> Result<()> {
+        self.clear_error();
         let parsed = parse_jam_link(link)
             .ok_or_else(|| JamError::Config(format!("{link:?} is not a jam link or code")))?;
         match parsed.secret {
@@ -530,7 +645,12 @@ impl JamController {
                 let jam = self.api.jam_by_code(&parsed.code)?;
                 let jam_id = JamId::new(jam.jam.id.clone());
                 self.set_join_url(jam.join_url.clone());
-                self.join(jam_id, String::new())
+                // No secret means no jam access token, and the server's rule is
+                // explicit: the host gets in, a token gets in, an existing
+                // member gets in, and everybody else is refused. Saying which
+                // link this was is the difference between a refusal somebody
+                // can act on and one that reads as the app being broken.
+                self.join(jam_id, String::new()).map_err(room_link_refusal)
             }
         }
     }
@@ -543,10 +663,10 @@ impl JamController {
             let mut options = JamSessionOptions::new(self.device_id.clone(), sink);
             options.device_name = device_name();
             options.publish_sample_rate = PUBLISH_SAMPLE_RATE as i32;
-            // Studio chooses. A remote stream is only audible through an input
-            // connection, so taking the whole room would decode audio the audio
-            // callback never reads — see [`ingress`].
-            options.ingress = JamIngress::Routed;
+            // Whose choice this is depends on the host — see
+            // [`install_with_ingress`]. Studio routes; a jam client takes the
+            // room so joining is audible without a second gesture.
+            options.ingress = self.ingress;
             let session = JamSession::spawn_with_clock(
                 self.config.clone(),
                 Arc::clone(&self.credentials),
@@ -764,9 +884,24 @@ impl JamController {
     /// Mint an invite for the current jam. The link is a bearer secret and is
     /// returned once; it is never stored.
     pub fn create_invite(&mut self, role: &str) -> Result<String> {
+        self.clear_error();
         let jam_id = self
             .current_jam_id()
             .ok_or_else(|| JamError::Session("not in a jam".to_string()))?;
+        self.create_invite_for(&jam_id, role)
+    }
+
+    /// Mint an invite for a jam named explicitly.
+    ///
+    /// Split from [`Self::create_invite`] because of *when* the two know the
+    /// jam. `current_jam_id` reads the session's snapshot, and the session
+    /// joins asynchronously: `JamSession::join` queues a command and returns
+    /// long before the worker has a room. A caller that has just created a jam
+    /// over REST already holds its id and must not ask the session for one it
+    /// cannot have yet — doing so failed with "not in a jam", left the invite
+    /// unminted, and left the only shareable link the room link, which admits
+    /// nobody who was not already a member. Including the host's own browser.
+    fn create_invite_for(&mut self, jam_id: &JamId, role: &str) -> Result<String> {
         let created = self.api.create_invite(
             jam_id.as_str(),
             &CreateInviteRequest {
@@ -788,6 +923,7 @@ impl JamController {
     /// where to mix the click relative to the tap, so neither answer costs the
     /// stream a resample or a second buffer.
     pub fn publish_master(&mut self) -> Result<()> {
+        self.clear_error();
         let Some(session) = self.session.as_ref() else {
             return Err(JamError::Session("not in a jam".to_string()));
         };
@@ -833,6 +969,80 @@ impl JamController {
                 Err(error)
             }
         }
+    }
+
+    /// Publish the live hardware input pair — "send my microphone".
+    ///
+    /// The one-gesture form of the same thing an output bus bound to the jam's
+    /// Live Input ports does. It exists because binding a bus is a trip through
+    /// Audio Connections, and a standalone client has no reason to own that
+    /// window at all: sending your instrument is the entire point of joining.
+    ///
+    /// Binding the tap is also what makes the engine open the capture stream —
+    /// see `sync_live_input_stream`, which treats a bound live-input publish as
+    /// a request for the interface exactly as an armed track is.
+    pub fn publish_live_input(&mut self) -> Result<()> {
+        self.clear_error();
+        let Some(session) = self.session.as_ref() else {
+            return Err(JamError::Session("not in a jam".to_string()));
+        };
+        if self
+            .published_keys
+            .iter()
+            .any(|held| held == PUBLISH_KEY_LIVE_INPUT)
+        {
+            return Err(JamError::Audio(
+                "the live input is already being sent to the jam".to_string(),
+            ));
+        }
+        if self
+            .shared
+            .jam_bus
+            .bind_publish(PUBLISH_KEY_LIVE_INPUT)
+            .is_none()
+        {
+            return Err(JamError::Audio(
+                "no publish slot is free in the audio engine".to_string(),
+            ));
+        }
+        self.published_keys.push(PUBLISH_KEY_LIVE_INPUT.to_string());
+
+        let source = Arc::new(JamEngineSource::new(
+            Arc::clone(&self.shared),
+            Arc::clone(&self.clock),
+            PUBLISH_KEY_LIVE_INPUT,
+            self.quality.sample_rate,
+        ));
+        let mut request = JamPublishRequest::stereo(
+            LIVE_INPUT_STREAM_NAME,
+            JamPublishSourceKind::HardwareInput {
+                connection: PUBLISH_KEY_LIVE_INPUT.to_string(),
+            },
+        );
+        request.sample_format = self.quality.sample_format;
+        request.sample_rate = self.quality.sample_rate as i32;
+        match session.publish(request, source) {
+            Ok(()) => {
+                self.publish_ui_state();
+                Ok(())
+            }
+            Err(error) => {
+                self.published_keys
+                    .retain(|key| key != PUBLISH_KEY_LIVE_INPUT);
+                self.shared.jam_bus.release_publish(PUBLISH_KEY_LIVE_INPUT);
+                Err(error)
+            }
+        }
+    }
+
+    /// Stop publishing the live input.
+    pub fn unpublish_live_input(&mut self) -> Result<()> {
+        self.unpublish_named(LIVE_INPUT_STREAM_NAME);
+        self.published_keys
+            .retain(|key| key != PUBLISH_KEY_LIVE_INPUT);
+        self.shared.jam_bus.release_publish(PUBLISH_KEY_LIVE_INPUT);
+        self.publish_ui_state();
+        Ok(())
     }
 
     /// Stop publishing the master bus.
@@ -1257,6 +1467,12 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
             .find(|participant| participant.id == summary.participant_id)
             .map(|participant| participant.user.label())
             .unwrap_or_default();
+        let avatar_url = snapshot
+            .participants
+            .iter()
+            .find(|participant| participant.id == summary.participant_id)
+            .map(|participant| participant.user.avatar_url.clone())
+            .unwrap_or_default();
         let receiving = snapshot
             .formats
             .iter()
@@ -1274,12 +1490,20 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
             .map(|slot| slot.underruns().saturating_add(slot.overruns()))
             .unwrap_or(0);
 
+        // Start the download here rather than during render: the port menus and
+        // the participant list both read the cache every frame and must never
+        // be the thing that touches the network.
+        if !avatar_url.is_empty() {
+            crate::account::prefetch_profile_picture(&avatar_url);
+        }
+
         streams.push(JamStreamView {
             stream_id: summary.id.clone(),
             user_id: summary.user_id.clone(),
             device_id: summary.device_id.clone(),
             handle,
             display_name,
+            avatar_url,
             stream_name: summary.name.clone(),
             channels: summary.channels.max(0) as usize,
             channel_labels: channel_labels(summary),
@@ -1326,6 +1550,32 @@ fn build_ui_state(snapshot: &JamSnapshot, config: &JamConfig, shared: &SharedSta
         invite_link: None,
         quality: JamPublishQuality::default(),
         multitrack_tracks: Vec::new(),
+    }
+}
+
+/// Explain a refusal that a room link caused.
+///
+/// A room link carries no secret, so it admits only the host and people already
+/// in the jam — which is the server's rule, not a client limitation, and there
+/// is no call that mints a token for somebody who was never invited. The fix is
+/// always the same and is never obvious from `forbidden`: ask for the invite
+/// link, the one with a `#` in it.
+fn room_link_refusal(error: JamError) -> JamError {
+    match &error {
+        JamError::Api(wire)
+            if matches!(
+                wire.code,
+                sphere_jam_client::error::ErrorCode::Forbidden
+                    | sphere_jam_client::error::ErrorCode::AccountRequired
+            ) =>
+        {
+            JamError::Audio(
+                "That is a room link, which only admits people already in the jam. \
+                 Ask the host for an invite link — the one with a # in it."
+                    .to_string(),
+            )
+        }
+        _ => error,
     }
 }
 
@@ -1736,5 +1986,37 @@ mod send_label_tests {
         let (name, tap) = publish_key_labels("track:trk_7");
         assert_eq!(name, "Track trk_7");
         assert_eq!(tap, "Track");
+    }
+}
+
+#[cfg(test)]
+mod stream_identity_tests {
+    use super::{monogram_for, stream_identity};
+
+    /// A face belongs to a jam stream and to nothing else. A hardware device
+    /// and the jam *send* device both have to fall through to an icon, or the
+    /// port menu would put somebody's picture on an audio interface.
+    #[test]
+    fn only_a_jam_stream_has_a_person_behind_it() {
+        assert!(stream_identity("Focusrite USB ASIO").is_none());
+        assert!(stream_identity("jam-send").is_none());
+        // A jam device id with nobody in the room resolves to nobody, rather
+        // than to a half-built identity with an empty name.
+        assert!(stream_identity("jam:str_gone").is_none());
+    }
+
+    /// The monogram stands in for a picture that has not landed — or will never
+    /// land — so it has to be right for every shape of name the room can carry.
+    #[test]
+    fn a_monogram_is_at_most_two_characters_of_whoever_it_is() {
+        assert_eq!(monogram_for("Aria Kim"), "AK");
+        assert_eq!(monogram_for("Aria Mae Kim"), "AM");
+        assert_eq!(monogram_for("@nut"), "NU");
+        assert_eq!(monogram_for("nut"), "NU");
+        assert_eq!(monogram_for("x"), "X");
+        assert_eq!(monogram_for("  "), "");
+        for name in ["Aria Kim", "@nut", "n", ""] {
+            assert!(monogram_for(name).chars().count() <= 2, "{name}");
+        }
     }
 }

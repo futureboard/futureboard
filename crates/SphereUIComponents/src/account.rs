@@ -15,6 +15,7 @@
 //! provider ([`crate::edition`]) and stays behind the Professional Edition's
 //! verified license token.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -287,6 +288,88 @@ pub fn clear_account_avatar() {
     if let Ok(mut cache) = avatar_slot().write() {
         cache.url = None;
         cache.image = None;
+    }
+}
+
+// ── Other people's pictures ─────────────────────────────────────────────────
+//
+// The cache above holds exactly one picture, because the titlebar shows exactly
+// one account. A room full of performers needs many, so they live in a map
+// keyed by URL — same download, same decode, same "remember the failure too"
+// rule, and the same reason for existing: GPUI cannot fetch a URL itself
+// because this application installs no `HttpClient`.
+
+/// Ceiling on how many faces are held at once. A jam is people, not a feed;
+/// past this the oldest are simply not cached and re-download if they come
+/// back on screen.
+const PROFILE_PICTURE_CAPACITY: usize = 64;
+
+type PictureCache = RwLock<HashMap<String, Option<Arc<gpui::Image>>>>;
+
+fn picture_cache() -> &'static PictureCache {
+    static CACHE: OnceLock<PictureCache> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn pictures_in_flight() -> &'static RwLock<HashSet<String>> {
+    static FLIGHT: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+    FLIGHT.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// A cached picture for `url`, if one has been downloaded.
+///
+/// Never blocks and never starts work: this is read during render, once per
+/// row, so it has to be a map lookup and nothing else. Start the download with
+/// [`prefetch_profile_picture`].
+pub fn profile_picture(url: &str) -> Option<Arc<gpui::Image>> {
+    picture_cache().read().ok()?.get(url).cloned().flatten()
+}
+
+/// Start downloading `url` unless it is cached or already being fetched.
+///
+/// Returns immediately; the picture appears on the frame after it lands. A
+/// failure is cached as `None` against the URL so a broken link is requested
+/// once rather than on every paint.
+pub fn prefetch_profile_picture(url: &str) {
+    let url = url.trim();
+    if url.is_empty() || !url.starts_with("https://") {
+        return;
+    }
+    if let Ok(cache) = picture_cache().read() {
+        if cache.contains_key(url) {
+            return;
+        }
+        if cache.len() >= PROFILE_PICTURE_CAPACITY {
+            return;
+        }
+    }
+    {
+        let Ok(mut flight) = pictures_in_flight().write() else {
+            return;
+        };
+        if !flight.insert(url.to_string()) {
+            return;
+        }
+    }
+    let url = url.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("profile-picture".into())
+        .spawn({
+            let url = url.clone();
+            move || {
+                let fetched = download_avatar(&url).map(Arc::new);
+                if let Ok(mut cache) = picture_cache().write() {
+                    cache.insert(url.clone(), fetched);
+                }
+                if let Ok(mut flight) = pictures_in_flight().write() {
+                    flight.remove(&url);
+                }
+            }
+        });
+    if spawned.is_err() {
+        if let Ok(mut flight) = pictures_in_flight().write() {
+            flight.remove(&url);
+        }
     }
 }
 

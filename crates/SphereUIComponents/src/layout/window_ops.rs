@@ -261,6 +261,10 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::song_text_panel::SongTextWindow>>,
     pub lyric_editor:
         Option<gpui::WindowHandle<crate::components::song_text_panel::SongTextWindow>>,
+    /// Big Clock — the playhead in bars, large enough to read from the room.
+    pub big_clock: Option<gpui::WindowHandle<crate::components::clock_window::ClockWindow>>,
+    /// Timecode — the same playhead as SMPTE, for a session cut to picture.
+    pub timecode: Option<gpui::WindowHandle<crate::components::clock_window::ClockWindow>>,
 }
 
 impl StudioLayout {
@@ -940,6 +944,60 @@ impl StudioLayout {
                     Some(format!("Audio Connections window failed to open: {error}"));
             }
         }
+    }
+
+    /// Open a clock window, or bring the one already open to the front.
+    ///
+    /// Two windows rather than one with a switch: the two readings are watched
+    /// by different people at the same time, often on different monitors, and a
+    /// clock that has to be re-pointed is a clock somebody has to look away
+    /// from. They share one view — see [`crate::components::clock_window`] —
+    /// so the readings can never disagree about where the playhead is.
+    pub(crate) fn open_clock_window(
+        &mut self,
+        kind: crate::components::clock_window::ClockKind,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::components::clock_window::ClockKind;
+
+        let slot = match kind {
+            ClockKind::BigClock => &mut self.external_windows.big_clock,
+            ClockKind::Timecode => &mut self.external_windows.timecode,
+        };
+        if let Some(handle) = slot.clone() {
+            if handle
+                .update(cx, |_view, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            *slot = None;
+        }
+
+        let owner = cx.entity().clone();
+        let on_close: Arc<dyn Fn(ClockKind, &mut App) + Send + Sync> =
+            Arc::new(move |closed, app| {
+                let _ = owner.update(app, |layout, cx| {
+                    match closed {
+                        ClockKind::BigClock => layout.external_windows.big_clock = None,
+                        ClockKind::Timecode => layout.external_windows.timecode = None,
+                    }
+                    cx.notify();
+                });
+            });
+
+        match crate::components::clock_window::open_clock_window(
+            kind,
+            owner_bounds,
+            self.timeline.clone(),
+            on_close,
+            cx,
+        ) {
+            Ok(handle) => *slot = Some(handle),
+            Err(error) => eprintln!("[clock] failed to open {}: {error}", kind.title()),
+        }
+        cx.notify();
     }
 
     pub(crate) fn open_song_text_external_window(

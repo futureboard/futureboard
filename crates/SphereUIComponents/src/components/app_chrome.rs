@@ -1216,7 +1216,13 @@ fn report_bug_button(i18n: I18n) -> impl IntoElement {
 /// is a "Sign in" chip; signed in it shows only the compact avatar and opens
 /// the account menu. Reads the account snapshot fresh each render, so sign-in /
 /// sign-out reflect here without extra wiring.
-pub(crate) fn account_chip() -> Option<impl IntoElement> {
+///
+/// Public because it is not Studio's chip, it is *the* account control: the
+/// Welcome window draws it, and so does the standalone Audio Jam client, which
+/// needs an account before it can join anything at all. A second implementation
+/// of a sign-in affordance is how two surfaces end up disagreeing about who is
+/// signed in.
+pub fn account_chip() -> Option<impl IntoElement> {
     let snapshot = crate::account::current_account()?;
     let signed_in = snapshot.signed_in;
     let action = if signed_in {
@@ -1364,7 +1370,7 @@ const ACCOUNT_MENU_PRIORITY: usize = 130;
 /// `anchor_top` is the distance from that origin down to the bottom of the bar
 /// holding the chip; `anchor_right` is that bar's own right padding, so the
 /// menu lines up with the chip instead of the window edge.
-pub(crate) fn account_menu_overlay(
+pub fn account_menu_overlay(
     window: &gpui::Window,
     anchor_top: f32,
     anchor_right: f32,

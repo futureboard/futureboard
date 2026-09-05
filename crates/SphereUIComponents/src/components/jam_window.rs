@@ -1577,6 +1577,37 @@ fn default_jam_name() -> String {
 /// point of the value is that both rows use it.
 const QUALITY_LABEL_WIDTH: f32 = 44.0;
 
+/// Open the jam panel as an application's own root window.
+///
+/// The same view, with different chrome, and the difference is not cosmetic.
+/// Studio opens the panel as a dialog beside a project: not minimizable, no
+/// separate taskbar entry, parented to the window it belongs to — all correct
+/// for something that sits next to a document. A standalone client has no
+/// document to sit next to; it *is* the window. Minimizing it, finding it in
+/// the taskbar, and having it outlive nothing are ordinary expectations of an
+/// application, and a dialog satisfies none of them.
+pub fn open_jam_main_window(
+    handlers: JamWindowHandlers,
+    cx: &mut App,
+) -> Result<WindowHandle<JamWindow>, String> {
+    let mut options = crate::platform_chrome::studio_window_options();
+    // `studio_window_options` opens hidden so a heavy first layout cannot show
+    // a black client area. The jam panel's first frame is a header and a list;
+    // there is nothing to hide behind, and staying hidden would look like a
+    // launch that did nothing.
+    options.show = true;
+    options.window_bounds = Some(WindowBounds::Windowed(centered_window_bounds(
+        cx.primary_display().map(|display| display.bounds()),
+        size(px(JAM_WINDOW_WIDTH), px(JAM_WINDOW_HEIGHT)),
+        cx,
+    )));
+
+    cx.open_window(options, move |_window, cx| {
+        cx.new(|cx| JamWindow::new(handlers, cx))
+    })
+    .map_err(|error| error.to_string())
+}
+
 pub fn open_jam_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     handlers: JamWindowHandlers,
@@ -1611,6 +1642,7 @@ mod tests {
             device_id: "studio-mac".to_string(),
             handle: handle.to_string(),
             display_name: display.to_string(),
+            avatar_url: String::new(),
             stream_name: name.to_string(),
             channels: 2,
             channel_labels: vec!["L".to_string(), "R".to_string()],
@@ -1707,6 +1739,7 @@ mod flow_visibility_tests {
             device_id: "studio".to_string(),
             handle: "@nut".to_string(),
             display_name: "Nut".to_string(),
+            avatar_url: String::new(),
             stream_name: "Guitar".to_string(),
             channels: 2,
             channel_labels: Vec::new(),
@@ -1766,5 +1799,59 @@ mod flow_visibility_tests {
             ..stream()
         };
         assert!(stream_health(&nothing_works).contains("Not routed"));
+    }
+}
+
+#[cfg(test)]
+mod standalone_chrome_tests {
+    /// This file's implementation, with the test modules stripped off, so a scan
+    /// for banned constructs cannot match its own assertion literals.
+    fn implementation_source() -> &'static str {
+        let source = include_str!("jam_window.rs");
+        source
+            .split_once("#[cfg(test)]")
+            .map(|(implementation, _)| implementation)
+            .expect("this file has a test module")
+    }
+
+    /// The standalone client's root window is an application window, not a
+    /// dialog. A dialog cannot be minimized, gets no taskbar entry of its own,
+    /// and on Windows is parented to an owner — all correct for a panel beside
+    /// a project, all wrong for the only window an application has.
+    #[test]
+    fn the_standalone_root_window_is_an_application_window() {
+        let source = implementation_source();
+        let (_, from_opener) = source
+            .split_once("pub fn open_jam_main_window")
+            .expect("the root-window opener");
+        let (opener, _) = from_opener
+            .split_once("pub fn open_jam_window")
+            .expect("the dialog opener follows it");
+
+        assert!(
+            opener.contains("studio_window_options"),
+            "the root window must take the ordinary application chrome"
+        );
+        assert!(
+            !opener.contains("external_dialog_window_options_partial"),
+            "a dialog is not an application window"
+        );
+        assert!(
+            opener.contains("options.show = true"),
+            "a launch that stays hidden reads as a launch that did nothing"
+        );
+    }
+
+    /// Both openers build the same view. If they ever stop, the standalone
+    /// client has quietly become a second implementation of the panel — which
+    /// is the one thing it exists not to be.
+    #[test]
+    fn both_openers_build_the_same_panel() {
+        let source = implementation_source();
+        let constructions = source.matches("JamWindow::new(handlers, cx)").count();
+        assert_eq!(
+            constructions, 2,
+            "the dialog and the root window must construct one and the same view"
+        );
     }
 }

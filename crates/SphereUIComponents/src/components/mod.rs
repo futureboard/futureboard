@@ -14,6 +14,7 @@ pub mod builtin_plugin_editor;
 pub(crate) mod builtin_plugin_editor_surface;
 pub mod builtin_plugin_editor_window;
 pub mod builtin_plugin_files;
+pub mod clock_window;
 pub mod color_picker;
 pub mod combo_box;
 pub mod command_palette;
@@ -101,9 +102,10 @@ pub use add_track_dialog::{
     AddTrackWindow,
 };
 pub use app_chrome::{
-    app_chrome, app_chrome_drawn_height, bpm_debug_enabled, bpm_drag_sensitivity, BpmChangeCb,
-    BpmDragCb, BpmDragSample, BpmMenuCb, ChromeActionCb, PanelChromeState, ProjectChromeState,
-    TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX, BPM_MIN,
+    account_chip, account_menu_overlay, app_chrome, app_chrome_drawn_height, bpm_debug_enabled,
+    bpm_drag_sensitivity, BpmChangeCb, BpmDragCb, BpmDragSample, BpmMenuCb, ChromeActionCb,
+    PanelChromeState, ProjectChromeState, TransportChromeState, BPM_DRAG_DEADZONE_PX, BPM_MAX,
+    BPM_MIN,
 };
 pub use ara_editor_host::AraEditorHost;
 pub use audio_editor_host::AudioEditorHost;

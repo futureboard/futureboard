@@ -131,9 +131,11 @@ impl InsertPickerWindow {
             && !mods.platform
             && !mods.function
         {
+            crate::components::transport_key::claim_space_key_up();
             let _ = self.owner.update(cx, |layout, cx| {
                 layout.dispatch_command_id("transport:play-pause", cx);
             });
+            window.prevent_default();
             cx.stop_propagation();
         }
         if finished {
@@ -405,6 +407,17 @@ impl Render for InsertPickerWindow {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.handle_key(event, window, cx)
             }))
+            // The transport key's key-up belongs to the transport, not to the
+            // focused row or button GPUI would otherwise click with it. See
+            // `transport_key::claim_space_key_up`.
+            .capture_key_up(
+                |_event: &gpui::KeyUpEvent, window: &mut Window, cx: &mut gpui::App| {
+                    if crate::components::transport_key::take_space_key_up_claim() {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                },
+            )
             .child(external_window_titlebar(
                 "Add Insert",
                 "insert-picker-close",

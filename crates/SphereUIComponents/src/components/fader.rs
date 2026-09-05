@@ -23,11 +23,16 @@ use crate::theme::Colors;
 /// Minimum recommended rail travel height. The fader will still render at
 /// smaller heights, but below this the dB labels start to crowd.
 pub const FADER_TRACK_HEIGHT: f32 = 130.0;
-pub const FADER_THUMB_HEIGHT: f32 = 10.0;
-const RAIL_CENTER_X: f32 = 12.0;
-const RAIL_W: f32 = 2.0;
-const THUMB_W: f32 = 22.0;
-const ACCENT_LINE_H: f32 = 2.0;
+/// Cap height. Tall enough to be a grip and to leave the grip line room to sit
+/// centred in it; every travel calculation is inset by half of this.
+pub const FADER_THUMB_HEIGHT: f32 = 14.0;
+pub const FADER_THUMB_WIDTH: f32 = 24.0;
+/// Total width of the fader element — the cap, plus the tick tape beside the
+/// groove, plus a little slack so a drag can wander horizontally.
+const FADER_RAIL_W: f32 = 26.0;
+const GROOVE_CENTER_X: f32 = 16.0;
+const GROOVE_W: f32 = 5.0;
+const GRIP_LINE_H: f32 = 2.0;
 const HORIZONTAL_FADER_HEIGHT: f32 = 24.0;
 const HORIZONTAL_THUMB_W: f32 = 10.0;
 const HORIZONTAL_THUMB_H: f32 = 22.0;
@@ -167,90 +172,112 @@ pub fn db_scale_column() -> gpui::Div {
     col
 }
 
-/// Render the vertical rail + ticks + thumb at `value_norm`.
-fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
+/// Render the console fader: a recessed groove, a scale of ticks beside it,
+/// and a cap at `value_norm`.
+///
+/// The cap is the point of this shape. A slim thumb on a rail reads as a
+/// slider — a value being set — and a mixer fader is a thing the hand rests on
+/// and rides. So it is wide, light, and physically proportioned: 24 px across a
+/// 5 px groove, with the grip line the finger is meant to find and a shadowed
+/// bottom edge so it sits *on* the strip rather than in it.
+///
+/// The ticks live to the left of the groove and carry no numbers. The number
+/// that matters is the channel's dB readout under the bay, printed once at a
+/// size worth reading; eight labelled ticks beside every strip is the same
+/// number said eight times in type too small to be said well.
+fn fader_rail(value_norm: f32) -> gpui::Div {
     let value = value_norm.clamp(0.0, 1.0);
-
-    let thumb_accent = Colors::with_alpha(accent, 0.9); // Approved: dynamic accent thumb outline
 
     let top_basis = (1.0 - value).clamp(0.0, 1.0);
     let bot_basis = value.clamp(0.0, 1.0);
 
     let mut col = div()
         .relative()
-        .w(px(24.0))
+        .w(px(FADER_RAIL_W))
         .h_full()
         .flex()
         .flex_col()
         .items_center();
 
-    // Background rail (absolute, layered).
+    // The groove, inset by half a cap at each end so the cap's travel stops
+    // flush with the bay rather than hanging off it.
     col = col.child(
         div()
             .absolute()
             .top(px(FADER_THUMB_HEIGHT / 2.0))
             .bottom(px(FADER_THUMB_HEIGHT / 2.0))
-            .left(px(RAIL_CENTER_X - RAIL_W / 2.0))
-            .w(px(RAIL_W))
-            .bg(Colors::fader_rail())
+            .left(px(GROOVE_CENTER_X - GROOVE_W / 2.0))
+            .w(px(GROOVE_W))
+            .rounded(px(crate::theme::radius::MICRO))
+            .bg(Colors::fader_groove())
             .border(px(1.0))
-            .border_color(Colors::fader_groove())
-            .rounded(px(crate::theme::radius::PILL)),
+            .border_color(Colors::fader_rail()),
     );
 
-    // Tick marks (absolute, layered) at fractional positions on the rail.
+    // Scale ticks, left of the groove. Unity and the top of the range are the
+    // two the eye returns to, so they are longer and brighter; the rest are
+    // there to make the tape read as continuous.
     for &(db, _, _) in SCALE_MARKS.iter() {
         let pct = db_to_top_fraction(db);
-        let w = if db == 0.0 || db == volume::MAX_DB {
-            14.0_f32
-        } else {
-            9.0_f32
-        };
-        let left = RAIL_CENTER_X - w / 2.0;
+        let anchor = db == 0.0 || db == volume::MAX_DB;
+        let w = if anchor { 8.0_f32 } else { 5.0_f32 };
         col = col.child(
             div()
                 .absolute()
                 .top(relative(pct))
-                .left(px(left))
+                .left(px(GROOVE_CENTER_X - GROOVE_W / 2.0 - 2.0 - w))
                 .h(px(1.0))
                 .w(px(w))
-                .bg(if db == 0.0 || db == volume::MAX_DB {
+                .bg(if anchor {
                     Colors::fader_tick()
                 } else {
-                    Colors::with_alpha(Colors::fader_tick(), 0.3) // Approved: minor tick marks alpha
+                    Colors::with_alpha(Colors::fader_tick(), 0.45)
                 }),
         );
     }
 
-    // Flex flow: top spacer / thumb / bot spacer.
+    // Flex flow: top spacer / cap / bottom spacer. Sizing the spacers by the
+    // value keeps the cap on the groove at any bay height, which is what lets
+    // the mixer's fader travel grow with the panel.
     col.child(div().w(px(0.0)).flex_basis(relative(top_basis)))
         .child(
             div()
                 .flex_none()
-                .w(px(THUMB_W))
+                .w(px(FADER_THUMB_WIDTH))
                 .h(px(FADER_THUMB_HEIGHT))
-                .rounded(px(crate::theme::radius::CONTROL))
-                .bg(Colors::surface_input())
-                .border(px(1.0))
-                .border_color(Colors::fader_thumb_border())
+                .rounded(px(crate::theme::radius::MICRO))
+                .bg(Colors::fader_thumb())
                 .relative()
+                // Top highlight and bottom shadow: two hairlines are the whole
+                // difference between a rectangle and a moulded cap.
                 .child(
                     div()
                         .absolute()
-                        .top(px(1.0))
+                        .top(px(0.0))
                         .left(px(1.0))
                         .right(px(1.0))
                         .h(px(1.0))
-                        .bg(Colors::with_alpha(Colors::text_primary(), 0.15)), // Approved: thumb top highlight
+                        .bg(Colors::with_alpha(gpui::white().into(), 0.45)),
                 )
                 .child(
                     div()
                         .absolute()
-                        .top(px((FADER_THUMB_HEIGHT - ACCENT_LINE_H) / 2.0))
-                        .left(px(2.0))
-                        .right(px(2.0))
-                        .h(px(ACCENT_LINE_H))
-                        .bg(thumb_accent),
+                        .bottom(px(0.0))
+                        .left(px(1.0))
+                        .right(px(1.0))
+                        .h(px(1.0))
+                        .bg(Colors::with_alpha(gpui::black().into(), 0.35)),
+                )
+                // The grip line, dead centre — this is the row the pointer is
+                // aligning to and the row the value is read against.
+                .child(
+                    div()
+                        .absolute()
+                        .top(px((FADER_THUMB_HEIGHT - GRIP_LINE_H) / 2.0))
+                        .left(px(3.0))
+                        .right(px(3.0))
+                        .h(px(GRIP_LINE_H))
+                        .bg(Colors::with_alpha(gpui::black().into(), 0.45)),
                 ),
         )
         .child(div().w(px(0.0)).flex_basis(relative(bot_basis)))
@@ -387,13 +414,11 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
 pub fn fader(
     id: impl Into<gpui::SharedString>,
     value_norm: f32,
-    accent: gpui::Rgba,
     on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     fader_with_drag_callbacks(
         id,
         value_norm,
-        accent,
         None::<fn(&f32, &mut Window, &mut App)>,
         Some(on_change),
         None::<fn(&mut Window, &mut App)>,
@@ -404,7 +429,6 @@ pub fn fader(
 pub fn fader_with_drag_callbacks(
     id: impl Into<gpui::SharedString>,
     value_norm: f32,
-    accent: gpui::Rgba,
     on_drag_start: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
     on_drag_preview: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
     on_drag_commit: Option<impl Fn(&mut Window, &mut App) + 'static>,
@@ -418,14 +442,14 @@ pub fn fader_with_drag_callbacks(
         .id(gpui::ElementId::Name(id_str.clone()))
         // Hit area: rail width + horizontal slack so users can wander
         // horizontally without losing the drag.
-        .w(px(28.0))
+        .w(px(FADER_RAIL_W))
         .h_full()
         .relative()
         .cursor(gpui::CursorStyle::ResizeUpDown)
         .flex()
         .flex_row()
         .justify_center()
-        .child(fader_rail(value, accent))
+        .child(fader_rail(value))
         .on_drag(
             FaderDrag {
                 id: id_string.clone(),

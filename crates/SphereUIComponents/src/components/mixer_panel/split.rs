@@ -1,21 +1,22 @@
 use gpui::{App, Empty, IntoElement, Render, Window};
 
 // ── Section dimensions ─────────────────────────────────────────────────────
+//
+// The per-section heights themselves live in [`super::console`], which owns the
+// look; what lives here is what the splitter arithmetic needs — the strip's
+// overall bounds and the fixed height it must leave alone.
 pub const STRIP_WIDTH: f32 = 88.0;
 /// Minimum height for a channel strip. Below this the mixer should scroll/clip
 /// as a whole rather than compressing the pan/fader controls into unusability.
 pub const STRIP_MIN_HEIGHT: f32 = 320.0;
 
-pub(crate) const SEC_HEADER_H: f32 = 40.0;
-pub(crate) const SEC_SECTION_HEADER_H: f32 = 20.0;
-pub(crate) const SEC_PAN_H: f32 = 60.0;
-/// Two compact control rows: four channel-state buttons (M/S/R/I) above two
-/// wider listen-tap buttons (PFL/AFL). This keeps the long listen labels clear
-/// while preserving the narrow 88px mixer strip.
-pub(crate) const SEC_BUTTONS_H: f32 = 40.0;
-pub(crate) const SEC_FOOTER_H: f32 = 22.0;
-pub(crate) const SEC_FADER_MIN_H: f32 = 66.0;
-pub(crate) const LOWER_CONTROL_MIN_H: f32 = SEC_PAN_H + SEC_FADER_MIN_H + SEC_BUTTONS_H;
+/// Everything below the racks: I/O, pan, the fader bay at its floor, and the
+/// toggle row. Fixed on every strip, which is what keeps the four kinds of
+/// strip on one set of baselines.
+pub(crate) const LOWER_CONTROL_MIN_H: f32 = super::console::IO_ROW_H
+    + super::console::PAN_H
+    + super::console::FADER_MIN_H
+    + super::console::BUTTONS_H;
 
 // ── Vertical mixer section resizing ─────────────────────────────────────────
 // Inserts and sends each own a fixed-height clipped viewport with their own
@@ -51,8 +52,12 @@ pub fn clamp_mixer_section_heights_for_strip(
 ) -> (f32, f32) {
     let mut insert_px = clamp_mixer_section_height_px(insert_px);
     let mut send_px = clamp_mixer_section_height_px(send_px);
-    let fixed_without_sections =
-        2.0 + SEC_HEADER_H + (SEC_SPLITTER_H * 2.0) + LOWER_CONTROL_MIN_H + SEC_FOOTER_H;
+    // Everything the two racks may never eat into: the type row, both splitter
+    // handles, the lower console, and the name plate.
+    let fixed_without_sections = super::console::TOP_ROW_H
+        + (SEC_SPLITTER_H * 2.0)
+        + LOWER_CONTROL_MIN_H
+        + super::console::PLATE_H;
     let max_total = (strip_available_px - fixed_without_sections).max(SECTION_VIEWPORT_MIN_H * 2.0);
 
     let total = insert_px + send_px;

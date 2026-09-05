@@ -249,9 +249,12 @@ pub fn dropdown_height(option_count: usize) -> f32 {
 /// Analogue 3 + 4" in a 110 px port column), so the list read as cropped.
 pub fn dropdown_width(longest_label_chars: usize, anchor_width: f32, viewport_width: f32) -> f32 {
     // 10.5 px UI text averages ~6.3 px per glyph; padding, the check mark and
-    // its gap make up the rest.
+    // its gap make up the rest — plus the leading icon/avatar column every row
+    // now carries, which would otherwise be taken out of the label's width and
+    // truncate exactly the endpoint names this function exists to show whole.
     const GLYPH: f32 = 6.3;
-    const CHROME: f32 = DROPDOWN_PADDING + 16.0 + 8.0 + 11.0 + 6.0;
+    const LEADING_ICON: f32 = 14.0 + 7.0;
+    const CHROME: f32 = DROPDOWN_PADDING + 16.0 + 8.0 + 11.0 + 6.0 + LEADING_ICON;
     let wanted = longest_label_chars as f32 * GLYPH + CHROME;
     let max = (viewport_width - 12.0).max(anchor_width.min(viewport_width));
     wanted.max(anchor_width).min(max)

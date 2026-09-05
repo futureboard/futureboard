@@ -7,6 +7,8 @@
 //!   editions must build into separate target directories).
 //! * `package` — build `FutureboardNative` and stage a clean, runnable
 //!   application tree into `out/`, separate from the Cargo `target/` cache.
+//! * `jam` — the same for `FutureboardJam`, the standalone Audio Jam client.
+//!   A much smaller package: one executable, no CEF, no sidecars, no editions.
 //!
 //! Packaging deliberately lives here, not in `build.rs`: `build.rs` runs inside
 //! every compilation and must stay hermetic, whereas packaging is an explicit,
@@ -14,6 +16,7 @@
 
 mod cargo_build;
 mod cef;
+mod jam;
 mod metadata;
 mod package;
 mod platform;
@@ -62,6 +65,32 @@ enum XtaskCommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Build and stage the standalone Audio Jam client (`FutureboardJam`).
+    Jam(JamArgs),
+}
+
+#[derive(clap::Args)]
+struct JamArgs {
+    /// Cargo profile to build (e.g. `dev`, `release`).
+    #[arg(long, default_value = "dev")]
+    profile: String,
+
+    /// Cargo target triple (defaults to the host target).
+    #[arg(long)]
+    target: Option<String>,
+
+    /// Root output directory for staged packages.
+    #[arg(long, default_value = "out")]
+    out: PathBuf,
+
+    /// Also copy debug symbols (`.pdb`) into a `symbols/` directory.
+    #[arg(long)]
+    symbols: bool,
+
+    /// Compile only; do not stage anything into `out/`.
+    #[arg(long)]
+    build_only: bool,
 }
 
 #[derive(clap::Args)]
@@ -112,7 +141,33 @@ fn main() -> ExitCode {
         Some(XtaskCommand::CheckAll { args }) => {
             run_aliases(&["check-ce", "check-professional-win"], &args)
         }
+        Some(XtaskCommand::Jam(args)) => run_jam(args),
         None => run_package(cli.package),
+    }
+}
+
+fn run_jam(args: JamArgs) -> ExitCode {
+    let options = jam::JamOptions {
+        profile: args.profile,
+        target: args.target,
+        out_root: args.out,
+        symbols: args.symbols,
+        build_only: args.build_only,
+    };
+    let building_only = options.build_only;
+    match jam::run(&options) {
+        Ok(path) => {
+            if building_only {
+                println!("Built {}", path.display());
+            } else {
+                println!("Packaged into {}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-08-10T02:56:47.644Z",
+  "generatedAt": "2026-09-05T07:15:13.689Z",
   "menus": [
     {
       "id": "file",
@@ -1156,6 +1156,21 @@
           "children": []
         },
         {
+          "id": "window.show_bottom_panel",
+          "kind": "checkbox",
+          "label": "Show Bottom Panel",
+          "icon": "panel-bottom",
+          "shortcut": null,
+          "command": "panel:toggle-bottom",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": true,
+          "danger": false,
+          "description": "Show or hide the bottom dock itself, whichever tab is in it",
+          "children": []
+        },
+        {
           "id": "window.float_mixer",
           "kind": "normal",
           "label": "Open Mixer in Window",
@@ -1168,6 +1183,21 @@
           "checked": false,
           "danger": false,
           "description": null,
+          "children": []
+        },
+        {
+          "id": "window.routing_matrix",
+          "kind": "normal",
+          "label": "Routing Matrix",
+          "icon": "route",
+          "shortcut": null,
+          "command": "floatingwindow:routing-matrix",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Cross-point grid of every track against Main, the buses and the returns, for toggling sends",
           "children": []
         },
         {
@@ -1198,6 +1228,42 @@
           "checked": false,
           "danger": false,
           "description": "Play with other Futureboard accounts over the network, and route their streams to tracks",
+          "children": []
+        },
+        {
+          "id": "window.sep.clocks",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "window.big_clock",
+          "kind": "normal",
+          "label": "Big Clock",
+          "icon": "clock",
+          "shortcut": null,
+          "command": "window:big-clock",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "The playhead in bars and beats, large enough to read from across the room",
+          "children": []
+        },
+        {
+          "id": "window.timecode",
+          "kind": "normal",
+          "label": "Timecode",
+          "icon": "timer",
+          "shortcut": null,
+          "command": "window:timecode",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "The same clock led by SMPTE timecode, at 24, 25, 29.97 DF or 30 fps",
           "children": []
         },
         {

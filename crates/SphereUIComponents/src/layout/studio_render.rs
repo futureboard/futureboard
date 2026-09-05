@@ -323,6 +323,10 @@ impl Render for StudioLayout {
                                 // — not merely when the dock happens to be open
                                 // on some other tab.
                                 ("window.show_mixer", self.mixer_panel_chrome_visible()),
+                                // The dock itself, not the tab in it: this is
+                                // ticked whenever the bottom panel is docked
+                                // open, whatever it happens to be showing.
+                                ("window.show_bottom_panel", self.panels.bottom_docked),
                                 (
                                     "view.developer.perf_metrics",
                                     perf.show_status_performance_metrics,
@@ -902,6 +906,12 @@ impl Render for StudioLayout {
             })
             .capture_key_down(move |event, window, cx| {
                 let modifiers = event.keystroke.modifiers;
+                if !event.is_held {
+                    // A fresh press: nothing from the last one is still owed a
+                    // key-up. Repeats are left alone — the key-up of a held
+                    // Space still belongs to whoever claimed the press.
+                    crate::components::transport_key::forget_space_key_up();
+                }
                 if event.keystroke.key.eq_ignore_ascii_case("tab")
                     && !modifiers.control
                     && !modifiers.alt
@@ -1097,6 +1107,33 @@ impl Render for StudioLayout {
                         }
                         return;
                     }
+                    if is_transport {
+                        // The transport owns this key, so nothing downstream may
+                        // also act on it. Both halves matter: `prevent_default`
+                        // and `stop_propagation` keep the key-down off any
+                        // focused control, and the claim does the same for the
+                        // key-up, which GPUI would otherwise turn into a click on
+                        // whatever the mouse focused last — the Play or Record
+                        // button, for a transport shortcut.
+                        if event.keystroke.key.eq_ignore_ascii_case("space") {
+                            crate::components::transport_key::claim_space_key_up();
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        // Auto-repeat is one press, one command: the transport
+                        // commands are toggles and jumps, and replaying them at
+                        // the repeat rate is how a held key ends up starting
+                        // playback it just stopped. Matches the Win32 claim path,
+                        // which drops repeats on the same grounds.
+                        if event.is_held {
+                            if key_debug() {
+                                eprintln!(
+                                    "[key] ignored command={command_id} reason=auto-repeat"
+                                );
+                            }
+                            return;
+                        }
+                    }
                     if is_tap_tempo_command(&normalize_command_id(&command_id))
                         && shortcut_keydown_target
                             .read(cx)
@@ -1147,6 +1184,7 @@ impl Render for StudioLayout {
                             "[key] dispatched command=transport:play-pause reason=spacebar-fallback"
                         );
                     }
+                    crate::components::transport_key::claim_space_key_up();
                     window.prevent_default();
                     cx.stop_propagation();
                     let _ = shortcut_keydown_target.update(cx, |this, cx| {
@@ -1187,6 +1225,19 @@ impl Render for StudioLayout {
                             cx.stop_propagation();
                         }
                         return;
+                    }
+                    // The key-down routed this Space to the transport, so the
+                    // key-up is spoken for as well. Left alone, GPUI fires the
+                    // focused element's click listeners on it, and a Play or
+                    // Record button focused by an earlier mouse click is pressed
+                    // again the instant the key comes back up — Space pausing and
+                    // then immediately restarting from one press.
+                    if crate::components::transport_key::take_space_key_up_claim() {
+                        if key_debug() {
+                            eprintln!("[key] swallowed key-up key=space reason=transport-key");
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
                     }
                 }
             })

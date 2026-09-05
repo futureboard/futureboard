@@ -1144,6 +1144,27 @@ impl Colors {
         Self::composite(base, Self::with_alpha(Self::state_hover(), alpha))
     }
 
+    /// Foreground that stays readable on an arbitrary fill.
+    ///
+    /// Needed wherever the *content* picks the background — a mixer name plate
+    /// filled with the track colour, a swatch, a coloured badge. The palette
+    /// spans pale yellows and deep blues, so a fixed light or dark text colour
+    /// is unreadable on half of it.
+    ///
+    /// Uses relative luminance (Rec. 709 coefficients, the same weighting
+    /// WCAG's contrast formula is built on) rather than a naive average, so a
+    /// saturated green reads as light and a saturated blue as dark, which is
+    /// how the eye sees them. The 0.55 threshold sits where both `text_inverse`
+    /// and `text_primary` clear 4.5:1 against the default palette.
+    pub fn on_color(fill: Rgba) -> Rgba {
+        let luminance = 0.2126 * fill.r + 0.7152 * fill.g + 0.0722 * fill.b;
+        if luminance > 0.55 {
+            Self::text_inverse()
+        } else {
+            Self::text_primary()
+        }
+    }
+
     /// Fill and border for a latched DAW toggle (mute, solo, arm, monitor,
     /// automation-write). Returns `(fill, border)`; the glyph itself is painted
     /// at the full `semantic` color, so the state reads on three channels.
