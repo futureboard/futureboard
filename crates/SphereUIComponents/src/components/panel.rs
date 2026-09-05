@@ -193,14 +193,6 @@ pub struct InspectorCallbacks {
     pub on_open_soundfont_player: StrCb,
     pub open_routing_combo: Option<InspectorRoutingCombo>,
     pub on_toggle_routing_combo: RoutingComboToggleCb,
-    /// Sections the user has folded, by the stable id `section_card` is given.
-    ///
-    /// Held by the owner rather than by the panel because the panel is rebuilt
-    /// from scratch on every selection change, and a fold that forgets itself
-    /// the moment you click another track is a fold nobody would use.
-    pub collapsed_sections: std::collections::HashSet<String>,
-    /// Folds or unfolds one section, by that same id.
-    pub on_toggle_section: StrCb,
 }
 
 /// Width of the docked Inspector column. Mirrors the constant in
@@ -628,28 +620,22 @@ fn format_pan(i18n: I18n, pan: f32) -> String {
 }
 
 /// Clickable M/S/R/I-style state badge.
-/// A collapsible inspector card.
+/// An inspector card.
 ///
-/// `id` is the section's stable name, which is also the key the collapsed set
-/// is stored under — so a section stays folded across selections and restarts
-/// rather than springing open every time the panel rebuilds.
+/// `id` is the section's stable name. It carries no control of its own: the
+/// header is a title and a rule, and the rule is what ties a long stack of
+/// cards together for the eye. A switch there had nothing to switch — the
+/// sections are short and all of them want to be visible at once — so it was a
+/// control whose only effect was to hide something the user had just gone
+/// looking for.
 fn section_card(
     id: &'static str,
     title: impl Into<String>,
-    callbacks: &InspectorCallbacks,
+    _callbacks: &InspectorCallbacks,
     body: impl IntoElement,
 ) -> impl IntoElement {
-    let expanded = !callbacks.collapsed_sections.contains(id);
-    let toggle = callbacks.on_toggle_section.clone();
-    inspector_kit::ins_card(
-        title,
-        Some(inspector_kit::InsCardSwitch {
-            id: gpui::ElementId::Name(format!("inspector-section-{id}").into()),
-            on: expanded,
-            on_toggle: std::sync::Arc::new(move |w, cx| toggle(&id.to_string(), w, cx)),
-        }),
-        body,
-    )
+    let _ = id;
+    inspector_kit::ins_card(title, body)
 }
 
 /// A stack of rows, for a card body built up one child at a time.
@@ -2401,7 +2387,7 @@ fn track_inspector(
 /// sections that all fit at once, so a switch on each would be a control with
 /// nothing to gain by pressing it.
 fn inspector_section(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {
-    inspector_kit::ins_card(label, None, child)
+    inspector_kit::ins_card(label, child)
 }
 
 fn compact_property_row(label: impl Into<String>, child: impl IntoElement) -> impl IntoElement {

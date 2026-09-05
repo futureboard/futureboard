@@ -684,6 +684,26 @@ impl AudioEngine {
         self.inner.set_metronome_enabled(enabled)
     }
 
+    /// Begin an audible record count-in at the tempo of `target_beat`. See
+    /// [`crate::engine::EngineInner::start_count_in`].
+    pub fn start_count_in(
+        &self,
+        beats: u32,
+        beats_per_bar: u32,
+        target_beat: f64,
+    ) -> Result<(), SphereAudioError> {
+        self.inner.start_count_in(beats, beats_per_bar, target_beat)
+    }
+
+    pub fn cancel_count_in(&self) -> Result<(), SphereAudioError> {
+        self.inner.cancel_count_in()
+    }
+
+    /// Samples left in the count-in; `0` when none is running.
+    pub fn count_in_remaining_samples(&self) -> u64 {
+        self.inner.count_in_remaining_samples()
+    }
+
     /// Click level (the persisted 0..1 control position, where the 0.8 default
     /// is unity) and timbre label ("Woodblock" / "Beep") from Settings.
     pub fn set_metronome_voice(

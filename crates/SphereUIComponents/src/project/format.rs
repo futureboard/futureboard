@@ -6,10 +6,11 @@ use super::{
     ProjectAudioConnection, ProjectAudioPortBinding, ProjectClip, ProjectInsert,
     ProjectLyricSyllable, ProjectLyricSyllableMode, ProjectMixer, ProjectPluginInstance,
     ProjectSend, ProjectSolfegeEngine, ProjectSolfegeLane, ProjectSongSectionType,
-    ProjectSongTextEvent, ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTempoPoint,
-    ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat,
-    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, SoundfontEnvelope,
-    SoundfontRenderQuality, TrackRouting, V33TrackInputRouting,
+    ProjectSongTextEvent, ProjectSongTextEventKind, ProjectSoundfontPlayer, ProjectTake,
+    ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack,
+    ProjectTrackAudioFormat, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
+    ProjectTrackType, SoundfontEnvelope, SoundfontRenderQuality, TrackRouting,
+    V33TrackInputRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -63,7 +64,7 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v30 adds arrangement group membership; v31 persists folder collapse state;
 /// v32 persists each track's volume-automation read/bypass state.
 /// v33 adds the reference Video track (track type tag 7) and the video clip
-/// source (clip source tag 4), which stores only the asset id and source path —
+/// source (clip source tag 4), which stores only the asset id and source path â
 /// frames are always decoded from the file, never persisted. Pre-v33 projects
 /// have no Video track, which is exactly what they had before the type existed.
 /// v34 splits the combined per-track input union into an audio Audio Connection
@@ -80,21 +81,21 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// is positional and a v34 file simply ends after the registry, so appending
 /// fields under the same version number would leave the decoder guessing whether
 /// trailing bytes are absent or truncated. A v34 file must decode as v34, with
-/// no output routing and the bootstrap latch clear — which is exactly what makes
+/// no output routing and the bootstrap latch clear â which is exactly what makes
 /// the compatibility bootstrap run once for it.
 /// v39 appends per-note musical accent: five normalised components and a
 /// provenance tag, written as an optional block after the pitch curve. A v38
 /// file loads with no accent on any note, which is exactly the state it was
-/// saved in — and "no accent" is a distinct state from "neutral accent", so
+/// saved in â and "no accent" is a distinct state from "neutral accent", so
 /// re-analysis treats a pre-v39 project as never analysed rather than as
 /// analysed-and-found-flat.
-/// v40 appends the conductor lanes' fold state — four collapse latches and five
-/// dragged heights — after the output routing. A v39 file loads with every lane
+/// v40 appends the conductor lanes' fold state â four collapse latches and five
+/// dragged heights â after the output routing. A v39 file loads with every lane
 /// expanded at its default height, which is the state it was saved in, since
 /// that is what v39 always restored.
 /// v41 appended each clip's ARA binding after its stretch block, and the ARA
 /// document archives after the conductor lanes. A v40 file loads with no ARA at
-/// all — the state it was saved in, since v40 could not express a binding.
+/// all â the state it was saved in, since v40 could not express a binding.
 /// v42 moves the binding from the clip to the track, where it belongs: ARA is a
 /// track processor like an insert, and every audio clip on the track becomes one
 /// of its playback regions. The v41 per-clip byte is still read and discarded so
@@ -102,7 +103,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// closest honest answer, since a v41 file could bind individual clips to
 /// different plug-ins and a track can only carry one.
 /// v43 adds the project timebase (display format + timecode frame rate).
-pub const PROJECT_VERSION: u32 = 43;
+/// v44 adds per-track recorded takes. A take names one of the track's own
+/// clips, so the audio is not duplicated — only the record of which pass made
+/// it and whether it is the one heard.
+pub const PROJECT_VERSION: u32 = 44;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -195,7 +199,7 @@ impl From<io::Error> for ProjectError {
     }
 }
 
-// ── Low-level writer ──────────────────────────────────────────────────────────
+// ââ Low-level writer ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 pub struct FbWriter {
     buf: Vec<u8>,
@@ -318,7 +322,7 @@ impl FbWriter {
     }
 }
 
-// ── Low-level reader ──────────────────────────────────────────────────────────
+// ââ Low-level reader ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 pub struct FbReader<'a> {
     cur: Cursor<&'a [u8]>,
@@ -465,7 +469,7 @@ impl<'a> FbReader<'a> {
     }
 }
 
-// ── Encoding ──────────────────────────────────────────────────────────────────
+// ââ Encoding ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 fn encode_plugin_format(w: &mut FbWriter, f: PluginFormat) {
     w.write_u8(match f {
@@ -763,7 +767,7 @@ fn encode_track_type(w: &mut FbWriter, t: ProjectTrackType) {
     });
 }
 
-/// **v33 encoder — legacy compatibility only.** v34 saves never call this;
+/// **v33 encoder â legacy compatibility only.** v34 saves never call this;
 /// it exists for the legacy fixtures and round-trip tests.
 #[cfg(test)]
 fn encode_track_input_routing(w: &mut FbWriter, input: &V33TrackInputRouting) {
@@ -851,7 +855,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     w.write_bool(t.solo);
     w.write_bool(t.record_arm);
     encode_input_monitor(w, t.input_monitor);
-    // routing — v34 stores the audio input as a logical Audio Connection id.
+    // routing â v34 stores the audio input as a logical Audio Connection id.
     // The legacy combined union is never written by this encoder.
     w.write_opt_str(&t.routing.audio_input_connection_id);
     encode_track_output_routing(w, &t.routing.output);
@@ -888,7 +892,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     encode_soundfont_player(w, t.soundfont.as_ref()); // v28
     w.write_bool(t.volume_automation_read); // v32
     encode_solfege_engine(w, t.solfege.as_ref()); // v37
-                                                  // v42: the track's ARA plug-in. Identity only — its edits live in the
+                                                  // v42: the track's ARA plug-in. Identity only â its edits live in the
                                                   // project-level document archive keyed by (plug-in, track).
     match &t.ara {
         Some(ara) => {
@@ -900,8 +904,19 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
         None => w.write_u8(0),
     }
     // v43: per-track timebase, at the tail of the track block for the same
-    // reason the ARA binding is — a v42 track block simply ends before it.
+    // reason the ARA binding is â a v42 track block simply ends before it.
     w.write_u8(t.timebase);
+    // v44: recorded takes. Appended for the same reason again; a v43 track
+    // block ends above and reads as a track with no take list.
+    w.write_u32(t.takes.len() as u32);
+    for take in &t.takes {
+        w.write_str(&take.id);
+        w.write_str(&take.name);
+        w.write_str(&take.clip_id);
+        w.write_bool(take.active);
+        w.write_str(&take.recorded_at);
+    }
+    w.write_bool(t.takes_expanded);
 }
 
 /// v28: built-in Soundfont Player instrument state. A leading flag keeps the
@@ -1396,7 +1411,7 @@ fn encode_audio_connection(w: &mut FbWriter, c: &ProjectAudioConnection) {
     w.write_u32(c.channel_count);
     w.write_opt_str(&c.device_id);
     w.write_bool(c.enabled);
-    // Ordered bindings — index order is semantic (Left, Right) and is written
+    // Ordered bindings â index order is semantic (Left, Right) and is written
     // exactly as held.
     w.write_u32(c.port_bindings.len() as u32);
     for binding in &c.port_bindings {
@@ -1494,7 +1509,7 @@ pub fn encode_project(project: &FutureboardProject) -> Vec<u8> {
     out
 }
 
-// ── Decoding ──────────────────────────────────────────────────────────────────
+// ââ Decoding ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 
 fn decode_plugin_format(r: &mut FbReader) -> Result<PluginFormat, ProjectError> {
     Ok(match r.read_u8()? {
@@ -2156,6 +2171,25 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     // the only behaviour it could have been saved with.
     let timebase = if version >= 43 { r.read_u8()? } else { 0 };
 
+    // v44: recorded takes. A v43 track has none, which is exactly what a
+    // project saved before take management was is.
+    let (takes, takes_expanded) = if version >= 44 {
+        let count = r.read_u32()? as usize;
+        let mut takes = Vec::with_capacity(count.min(256));
+        for _ in 0..count {
+            takes.push(ProjectTake {
+                id: r.read_str()?,
+                name: r.read_str()?,
+                clip_id: r.read_str()?,
+                active: r.read_bool()?,
+                recorded_at: r.read_str()?,
+            });
+        }
+        (takes, r.read_bool()?)
+    } else {
+        (Vec::new(), false)
+    };
+
     Ok(ProjectTrack {
         id,
         name,
@@ -2179,6 +2213,8 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
         soundfont,
         volume_automation_read,
         solfege,
+        takes,
+        takes_expanded,
     })
 }
 
@@ -2280,7 +2316,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             // Field order must match `encode_body`: id, beat, numerator,
             // denominator, grouping. (A previous build read these out of order,
             // which desynced the cursor and produced spurious EOF errors when a
-            // project contained any time-signature point — including the default
+            // project contained any time-signature point â including the default
             // 4/4 marker every new project carries.)
             let id = r.read_str()?;
             let beat = r.read_f64()?;
@@ -2433,7 +2469,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
         };
 
     // Conductor lane fold state (v40+). A v39 file has none, and every lane
-    // comes back expanded at its default height — the state such a file was
+    // comes back expanded at its default height â the state such a file was
     // saved in.
     let global_lanes = if version >= 40 {
         super::ProjectGlobalLanes {
@@ -2523,7 +2559,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
 /// Cheaply validate that `data` begins with a supported Futureboard project
 /// header (magic + version) without decoding the body or verifying the
 /// checksum. Returns the on-disk format version. Used for fast pre-load
-/// validation (e.g. the Welcome → Open Project flow) so an invalid pick can be
+/// validation (e.g. the Welcome â Open Project flow) so an invalid pick can be
 /// reported inline without reading/decoding the whole file.
 pub fn peek_project_header(data: &[u8]) -> Result<u32, ProjectError> {
     if data.len() < PROJECT_HEADER_SIZE {
@@ -3139,25 +3175,25 @@ mod tests {
                 id: "chord-1".to_string(),
                 beat: 4.0,
                 kind: ProjectSongTextEventKind::Chord {
-                    symbol: "F♯m7/C♯".to_string(),
+                    symbol: "Fâ¯m7/Câ¯".to_string(),
                 },
             },
             ProjectSongTextEvent {
                 id: "lyric-1".to_string(),
                 beat: 4.5,
                 kind: ProjectSongTextEventKind::Lyric {
-                    text: "คืนที่ดาวเต็มฟ้า".to_string(),
+                    text: "à¸à¸·à¸à¸à¸µà¹à¸à¸²à¸§à¹à¸à¹à¸¡à¸à¹à¸²".to_string(),
                     syllable_mode: ProjectLyricSyllableMode::Syllables,
                     continuation: true,
                     duration_beats: Some(3.5),
                     syllables: vec![
                         ProjectLyricSyllable {
-                            text: "คืน".to_string(),
+                            text: "à¸à¸·à¸".to_string(),
                             offset_beats: 0.0,
                             duration_beats: Some(0.75),
                         },
                         ProjectLyricSyllable {
-                            text: "ที่ดาว".to_string(),
+                            text: "à¸à¸µà¹à¸à¸²à¸§".to_string(),
                             offset_beats: 0.75,
                             duration_beats: None,
                         },
@@ -3549,7 +3585,7 @@ mod tests {
     #[test]
     fn old_project_load_defaults() {
         // Hand-encode a pre-v16 clip body (no stretch trailer) and decode at v15:
-        // the clip must fall back to the un-stretched defaults (spec §13).
+        // the clip must fall back to the un-stretched defaults (spec Â§13).
         let mut w = FbWriter::new();
         w.write_str("c1");
         w.write_str("clip");
@@ -3681,7 +3717,7 @@ mod tests {
         assert_eq!(decoded.id, "t1");
     }
 
-    /// Writes exactly the track body a v27 writer produced — everything through
+    /// Writes exactly the track body a v27 writer produced â everything through
     /// the v17 row height, and nothing after it.
     fn encode_track_body_v27(w: &mut FbWriter) {
         w.write_str("t1");
@@ -3734,6 +3770,8 @@ mod tests {
             soundfont: None,
             volume_automation_read: true,
             solfege: None,
+            takes: Vec::new(),
+            takes_expanded: false,
         }
     }
 
@@ -3748,7 +3786,52 @@ mod tests {
         assert_eq!(decoded.tracks[0].clips[0].stretch, sample_stretch());
     }
 
-    // ── Audio Connections codec ──────────────────────────────────────────
+    /// v44. Which pass a clip came from, and which one is heard, are not
+    /// recoverable from anything else in the file — a comp that survives Save
+    /// only as "one clip is muted" is a comp the take list can no longer edit.
+    #[test]
+    fn takes_survive_a_full_project_roundtrip() {
+        let mut project = FutureboardProject::new("Takes");
+        let mut track = track_with_clip(empty_clip_with_stretch(sample_stretch()));
+        track.takes = vec![
+            ProjectTake {
+                id: "t-1".to_string(),
+                name: "Take 1".to_string(),
+                clip_id: "clip-1".to_string(),
+                active: false,
+                recorded_at: "10:32".to_string(),
+            },
+            ProjectTake {
+                id: "t-2".to_string(),
+                name: "The keeper".to_string(),
+                clip_id: "clip-2".to_string(),
+                active: true,
+                recorded_at: "10:35".to_string(),
+            },
+        ];
+        track.takes_expanded = true;
+        let expected = track.takes.clone();
+        project.tracks.push(track);
+
+        let decoded = decode_project(&encode_project(&project)).expect("decode");
+        assert_eq!(decoded.tracks[0].takes, expected);
+        assert!(decoded.tracks[0].takes_expanded);
+    }
+
+    /// A track that has never been recorded onto carries no take list, and must
+    /// round-trip as one — not as a list with an empty entry in it.
+    #[test]
+    fn a_track_with_no_takes_roundtrips_as_a_track_with_no_takes() {
+        let mut project = FutureboardProject::new("No takes");
+        project
+            .tracks
+            .push(track_with_clip(empty_clip_with_stretch(sample_stretch())));
+        let decoded = decode_project(&encode_project(&project)).expect("decode");
+        assert!(decoded.tracks[0].takes.is_empty());
+        assert!(!decoded.tracks[0].takes_expanded);
+    }
+
+    // ââ Audio Connections codec ââââââââââââââââââââââââââââââââââââââââââ
 
     use super::*;
 
@@ -3912,7 +3995,7 @@ mod tests {
     }
 
     /// A v39 file has no fold block, and every lane must come back expanded at
-    /// its default height — the state such a file was actually saved in.
+    /// its default height â the state such a file was actually saved in.
     #[test]
     fn a_v39_project_loads_with_every_conductor_lane_expanded() {
         let mut body = encode_body(&FutureboardProject::new("legacy"));

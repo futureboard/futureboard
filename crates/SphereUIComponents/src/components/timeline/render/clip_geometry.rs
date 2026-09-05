@@ -9,9 +9,178 @@
 //! lookups, no allocation per note — so it is unit-testable and cheap enough to
 //! run on every repaint.
 
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use crate::components::timeline::timeline_state::{
-    MidiControllerKind, MidiControllerLane, MidiNoteState,
+    midi_edit_revision, MidiControllerKind, MidiControllerLane, MidiNoteState,
 };
+
+// ── Preview cache ─────────────────────────────────────────────────────────────
+//
+// Building a preview is a pass over every note in the clip, and the arrangement
+// asks for one per visible clip on every repaint — which is every scroll, every
+// zoom and every selection. That makes a frame cost `visible clips × notes`
+// while producing an output bounded by `visible clips × pixels`: a session with
+// dense imported parts was measured at 40 ms a frame for 24,000 painted quads.
+//
+// So the pass runs once per (content, geometry) pair and is reused until one of
+// them moves. Validity is a single integer compare against the global MIDI edit
+// revision — see [`midi_edit_revision`], which exists for exactly this and is
+// bumped by the mutable accessors themselves, so no edit path has to remember.
+// The note count is in the key as well, which catches a clip whose payload was
+// replaced wholesale rather than edited in place.
+
+/// Bounded, insertion-ordered map. Same shape as the waveform geometry cache:
+/// the working set is the visible clips times a handful of recent zoom/scroll
+/// states, and evicting the oldest key keeps that resident without unbounded
+/// growth on a long scroll.
+///
+/// Values are cloned out on a hit, so they are stored already wrapped — a hit
+/// is a reference-count bump, never a copy of the geometry.
+struct PreviewCache<T: Clone> {
+    map: HashMap<u64, T>,
+    order: VecDeque<u64>,
+    cap: usize,
+}
+
+impl<T: Clone> PreviewCache<T> {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, key: u64) -> Option<T> {
+        self.map.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u64, value: T) {
+        if self.map.insert(key, value).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+/// `None` is cached as well as `Some`: a clip that genuinely draws nothing must
+/// not be re-walked every frame to rediscover that.
+type CachedNotePreview = Option<Arc<NotePreview>>;
+type CachedControllerPreview = Option<Arc<ControllerPreview>>;
+
+fn note_preview_cache() -> &'static Mutex<PreviewCache<CachedNotePreview>> {
+    static CACHE: OnceLock<Mutex<PreviewCache<CachedNotePreview>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PreviewCache::new(512)))
+}
+
+fn controller_preview_cache() -> &'static Mutex<PreviewCache<CachedControllerPreview>> {
+    static CACHE: OnceLock<Mutex<PreviewCache<CachedControllerPreview>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(PreviewCache::new(256)))
+}
+
+/// Everything a preview's shape depends on, as one integer.
+///
+/// `clip_id` identifies the clip, the edit revision identifies its content, and
+/// the geometry values identify the window it is being drawn into. A miss on
+/// any of them rebuilds; there is no path that reuses geometry built for
+/// different notes or a different zoom.
+fn preview_key(clip_id: &str, content_len: usize, geometry: &[f32]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    clip_id.hash(&mut hasher);
+    midi_edit_revision().hash(&mut hasher);
+    content_len.hash(&mut hasher);
+    for value in geometry {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Scroll granularity the note preview is cached at, in clip-local pixels.
+///
+/// A cache keyed on the exact visible window is a cache that misses on every
+/// frame of a scroll — which is the one gesture whose cost the user feels. So
+/// the window is snapped out to a tile boundary: the geometry covers a little
+/// more than is on screen, and stays valid until the scroll crosses a tile.
+///
+/// 256 px is roughly a sixth of an editing viewport: the extra columns built
+/// and painted are a rounding error against re-walking every note, and one
+/// entry survives a quarter-screen of travel.
+const PREVIEW_TILE_PX: f32 = 256.0;
+
+/// Snap a visible window out to tile boundaries, clamped to the clip.
+///
+/// Clamping matters: the preview's columns are painted at clip-local x inside
+/// the clip's own element, so a window that ran past the clip's edge would draw
+/// note mass outside the clip it belongs to.
+fn tiled_window(px_start: f32, px_end: f32, clip_width_px: f32) -> (f32, f32) {
+    let limit = clip_width_px.max(0.0);
+    let start = (px_start / PREVIEW_TILE_PX).floor() * PREVIEW_TILE_PX;
+    let end = (px_end / PREVIEW_TILE_PX).ceil() * PREVIEW_TILE_PX;
+    (start.max(0.0), end.min(limit).max(px_end.min(limit)))
+}
+
+/// [`build_note_preview`], reused across frames and across a scroll.
+///
+/// The uncached builder stays public and is what the geometry tests exercise:
+/// the cache is a memo over it, never a second implementation.
+pub fn note_preview_cached(
+    clip_id: &str,
+    notes: &[MidiNoteState],
+    clip_len: f32,
+    ppb: f32,
+    px_start: f32,
+    px_end: f32,
+) -> Option<Arc<NotePreview>> {
+    let clip_width_px = (clip_len.max(0.0) * ppb).max(px_end);
+    let (px_start, px_end) = tiled_window(px_start, px_end, clip_width_px);
+    let key = preview_key(clip_id, notes.len(), &[clip_len, ppb, px_start, px_end]);
+    if let Some(hit) = note_preview_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key))
+    {
+        crate::perf::count("midi_preview_cache_hit", 1);
+        return hit;
+    }
+    crate::perf::count("midi_preview_cache_miss", 1);
+    let built = build_note_preview(notes, clip_len, ppb, px_start, px_end).map(Arc::new);
+    if let Ok(mut cache) = note_preview_cache().lock() {
+        cache.insert(key, built.clone());
+    }
+    built
+}
+
+/// [`build_controller_preview`], reused across frames.
+pub fn controller_preview_cached(
+    clip_id: &str,
+    lanes: &[MidiControllerLane],
+    clip_len: f32,
+    ppb: f32,
+    width: f32,
+) -> Option<Arc<ControllerPreview>> {
+    let content_len: usize = lanes.iter().map(|lane| lane.points.len()).sum();
+    let key = preview_key(clip_id, content_len, &[clip_len, ppb, width, -1.0]);
+    if let Some(hit) = controller_preview_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key))
+    {
+        return hit;
+    }
+    let built = build_controller_preview(lanes, clip_len, ppb, width).map(Arc::new);
+    if let Ok(mut cache) = controller_preview_cache().lock() {
+        cache.insert(key, built.clone());
+    }
+    built
+}
 
 /// Clip-local pixel window that is actually on screen, or `None` when the clip
 /// is fully scrolled out. `left` is the clip's x in lane coordinates.

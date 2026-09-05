@@ -172,7 +172,7 @@ impl ExtensionsWindow {
                     Ok((path, _theme_id)) => {
                         this.installed.insert(slug.clone());
                         this.status = Some(SharedString::from(format!(
-                            "Installed {name} — select it in Preferences › Appearance."
+                            "Installed {name} — press Apply to wear it."
                         )));
                         eprintln!("[extensions] installed theme {slug} -> {}", path.display());
                     }
@@ -343,6 +343,76 @@ impl ExtensionsWindow {
                 .child(label)
         };
 
+        // Apply, next to Reinstall, for a theme already on disk.
+        //
+        // Installing wrote a file and told the user to go and find it in
+        // Preferences — a second trip through a second window to finish a job
+        // they had just asked for. The theme is downloaded *because* they want
+        // to look at it, so the button that wears it is on the row that
+        // installed it.
+        let apply = (installed && self.kind == ExtensionKind::Themes).then(|| {
+            let active = crate::theme::active_theme_summary().0;
+            let theme_id = crate::extensions_registry::installed_theme_id(&item.slug);
+            let is_active = theme_id.as_deref() == Some(active.as_str());
+            let name = item.name.clone();
+            div()
+                .id(SharedString::from(format!(
+                    "extensions-apply-{}",
+                    item.slug
+                )))
+                .flex()
+                .items_center()
+                .justify_center()
+                .h(px(26.0))
+                .px(px(12.0))
+                .flex_shrink_0()
+                .rounded(px(crate::theme::radius::CONTROL_SM))
+                .bg(if is_active {
+                    Colors::surface_raised()
+                } else {
+                    Colors::accent_primary()
+                })
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if is_active {
+                    Colors::text_muted()
+                } else {
+                    Colors::on_accent()
+                })
+                .when(!is_active, |element| {
+                    element
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|style| style.bg(Colors::accent_primary_hover()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                let Some(id) = theme_id.clone() else {
+                                    this.error = Some(SharedString::from(
+                                        "That theme file has no id to select.",
+                                    ));
+                                    cx.notify();
+                                    return;
+                                };
+                                if crate::theme::activate_theme_by_id(&id) {
+                                    this.error = None;
+                                    this.status =
+                                        Some(SharedString::from(format!("Applied {name}.")));
+                                    // Every window is painted from these
+                                    // colours, so all of them repaint — not just
+                                    // the one the button is in.
+                                    cx.refresh_windows();
+                                } else {
+                                    this.error = Some(SharedString::from(format!(
+                                        "Could not apply {name}."
+                                    )));
+                                }
+                                cx.notify();
+                            }),
+                        )
+                })
+                .child(if is_active { "Applied" } else { "Apply" })
+        });
+
         div()
             .flex()
             .flex_row()
@@ -406,6 +476,7 @@ impl ExtensionsWindow {
                         )
                     }),
             )
+            .children(apply)
             .child(action)
     }
 

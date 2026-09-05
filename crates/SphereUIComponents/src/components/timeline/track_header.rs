@@ -26,6 +26,9 @@ type TrackContextCallback =
     std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 type TrackGroupCallback =
     std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>;
+/// `(track_id, take_id)`.
+type TrackTakeCallback =
+    std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 /// Bundle of callbacks the TrackHeader can fire. Keeping them in one struct
 /// keeps the function signature manageable and lets new actions land without
@@ -51,6 +54,12 @@ pub struct TrackHeaderCallbacks {
     pub on_assign_to_group: TrackGroupCallback,
     pub on_toggle_group_collapsed: TrackCallback,
     pub on_context_menu: Option<TrackContextCallback>,
+    /// Open/close the track's take sub-lane.
+    pub on_toggle_takes: TrackCallback,
+    /// Make a take the one that is heard: `(track_id, take_id)`.
+    pub on_select_take: TrackTakeCallback,
+    /// Delete a take and the clip it holds: `(track_id, take_id)`.
+    pub on_delete_take: TrackTakeCallback,
 }
 
 pub struct TrackDragPreview {
@@ -105,6 +114,18 @@ const GLYPH_MD: f32 = 11.0;
 /// Height of the pan readout. Below the 16 px pill tier because it shares a row
 /// with a 24 px fader and has to leave the plate its breathing room.
 const PAN_PILL_H: f32 = 14.0;
+
+/// Height of the take sub-lane's own header line, and of one take row.
+///
+/// The sub-lane lives in the room the user makes by dragging the track taller
+/// — it never pushes the arrangement around. That is what keeps a take list
+/// from silently re-laying-out every lane below it the first time somebody
+/// records twice.
+const TAKE_STRIP_HEADER_H: f32 = 16.0;
+const TAKE_ROW_H: f32 = 18.0;
+
+/// Vertical space the two-row header needs before anything else can be shown.
+const TAKE_STRIP_BASE_H: f32 = TRACK_HEADER_CONTROLS_MIN_HEIGHT;
 
 /// How far a grouped child's inset frame sits inside the header column, and how
 /// much room its accent strip and indent need inside that frame. Derived from
@@ -310,6 +331,186 @@ where
                     handlers.on_automation,
                 )),
         )
+}
+
+/// The track's take sub-lane, or `None` when the track has no takes or the row
+/// is too short to hold the strip.
+///
+/// It is a sub-lane *of the header*: it occupies the vertical room the user made
+/// by dragging the track taller, and shows as many take rows as fit. A track
+/// with eight takes on a default-height row shows the header line and the count;
+/// drag it taller and the rows appear. Nothing here can overflow the row,
+/// because the number of rows drawn is derived from the room there is.
+fn take_sublane(
+    track: &TrackState,
+    row_height: f32,
+    on_toggle: TrackCallback,
+    on_select: TrackTakeCallback,
+    on_delete: TrackTakeCallback,
+) -> Option<gpui::AnyElement> {
+    if track.takes.is_empty() {
+        return None;
+    }
+    let spare = row_height - TAKE_STRIP_BASE_H;
+    if spare < TAKE_STRIP_HEADER_H {
+        return None;
+    }
+    let visible_rows = if track.takes_expanded {
+        (((spare - TAKE_STRIP_HEADER_H) / TAKE_ROW_H)
+            .floor()
+            .max(0.0) as usize)
+            .min(track.takes.len())
+    } else {
+        0
+    };
+    let hidden = track.takes.len().saturating_sub(visible_rows);
+
+    let toggle_id = track.id.clone();
+    let caret = if track.takes_expanded { "▾" } else { "▸" };
+    let depth = track.take_stack_depth();
+    let summary = if depth > 1 {
+        format!("{} takes · {depth} deep", track.takes.len())
+    } else {
+        format!("{} takes", track.takes.len())
+    };
+
+    let header_line = div()
+        .id(gpui::ElementId::Name(
+            format!("track-takes-toggle-{}", track.id).into(),
+        ))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(space::TIGHT))
+        .h(px(TAKE_STRIP_HEADER_H))
+        .px(px(space::SNUG))
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|style| style.bg(Colors::surface_control_hover()))
+        .text_size(px(typography::DENSE_CAPTION))
+        .text_color(Colors::text_muted())
+        .child(caret)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(summary),
+        )
+        .when(hidden > 0 && track.takes_expanded, |line| {
+            line.child(
+                div()
+                    .text_color(Colors::text_faint())
+                    .child(format!("+{hidden}")),
+            )
+        })
+        .on_click(move |_event, window, cx| on_toggle(&toggle_id, window, cx));
+
+    // Newest first: the pass the player just did is the one they are looking
+    // for, and it is the one that is active.
+    let rows: Vec<gpui::AnyElement> = track
+        .takes_newest_first()
+        .take(visible_rows)
+        .map(|take| {
+            let select = on_select.clone();
+            let delete = on_delete.clone();
+            let select_ids = (track.id.clone(), take.id.clone());
+            let delete_ids = (track.id.clone(), take.id.clone());
+            let active = take.active;
+            div()
+                .id(gpui::ElementId::Name(
+                    format!("track-take-{}-{}", track.id, take.id).into(),
+                ))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(space::SNUG))
+                .h(px(TAKE_ROW_H))
+                .px(px(space::SNUG))
+                .rounded(px(radius::CONTROL_SM))
+                .when(active, |row| row.bg(Colors::accent_muted()))
+                .hover(|style| style.bg(Colors::surface_control_hover()))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .text_size(px(typography::DENSE_CAPTION))
+                .child(
+                    // Filled dot for the take that is heard. The state never
+                    // rests on colour alone — the dot is present or it is not.
+                    div()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .flex_none()
+                        .rounded(px(radius::PILL))
+                        .border(px(1.0))
+                        .border_color(if active {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::border_strong()
+                        })
+                        .when(active, |dot| dot.bg(Colors::accent_primary())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(if active {
+                            Colors::text_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .child(take.name.clone()),
+                )
+                .when(!take.recorded_at.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_color(Colors::text_faint())
+                            .child(take.recorded_at.clone()),
+                    )
+                })
+                .child(
+                    div()
+                        .id(gpui::ElementId::Name(
+                            format!("track-take-delete-{}-{}", track.id, take.id).into(),
+                        ))
+                        .flex_none()
+                        .w(px(12.0))
+                        .h(px(12.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(radius::CONTROL_SM))
+                        .text_color(Colors::text_faint())
+                        .hover(|style| {
+                            style
+                                .bg(Colors::with_alpha(Colors::status_error(), 0.18))
+                                .text_color(Colors::status_error())
+                        })
+                        .child("×")
+                        .on_click(move |_event, window, cx| {
+                            // Without this the click also lands on the row and
+                            // activates the take it is deleting.
+                            cx.stop_propagation();
+                            delete(&delete_ids, window, cx);
+                        }),
+                )
+                .on_click(move |_event, window, cx| select(&select_ids, window, cx))
+                .into_any_element()
+        })
+        .collect();
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .flex_none()
+            .border_t(px(1.0))
+            .border_color(Colors::divider())
+            .child(header_line)
+            .children(rows)
+            .into_any_element(),
+    )
 }
 
 pub fn track_header(
@@ -909,6 +1110,16 @@ pub fn track_header(
                                 is_selected,
                             )),
                     )
-                }),
+                })
+                // Row 3: the take sub-lane, in whatever room is left below the
+                // control row. Absent on a track with no takes, and on a row
+                // too short to hold it.
+                .children(take_sublane(
+                    track,
+                    row_height,
+                    callbacks.on_toggle_takes.clone(),
+                    callbacks.on_select_take.clone(),
+                    callbacks.on_delete_take.clone(),
+                )),
         )
 }

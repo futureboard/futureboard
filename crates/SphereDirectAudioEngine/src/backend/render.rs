@@ -182,6 +182,24 @@ pub struct LocalAudioState {
     pub metronome_click_sound: MetronomeSound,
     /// When true, metronome scheduling and output are suppressed (playhead scrub).
     pub metronome_suspended: bool,
+    /// Samples left in an audible record count-in.
+    ///
+    /// A count-in is a pre-roll the transport does not take part in: the
+    /// playhead stays parked on the beat about to be recorded while the click
+    /// counts the player in. The transport metronome cannot do that — it is
+    /// scheduled off the playhead and returns silence whenever the transport is
+    /// stopped, which is why a count-in from bar 1 used to be a silent wait.
+    ///
+    /// So the pre-roll runs on its own sample clock, and deliberately ignores
+    /// `metronome_enabled`: asking for a count-in *is* asking for clicks.
+    pub count_in_remaining: u64,
+    /// Samples until the next pre-roll click.
+    count_in_to_next_click: u64,
+    /// Samples between pre-roll clicks, from the tempo at the record position.
+    count_in_click_interval: u64,
+    /// Which beat of the count-in is next, for the bar accent.
+    count_in_beat_index: u32,
+    count_in_beats_per_bar: u32,
     /// Standalone File Browser audition, owned by this stream/callback.
     pub audition: AuditionPlayer,
 }
@@ -228,8 +246,137 @@ impl LocalAudioState {
             metronome_sound: MetronomeSound::Woodblock,
             metronome_click_sound: MetronomeSound::Woodblock,
             metronome_suspended: false,
+            count_in_remaining: 0,
+            count_in_to_next_click: 0,
+            count_in_click_interval: 0,
+            count_in_beat_index: 0,
+            count_in_beats_per_bar: 4,
             audition: AuditionPlayer::default(),
         }
+    }
+
+    /// Start an audible count-in of `beats` beats, `samples_per_beat` apart,
+    /// accenting every `beats_per_bar`-th one.
+    ///
+    /// The caller resolves the spacing from the tempo map *at the beat the take
+    /// starts on*, so a count-in into a section at 90 BPM counts at 90 — not at
+    /// whatever the project's nominal tempo happens to be.
+    pub fn begin_count_in(&mut self, beats: u32, beats_per_bar: u32, samples_per_beat: u64) {
+        let beats = beats.max(1) as u64;
+        let interval = samples_per_beat.max(1);
+        self.count_in_click_interval = interval;
+        self.count_in_remaining = interval.saturating_mul(beats);
+        // Zero, so the first click lands on the first sample of the pre-roll
+        // rather than a beat late.
+        self.count_in_to_next_click = 0;
+        self.count_in_beat_index = 0;
+        self.count_in_beats_per_bar = beats_per_bar.max(1);
+        self.metronome_click_remaining = 0;
+    }
+
+    /// Abandon a count-in in progress (the user cancelled, or the take failed
+    /// to arm). Silent immediately — a click left ringing after a cancel is the
+    /// clearest possible sign that a control did not take.
+    pub fn cancel_count_in(&mut self) {
+        self.count_in_remaining = 0;
+        self.count_in_to_next_click = 0;
+        self.metronome_click_remaining = 0;
+    }
+
+    pub fn count_in_active(&self) -> bool {
+        self.count_in_remaining > 0
+    }
+
+    /// Arm one click voice. Shared by the transport metronome and the count-in
+    /// pre-roll so the two are the same sound at the same level — a count-in
+    /// that does not match the click it runs into is worse than none.
+    fn arm_click(&mut self, accent: crate::time_signature_map::MetronomeAccent, sample_rate: u32) {
+        use crate::time_signature_map::MetronomeAccent;
+
+        let sr = sample_rate.max(1) as f64;
+        let (freq, gain) = match self.metronome_sound {
+            MetronomeSound::Woodblock => match accent {
+                MetronomeAccent::Downbeat => (1760.0, 0.34),
+                MetronomeAccent::Group => (1320.0, 0.28),
+                MetronomeAccent::Normal => (980.0, 0.22),
+            },
+            // The beep sits a register lower and holds, so it reads as a tone
+            // against the woodblock's tick rather than as the same click at
+            // another pitch.
+            MetronomeSound::Beep => match accent {
+                MetronomeAccent::Downbeat => (880.0, 0.30),
+                MetronomeAccent::Group => (660.0, 0.25),
+                MetronomeAccent::Normal => (440.0, 0.20),
+            },
+        };
+        self.metronome_click_phase = 0.0;
+        self.metronome_click_phase_inc = freq / sr;
+        self.metronome_click_gain = gain * self.metronome_volume;
+        self.metronome_click_sound = self.metronome_sound;
+        self.metronome_click_span = match self.metronome_sound {
+            MetronomeSound::Woodblock => self.metronome_click_len,
+            // ~48 ms: long enough to be heard as a pitch, still inside a beat
+            // at any usable tempo.
+            MetronomeSound::Beep => self.metronome_click_len.saturating_mul(2).max(1),
+        };
+        self.metronome_click_remaining = self.metronome_click_span;
+    }
+
+    /// One sample of whatever click is currently sounding, advancing it.
+    fn render_click(&mut self) -> f32 {
+        if self.metronome_click_remaining == 0 {
+            return 0.0;
+        }
+        let span = self.metronome_click_span.max(1);
+        let age = span.saturating_sub(self.metronome_click_remaining) as f32;
+        let t = (age / span as f32).clamp(0.0, 1.0);
+        let env = match self.metronome_click_sound {
+            // Percussive: squared decay from the transient.
+            MetronomeSound::Woodblock => {
+                let decay = (1.0 - t).max(0.0);
+                decay * decay
+            }
+            // Tonal: fast attack, flat body, short release.
+            MetronomeSound::Beep => {
+                if t < BEEP_ATTACK_FRACTION {
+                    t / BEEP_ATTACK_FRACTION
+                } else if t > 1.0 - BEEP_RELEASE_FRACTION {
+                    ((1.0 - t) / BEEP_RELEASE_FRACTION).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                }
+            }
+        };
+        let sample = (self.metronome_click_phase * std::f64::consts::TAU).sin() as f32
+            * env
+            * self.metronome_click_gain;
+        self.metronome_click_phase += self.metronome_click_phase_inc;
+        self.metronome_click_phase -= self.metronome_click_phase.floor();
+        self.metronome_click_remaining = self.metronome_click_remaining.saturating_sub(1);
+        sample
+    }
+
+    /// One sample of the count-in pre-roll, or `None` when there is none.
+    #[inline]
+    fn count_in_sample(&mut self, sample_rate: u32) -> Option<f32> {
+        use crate::time_signature_map::MetronomeAccent;
+
+        if self.count_in_remaining == 0 {
+            return None;
+        }
+        if self.count_in_to_next_click == 0 {
+            let accent = if self.count_in_beat_index % self.count_in_beats_per_bar == 0 {
+                MetronomeAccent::Downbeat
+            } else {
+                MetronomeAccent::Normal
+            };
+            self.arm_click(accent, sample_rate);
+            self.count_in_beat_index = self.count_in_beat_index.wrapping_add(1);
+            self.count_in_to_next_click = self.count_in_click_interval.max(1);
+        }
+        self.count_in_to_next_click = self.count_in_to_next_click.saturating_sub(1);
+        self.count_in_remaining = self.count_in_remaining.saturating_sub(1);
+        Some(self.render_click())
     }
 
     pub fn set_metronome_enabled(&mut self, enabled: bool, position_sample: u64, sample_rate: u32) {
@@ -360,7 +507,24 @@ impl LocalAudioState {
         graph_max_latency_samples: u32,
         metronome_compensation_delay_samples: u32,
     ) -> f32 {
-        if !self.metronome_enabled || self.metronome_suspended || !transport_playing {
+        if self.metronome_suspended {
+            self.metronome_click_remaining = 0;
+            self.count_in_remaining = 0;
+            return 0.0;
+        }
+        if self.count_in_remaining > 0 {
+            if !transport_playing {
+                // The pre-roll owns the click while the transport is parked.
+                if let Some(sample) = self.count_in_sample(sample_rate) {
+                    return sample;
+                }
+            } else {
+                // The take started: the count-in has done its job, and leaving
+                // it running would double the click against the transport's.
+                self.cancel_count_in();
+            }
+        }
+        if !self.metronome_enabled || !transport_playing {
             if !transport_playing {
                 self.metronome_click_remaining = 0;
             }
@@ -386,32 +550,7 @@ impl LocalAudioState {
             let accent = self
                 .time_signature_map
                 .metronome_accent_at_beat(self.metronome_next_beat);
-            let (freq, gain) = match self.metronome_sound {
-                MetronomeSound::Woodblock => match accent {
-                    crate::time_signature_map::MetronomeAccent::Downbeat => (1760.0, 0.34),
-                    crate::time_signature_map::MetronomeAccent::Group => (1320.0, 0.28),
-                    crate::time_signature_map::MetronomeAccent::Normal => (980.0, 0.22),
-                },
-                // The beep sits a register lower and holds, so it reads as a
-                // tone against the woodblock's tick rather than as the same
-                // click at another pitch.
-                MetronomeSound::Beep => match accent {
-                    crate::time_signature_map::MetronomeAccent::Downbeat => (880.0, 0.30),
-                    crate::time_signature_map::MetronomeAccent::Group => (660.0, 0.25),
-                    crate::time_signature_map::MetronomeAccent::Normal => (440.0, 0.20),
-                },
-            };
-            self.metronome_click_phase = 0.0;
-            self.metronome_click_phase_inc = freq / sr;
-            self.metronome_click_gain = gain * self.metronome_volume;
-            self.metronome_click_sound = self.metronome_sound;
-            self.metronome_click_span = match self.metronome_sound {
-                MetronomeSound::Woodblock => self.metronome_click_len,
-                // ~48 ms: long enough to be heard as a pitch, still inside a beat
-                // at any usable tempo.
-                MetronomeSound::Beep => self.metronome_click_len.saturating_mul(2).max(1),
-            };
-            self.metronome_click_remaining = self.metronome_click_span;
+            self.arm_click(accent, sample_rate);
             if metronome_debug_enabled() {
                 let compensated_audible_sample_position =
                     output_sample_position.saturating_sub(compensation_delay);
@@ -452,37 +591,7 @@ impl LocalAudioState {
             }
         }
 
-        if self.metronome_click_remaining == 0 {
-            return 0.0;
-        }
-
-        let span = self.metronome_click_span.max(1);
-        let age = span.saturating_sub(self.metronome_click_remaining) as f32;
-        let t = (age / span as f32).clamp(0.0, 1.0);
-        let env = match self.metronome_click_sound {
-            // Percussive: squared decay from the transient.
-            MetronomeSound::Woodblock => {
-                let decay = (1.0 - t).max(0.0);
-                decay * decay
-            }
-            // Tonal: fast attack, flat body, short release.
-            MetronomeSound::Beep => {
-                if t < BEEP_ATTACK_FRACTION {
-                    t / BEEP_ATTACK_FRACTION
-                } else if t > 1.0 - BEEP_RELEASE_FRACTION {
-                    ((1.0 - t) / BEEP_RELEASE_FRACTION).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                }
-            }
-        };
-        let sample = (self.metronome_click_phase * std::f64::consts::TAU).sin() as f32
-            * env
-            * self.metronome_click_gain;
-        self.metronome_click_phase += self.metronome_click_phase_inc;
-        self.metronome_click_phase -= self.metronome_click_phase.floor();
-        self.metronome_click_remaining = self.metronome_click_remaining.saturating_sub(1);
-        sample
+        self.render_click()
     }
 }
 
@@ -726,6 +835,22 @@ pub fn drain_commands(
             }
             EngineCommand::SetMetronomeVoice { volume, sound } => {
                 local.set_metronome_voice(volume, MetronomeSound::from_code(sound));
+            }
+            EngineCommand::StartCountIn {
+                beats,
+                beats_per_bar,
+                samples_per_beat,
+            } => {
+                local.begin_count_in(beats, beats_per_bar, samples_per_beat);
+                shared
+                    .count_in_remaining_samples
+                    .store(local.count_in_remaining, Ordering::Relaxed);
+            }
+            EngineCommand::CancelCountIn => {
+                local.cancel_count_in();
+                shared
+                    .count_in_remaining_samples
+                    .store(0, Ordering::Relaxed);
             }
             EngineCommand::SetBpm(bpm) => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -991,6 +1116,12 @@ pub fn drain_commands(
             }
         }
     }
+    // Publish the count-in's remaining length once per block. One atomic store;
+    // the control thread polls it to know when to start the take, which is what
+    // puts the downbeat on the audio clock instead of on a timer.
+    shared
+        .count_in_remaining_samples
+        .store(local.count_in_remaining, Ordering::Relaxed);
     false
 }
 
@@ -2089,6 +2220,127 @@ fn clear_input_bus_meter(shared: &Arc<SharedState>, local: &mut LocalAudioState)
         .store(f32_store(0.0), Ordering::Relaxed);
     local.prev_input_bus_l = 0.0;
     local.prev_input_bus_r = 0.0;
+}
+
+#[cfg(test)]
+mod count_in_tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+    /// One beat at 120 BPM.
+    const BEAT: u64 = 24_000;
+
+    fn count_in_state(beats: u32, beats_per_bar: u32) -> LocalAudioState {
+        let mut local = LocalAudioState::new(SR as f64);
+        local.begin_count_in(beats, beats_per_bar, BEAT);
+        local
+    }
+
+    /// Sample offsets at which a click starts, over `samples` of stopped
+    /// transport.
+    fn click_onsets(local: &mut LocalAudioState, samples: u64) -> Vec<u64> {
+        let mut onsets = Vec::new();
+        let mut sounding = false;
+        for sample in 0..samples {
+            let value = local.metronome_sample(sample, sample, SR, false, 0, 0);
+            let now_sounding = local.metronome_click_remaining > 0 || value != 0.0;
+            if now_sounding && !sounding {
+                onsets.push(sample);
+            }
+            sounding = now_sounding;
+        }
+        onsets
+    }
+
+    /// The whole point. The transport metronome is scheduled off the playhead
+    /// and is silent while stopped, so a count-in from bar 1 — where there is
+    /// no earlier timeline to roll through — used to be a silent wait.
+    #[test]
+    fn a_count_in_clicks_with_the_transport_stopped() {
+        let mut local = count_in_state(4, 4);
+        assert!(!local.metronome_enabled, "the take never enabled the click");
+        let onsets = click_onsets(&mut local, BEAT * 4);
+        assert_eq!(
+            onsets,
+            vec![0, BEAT, BEAT * 2, BEAT * 3],
+            "a count-in must click on every beat from the first sample"
+        );
+    }
+
+    /// It has to end on its own, exactly where it said it would — the take is
+    /// started off this length.
+    #[test]
+    fn a_count_in_ends_after_exactly_the_beats_it_was_given() {
+        let mut local = count_in_state(2, 4);
+        assert_eq!(local.count_in_remaining, BEAT * 2);
+        for sample in 0..(BEAT * 2) {
+            local.metronome_sample(sample, sample, SR, false, 0, 0);
+        }
+        assert_eq!(local.count_in_remaining, 0);
+        assert!(!local.count_in_active());
+        // And nothing more is emitted afterwards.
+        let onsets = click_onsets(&mut local, BEAT);
+        assert!(onsets.is_empty(), "the count-in kept clicking past its end");
+    }
+
+    /// A count-in accents the downbeat of every bar, so a player can hear where
+    /// "one" is rather than counting four identical ticks.
+    #[test]
+    fn a_count_in_accents_the_first_beat_of_each_bar() {
+        let mut local = count_in_state(8, 4);
+        let mut gains = Vec::new();
+        let mut sounding = false;
+        for sample in 0..(BEAT * 8) {
+            local.metronome_sample(sample, sample, SR, false, 0, 0);
+            let now = local.metronome_click_remaining > 0;
+            if now && !sounding {
+                gains.push(local.metronome_click_gain);
+            }
+            sounding = now;
+        }
+        assert_eq!(gains.len(), 8);
+        assert!(gains[0] > gains[1], "beat 1 must be accented");
+        assert!(
+            (gains[4] - gains[0]).abs() < 1.0e-6,
+            "the next bar's downbeat must be accented too"
+        );
+        assert!((gains[3] - gains[1]).abs() < 1.0e-6);
+    }
+
+    /// When the take starts, the transport metronome takes over. Leaving the
+    /// pre-roll running would double every click against it.
+    #[test]
+    fn the_transport_starting_ends_the_count_in() {
+        let mut local = count_in_state(4, 4);
+        local.metronome_sample(0, 0, SR, false, 0, 0);
+        assert!(local.count_in_active());
+        local.metronome_sample(1, 1, SR, true, 0, 0);
+        assert!(
+            !local.count_in_active(),
+            "the pre-roll outlived the downbeat"
+        );
+    }
+
+    /// Cancelling is immediate and silent — a click left ringing after a
+    /// cancelled take is the clearest possible sign a control did not take.
+    #[test]
+    fn cancelling_a_count_in_is_silent_immediately() {
+        let mut local = count_in_state(4, 4);
+        local.metronome_sample(0, 0, SR, false, 0, 0);
+        local.cancel_count_in();
+        assert!(!local.count_in_active());
+        assert_eq!(local.metronome_sample(1, 1, SR, false, 0, 0), 0.0);
+    }
+
+    /// Scrubbing the playhead suspends the metronome; it must silence a
+    /// count-in too rather than leaving one counting under the gesture.
+    #[test]
+    fn suspending_the_metronome_silences_a_count_in() {
+        let mut local = count_in_state(4, 4);
+        local.set_metronome_suspended(true);
+        assert_eq!(local.metronome_sample(0, 0, SR, false, 0, 0), 0.0);
+        assert!(!local.count_in_active());
+    }
 }
 
 #[cfg(test)]

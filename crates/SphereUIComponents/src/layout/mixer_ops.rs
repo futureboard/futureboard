@@ -262,7 +262,39 @@ impl StudioLayout {
             tree_sidebar_enabled: self.mixer_view.tree_sidebar_enabled,
             tree_sidebar_collapsed: self.mixer_view.tree_sidebar_collapsed,
             tree_sidebar_width_px: self.mixer_view.tree_sidebar_width_px,
+            // Filled by `push_mixer_snapshot_to_window`: building the entries
+            // needs `&mut Context`, which a snapshot clone does not have.
+            context_menu: None,
         }
+    }
+
+    /// The open context menu, if it was opened from the detached mixer.
+    ///
+    /// The Studio owns every menu because it owns the state the entries act on;
+    /// what it cannot own is where one is *painted*. An overlay drawn by
+    /// `StudioLayout::render` lands in the Studio's window, so a picker opened
+    /// from the pop-out mixer appeared over the arrangement instead — at the
+    /// mixer's coordinates, which mean nothing there. The request has always
+    /// carried the window it came from; this reads it.
+    fn mixer_window_context_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::components::MixerContextMenu> {
+        let handle = self.external_windows.mixer.as_ref()?;
+        let Some(super::studio_state::OpenPopover::Context { request }) =
+            self.overlay.open_popover.clone()
+        else {
+            return None;
+        };
+        if request.window_id != handle.window_id() {
+            return None;
+        }
+        let target = request.target.to_context_target();
+        Some(crate::components::MixerContextMenu {
+            x: request.x,
+            y: request.y,
+            entries: self.context_entries(&target, cx),
+        })
     }
 
     pub(crate) fn mixer_view_state(
@@ -287,7 +319,8 @@ impl StudioLayout {
         let Some(handle) = self.external_windows.mixer.clone() else {
             return;
         };
-        let snapshot = self.build_mixer_snapshot(cx);
+        let mut snapshot = self.build_mixer_snapshot(cx);
+        snapshot.context_menu = self.mixer_window_context_menu(cx);
         let _ = handle.update(cx, |mixer, _window, cx| {
             mixer.set_snapshot(snapshot);
             cx.notify();
@@ -2176,7 +2209,15 @@ impl StudioLayout {
                         if changed {
                             this.mark_dirty();
                             this.audio_bridge.project_dirty = true;
-                            this.schedule_audio_project_sync(cx, true, "mixer_send_gain");
+                            // Not forced. A send fader reports a value per
+                            // pointer sample, and a forced sync rebuilds the
+                            // whole runtime graph for each one — sixty full
+                            // project rebuilds a second on the UI thread, which
+                            // is the stutter. Unforced, the burst window
+                            // coalesces them; `project_dirty` stays set, so the
+                            // 60 Hz engine poll publishes the value the drag
+                            // ended on. See `sync_should_build_now`.
+                            this.schedule_audio_project_sync(cx, false, "mixer_send_gain");
                             this.push_mixer_snapshot_to_window(cx);
                             cx.notify();
                         }
@@ -2530,6 +2571,11 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         solfege,
         sends,
         routing,
+        // Takes are an arrangement concern: the mixer strip has no take lane, and
+        // carrying the list into a clone that drops its clips would leave every
+        // take pointing at a clip that is not there.
+        takes: _,
+        takes_expanded: _,
     } = track;
     TrackState {
         // Preserved, not reset: the mixer strip renders its PFL/AFL buttons
@@ -2557,6 +2603,8 @@ fn clone_track_for_mixer_detail(track: &TrackState, include_detail: bool) -> Tra
         meter_peak_hold_r: *meter_peak_hold_r,
         meter_clip: *meter_clip,
         clips: Vec::new(),
+        takes: Vec::new(),
+        takes_expanded: false,
         automation_lanes: if include_detail {
             automation_lanes.clone()
         } else {

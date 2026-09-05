@@ -1244,6 +1244,7 @@ fn build_engine_project_snapshot_inner(
             .map(|p| EngineTempoPointSnapshot {
                 beat: p.beat,
                 bpm: p.bpm,
+                curve: p.curve.to_tag(),
             })
             .collect(),
         time_signature: [state.time_signature_num, state.time_signature_den],

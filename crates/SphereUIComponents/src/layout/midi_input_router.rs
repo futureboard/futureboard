@@ -351,11 +351,16 @@ impl StudioLayout {
         // recording placement follows that arrival rather than the later drain.
         let capture_beat = self.audio_bridge.engine.as_ref().map(|engine| {
             let snapshot = engine.transport_snapshot();
-            compensated_midi_capture_beat(
-                snapshot.position_beats,
-                snapshot.bpm,
-                message.received_at.elapsed().as_secs_f64(),
-            )
+            let delay = message.received_at.elapsed().as_secs_f64();
+            // Back the arrival out in *seconds* and resolve the beat through
+            // the tempo map. `beat - delay * bpm / 60` assumes one tempo for
+            // the whole project, so a note played just after a tempo change
+            // used to land at the wrong distance from it — by more the bigger
+            // the change.
+            let state = &self.timeline.read(cx).state;
+            compensated_midi_capture_beat(snapshot.position_seconds, delay, |seconds| {
+                state.beat_at_seconds(seconds)
+            })
         });
         let channel = match &message.event {
             MidiInputEvent::NoteOn { channel, .. }
@@ -717,9 +722,19 @@ fn first_instrument_insert_id(
     }
 }
 
-fn compensated_midi_capture_beat(current_beat: f64, bpm: f64, queue_delay_seconds: f64) -> f32 {
-    let elapsed_beats = queue_delay_seconds.max(0.0) * bpm.max(1.0) / 60.0;
-    (current_beat - elapsed_beats).max(0.0) as f32
+/// Where a MIDI event that arrived `queue_delay_seconds` ago belongs.
+///
+/// The compensation is done on the clock and the *result* converted to a beat,
+/// rather than converted first and subtracted in beats: seconds are what the
+/// delay is measured in, and beats are only linear in seconds while the tempo
+/// is constant.
+fn compensated_midi_capture_beat(
+    position_seconds: f64,
+    queue_delay_seconds: f64,
+    beat_at_seconds: impl Fn(f64) -> f64,
+) -> f32 {
+    let seconds = (position_seconds - queue_delay_seconds.max(0.0)).max(0.0);
+    beat_at_seconds(seconds).max(0.0) as f32
 }
 
 #[cfg(test)]
@@ -748,9 +763,37 @@ mod tests {
 
     #[test]
     fn midi_record_timing_compensates_control_queue_delay() {
-        let beat = compensated_midi_capture_beat(8.0, 120.0, 0.025);
-        assert!((beat - 7.95).abs() < 0.0001);
-        assert_eq!(compensated_midi_capture_beat(0.01, 120.0, 1.0), 0.0);
+        // 120 BPM: half a second per beat.
+        let at_120 = |seconds: f64| seconds * 2.0;
+        // Beat 8 is 4.0 s in; an event that arrived 25 ms ago belongs at 7.95.
+        let beat = compensated_midi_capture_beat(4.0, 0.025, at_120);
+        assert!((beat - 7.95).abs() < 0.0001, "got {beat}");
+        // A delay longer than the take clamps to the start rather than going
+        // negative.
+        assert_eq!(compensated_midi_capture_beat(0.005, 1.0, at_120), 0.0);
+    }
+
+    /// The delay is a wall-clock quantity, so it has to be taken off the clock
+    /// and the beat resolved afterwards. Subtracting `delay * bpm / 60` — one
+    /// tempo for the whole project — puts a note played just after a tempo
+    /// change at the wrong distance from it, by more the larger the change.
+    #[test]
+    fn midi_record_timing_follows_the_tempo_map_across_a_change() {
+        // 60 BPM (1 s/beat) for the first 4 beats, then 240 BPM (0.25 s/beat).
+        let map = |seconds: f64| {
+            if seconds <= 4.0 {
+                seconds
+            } else {
+                4.0 + (seconds - 4.0) * 4.0
+            }
+        };
+        // 40 ms into the fast section, an event that arrived 80 ms ago was
+        // played 40 ms *before* the change — in the slow section.
+        let beat = compensated_midi_capture_beat(4.04, 0.08, map);
+        assert!((beat - 3.96).abs() < 0.0001, "got {beat}");
+        // Whereas one that arrived 20 ms ago is already past it.
+        let beat = compensated_midi_capture_beat(4.04, 0.02, map);
+        assert!((beat - 4.08).abs() < 0.0001, "got {beat}");
     }
 
     #[test]

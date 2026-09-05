@@ -98,12 +98,38 @@ pub struct MixerSnapshot {
     pub tree_sidebar_enabled: bool,
     pub tree_sidebar_collapsed: bool,
     pub tree_sidebar_width_px: f32,
+    /// A context menu opened *from this window*: its position in this window's
+    /// coordinates, and the entries to draw.
+    ///
+    /// The Studio owns every menu, because it owns the state the entries act
+    /// on. What it cannot own is where one is painted: an overlay drawn by
+    /// `StudioLayout::render` lands in the Studio's window, so a picker opened
+    /// from the detached mixer appeared over the arrangement — at the mixer's
+    /// coordinates, which mean nothing there. The request has always carried
+    /// the window it came from; this is that field finally being used, with the
+    /// Studio drawing the menus that belong to it and handing this window the
+    /// ones that belong here.
+    pub context_menu: Option<MixerContextMenu>,
+}
+
+/// A context menu the detached mixer has to draw itself.
+#[derive(Clone)]
+pub struct MixerContextMenu {
+    pub x: f32,
+    pub y: f32,
+    pub entries: Vec<crate::components::context_menu::ContextMenuEntry>,
 }
 
 pub struct MixerWindow {
     snapshot: MixerSnapshot,
     tree_sidebar: Entity<MixerTreeSidebar>,
     callbacks: MixerCallbacks,
+    /// Runs a context-menu command back in the Studio, which owns the state
+    /// every entry acts on.
+    on_menu_command: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>,
+    /// Dismisses the open menu, again in the Studio: this window draws the
+    /// menu, it does not own whether one is open.
+    on_menu_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
@@ -116,6 +142,8 @@ impl MixerWindow {
         snapshot: MixerSnapshot,
         tree_sidebar: Entity<MixerTreeSidebar>,
         callbacks: MixerCallbacks,
+        on_menu_command: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>,
+        on_menu_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
         on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
         on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
@@ -130,6 +158,8 @@ impl MixerWindow {
             snapshot,
             tree_sidebar,
             callbacks,
+            on_menu_command,
+            on_menu_close,
             on_close,
             on_mixer_scroll,
             on_mixer_split,
@@ -174,6 +204,7 @@ impl Render for MixerWindow {
             tree_sidebar_enabled,
             tree_sidebar_collapsed,
             tree_sidebar_width_px,
+            context_menu,
         } = self.snapshot.clone();
         let mixer_callbacks = self.callbacks.clone();
         let on_mixer_scroll = self.on_mixer_scroll.clone();
@@ -264,6 +295,25 @@ impl Render for MixerWindow {
                         i18n,
                     )),
             )
+            // The menu this window's own controls opened. Drawn here so it
+            // lands where the pointer is, over the strip that opened it.
+            .children(context_menu.map(|menu| {
+                let command = self.on_menu_command.clone();
+                let close = self.on_menu_close.clone();
+                let dismiss = self.on_menu_close.clone();
+                crate::components::context_menu::context_menu_overlay(
+                    menu.entries,
+                    menu.x,
+                    menu.y,
+                    viewport_width,
+                    viewport_height,
+                    std::sync::Arc::new(move |id: &String, window, cx| {
+                        command(id.as_str(), window, cx);
+                        close(window, cx);
+                    }),
+                    std::sync::Arc::new(move |_: &(), window, cx| dismiss(window, cx)),
+                )
+            }))
     }
 }
 
@@ -276,6 +326,8 @@ pub fn open_mixer_window(
     on_mixer_scroll: Arc<dyn Fn(f32, &mut Window, &mut App) + Send + Sync>,
     on_mixer_split: Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + Send + Sync>,
     dispatch_key: Arc<dyn Fn(&KeyDownEvent, &mut App) -> bool + Send + Sync>,
+    on_menu_command: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>,
+    on_menu_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<MixerWindow>, String> {
     external_mixer_debug(&format!(
@@ -312,6 +364,8 @@ pub fn open_mixer_window(
                 snapshot,
                 tree_sidebar,
                 callbacks,
+                on_menu_command,
+                on_menu_close,
                 on_close,
                 on_mixer_scroll,
                 on_mixer_split,

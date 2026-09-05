@@ -37,6 +37,100 @@ pub fn resolve_waveform_source_range(
     )
 }
 
+/// Maps a clip-local pixel column to its position *inside the clip's audio*,
+/// as a 0..1 fraction of what the clip plays.
+///
+/// Flat-tempo projects use `Uniform`, which is the column's share of the clip
+/// width — the mapping the waveform has always used, at exactly its old cost.
+/// With tempo automation the clip's width covers a bent beat axis, so each
+/// column is resolved to a beat, the beat to a real elapsed second, and the
+/// second to its share of the clip's playing time. That is the mapping the
+/// engine reads samples by, which is what keeps the drawn waveform on the audio
+/// through a tempo change instead of sliding against it.
+enum ClipTimeMap {
+    Uniform {
+        clip_w: f64,
+    },
+    Tempo {
+        tempo: DirectAudio::TempoMap,
+        viewport: super::timeline_state::TimelineViewport,
+        clip_left: f64,
+        clip_w: f64,
+        start_seconds: f64,
+        played_seconds: f64,
+        revision: u64,
+    },
+}
+
+impl ClipTimeMap {
+    fn for_clip(clip: &ClipState, state: &TimelineState, clip_left: f32, clip_w: f64) -> Self {
+        let uniform = Self::Uniform { clip_w };
+        if !state.tempo_map.has_automation() {
+            return uniform;
+        }
+        let project_bpm = state.bpm.max(1.0) as f64;
+        let Some(played_seconds) = clip.stretch.played_seconds_for_project_bpm(project_bpm) else {
+            return uniform;
+        };
+        if played_seconds <= 0.0 {
+            return uniform;
+        }
+        let tempo = state.tempo_map.to_engine_map(project_bpm);
+        let start_seconds = tempo.seconds_at_beat(clip.start_beat.max(0.0) as f64);
+        Self::Tempo {
+            tempo,
+            viewport: state.viewport.clone(),
+            clip_left: clip_left as f64,
+            clip_w,
+            start_seconds,
+            played_seconds,
+            revision: state.tempo_map.revision(),
+        }
+    }
+
+    /// Position of clip-local pixel `x` inside the clip's audio, 0..1.
+    fn fraction_at(&self, x: f32) -> f64 {
+        match self {
+            Self::Uniform { clip_w } => ((x as f64) / clip_w).clamp(0.0, 1.0),
+            Self::Tempo {
+                tempo,
+                viewport,
+                clip_left,
+                clip_w,
+                start_seconds,
+                played_seconds,
+                ..
+            } => {
+                let lane_x = clip_left + (x as f64).clamp(0.0, *clip_w);
+                let beat = super::timeline_state::x_to_beat(lane_x as f32, viewport);
+                let seconds = tempo.seconds_at_beat(beat) - start_seconds;
+                (seconds / played_seconds).clamp(0.0, 1.0)
+            }
+        }
+    }
+
+    /// Everything the mapping depends on that the geometry cache key does not
+    /// already carry, so a tempo edit invalidates the cached bars.
+    fn hash_into(&self, hasher: &mut impl Hasher) {
+        match self {
+            Self::Uniform { .. } => 0u8.hash(hasher),
+            Self::Tempo {
+                revision,
+                start_seconds,
+                played_seconds,
+                clip_left,
+                ..
+            } => {
+                1u8.hash(hasher);
+                revision.hash(hasher);
+                start_seconds.to_bits().hash(hasher);
+                played_seconds.to_bits().hash(hasher);
+                clip_left.to_bits().hash(hasher);
+            }
+        }
+    }
+}
+
 /// One bar per visible CSS pixel column. No hard cap on number of bars —
 /// the visible-range clamp naturally bounds it by viewport width.
 pub fn waveform_canvas(
@@ -283,6 +377,16 @@ fn draw_chunk_waveform_locked(
 
     let clip_w = clip_width.max(1.0) as f64;
 
+    // Where each drawn column sits *inside the audio*, 0..1.
+    //
+    // With a flat tempo this is the column's share of the clip width, which is
+    // what it always was. With tempo automation the clip's pixels are not
+    // uniform seconds — the beat axis they are drawn on bends — so a linear
+    // share would slide the picture away from the samples the engine actually
+    // plays there. Resolving each column back through the tempo map to a real
+    // elapsed second is what holds the waveform still across a tempo change.
+    let clip_time_map = ClipTimeMap::for_clip(clip, state, clip_left, clip_w);
+
     // Geometry signature: horizontal mapping only — peak values are normalized
     // and scaled vertically from the canvas bounds at paint time.
     let key = {
@@ -309,6 +413,7 @@ fn draw_chunk_waveform_locked(
             .to_bits()
             .hash(&mut hasher);
         (clip.stretch.reverse as u8).hash(&mut hasher);
+        clip_time_map.hash_into(&mut hasher);
         hasher.finish()
     };
 
@@ -322,8 +427,8 @@ fn draw_chunk_waveform_locked(
         for col in 0..num_cols {
             let x0 = visible_start + col as f32;
             let x1 = x0 + 1.0;
-            let out0 = ((x0 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
-            let out1 = ((x1 as f64) / clip_w).clamp(0.0, 1.0) * output_len;
+            let out0 = clip_time_map.fraction_at(x0) * output_len;
+            let out1 = clip_time_map.fraction_at(x1) * output_len;
             let s0 = clip_output_local_to_source_sample(
                 out0,
                 source_start,

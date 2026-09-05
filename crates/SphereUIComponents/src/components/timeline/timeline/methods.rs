@@ -148,6 +148,7 @@ impl Timeline {
         self.automation_marquee = None;
         self.tempo_drag = None;
         self.tempo_gesture_origin = None;
+        self.tempo_gesture_linear_anchors.clear();
         self.ts_drag = None;
         self.ts_gesture_origin = None;
         self.marker_drag = None;
@@ -211,6 +212,7 @@ impl Timeline {
             tempo_drag: None,
             marker_drag: None,
             tempo_gesture_origin: None,
+            tempo_gesture_linear_anchors: Vec::new(),
             ts_drag: None,
             ts_gesture_origin: None,
             region_gesture_origin: None,
@@ -279,6 +281,7 @@ impl Timeline {
             tempo_drag: None,
             marker_drag: None,
             tempo_gesture_origin: None,
+            tempo_gesture_linear_anchors: Vec::new(),
             ts_drag: None,
             ts_gesture_origin: None,
             region_gesture_origin: None,
@@ -1251,6 +1254,7 @@ impl Timeline {
         if click_count >= 2 {
             if point_id.is_none() {
                 let origin = self.capture_tempo_state();
+                self.tempo_gesture_linear_anchors = self.state.capture_linear_clip_anchors();
                 if let Some(id) = self.state.add_tempo_point(beat, bpm) {
                     self.state.select_tempo_point(&id);
                     // The double-click both creates the marker and starts a
@@ -1270,6 +1274,7 @@ impl Timeline {
         if let Some(id) = point_id {
             self.state.select_tempo_point(&id);
             self.tempo_gesture_origin = Some(("Move Tempo Marker", self.capture_tempo_state()));
+            self.tempo_gesture_linear_anchors = self.state.capture_linear_clip_anchors();
             self.tempo_drag = Some(TempoPointDrag {
                 point_id: id,
                 moved: false,
@@ -1307,7 +1312,15 @@ impl Timeline {
     pub(super) fn finish_tempo_track_interaction(&mut self, cx: &mut Context<Self>) -> bool {
         if let Some(drag) = self.tempo_drag.take() {
             let origin = self.tempo_gesture_origin.take();
+            let anchors = std::mem::take(&mut self.tempo_gesture_linear_anchors);
             if drag.moved {
+                // The map moved under the arrangement, so settle the clips
+                // against it before the edit is recorded: audio clips re-derive
+                // their bar count from the audio they play, and Linear-timebase
+                // clips go back to the wall-clock position they were dragged
+                // from. Same two passes as a menu-driven tempo edit and as undo.
+                self.state.reconcile_audio_clip_lengths();
+                self.state.reapply_linear_clip_anchors(&anchors);
                 match origin {
                     Some((label, prev)) => {
                         self.record_tempo_edit(label, prev, cx);

@@ -10,9 +10,12 @@ pub struct TempoPointDrag {
 
 // ── Tempo map ─────────────────────────────────────────────────────────────────
 
-/// Interpolation shape between a tempo point and the next one. Mirrors the
-/// audio engine's tempo concept. `Smooth` is stored/round-tripped even though
-/// it currently evaluates as `Linear` until the curve math lands engine-side.
+/// Interpolation shape between a tempo point and the next one.
+///
+/// The tag is the wire format shared with [`DirectAudio::TempoCurve`], which is
+/// where the curve is actually evaluated: the lane draws, the transport plays,
+/// and every beat/second/sample conversion resolves through that one map, so a
+/// curve here is a curve the engine renders rather than a label on a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TempoCurve {
     #[default]
@@ -44,6 +47,12 @@ impl TempoCurve {
             TempoCurve::Linear => "Linear",
             TempoCurve::Smooth => "Smooth",
         }
+    }
+
+    /// The engine's matching curve. One conversion point, so the lane and the
+    /// transport can never disagree about what shape was drawn.
+    pub fn to_engine(self) -> DirectAudio::TempoCurve {
+        DirectAudio::TempoCurve::from_tag(self.to_tag())
     }
 }
 
@@ -83,14 +92,6 @@ impl TempoPoint {
 /// When `points` is empty the project plays at the timeline's base BPM; the
 /// base BPM is supplied by the caller (`TimelineState::bpm`) so this map stays
 /// self-contained and cheap to clone.
-/// Cached hold-mode segment for beat/time conversion.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct TempoHoldSegment {
-    start_beat: f64,
-    start_seconds: f64,
-    bpm: f64,
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TempoMap {
     /// Sorted (by beat) tempo markers in addition to the implicit base point at
@@ -126,30 +127,44 @@ impl TempoMap {
         !self.points.is_empty()
     }
 
-    /// Hold-mode seconds at `beat` using step-hold segments between markers.
-    pub fn seconds_at_beat(&self, beat: f64, base_bpm: f64) -> f64 {
-        let beat = beat.max(0.0);
-        let segments = self.hold_segments(base_bpm);
-        let seg = hold_segment_at_beat(&segments, beat);
-        seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(TEMPO_BPM_MIN)
+    /// The engine's map for these markers at `base_bpm`.
+    ///
+    /// The one place the UI resolves musical time, and it resolves it by asking
+    /// the same type the audio callback asks. Two implementations of the same
+    /// integral is how a curve ends up drawn in one place and played in
+    /// another; there is only one, and it lives in the engine.
+    ///
+    /// Built per call rather than cached: the marker list is small, the result
+    /// depends on `base_bpm` which is not part of this map, and a stale cache
+    /// here is a playhead that disagrees with the transport. Callers converting
+    /// many positions in one pass (grid generation, a clip sweep) should build
+    /// it once and query it directly instead of going through the wrappers.
+    pub fn to_engine_map(&self, base_bpm: f64) -> DirectAudio::TempoMap {
+        DirectAudio::TempoMap::from_points(
+            base_bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX),
+            self.points
+                .iter()
+                .map(|p| DirectAudio::TempoPoint::new(p.beat, p.bpm, p.curve.to_engine()))
+                .collect(),
+        )
     }
 
-    /// Inverse of [`Self::seconds_at_beat`] for hold-mode segments.
+    /// Elapsed seconds at `beat`, following every marker's curve.
+    pub fn seconds_at_beat(&self, beat: f64, base_bpm: f64) -> f64 {
+        let beat = beat.max(0.0);
+        if self.points.is_empty() {
+            return beat * 60.0 / base_bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
+        }
+        self.to_engine_map(base_bpm).seconds_at_beat(beat)
+    }
+
+    /// Inverse of [`Self::seconds_at_beat`].
     pub fn beat_at_seconds(&self, seconds: f64, base_bpm: f64) -> f64 {
         let seconds = seconds.max(0.0);
-        let segments = self.hold_segments(base_bpm);
-        if segments.is_empty() {
-            return 0.0;
+        if self.points.is_empty() {
+            return seconds * base_bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX) / 60.0;
         }
-        if seconds <= segments[0].start_seconds {
-            return 0.0;
-        }
-        let idx = segments
-            .partition_point(|seg| seg.start_seconds <= seconds)
-            .saturating_sub(1);
-        let seg = &segments[idx.min(segments.len() - 1)];
-        let elapsed = seconds - seg.start_seconds;
-        seg.start_beat + elapsed * seg.bpm.max(TEMPO_BPM_MIN) / 60.0
+        self.to_engine_map(base_bpm).beat_at_seconds(seconds)
     }
 
     pub fn samples_at_beat(&self, beat: f64, base_bpm: f64, sample_rate: f64) -> u64 {
@@ -374,48 +389,93 @@ impl TempoMap {
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
+}
 
-    fn hold_segments(&self, base_bpm: f64) -> Vec<TempoHoldSegment> {
-        let base_bpm = base_bpm.clamp(TEMPO_BPM_MIN, TEMPO_BPM_MAX);
-        let mut markers: Vec<(f64, f64)> = Vec::new();
-        if self.points.is_empty() {
-            markers.push((0.0, base_bpm));
-        } else {
-            if self.points[0].beat > 0.0 {
-                markers.push((0.0, base_bpm));
-            }
-            for point in &self.points {
-                markers.push((point.beat, point.bpm));
-            }
-        }
-        let mut segments = Vec::with_capacity(markers.len());
-        let mut start_seconds = 0.0;
-        for (i, (beat, bpm)) in markers.iter().enumerate() {
-            segments.push(TempoHoldSegment {
-                start_beat: *beat,
-                start_seconds,
-                bpm: *bpm,
-            });
-            if let Some((next_beat, _)) = markers.get(i + 1) {
-                start_seconds += (next_beat - beat) * 60.0 / bpm.max(TEMPO_BPM_MIN);
-            }
-        }
-        segments
+/// The resolved engine tempo map for one `(tempo_map, bpm)` pair.
+///
+/// Every audio clip's geometry resolves through the tempo map — where it
+/// starts on the clock, how many beats its wall-clock length covers — and the
+/// arrangement asks for that once per clip per frame. Building the map each
+/// time made a frame cost `clips × tempo markers`, so adding markers to a
+/// project slowed down scrolling in proportion to how many were added.
+///
+/// This is derived state, so it is deliberately outside the value: it is never
+/// persisted, and [`PartialEq`] ignores it — two timelines with the same tempo
+/// are the same timeline whether or not either has resolved it yet.
+///
+/// It refreshes itself on read rather than being refreshed by whoever last
+/// edited the tempo. A cache that has to be remembered is a cache that will be
+/// forgotten by exactly one code path, and the symptom — a project that grows
+/// slower the more tempo markers it has — is invisible until someone measures
+/// it. The key is checked on every read, so a stale build simply rebuilds.
+#[derive(Debug, Default)]
+pub struct ResolvedTempo {
+    /// `None` until first use. Behind a lock because the accessor takes
+    /// `&self`: it is read once per audio clip per frame from the UI thread,
+    /// and an uncontended lock is nothing against building the map.
+    cell: std::sync::Mutex<Option<(TempoCacheKey, std::sync::Arc<DirectAudio::TempoMap>)>>,
+}
+
+/// What a resolved map was built from: the marker list's revision (which moves
+/// on every edit), the base BPM, and the marker count.
+type TempoCacheKey = (u64, u32, usize);
+
+impl Clone for ResolvedTempo {
+    /// A clone starts empty rather than copying the entry. Cloning a timeline
+    /// is not a hot path, and carrying a cache into a clone that may be edited
+    /// independently is how a cache and its subject part company.
+    fn clone(&self) -> Self {
+        Self::default()
     }
 }
 
-fn hold_segment_at_beat(segments: &[TempoHoldSegment], beat: f64) -> TempoHoldSegment {
-    if segments.is_empty() {
-        return TempoHoldSegment {
-            start_beat: 0.0,
-            start_seconds: 0.0,
-            bpm: TEMPO_BPM_MIN,
-        };
+impl PartialEq for ResolvedTempo {
+    /// Derived state is not part of the value.
+    fn eq(&self, _other: &Self) -> bool {
+        true
     }
-    let idx = segments
-        .partition_point(|seg| seg.start_beat <= beat)
-        .saturating_sub(1);
-    segments[idx.min(segments.len() - 1)]
+}
+
+impl TimelineState {
+    fn tempo_cache_key(&self) -> TempoCacheKey {
+        (
+            self.tempo_map.revision(),
+            self.bpm.to_bits(),
+            self.tempo_map.points.len(),
+        )
+    }
+
+    /// The engine tempo map for the project's current tempo.
+    ///
+    /// One `Arc` clone when the cache is current, which is the state the
+    /// arrangement reads it in — the map is otherwise rebuilt once per audio
+    /// clip per frame, which is what made a project's frame cost scale with
+    /// its tempo-marker count.
+    pub fn resolved_tempo_map(&self) -> std::sync::Arc<DirectAudio::TempoMap> {
+        let key = self.tempo_cache_key();
+        let build = || std::sync::Arc::new(self.tempo_map.to_engine_map(self.bpm.max(1.0) as f64));
+        // A poisoned lock is not a reason to be wrong: build and move on.
+        let Ok(mut cell) = self.resolved_tempo.cell.lock() else {
+            return build();
+        };
+        if let Some((cached_key, map)) = cell.as_ref() {
+            if *cached_key == key {
+                return std::sync::Arc::clone(map);
+            }
+        }
+        let map = build();
+        *cell = Some((key, std::sync::Arc::clone(&map)));
+        map
+    }
+
+    /// Resolve the tempo map now, so the next read is a cache hit.
+    ///
+    /// Not required for correctness — [`Self::resolved_tempo_map`] refreshes
+    /// itself — but calling it after a tempo edit keeps the rebuild off the
+    /// first frame that draws with it.
+    pub fn refresh_tempo_cache(&mut self) {
+        let _ = self.resolved_tempo_map();
+    }
 }
 
 /// BPM clamp range for tempo points (matches the audio engine spec).

@@ -936,111 +936,286 @@ pub fn tick_root_frame(reason: &'static str) {
 /// `None` until two samples exist and on any platform that cannot report it: an
 /// unmeasured rate is not a rate of zero.
 pub fn disk_io_bytes_per_sec() -> Option<f64> {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    let usage = resource_usage();
+    usage.studio_known.then(|| usage.total().disk_bytes_per_sec)
+}
 
-    /// Long enough to smooth a burst into a rate, short enough that a stream
-    /// starting is visible while the user is still looking.
-    const WINDOW: Duration = Duration::from_millis(500);
-    struct Sample {
-        at: Instant,
-        bytes: u64,
-        rate: Option<f64>,
-    }
-    static LAST: std::sync::OnceLock<Mutex<Option<Sample>>> = std::sync::OnceLock::new();
+// ── Whole-session resource usage ────────────────────────────────────────────
+//
+// Studio hosts plug-ins out of process, so "what is Futureboard costing this
+// machine" is never one process's numbers. Memory, disk and CPU are all read
+// for the Studio *and* every live plug-in host, on one shared one-second tick:
+// three separate samplers on three cadences would have read the same handles
+// three times and still disagreed with each other about which second they were
+// describing.
 
-    let now = Instant::now();
-    let Ok(mut slot) = LAST.get_or_init(|| Mutex::new(None)).lock() else {
-        return None;
-    };
-    // Called at the meter's cadence but sampled twice a second: this opens a
-    // handle per plugin host, and a readout that only shows whole megabytes has
-    // no use for more.
-    if let Some(prev) = slot.as_ref() {
-        if now.duration_since(prev.at) < WINDOW {
-            return prev.rate;
-        }
-    }
-    let bytes = read_total_io_bytes()?;
-    match slot.as_mut() {
-        None => {
-            *slot = Some(Sample {
-                at: now,
-                bytes,
-                rate: None,
-            });
-            None
-        }
-        Some(prev) => {
-            let elapsed = now.duration_since(prev.at).as_secs_f64();
-            // A host that exits between samples takes its counters with it, so
-            // the total can go backwards; that is not negative disk traffic.
-            let moved = bytes.saturating_sub(prev.bytes);
-            let rate = if elapsed > 0.0 {
-                moved as f64 / elapsed
-            } else {
-                0.0
-            };
-            prev.at = now;
-            prev.bytes = bytes;
-            prev.rate = Some(rate);
-            Some(rate)
+/// What one side of the session (Studio, or the plug-in hosts together) costs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ProcessLoad {
+    /// Working set — the number Task Manager calls "Memory".
+    pub memory_bytes: u64,
+    /// Share of the whole machine's CPU over the last window, 0..100. Scaled by
+    /// core count, so 100 means every core, not one of them.
+    pub cpu_percent: f32,
+    /// Bytes through the I/O manager per second over the last window.
+    pub disk_bytes_per_sec: f64,
+}
+
+impl ProcessLoad {
+    fn plus(self, other: Self) -> Self {
+        Self {
+            memory_bytes: self.memory_bytes.saturating_add(other.memory_bytes),
+            cpu_percent: self.cpu_percent + other.cpu_percent,
+            disk_bytes_per_sec: self.disk_bytes_per_sec + other.disk_bytes_per_sec,
         }
     }
 }
 
-/// Bytes transferred by this process and every live plugin host since each one
-/// started. Only the difference between two readings is meaningful.
-#[cfg(windows)]
-fn read_total_io_bytes() -> Option<u64> {
-    let mut total = read_current_process_io_bytes()?;
-    for pid in running_plugin_host_pids() {
-        if let Some(bytes) = read_pid_io_bytes(pid) {
-            total = total.saturating_add(bytes);
+/// The session's cost, split the way the user can act on it: the app, and the
+/// plug-ins they chose to load.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ResourceUsage {
+    pub studio: ProcessLoad,
+    /// False before the first sample, and on platforms with no reader — which is
+    /// not the same as "zero", and must not print as it.
+    pub studio_known: bool,
+    /// Every live plug-in host, summed.
+    pub plugin_hosts: ProcessLoad,
+    /// How many hosts answered. Zero is a real answer: no plug-in loaded yet.
+    pub plugin_host_count: usize,
+}
+
+impl ResourceUsage {
+    pub fn total(&self) -> ProcessLoad {
+        self.studio.plus(self.plugin_hosts)
+    }
+}
+
+/// How often the counters are re-read. One second: these are syscalls per
+/// process, and a rate averaged over less than that reads as noise.
+const RESOURCE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Cumulative counters from the previous tick, per process.
+///
+/// CPU and disk are both *counters*, not gauges: the machine reports totals
+/// since the process started, and a rate only exists as the difference between
+/// two readings. Keyed by pid, with `0` standing for the Studio itself.
+#[derive(Clone, Copy, Default)]
+struct ProcessCounters {
+    cpu_100ns: u64,
+    io_bytes: u64,
+}
+
+/// The session's CPU, memory and disk, as of the last background reading.
+///
+/// Free to call: it returns a published snapshot, so the meter tick, the
+/// profiler overlay and the Performance Monitor all read the same second's
+/// numbers without any of them touching a process handle. The syscalls happen
+/// on [`start_resource_sampler`]'s thread — see there for why they must not
+/// happen here.
+pub fn resource_usage() -> ResourceUsage {
+    start_resource_sampler();
+    let Ok(latest) = published_resource_usage().lock() else {
+        return ResourceUsage::default();
+    };
+    *latest
+}
+
+/// The last reading published by the sampler thread.
+fn published_resource_usage() -> &'static std::sync::Mutex<ResourceUsage> {
+    static LATEST: std::sync::OnceLock<std::sync::Mutex<ResourceUsage>> =
+        std::sync::OnceLock::new();
+    LATEST.get_or_init(|| std::sync::Mutex::new(ResourceUsage::default()))
+}
+
+/// Start the once-a-second sampler, if it is not already running.
+///
+/// Opening a handle on every plug-in host and asking each for four counters is
+/// a burst of syscalls, and it used to happen on whichever meter tick crossed
+/// the poll interval — on the UI thread, once a second, growing with the number
+/// of hosts loaded. That is a dropped frame a second on a big session, and it
+/// is invisible in an average.
+fn start_resource_sampler() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    STARTED.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("fb-resource-sampler".into())
+            .spawn(|| {
+                let mut sampler = ResourceSampler::default();
+                loop {
+                    let value = sampler.sample();
+                    if let Ok(mut latest) = published_resource_usage().lock() {
+                        *latest = value;
+                    }
+                    std::thread::sleep(RESOURCE_POLL);
+                }
+            });
+    });
+}
+
+/// Previous counters, so the rates are a difference between two readings.
+#[derive(Default)]
+struct ResourceSampler {
+    counters: std::collections::HashMap<u32, ProcessCounters>,
+    at: Option<std::time::Instant>,
+}
+
+impl ResourceSampler {
+    fn sample(&mut self) -> ResourceUsage {
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let now = Instant::now();
+        let elapsed = self
+            .at
+            .map(|at| now.duration_since(at).as_secs_f64())
+            .filter(|seconds| *seconds > 0.0);
+        self.at = Some(now);
+
+        let previous = std::mem::take(&mut self.counters);
+        let mut counters: HashMap<u32, ProcessCounters> = HashMap::new();
+        let mut sample = |pid: u32, raw: Option<(u64, ProcessCounters)>| -> ProcessLoad {
+            let Some((memory_bytes, current)) = raw else {
+                return ProcessLoad::default();
+            };
+            counters.insert(pid, current);
+            // No previous reading, or a process that restarted onto the same
+            // pid: report the gauge and leave the rates at zero until there are
+            // two readings to subtract. A counter that went backwards is a new
+            // process, never negative work.
+            let (cpu_percent, disk_bytes_per_sec) = match (previous.get(&pid).copied(), elapsed) {
+                (Some(previous), Some(elapsed)) => {
+                    let cpu_delta = current.cpu_100ns.saturating_sub(previous.cpu_100ns) as f64;
+                    let io_delta = current.io_bytes.saturating_sub(previous.io_bytes) as f64;
+                    let cores = cpu_core_count() as f64;
+                    // 100 ns units against wall-clock seconds, spread over
+                    // the cores the work could have used.
+                    let percent = (cpu_delta / 1.0e7) / elapsed / cores * 100.0;
+                    (percent.clamp(0.0, 100.0) as f32, io_delta / elapsed)
+                }
+                _ => (0.0, 0.0),
+            };
+            ProcessLoad {
+                memory_bytes,
+                cpu_percent,
+                disk_bytes_per_sec,
+            }
+        };
+
+        let studio_raw = read_studio_counters();
+        let studio_known = studio_raw.is_some();
+        let studio = sample(0, studio_raw);
+
+        let mut plugin_hosts = ProcessLoad::default();
+        let mut plugin_host_count = 0usize;
+        for pid in running_plugin_host_pids() {
+            if let Some(raw) = read_pid_counters(pid) {
+                plugin_hosts = plugin_hosts.plus(sample(pid, Some(raw)));
+                plugin_host_count += 1;
+            }
+        }
+
+        drop(sample);
+        self.counters = counters;
+        ResourceUsage {
+            studio,
+            studio_known,
+            plugin_hosts,
+            plugin_host_count,
         }
     }
-    Some(total)
+}
+
+/// Cores to divide CPU time by. Queried once — it does not change.
+fn cpu_core_count() -> usize {
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CORES.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1)
+    })
+}
+
+#[cfg(windows)]
+fn read_studio_counters() -> Option<(u64, ProcessCounters)> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    counters_for_handle(unsafe { GetCurrentProcess() })
 }
 
 #[cfg(not(windows))]
-fn read_total_io_bytes() -> Option<u64> {
+fn read_studio_counters() -> Option<(u64, ProcessCounters)> {
     None
 }
 
 #[cfg(windows)]
-fn read_current_process_io_bytes() -> Option<u64> {
-    use windows::Win32::System::Threading::GetCurrentProcess;
-    io_bytes_for_handle(unsafe { GetCurrentProcess() })
-}
-
-#[cfg(windows)]
-fn read_pid_io_bytes(pid: u32) -> Option<u64> {
+fn read_pid_counters(pid: u32) -> Option<(u64, ProcessCounters)> {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
 
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    let bytes = io_bytes_for_handle(handle);
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            false,
+            pid,
+        )
+    }
+    .ok()?;
+    let out = counters_for_handle(handle);
     unsafe {
         let _ = CloseHandle(handle);
     }
-    bytes
+    out
 }
 
-#[cfg(windows)]
-fn io_bytes_for_handle(handle: windows::Win32::Foundation::HANDLE) -> Option<u64> {
-    use windows::Win32::System::Threading::GetProcessIoCounters;
+#[cfg(not(windows))]
+fn read_pid_counters(_pid: u32) -> Option<(u64, ProcessCounters)> {
+    None
+}
 
-    // `IO_COUNTERS` counts every transfer through the I/O manager, so this is
-    // the same figure Task Manager's Disk column is built from rather than a
-    // filesystem-only one. Named "Disk" on the readout because that is what it
-    // is in practice for a DAW.
-    let mut counters = Default::default();
-    unsafe { GetProcessIoCounters(handle, &mut counters) }.ok()?;
-    Some(
-        counters
-            .ReadTransferCount
-            .saturating_add(counters.WriteTransferCount),
-    )
+/// Working set, CPU time and I/O totals for one open process handle.
+#[cfg(windows)]
+fn counters_for_handle(
+    handle: windows::Win32::Foundation::HANDLE,
+) -> Option<(u64, ProcessCounters)> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{GetProcessIoCounters, GetProcessTimes};
+
+    let mut memory = PROCESS_MEMORY_COUNTERS::default();
+    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    unsafe { GetProcessMemoryInfo(handle, &mut memory, size) }.ok()?;
+
+    // Kernel *and* user: a DAW's file and device work is kernel time, and
+    // charging it to nobody would make the readout disagree with Task Manager
+    // exactly when the machine is busiest.
+    let (mut creation, mut exit, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }.ok()?;
+    let filetime_100ns =
+        |time: FILETIME| ((time.dwHighDateTime as u64) << 32) | (time.dwLowDateTime as u64);
+
+    let mut io = Default::default();
+    // Missing I/O counters are not a reason to lose the memory and CPU readings
+    // that came back fine.
+    let io_bytes = unsafe { GetProcessIoCounters(handle, &mut io) }
+        .ok()
+        .map(|()| io.ReadTransferCount.saturating_add(io.WriteTransferCount))
+        .unwrap_or(0);
+
+    Some((
+        memory.WorkingSetSize as u64,
+        ProcessCounters {
+            cpu_100ns: filetime_100ns(kernel).saturating_add(filetime_100ns(user)),
+            io_bytes,
+        },
+    ))
 }
 
 /// Working set attributable to Futureboard, split by process.
@@ -1077,30 +1252,12 @@ impl MemoryUsage {
 /// on a handful of processes is a syscall each, and the readout only shows
 /// megabytes.
 pub fn memory_usage() -> MemoryUsage {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    const POLL_INTERVAL: Duration = Duration::from_secs(1);
-    static CACHE: std::sync::OnceLock<Mutex<Option<(Instant, MemoryUsage)>>> =
-        std::sync::OnceLock::new();
-
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let Ok(mut slot) = cache.lock() else {
-        return MemoryUsage::default();
-    };
-    if let Some((at, value)) = *slot {
-        if at.elapsed() < POLL_INTERVAL {
-            return value;
-        }
+    let usage = resource_usage();
+    MemoryUsage {
+        studio_bytes: usage.studio_known.then_some(usage.studio.memory_bytes),
+        plugin_host_bytes: usage.plugin_hosts.memory_bytes,
+        plugin_hosts: usage.plugin_host_count,
     }
-    let (plugin_host_bytes, plugin_hosts) = read_plugin_host_memory_bytes();
-    let value = MemoryUsage {
-        studio_bytes: read_process_memory_bytes(),
-        plugin_host_bytes,
-        plugin_hosts,
-    };
-    *slot = Some((Instant::now(), value));
-    value
 }
 
 /// Studio's own working set, uncached. Prefer [`memory_usage`].
@@ -1125,72 +1282,6 @@ fn running_plugin_host_pids() -> Vec<u32> {
         .filter(|record| record.state == HostLifecycleState::Running)
         .map(|record| record.pid)
         .collect()
-}
-
-/// Summed working set of the live plugin hosts, and how many answered.
-#[cfg(windows)]
-fn read_plugin_host_memory_bytes() -> (u64, usize) {
-    let mut total = 0u64;
-    let mut counted = 0usize;
-    for pid in running_plugin_host_pids() {
-        if let Some(bytes) = read_pid_memory_bytes(pid) {
-            total = total.saturating_add(bytes);
-            counted += 1;
-        }
-    }
-    (total, counted)
-}
-
-#[cfg(not(windows))]
-fn read_plugin_host_memory_bytes() -> (u64, usize) {
-    (0, 0)
-}
-
-#[cfg(windows)]
-fn read_pid_memory_bytes(pid: u32) -> Option<u64> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-    };
-
-    // `PROCESS_QUERY_LIMITED_INFORMATION` is the minimum this needs and is the
-    // mask the host's own parent-liveness watchdog uses; `PROCESS_VM_READ` is
-    // required by `GetProcessMemoryInfo`.
-    let handle = unsafe {
-        OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-            false,
-            pid,
-        )
-    }
-    .ok()?;
-    let mut counters = PROCESS_MEMORY_COUNTERS::default();
-    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    let ok = unsafe { GetProcessMemoryInfo(handle, &mut counters, size) };
-    let bytes = ok.ok().map(|_| counters.WorkingSetSize as u64);
-    unsafe {
-        let _ = CloseHandle(handle);
-    }
-    bytes
-}
-
-#[cfg(windows)]
-fn read_process_memory_bytes() -> Option<u64> {
-    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows::Win32::System::Threading::GetCurrentProcess;
-
-    // The working set is what Task Manager calls "Memory" for a process, which
-    // is the number a user comparing the two would expect to match.
-    let mut counters = PROCESS_MEMORY_COUNTERS::default();
-    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
-    ok.ok().map(|_| counters.WorkingSetSize as u64)
-}
-
-#[cfg(not(windows))]
-fn read_process_memory_bytes() -> Option<u64> {
-    None
 }
 
 #[cfg(test)]

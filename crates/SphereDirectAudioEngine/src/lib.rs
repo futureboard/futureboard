@@ -25,6 +25,7 @@ mod audio_file;
 mod audio_graph;
 mod audio_source;
 pub mod backend;
+pub mod capture_tap;
 pub mod clap_processor;
 mod command;
 pub mod device;
@@ -107,7 +108,9 @@ pub use crate::runtime::automation_curve_factor;
 // with `AudioEngine::set_ara_renderers`, so the type has to be nameable outside
 // this crate.
 pub use crate::runtime::RuntimeAraRenderer;
-pub use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint, TempoSegment};
+pub use crate::tempo_map::{
+    RuntimeTempoMapSnapshot, TempoCurve, TempoMap, TempoPoint, TempoSegment,
+};
 pub use crate::transport::RuntimeTransportSnapshot;
 pub use crate::vst3_processor::{
     AraMainFactory, RuntimeTransportContext, Vst3MidiEvent, Vst3MidiEventKind, Vst3PluginState,

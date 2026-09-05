@@ -112,12 +112,19 @@ impl StudioLayout {
         self.project_switcher.is_open = false;
         self.overlay.open_popover = Some(OpenPopover::Context { request });
         context_menu_log("opened");
+        // The detached mixer draws the menus opened from its own window, so it
+        // has to hear about one immediately — the meter cadence is too slow to
+        // be a menu's response time.
+        self.push_mixer_snapshot_to_window(cx);
         cx.notify();
     }
 
     pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.overlay.open_popover.take().is_some() {
             context_menu_log("closed");
+            // Same reason as opening: a menu the pop-out mixer is drawing has to
+            // come down when the Studio decides it is closed.
+            self.push_mixer_snapshot_to_window(cx);
             cx.notify();
         }
     }

@@ -509,7 +509,13 @@ impl Render for StudioLayout {
             )
         } else {
             match self.overlay.open_popover.clone() {
-                Some(OpenPopover::Context { request }) => {
+                // A menu opened from a detached window is drawn *by* that
+                // window (see `MixerWindow`): its x/y are in that window's
+                // coordinates, so painting it here put it at a meaningless spot
+                // over the arrangement.
+                Some(OpenPopover::Context { request })
+                    if request.window_id == window.window_handle().window_id() =>
+                {
                     let target = request.target.to_context_target();
                     Some(
                         components::context_menu::context_menu_overlay(
@@ -524,6 +530,8 @@ impl Render for StudioLayout {
                         .into_any_element(),
                     )
                 }
+                // Opened from a detached window: that window draws it.
+                Some(OpenPopover::Context { .. }) => None,
                 Some(OpenPopover::AutomationTargetPicker { track_id, x, y }) => {
                     use crate::components::timeline::automation_target_picker::automation_target_picker_overlay;
 

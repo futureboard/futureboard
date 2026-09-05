@@ -253,6 +253,20 @@ pub fn is_theme_installed(slug: &str) -> bool {
     installed_theme_path(slug).is_file()
 }
 
+/// The theme id of an already-installed slug, for
+/// [`crate::theme::activate_theme_by_id`].
+///
+/// A slug is the registry's name for a download; a theme id is what the theme
+/// calls itself, and only the second one selects it. Downloading returns the id,
+/// but a theme installed in an earlier session has only its file — so this reads
+/// the id back out of it.
+pub fn installed_theme_id(slug: &str) -> Option<String> {
+    let body = fs::read_to_string(installed_theme_path(slug)).ok()?;
+    validate_theme_document(&body)
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
 /// Downloads one theme and installs it into the user themes directory.
 ///
 /// The registry generates the document from its database on every request, so

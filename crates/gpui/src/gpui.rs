@@ -23,6 +23,8 @@ mod elements;
 mod executor;
 mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
+#[cfg(test)]
+mod frame_bench;
 /// Coarse per-frame draw/present timings for an embedder's profiler HUD.
 pub mod frame_profile;
 mod geometry;

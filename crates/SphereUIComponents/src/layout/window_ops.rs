@@ -265,6 +265,9 @@ pub(crate) struct ExternalWindows {
     pub big_clock: Option<gpui::WindowHandle<crate::components::clock_window::ClockWindow>>,
     /// Timecode — the same playhead as SMPTE, for a session cut to picture.
     pub timecode: Option<gpui::WindowHandle<crate::components::clock_window::ClockWindow>>,
+    /// Performance Monitor — engine latency and PDC, cores, memory and drives.
+    pub performance:
+        Option<gpui::WindowHandle<crate::components::performance_window::PerformanceWindow>>,
 }
 
 impl StudioLayout {
@@ -1937,6 +1940,108 @@ impl StudioLayout {
         }
     }
 
+    /// What the audio engine currently reports about itself.
+    ///
+    /// Two calls into the engine: `stats()` for the device and the callback
+    /// budget, `latency_info()` for the delay-compensation graph. Both are
+    /// control-thread reads of already-published state — no engine command, no
+    /// lock held across the UI — so the monitor can ask twice a second.
+    pub(crate) fn audio_engine_reading(
+        &self,
+    ) -> crate::components::performance_window::AudioEngineReading {
+        use crate::components::performance_window::AudioEngineReading;
+
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
+            return AudioEngineReading::default();
+        };
+        let stats = engine.stats();
+        let latency = engine.latency_info();
+        AudioEngineReading {
+            present: true,
+            running: stats.running && stats.stream_open,
+            device_state: stats.device_state.clone(),
+            backend_name: stats.backend_name.clone(),
+            output_device: stats.output_device.clone(),
+            sample_rate: stats.sample_rate,
+            buffer_frames: stats.buffer_size,
+            output_latency_ms: stats.estimated_latency_ms,
+            input_latency_ms: stats.input_latency_ms,
+            round_trip_latency_ms: stats.round_trip_latency_ms,
+            pdc_samples: latency.max_path_samples,
+            pdc_ms: latency.max_path_ms,
+            master_latency_samples: latency.master_samples,
+            pdc_enabled: latency.pdc_enabled,
+            callback_last_us: stats.callback_last_us,
+            callback_max_us: stats.callback_max_us,
+            callback_deadline_us: stats.callback_deadline_us,
+            glitch_count: stats.glitch_count,
+            dropout_count: stats.dropout_count,
+            dropout_last_reason: stats.dropout_last_reason.clone(),
+            dropout_protection_mode: stats.dropout_protection_mode.clone(),
+            active_voices: stats.active_voices,
+            last_error: stats.last_error.clone(),
+        }
+    }
+
+    /// Close and re-open the audio device at the rate it is already running,
+    /// then rebuild the project runtime against it.
+    ///
+    /// The same path a sample-rate change takes — which is the point. A stream
+    /// that has stopped coping (a device that dropped, a plug-in that wedged
+    /// the graph) is recovered by the teardown and rebuild, not by a reset flag
+    /// invented for this button; anything less would be a control that looks
+    /// like it did something.
+    pub(crate) fn restart_audio_engine(&mut self, cx: &mut Context<Self>) {
+        let rate = self.current_audio_sample_rate().max(1);
+        eprintln!("[audio-device] restart requested from Performance Monitor rate={rate}");
+        if self.is_recording_active(cx) {
+            self.stop_native_recording(cx);
+        } else {
+            self.stop_native_playback(cx);
+        }
+        self.reopen_audio_with_sample_rate(rate, cx);
+    }
+
+    pub(super) fn open_performance_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.performance.clone() {
+            if handle
+                .update(cx, |_view, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.performance = None;
+        }
+
+        // The window owns no engine handle of its own: it asks the Studio for a
+        // reading when it repaints, and asks it to restart when the user does.
+        // One owner of the engine, whatever is on screen.
+        let reader_owner = cx.entity().clone();
+        let read_engine: crate::components::performance_window::AudioEngineReader =
+            Arc::new(move |app: &gpui::App| reader_owner.read(app).audio_engine_reading());
+        let restart_owner = cx.entity().clone();
+        let on_restart: crate::components::performance_window::RestartEngineCb =
+            Arc::new(move |app: &mut gpui::App| {
+                StudioLayout::defer_update(&restart_owner, app, |layout, cx| {
+                    layout.restart_audio_engine(cx);
+                });
+            });
+
+        match crate::components::performance_window::open_performance_window(
+            owner_bounds,
+            read_engine,
+            on_restart,
+            cx,
+        ) {
+            Ok(handle) => self.external_windows.performance = Some(handle),
+            Err(err) => eprintln!("[performance] failed to open window: {err}"),
+        }
+    }
+
     /// Build the Project Settings view-model from live project state. Cheap —
     /// a handful of scalars plus the project name/path — so it is safe to
     /// re-derive whenever the window needs refreshing.
@@ -2505,6 +2610,30 @@ impl StudioLayout {
             true
         });
 
+        // The pop-out draws the menus its own controls open; the Studio still
+        // runs them, because it owns the state every entry acts on.
+        let menu_owner = cx.entity().clone();
+        let on_menu_command: std::sync::Arc<
+            dyn Fn(&str, &mut Window, &mut gpui::App) + Send + Sync,
+        > = {
+            let owner = menu_owner.clone();
+            std::sync::Arc::new(move |command: &str, _window, cx| {
+                let command = command.to_string();
+                StudioLayout::defer_update(&owner, cx, move |layout, cx| {
+                    let bounds = layout.studio_window_bounds(cx);
+                    layout.dispatch_command_id_from_bounds(&command, bounds, cx);
+                });
+            })
+        };
+        let on_menu_close: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> = {
+            let owner = menu_owner;
+            std::sync::Arc::new(move |_window, cx| {
+                StudioLayout::defer_update(&owner, cx, move |layout, cx| {
+                    layout.close_context_menu(cx);
+                });
+            })
+        };
+
         match open_mixer_window(
             owner_bounds,
             snapshot,
@@ -2514,6 +2643,8 @@ impl StudioLayout {
             on_mixer_scroll,
             on_mixer_split,
             dispatch_key,
+            on_menu_command,
+            on_menu_close,
             cx,
         ) {
             Ok(handle) => {

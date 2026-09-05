@@ -189,6 +189,8 @@ pub(super) fn import(path: &Path) -> Result<FutureboardProject, ProjectError> {
             soundfont: None,
             volume_automation_read: true,
             solfege: None,
+            takes: Vec::new(),
+            takes_expanded: false,
         });
     }
 

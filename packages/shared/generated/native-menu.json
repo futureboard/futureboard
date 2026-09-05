@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-09-05T07:15:13.689Z",
+  "generatedAt": "2026-09-05T11:02:11.567Z",
   "menus": [
     {
       "id": "file",
@@ -1264,6 +1264,21 @@
           "checked": false,
           "danger": false,
           "description": "The same clock led by SMPTE timecode, at 24, 25, 29.97 DF or 30 fps",
+          "children": []
+        },
+        {
+          "id": "window.performance",
+          "kind": "normal",
+          "label": "Performance Monitor",
+          "icon": "gauge",
+          "shortcut": null,
+          "command": "window:performance",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Audio engine latency and PDC, plus every CPU core, memory and local drive",
           "children": []
         },
         {

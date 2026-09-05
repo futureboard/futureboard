@@ -167,6 +167,16 @@ pub enum EngineCommand {
     /// [`crate::backend::render::MetronomeSound`] code (the same
     /// code-in-a-command shape `SetTrackPreviewMode` uses).
     SetMetronomeVoice { volume: f32, sound: u8 },
+    /// Start an audible record count-in: `beats` clicks, `samples_per_beat`
+    /// apart, accented every `beats_per_bar`. Runs with the transport parked —
+    /// see [`crate::backend::render::LocalAudioState::begin_count_in`].
+    StartCountIn {
+        beats: u32,
+        beats_per_bar: u32,
+        samples_per_beat: u64,
+    },
+    /// Abandon a count-in in progress.
+    CancelCountIn,
     /// Set project tempo for metronome scheduling (static tempo shortcut).
     SetBpm(f64),
     /// Replace the authoritative tempo map used for beat/time/sample conversion.

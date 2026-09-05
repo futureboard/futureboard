@@ -221,6 +221,12 @@ pub struct Timeline {
     /// and then drags it — one gesture, but not an "edit"). Kept here rather
     /// than inside [`TempoPointDrag`] so the drag payload stays identity-only.
     tempo_gesture_origin: Option<(&'static str, TempoStateSnapshot)>,
+    /// Wall-clock positions of the Linear-timebase clips as they stood when the
+    /// Tempo lane drag began. A Linear track holds its place on the clock while
+    /// the marker moves under it, and that can only be read *before* the map
+    /// changes — see [`crate::components::timeline::timeline_state::TimelineState::capture_linear_clip_anchors`].
+    tempo_gesture_linear_anchors:
+        Vec<crate::components::timeline::timeline_state::LinearClipAnchor>,
     /// In-flight time-signature marker drag on the global Time Signature lane.
     ts_drag: Option<TimeSignaturePointDrag>,
     /// In-flight marker move on the global Marker lane. A root-driven gesture

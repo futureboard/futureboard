@@ -139,6 +139,11 @@ pub struct TimelineState {
     /// the TempoTrack (when shown) is only a view/editor over this. When empty
     /// the project plays at the static `bpm`.
     pub tempo_map: TempoMap,
+    /// The engine tempo map resolved from `tempo_map` + `bpm`. Derived cache —
+    /// see [`ResolvedTempo`]; read through
+    /// [`TimelineState::resolved_tempo_map`], refreshed by
+    /// [`TimelineState::refresh_tempo_cache`].
+    pub(crate) resolved_tempo: ResolvedTempo,
     /// Global time signature markers (authoritative for bar/beat layout).
     pub time_signature_map: TimeSignatureMap,
     /// Unit the ruler and every position readout are expressed in.
@@ -275,6 +280,7 @@ impl Default for TimelineState {
             bpm: 120.0,
             project_sample_rate: 48_000,
             tempo_map: TempoMap::new(),
+            resolved_tempo: ResolvedTempo::default(),
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             time_display_format: TimeDisplayFormat::default(),
             timecode_rate: TimecodeRate::default(),

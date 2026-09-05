@@ -404,6 +404,7 @@ windows = { version = "0.61", features = [
     "Storage_Streams",
     "System_Threading",
     "UI_ViewManagement",
+    "Wdk_System_SystemInformation",
     "Wdk_System_SystemServices",
 
     "Win32_Foundation",

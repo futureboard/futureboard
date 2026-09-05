@@ -4435,6 +4435,7 @@ pub fn build_tempo_map_from_points(
                 .map(|p| TempoPoint {
                     beat: p.beat,
                     bpm: p.bpm,
+                    curve: crate::tempo_map::TempoCurve::from_tag(p.curve),
                 })
                 .collect(),
         )

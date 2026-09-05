@@ -2183,6 +2183,7 @@ impl StudioLayout {
                 .map(|p| DirectAudio::types::EngineTempoPointSnapshot {
                     beat: p.beat,
                     bpm: p.bpm,
+                    curve: p.curve.to_tag(),
                 })
                 .collect::<Vec<_>>();
             let ts_points = timeline
@@ -2738,6 +2739,11 @@ impl StudioLayout {
             // read before the edit and reapplied under the new map.
             let linear_anchors = timeline.state.capture_linear_clip_anchors();
             edit(timeline);
+            // An audio clip's bar count is a function of the audio it plays and
+            // the tempo map over it, so a marker edit re-derives it — the same
+            // pass undo runs. Without it the clip keeps the bar count it had
+            // under the old map and the picture parts company with the audio.
+            timeline.state.reconcile_audio_clip_lengths();
             timeline.state.reapply_linear_clip_anchors(&linear_anchors);
             let changed = timeline.record_tempo_edit(label, prev, cx);
             if changed {
@@ -3296,6 +3302,7 @@ impl StudioLayout {
                     .map(|p| DirectAudio::types::EngineTempoPointSnapshot {
                         beat: p.beat,
                         bpm: p.bpm,
+                        curve: p.curve.to_tag(),
                     })
                     .collect::<Vec<_>>(),
             )

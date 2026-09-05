@@ -1,7 +1,18 @@
 //! Beat/time conversion for transport and scheduling.
 //!
-//! Phase T foundation: static tempo plus step-hold tempo points. Full tempo-map
-//! playback (clip stretch, tempo automation curves) is layered on later.
+//! The map is a list of tempo markers. Each marker says what the tempo is at its
+//! beat and how the tempo travels from there to the next marker: it holds, it
+//! ramps linearly, or it eases in and out. Everything downstream — the playhead,
+//! the metronome, MIDI event scheduling, clip start samples, the plugin process
+//! context — converts through this one map, so a curve drawn in the Tempo lane
+//! is a curve the transport actually plays.
+//!
+//! Curved segments are integrated in closed form rather than stepped: across a
+//! linear tempo ramp the elapsed time is `60/k * ln(bpm(b)/bpm0)`, which is
+//! exact and exactly invertible. That matters more than it sounds — a stepped
+//! approximation drifts, and audio that starts a few milliseconds late after
+//! every tempo ramp is precisely the "the waveform moved" failure the
+//! arrangement is not allowed to have.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,20 +20,160 @@ use serde::{Deserialize, Serialize};
 pub const BPM_MIN: f64 = 20.0;
 pub const BPM_MAX: f64 = 999.0;
 
+/// Below this BPM-per-beat slope a ramp is a hold. Far under the smallest tempo
+/// change the UI can express over the longest usable span, so the cheap
+/// constant-tempo path is taken for every project without curves and never
+/// swallows one the user drew.
+const RAMP_EPSILON: f64 = 1e-9;
+
+/// Linear pieces a `Smooth` segment is built from.
+///
+/// Smoothstep has no closed-form time integral, so it is approximated by linear
+/// ramps, each of which *is* integrated exactly. 16 pieces put the worst-case
+/// timing error of a 60→180 BPM ease over four bars well under one sample at
+/// 192 kHz, and the segments are built off the audio thread.
+const SMOOTH_STEPS: usize = 16;
+
+/// How the tempo travels from one marker to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TempoCurve {
+    /// Constant until the next marker, then a step change.
+    #[default]
+    Hold,
+    /// Straight line in BPM against beats.
+    Linear,
+    /// Eased in and out (smoothstep) between the two tempos.
+    Smooth,
+}
+
+impl TempoCurve {
+    pub fn to_tag(self) -> u8 {
+        match self {
+            TempoCurve::Hold => 0,
+            TempoCurve::Linear => 1,
+            TempoCurve::Smooth => 2,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Self {
+        match tag {
+            1 => TempoCurve::Linear,
+            2 => TempoCurve::Smooth,
+            _ => TempoCurve::Hold,
+        }
+    }
+
+    /// Interpolation factor for a normalized position across the segment.
+    #[inline]
+    fn shape(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            TempoCurve::Hold => 0.0,
+            TempoCurve::Linear => t,
+            TempoCurve::Smooth => t * t * (3.0 - 2.0 * t),
+        }
+    }
+}
+
 /// A tempo change anchored at a musical beat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempoPoint {
     pub beat: f64,
     pub bpm: f64,
+    /// How the tempo reaches the *next* marker. Defaulted so projects written
+    /// before curves existed load as the step-hold maps they were.
+    #[serde(default)]
+    pub curve: TempoCurve,
 }
 
-/// Cached segment for O(log n) beat/time lookup without allocation.
+impl TempoPoint {
+    pub fn new(beat: f64, bpm: f64, curve: TempoCurve) -> Self {
+        Self { beat, bpm, curve }
+    }
+
+    /// A step-hold marker — the shape every marker had before curves.
+    pub fn hold(beat: f64, bpm: f64) -> Self {
+        Self::new(beat, bpm, TempoCurve::Hold)
+    }
+}
+
+/// One piece of the map carrying a single linear tempo law, for O(log n)
+/// allocation-free lookup from the audio thread.
+///
+/// `bpm` is the tempo at `start_beat` and `end_bpm` the tempo at `end_beat`;
+/// they are equal on a hold. A `Smooth` marker contributes several of these.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TempoSegment {
     pub start_beat: f64,
     pub end_beat: f64,
     pub start_seconds: f64,
     pub bpm: f64,
+    pub end_bpm: f64,
+}
+
+impl TempoSegment {
+    /// BPM per beat across this segment; `0.0` on a hold or an open end.
+    #[inline]
+    fn slope(&self) -> f64 {
+        let span = self.end_beat - self.start_beat;
+        if !span.is_finite() || span <= 0.0 {
+            return 0.0;
+        }
+        let slope = (self.end_bpm - self.bpm) / span;
+        if slope.abs() < RAMP_EPSILON {
+            0.0
+        } else {
+            slope
+        }
+    }
+
+    #[inline]
+    pub fn bpm_at(&self, beat: f64) -> f64 {
+        let slope = self.slope();
+        if slope == 0.0 {
+            return self.bpm;
+        }
+        let beat = beat.clamp(self.start_beat, self.end_beat);
+        (self.bpm + slope * (beat - self.start_beat)).clamp(BPM_MIN, BPM_MAX)
+    }
+
+    /// Elapsed seconds at `beat`, integrating this segment's tempo law.
+    #[inline]
+    pub fn seconds_at(&self, beat: f64) -> f64 {
+        let delta_beats = (beat - self.start_beat).max(0.0);
+        let start_bpm = self.bpm.max(BPM_MIN);
+        let slope = self.slope();
+        if slope == 0.0 {
+            return self.start_seconds + delta_beats * 60.0 / start_bpm;
+        }
+        // ∫ 60/bpm(b) db with bpm linear in b. The ratio stays positive because
+        // both endpoint tempos are clamped to at least BPM_MIN.
+        let ratio = (1.0 + slope * delta_beats / start_bpm).max(f64::MIN_POSITIVE);
+        self.start_seconds + (60.0 / slope) * ratio.ln()
+    }
+
+    /// Inverse of [`Self::seconds_at`] within this segment.
+    #[inline]
+    pub fn beat_at(&self, seconds: f64) -> f64 {
+        let delta_seconds = (seconds - self.start_seconds).max(0.0);
+        let start_bpm = self.bpm.max(BPM_MIN);
+        let slope = self.slope();
+        if slope == 0.0 {
+            return self.start_beat + delta_seconds * start_bpm / 60.0;
+        }
+        self.start_beat + start_bpm * ((slope * delta_seconds / 60.0).exp() - 1.0) / slope
+    }
+
+    /// Elapsed seconds at `end_beat`; infinite for the final open segment.
+    #[inline]
+    fn end_seconds(&self) -> f64 {
+        if self.end_beat.is_finite() {
+            self.seconds_at(self.end_beat)
+        } else {
+            f64::INFINITY
+        }
+    }
 }
 
 /// Runtime-ready tempo map snapshot (immutable, built off the audio thread).
@@ -45,13 +196,13 @@ impl RuntimeTempoMapSnapshot {
     }
 
     pub fn bpm_at_beat(&self, beat: f64) -> f64 {
-        segment_at_beat(&self.segments, beat).bpm
+        let beat = beat.max(0.0);
+        segment_at_beat(&self.segments, beat).bpm_at(beat)
     }
 
     pub fn seconds_at_beat(&self, beat: f64) -> f64 {
         let beat = beat.max(0.0);
-        let seg = segment_at_beat(&self.segments, beat);
-        seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(BPM_MIN)
+        segment_at_beat(&self.segments, beat).seconds_at(beat)
     }
 
     pub fn beat_at_seconds(&self, seconds: f64) -> f64 {
@@ -70,7 +221,7 @@ impl RuntimeTempoMapSnapshot {
     }
 }
 
-/// Project tempo map with step-hold segments between tempo points.
+/// Project tempo map: the markers, and the segments they resolve to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempoMap {
     /// Fallback BPM when `points` is empty.
@@ -146,7 +297,7 @@ impl TempoMap {
         if self.segments.is_empty() {
             return self.default_bpm;
         }
-        segment_at_beat(&self.segments, beat).bpm
+        segment_at_beat(&self.segments, beat).bpm_at(beat)
     }
 
     pub fn seconds_at_beat(&self, beat: f64) -> f64 {
@@ -154,8 +305,7 @@ impl TempoMap {
         if self.segments.is_empty() {
             return beat * 60.0 / self.default_bpm.max(BPM_MIN);
         }
-        let seg = segment_at_beat(&self.segments, beat);
-        seg.start_seconds + (beat - seg.start_beat) * 60.0 / seg.bpm.max(BPM_MIN)
+        segment_at_beat(&self.segments, beat).seconds_at(beat)
     }
 
     pub fn beat_at_seconds(&self, seconds: f64) -> f64 {
@@ -177,34 +327,49 @@ impl TempoMap {
         self.segments.clear();
         let mut points: Vec<TempoPoint> = Vec::new();
         if self.points.is_empty() {
-            points.push(TempoPoint {
-                beat: 0.0,
-                bpm: self.default_bpm,
-            });
+            points.push(TempoPoint::hold(0.0, self.default_bpm));
         } else {
             if self.points[0].beat > 0.0 {
-                points.push(TempoPoint {
-                    beat: 0.0,
-                    bpm: self.default_bpm,
-                });
+                points.push(TempoPoint::hold(0.0, self.default_bpm));
             }
             points.extend(self.points.iter().cloned());
         }
 
         let mut start_seconds = 0.0;
         for (i, point) in points.iter().enumerate() {
-            let end_beat = points
-                .get(i + 1)
-                .map(|next| next.beat)
-                .unwrap_or(f64::INFINITY);
-            self.segments.push(TempoSegment {
-                start_beat: point.beat,
-                end_beat,
-                start_seconds,
-                bpm: point.bpm,
-            });
-            if end_beat.is_finite() {
-                start_seconds += (end_beat - point.beat) * 60.0 / point.bpm.max(BPM_MIN);
+            let Some(next) = points.get(i + 1) else {
+                // The last marker holds forever: there is nothing to ramp to.
+                self.segments.push(TempoSegment {
+                    start_beat: point.beat,
+                    end_beat: f64::INFINITY,
+                    start_seconds,
+                    bpm: point.bpm,
+                    end_bpm: point.bpm,
+                });
+                break;
+            };
+            let span = next.beat - point.beat;
+            if span <= 0.0 {
+                continue;
+            }
+            let pieces = match point.curve {
+                TempoCurve::Hold | TempoCurve::Linear => 1,
+                TempoCurve::Smooth => SMOOTH_STEPS,
+            };
+            let bpm_at_t =
+                |t: f64| clamp_bpm(point.bpm + (next.bpm - point.bpm) * point.curve.shape(t));
+            for piece in 0..pieces {
+                let t0 = piece as f64 / pieces as f64;
+                let t1 = (piece + 1) as f64 / pieces as f64;
+                let segment = TempoSegment {
+                    start_beat: point.beat + span * t0,
+                    end_beat: point.beat + span * t1,
+                    start_seconds,
+                    bpm: bpm_at_t(t0),
+                    end_bpm: bpm_at_t(t1),
+                };
+                start_seconds = segment.end_seconds();
+                self.segments.push(segment);
             }
         }
         self.revision = self.revision.wrapping_add(1);
@@ -218,6 +383,7 @@ fn segment_at_beat(segments: &[TempoSegment], beat: f64) -> TempoSegment {
             end_beat: f64::INFINITY,
             start_seconds: 0.0,
             bpm: BPM_MIN,
+            end_bpm: BPM_MIN,
         };
     }
     let idx = segments
@@ -237,9 +403,7 @@ fn beat_at_seconds_in_segments(segments: &[TempoSegment], seconds: f64) -> f64 {
     let idx = segments
         .partition_point(|seg| seg.start_seconds <= seconds)
         .saturating_sub(1);
-    let seg = &segments[idx.min(segments.len() - 1)];
-    let elapsed = seconds - seg.start_seconds;
-    seg.start_beat + elapsed * seg.bpm.max(BPM_MIN) / 60.0
+    segments[idx.min(segments.len() - 1)].beat_at(seconds)
 }
 
 fn clamp_bpm(bpm: f64) -> f64 {
@@ -263,16 +427,7 @@ mod tests {
     fn step_tempo_point_changes_bpm() {
         let map = TempoMap::from_points(
             120.0,
-            vec![
-                TempoPoint {
-                    beat: 4.0,
-                    bpm: 60.0,
-                },
-                TempoPoint {
-                    beat: 8.0,
-                    bpm: 240.0,
-                },
-            ],
+            vec![TempoPoint::hold(4.0, 60.0), TempoPoint::hold(8.0, 240.0)],
         );
         assert!((map.tempo_at_beat(0.0) - 120.0).abs() < 1e-9);
         assert!((map.tempo_at_beat(4.0) - 60.0).abs() < 1e-9);
@@ -286,13 +441,7 @@ mod tests {
     }
 
     fn map_120_160() -> TempoMap {
-        TempoMap::from_points(
-            120.0,
-            vec![TempoPoint {
-                beat: 4.0,
-                bpm: 160.0,
-            }],
-        )
+        TempoMap::from_points(120.0, vec![TempoPoint::hold(4.0, 160.0)])
     }
 
     #[test]
@@ -376,18 +525,139 @@ mod tests {
 
     #[test]
     fn segments_are_sorted_and_cover_origin() {
-        let map = TempoMap::from_points(
-            100.0,
-            vec![TempoPoint {
-                beat: 2.0,
-                bpm: 200.0,
-            }],
-        );
+        let map = TempoMap::from_points(100.0, vec![TempoPoint::hold(2.0, 200.0)]);
         let segs = map.segments();
         assert_eq!(segs.len(), 2);
         assert!((segs[0].start_beat - 0.0).abs() < 1e-9);
         assert!((segs[0].bpm - 100.0).abs() < 1e-9);
         assert!((segs[1].start_beat - 2.0).abs() < 1e-9);
         assert!((segs[1].bpm - 200.0).abs() < 1e-9);
+    }
+
+    // ── Curves ────────────────────────────────────────────────────────────────
+
+    fn linear_ramp() -> TempoMap {
+        TempoMap::from_points(
+            120.0,
+            vec![
+                TempoPoint::new(0.0, 60.0, TempoCurve::Linear),
+                TempoPoint::hold(8.0, 120.0),
+            ],
+        )
+    }
+
+    #[test]
+    fn linear_curve_interpolates_bpm_between_markers() {
+        let map = linear_ramp();
+        assert!((map.bpm_at_beat(0.0) - 60.0).abs() < 1e-9);
+        assert!((map.bpm_at_beat(4.0) - 90.0).abs() < 1e-9);
+        assert!((map.bpm_at_beat(8.0) - 120.0).abs() < 1e-9);
+        // Past the last marker the tempo holds.
+        assert!((map.bpm_at_beat(64.0) - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_curve_time_is_the_closed_form_integral() {
+        let map = linear_ramp();
+        // ∫₀⁸ 60 / (60 + 7.5·b) db = (60/7.5)·ln(120/60) = 8·ln 2.
+        let expected = 8.0 * 2.0_f64.ln();
+        assert!(
+            (map.seconds_at_beat(8.0) - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            map.seconds_at_beat(8.0)
+        );
+        // A hold at either endpoint tempo would bracket it, never match it.
+        assert!(map.seconds_at_beat(8.0) < 8.0 * 60.0 / 60.0);
+        assert!(map.seconds_at_beat(8.0) > 8.0 * 60.0 / 120.0);
+    }
+
+    #[test]
+    fn every_curve_roundtrips_beats_through_seconds() {
+        for curve in [TempoCurve::Hold, TempoCurve::Linear, TempoCurve::Smooth] {
+            let map = TempoMap::from_points(
+                120.0,
+                vec![
+                    TempoPoint::new(0.0, 72.0, curve),
+                    TempoPoint::new(16.0, 180.0, curve),
+                    TempoPoint::hold(24.0, 96.0),
+                ],
+            );
+            let mut beat = 0.0;
+            while beat <= 32.0 {
+                let seconds = map.seconds_at_beat(beat);
+                let back = map.beat_at_seconds(seconds);
+                assert!(
+                    (back - beat).abs() < 1e-6,
+                    "curve={curve:?} beat={beat} -> {seconds}s -> {back}"
+                );
+                beat += 0.125;
+            }
+        }
+    }
+
+    #[test]
+    fn curved_time_is_strictly_monotonic() {
+        let map = TempoMap::from_points(
+            120.0,
+            vec![
+                TempoPoint::new(0.0, 200.0, TempoCurve::Smooth),
+                TempoPoint::new(12.0, 40.0, TempoCurve::Linear),
+                TempoPoint::hold(20.0, 150.0),
+            ],
+        );
+        let mut previous = -1.0;
+        let mut beat = 0.0;
+        while beat <= 40.0 {
+            let seconds = map.seconds_at_beat(beat);
+            assert!(seconds > previous, "beat {beat} went backwards");
+            previous = seconds;
+            beat += 0.05;
+        }
+    }
+
+    #[test]
+    fn smooth_curve_eases_and_lands_on_both_endpoints() {
+        let map = TempoMap::from_points(
+            120.0,
+            vec![
+                TempoPoint::new(0.0, 60.0, TempoCurve::Smooth),
+                TempoPoint::hold(8.0, 120.0),
+            ],
+        );
+        assert!((map.bpm_at_beat(0.0) - 60.0).abs() < 1e-9);
+        assert!((map.bpm_at_beat(8.0) - 120.0).abs() < 1e-9);
+        assert!((map.bpm_at_beat(4.0) - 90.0).abs() < 1.0);
+        // Eased: the first eighth moves less than a straight line would.
+        let linear_at_1 = 60.0 + (120.0 - 60.0) / 8.0;
+        assert!(map.bpm_at_beat(1.0) < linear_at_1);
+    }
+
+    #[test]
+    fn a_hold_marker_is_unchanged_by_the_curve_support() {
+        let holds = TempoMap::from_points(
+            120.0,
+            vec![TempoPoint::hold(4.0, 60.0), TempoPoint::hold(8.0, 240.0)],
+        );
+        for beat in [0.0, 1.5, 3.999, 4.0, 6.0, 8.0, 12.0] {
+            let expected = if beat < 4.0 {
+                beat * 60.0 / 120.0
+            } else if beat < 8.0 {
+                2.0 + (beat - 4.0) * 60.0 / 60.0
+            } else {
+                6.0 + (beat - 8.0) * 60.0 / 240.0
+            };
+            assert!(
+                (holds.seconds_at_beat(beat) - expected).abs() < 1e-9,
+                "beat {beat}"
+            );
+        }
+    }
+
+    #[test]
+    fn curve_tags_round_trip() {
+        for curve in [TempoCurve::Hold, TempoCurve::Linear, TempoCurve::Smooth] {
+            assert_eq!(TempoCurve::from_tag(curve.to_tag()), curve);
+        }
+        assert_eq!(TempoCurve::from_tag(200), TempoCurve::Hold);
     }
 }

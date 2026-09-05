@@ -71,11 +71,17 @@ pub struct RecordingResult {
 
 /// Where the take's samples come from.
 pub(crate) enum CaptureSource {
-    /// A dedicated cpal input stream owned by this session (WASAPI & friends).
-    /// Dropping it stops capture and disconnects the audio channel. The field
-    /// is a pure keep-alive/drop guard — never read.
+    /// A dedicated cpal input stream owned by this session. The fallback for a
+    /// take that starts with no live input stream open, or one whose geometry
+    /// cannot serve the take. Dropping it stops capture and disconnects the
+    /// audio channel. The field is a pure keep-alive/drop guard — never read.
     #[allow(dead_code)]
     OwnStream(cpal::Stream),
+    /// The persistent live input stream feeds the take through an installed
+    /// [`crate::capture_tap::RecordSink`]. Nothing in the device path moves
+    /// when the take starts or stops, which is the whole point: opening and
+    /// closing a capture client mid-session is audible at both ends.
+    LiveStreamTap,
     /// The persistent ASIO session input callback feeds the take through an
     /// installed [`crate::backend::asio_session::RecordSink`]. The engine
     /// detaches the sink via `AsioInputCommand::ClearRecordSink`; the writer
@@ -98,6 +104,15 @@ pub struct RecordingSession {
     pub dropped_blocks: Arc<AtomicU64>,
     pub started_at: std::time::Instant,
     pub shared: Arc<crate::engine::SharedState>,
+    /// Transport position when the take was armed — the sample its RAUF header
+    /// and `start_beat` were written against.
+    pub armed_start_sample: u64,
+    /// Transport position of the first block actually captured, or
+    /// [`u64::MAX`] if none was. See
+    /// [`crate::capture_tap::RecordSink::first_capture_sample`]; the difference
+    /// between the two is how far after its declared start the take really
+    /// began, and it is corrected out at finalization.
+    pub first_capture_sample: Arc<AtomicU64>,
 }
 
 impl RecordingSession {
@@ -111,6 +126,21 @@ impl RecordingSession {
         {
             false
         }
+    }
+
+    /// Whether this take taps the persistent cpal live input stream.
+    pub fn is_live_stream_tap(&self) -> bool {
+        matches!(self.capture, CaptureSource::LiveStreamTap)
+    }
+
+    /// Whether the take owns the capture device for its duration.
+    ///
+    /// Only an own-stream take does. A tapped take borrows a stream that
+    /// existed before it and outlives it, so ending one must not reset the
+    /// input ring or clear the monitor flags out from under monitoring that was
+    /// never the take's to turn off.
+    pub fn owns_capture_stream(&self) -> bool {
+        matches!(self.capture, CaptureSource::OwnStream(_))
     }
 }
 
@@ -502,6 +532,7 @@ fn build_f32_input_stream(
     preview_tracks: Vec<(String, usize, usize)>,
     samples_per_bin: usize,
     capture_on_transport: bool,
+    first_capture_sample: Arc<AtomicU64>,
 ) -> Result<cpal::Stream, SphereAudioError> {
     use crate::engine::{f32_load, f32_store};
     use crate::input_ring::WaveformPeak;
@@ -575,6 +606,16 @@ fn build_f32_input_stream(
                     capture_on_transport,
                     shared.playing.load(Ordering::Relaxed),
                 );
+                if capture_active {
+                    // Stamp where the audio really begins — see
+                    // `RecordingSession::first_capture_sample`.
+                    let _ = first_capture_sample.compare_exchange(
+                        u64::MAX,
+                        shared.position_samples.load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
 
                 let mut raw_peak_l = 0.0f32;
                 let mut raw_peak_r = 0.0f32;
@@ -1026,6 +1067,7 @@ fn start_recording_with_config(
         .monitor_enabled_any
         .store(monitor_mix, Ordering::Relaxed);
 
+    let first_capture_sample = Arc::new(AtomicU64::new(u64::MAX));
     let input_stream = match build_f32_input_stream(
         device,
         &stream_config,
@@ -1040,6 +1082,7 @@ fn start_recording_with_config(
         preview_tracks,
         samples_per_bin,
         capture_on_transport,
+        Arc::clone(&first_capture_sample),
     ) {
         Ok(stream) => stream,
         Err(error) => {
@@ -1074,7 +1117,133 @@ fn start_recording_with_config(
         dropped_blocks,
         started_at: std::time::Instant::now(),
         shared,
+        armed_start_sample: start_sample,
+        first_capture_sample,
     })
+}
+
+/// Begin a take that taps the persistent cpal live input stream instead of
+/// opening one of its own.
+///
+/// The preferred path on every cpal backend. `input_ch` and `sample_rate` are
+/// the *live stream's* geometry, not a fresh negotiation — the take records
+/// exactly what is already being monitored, which is also why the channel
+/// validation in [`build_track_writers`] is meaningful here.
+///
+/// The ring and monitor flags are deliberately untouched: the stream they
+/// describe existed before this take and will outlive it.
+pub(crate) fn start_recording_live_tap(
+    config: JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
+    input_ch: usize,
+    sample_rate: u32,
+) -> Result<(RecordingSession, crate::capture_tap::RecordSink), SphereAudioError> {
+    let track_writers = build_track_writers(&config, &shared, input_ch, sample_rate)?;
+    let track_count = track_writers.len();
+
+    let max_record_block_samples = input_ch.saturating_mul(8192).max(input_ch.max(1));
+    let pipeline = spawn_recording_pipeline(
+        track_writers,
+        sample_rate,
+        input_ch,
+        config.start_beat,
+        max_record_block_samples,
+        512,
+    );
+
+    let recording_active = Arc::new(AtomicBool::new(true));
+    let dropped_blocks = Arc::new(AtomicU64::new(0));
+    shared.recording_active.store(true, Ordering::Relaxed);
+    shared
+        .record_peak
+        .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+    shared
+        .recording_monitor_mix
+        .store(monitor_mix, Ordering::Relaxed);
+
+    const PREVIEW_PEAKS_PER_SEC: u32 = 150;
+    let samples_per_bin = (sample_rate / PREVIEW_PEAKS_PER_SEC).max(1) as usize;
+    let monitor_channels: Vec<usize> = config
+        .monitor_channels
+        .iter()
+        .copied()
+        .filter_map(|channel| {
+            let channel = channel as usize;
+            (channel < input_ch).then_some(channel)
+        })
+        .collect();
+    let mon_l = monitor_channels.first().copied().unwrap_or(0);
+    let mon_r = monitor_channels.get(1).copied().unwrap_or(mon_l);
+    let preview_channels = monitor_channels.len().max(1) as u32;
+    let start_sample = shared.position_samples.load(Ordering::Relaxed);
+
+    shared.preview_ring.reset();
+    let preview_tracks = preview_tracks_for(&config.tracks, input_ch);
+    {
+        let mut ids = shared.recording_preview_track_ids.lock();
+        ids.clear();
+        for (slot, (track_id, _, _)) in preview_tracks.iter().enumerate() {
+            shared.preview_rings[slot].reset();
+            ids.push(track_id.clone());
+        }
+    }
+    shared.recording_preview_id.fetch_add(1, Ordering::Relaxed);
+    shared
+        .recording_preview_start_sample
+        .store(start_sample, Ordering::Relaxed);
+    shared
+        .recording_preview_sample_rate
+        .store(sample_rate, Ordering::Relaxed);
+    shared
+        .recording_preview_channels
+        .store(preview_channels, Ordering::Relaxed);
+    shared
+        .recording_preview_peaks_per_sec
+        .store(PREVIEW_PEAKS_PER_SEC, Ordering::Relaxed);
+    shared
+        .recording_preview_active
+        .store(true, Ordering::Relaxed);
+
+    let first_capture_sample = Arc::new(AtomicU64::new(u64::MAX));
+    let sink = crate::capture_tap::RecordSink {
+        audio_tx: pipeline.audio_tx,
+        free_rx: pipeline.free_rx,
+        free_tx: pipeline.free_tx,
+        samples_per_bin,
+        capture_on_transport: config.capture_on_transport.unwrap_or(false),
+        dropped_blocks: Arc::clone(&dropped_blocks),
+        active: Arc::clone(&recording_active),
+        first_capture_sample: Arc::clone(&first_capture_sample),
+        monitor: crate::capture_tap::PreviewAccum::new(mon_l, mon_r),
+        tracks: preview_tracks
+            .iter()
+            .map(|&(_, l, r)| crate::capture_tap::PreviewAccum::new(l, r))
+            .collect(),
+    };
+
+    eprintln!(
+        "[SphereAudio] Recording started (live-stream tap): {track_count} track(s), \
+         {input_ch}ch input @ {sample_rate} Hz"
+    );
+
+    Ok((
+        RecordingSession {
+            capture: CaptureSource::LiveStreamTap,
+            results_rx: pipeline.finalize_rx,
+            stop_flag: pipeline.stop_flag,
+            start_beat: config.start_beat,
+            sample_rate,
+            track_count,
+            recording_active,
+            dropped_blocks,
+            started_at: std::time::Instant::now(),
+            shared,
+            armed_start_sample: start_sample,
+            first_capture_sample: Arc::clone(&first_capture_sample),
+        },
+        sink,
+    ))
 }
 
 /// Begin a take that taps the persistent ASIO session input instead of opening
@@ -1160,6 +1329,11 @@ pub(crate) fn start_recording_asio_tap(
         .recording_preview_active
         .store(true, Ordering::Relaxed);
 
+    // The ASIO session's own sink does not stamp its first captured block, so a
+    // take on that path is placed at the sample it was armed on. The driver's
+    // callback is fixed-size and already running, which is the case where the
+    // two are closest together.
+    let first_capture_sample = Arc::new(AtomicU64::new(u64::MAX));
     let sink = crate::backend::asio_session::RecordSink {
         audio_tx: pipeline.audio_tx,
         free_rx: pipeline.free_rx,
@@ -1190,6 +1364,8 @@ pub(crate) fn start_recording_asio_tap(
             dropped_blocks,
             started_at: std::time::Instant::now(),
             shared,
+            armed_start_sample: start_sample,
+            first_capture_sample: Arc::clone(&first_capture_sample),
         },
         sink,
     ))
@@ -1199,7 +1375,7 @@ pub(crate) fn start_recording_asio_tap(
 pub fn stop_recording(
     session: RecordingSession,
 ) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
-    let asio_tap = session.is_asio_tap();
+    let owns_stream = session.owns_capture_stream();
     // Tell the callback to stop sending.
     session.recording_active.store(false, Ordering::Relaxed);
     session
@@ -1214,10 +1390,12 @@ pub fn stop_recording(
         .shared
         .recording_preview_active
         .store(false, Ordering::Relaxed);
-    if !asio_tap {
+    if owns_stream {
         // Own-stream capture doubled as the monitor source; releasing it must
-        // also release the ring. The ASIO session's ring/monitor state is
-        // owned by input-routing sync and survives the take.
+        // also release the ring. A tapped take (ASIO session, or the persistent
+        // cpal live input) borrows a stream whose ring and monitor flags are
+        // owned by input-routing sync and survive the take — clearing them here
+        // would silence monitoring the moment a take ends.
         session.shared.input_ring.set_active(false, 0, 0);
         session
             .shared

@@ -111,7 +111,19 @@ pub struct TimelineLoopDrag {
 #[derive(Clone, Copy, Debug)]
 enum RulerGesture {
     Scrub,
+    /// Sliding or stretching the loop that is already there.
     Loop(TimelineLoopDrag),
+    /// Drawing a new loop from the point the press landed on.
+    ///
+    /// Without this, Alt-drag was a gesture that did nothing most of the time:
+    /// it only worked with looping already on *and* the press inside the loop,
+    /// and anywhere else it quietly fell through to scrubbing. A modifier that
+    /// works on one strip of the ruler and nowhere else is one the hand never
+    /// learns. Now Alt-drag always means the loop — over it, move it; anywhere
+    /// else, draw a new one.
+    LoopCreate {
+        anchor_beat: f32,
+    },
 }
 
 /// How near an end of the loop counts as grabbing that end rather than the body.
@@ -324,6 +336,7 @@ pub fn timeline_ruler(
     let gesture = std::rc::Rc::new(TimelineGestureContext::from_state(state));
     let state_for_region_drag = std::rc::Rc::clone(&gesture);
     let on_loop_drag_move = on_loop_drag.clone();
+    let state_for_press = std::rc::Rc::clone(&gesture);
     let state_for_loop_drag = gesture;
 
     div()
@@ -516,21 +529,30 @@ pub fn timeline_ruler(
                         let x: f32 = event.position.x.into();
                         let click_x = x - lane_origin;
                         if event.modifiers.alt {
-                            if let Some((start, end, left_x, right_x)) = loop_span {
-                                if let Some(mode) = loop_grab_mode(click_x, left_x, right_x) {
-                                    gesture_down.set(RulerGesture::Loop(TimelineLoopDrag {
+                            let grab = loop_span.and_then(|(start, end, left_x, right_x)| {
+                                loop_grab_mode(click_x, left_x, right_x).map(|mode| {
+                                    RulerGesture::Loop(TimelineLoopDrag {
                                         mode,
                                         start_beat: start,
                                         end_beat: end,
                                         pointer_offset_x: click_x - left_x,
-                                    }));
-                                    // Alt-pressing the loop must not also move the
-                                    // playhead: the press belongs to the loop now.
-                                    window.prevent_default();
-                                    cx.stop_propagation();
-                                    return;
+                                    })
+                                })
+                            });
+                            gesture_down.set(grab.unwrap_or_else(|| {
+                                // Not on the loop: this press is the start of a
+                                // new one, anchored where it landed.
+                                RulerGesture::LoopCreate {
+                                    anchor_beat: state_for_press
+                                        .snap_beats(state_for_press.x_to_beats(click_x))
+                                        .max(0.0),
                                 }
-                            }
+                            }));
+                            // Alt-pressing the ruler must not also move the
+                            // playhead: the press belongs to the loop now.
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            return;
                         }
                         gesture_down.set(RulerGesture::Scrub);
                         on_seek_clone(
@@ -563,12 +585,35 @@ pub fn timeline_ruler(
                         let x: f32 = event.event.position.x.into();
                         let ox: f32 = event.bounds.origin.x.into();
                         let local_x = (x - ox).max(0.0);
+                        let beat_at_x = |x: f32| {
+                            state_for_loop_drag
+                                .snap_beats(state_for_loop_drag.x_to_beats(x))
+                                .max(0.0)
+                        };
+                        if let RulerGesture::LoopCreate { anchor_beat } = gesture_move.get() {
+                            let here = beat_at_x(local_x);
+                            // Either direction draws the same loop: the anchor
+                            // is one end, the pointer is the other, and which is
+                            // "start" is arithmetic, not a rule the user has to
+                            // know. A zero-width drag is left alone rather than
+                            // published as an empty loop.
+                            let (start_beat, end_beat) =
+                                (anchor_beat.min(here), anchor_beat.max(here));
+                            if (end_beat - start_beat) > f32::EPSILON {
+                                on_loop_drag_move(
+                                    &TimelineLoopDragUpdate {
+                                        start_beat,
+                                        end_beat,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            }
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            return;
+                        }
                         if let RulerGesture::Loop(drag) = gesture_move.get() {
-                            let beat_at_x = |x: f32| {
-                                state_for_loop_drag
-                                    .snap_beats(state_for_loop_drag.x_to_beats(x))
-                                    .max(0.0)
-                            };
                             let (start_beat, end_beat) = match drag.mode {
                                 TimelineRegionDragMode::Move => {
                                     let length = (drag.end_beat - drag.start_beat).max(1.0e-3);

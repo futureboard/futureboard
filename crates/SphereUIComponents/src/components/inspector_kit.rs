@@ -62,10 +62,6 @@ pub const CARD_PAD: f32 = space::LOOSE;
 pub const CARD_RADIUS: f32 = 14.0;
 /// Gap between a card's rows.
 pub const CARD_ROW_GAP: f32 = space::SNUG;
-/// The header switch.
-pub const SWITCH_W: f32 = 34.0;
-pub const SWITCH_H: f32 = 18.0;
-pub const SWITCH_KNOB: f32 = 14.0;
 /// One round latching state button (M / S / I / R).
 pub const STATE_BUTTON: f32 = 28.0;
 
@@ -253,34 +249,22 @@ pub fn ins_section_with_action(
 
 // ── The card ─────────────────────────────────────────────────────────────────
 
-/// A section card, with its title, its rule, and its switch.
-///
-/// # The shape, and why
+/// A section card: its title, its rule, and its rows.
 ///
 /// ```txt
 /// ┌─────────────────────────────────────────┐
-/// │  TRACK ─────────────────────────  (●──) │  ← title, rule, switch
+/// │  TRACK ──────────────────────────────── │  ← title, then a rule
 /// │  Type                             Audio │  ← label left, value right
 /// │  Name        ( Audio Track 1 UwU      ) │  ← controls are pills
 /// │  Volume      ────────────●──   +00 dB   │
 /// └─────────────────────────────────────────┘
 /// ```
 ///
-/// The rule between the title and the switch is doing real work: it ties the
-/// two ends of a 30 px header together so the switch reads as belonging to
-/// *this* section rather than floating above the next one, and it gives the eye
-/// a horizontal line to travel when scanning a stack of cards for a heading.
-///
-/// The switch collapses the section. Every section can be collapsed and none of
-/// them has a natural on/off of its own, so one meaning covers all of them —
-/// and a control that means one thing everywhere is worth more than five that
-/// each mean something local.
-pub fn ins_card(
-    title: impl Into<String>,
-    switch: Option<InsCardSwitch>,
-    body: impl IntoElement,
-) -> impl IntoElement {
-    let collapsed = switch.as_ref().is_some_and(|switch| !switch.on);
+/// The rule after the title is doing real work: it gives the eye a horizontal
+/// line to travel when scanning a stack of cards for a heading, and it closes
+/// the header across the full width so the title reads as belonging to the rows
+/// under it rather than floating between two cards.
+pub fn ins_card(title: impl Into<String>, body: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -288,82 +272,25 @@ pub fn ins_card(
         .p(px(CARD_PAD))
         .rounded(px(CARD_RADIUS))
         .bg(Colors::surface_card())
-        .child(ins_card_header(title, switch))
-        .when(!collapsed, |card| {
-            card.child(div().flex().flex_col().gap(px(CARD_ROW_GAP)).child(body))
-        })
-}
-
-/// The switch on a card's header.
-pub struct InsCardSwitch {
-    pub id: gpui::ElementId,
-    /// `true` = expanded. The switch reads as "this section is showing".
-    pub on: bool,
-    pub on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut App)>,
-}
-
-fn ins_card_header(title: impl Into<String>, switch: Option<InsCardSwitch>) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(space::LOOSE))
-        .h(px(size::DENSE))
-        .flex_shrink_0()
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(space::LOOSE))
+                .h(px(size::DENSE))
                 .flex_shrink_0()
-                .text_size(px(typography::UI_XS))
-                .font_weight(gpui::FontWeight::BOLD)
-                .text_color(Colors::text_primary())
-                .child(title.into().to_uppercase()),
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(typography::UI_XS))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(Colors::text_primary())
+                        .child(title.into().to_uppercase()),
+                )
+                .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle())),
         )
-        .child(div().flex_1().h(px(1.0)).bg(Colors::border_subtle()))
-        .children(switch.map(|switch| ins_switch(switch.id, switch.on, switch.on_toggle)))
-}
-
-/// The pill switch: a track with a knob that slides.
-///
-/// Reads as a physical state rather than a checkbox because it is setting how
-/// the panel *is*, not recording an answer — and because at this size a tick in
-/// a box is a 10 px target while this is a 34 px one.
-pub fn ins_switch(
-    id: gpui::ElementId,
-    on: bool,
-    on_toggle: std::sync::Arc<dyn Fn(&mut Window, &mut App)>,
-) -> impl IntoElement {
-    let track = if on {
-        Colors::accent_primary()
-    } else {
-        Colors::composite(Colors::surface_card(), Colors::state_recessed())
-    };
-    div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .flex_shrink_0()
-        .items_center()
-        .w(px(SWITCH_W))
-        .h(px(SWITCH_H))
-        .px(px(2.0))
-        .rounded(px(radius::PILL))
-        .bg(track)
-        .cursor(gpui::CursorStyle::PointingHand)
-        .child(div().flex_1().when(on, |spacer| spacer.min_w(px(0.0))))
-        .child(
-            div()
-                .flex_none()
-                .w(px(SWITCH_KNOB))
-                .h(px(SWITCH_KNOB))
-                .rounded(px(radius::PILL))
-                .bg(if on {
-                    Colors::on_color(Colors::accent_primary())
-                } else {
-                    Colors::text_muted()
-                }),
-        )
-        .when(on, |row| row.flex_row_reverse())
-        .on_click(move |_, window, cx| on_toggle(window, cx))
+        .child(div().flex().flex_col().gap(px(CARD_ROW_GAP)).child(body))
 }
 
 /// The panel's control surface: a pill.

@@ -36,6 +36,95 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Reusable working buffers for [`Scene::finish`]'s ordering pass. Kept on
+    /// the scene so a frame's sort allocates nothing.
+    sort: SortScratch,
+}
+
+/// Working memory for the draw-order sort, reused across frames.
+#[derive(Default)]
+struct SortScratch {
+    counts: Vec<u32>,
+    quads: Vec<Quad>,
+    shadows: Vec<Shadow>,
+    underlines: Vec<Underline>,
+}
+
+/// Above this draw order the counting sort's histogram stops being the cheaper
+/// option and its allocation stops being small, so the comparison sort takes
+/// over.
+///
+/// Orders cannot normally get near it: an order is "one more than the deepest
+/// thing this primitive overlaps", so it is bounded by how deeply the UI stacks
+/// on itself — tens, not thousands — and every primitive inside a layer shares
+/// the layer's single order. The limit exists for the pathological scene, not
+/// the expected one.
+const COUNTING_SORT_ORDER_LIMIT: u32 = 1 << 16;
+
+/// Below this length neither the scan nor the histogram can pay for itself
+/// against sorting a handful of items directly.
+const COUNTING_SORT_MIN_LEN: usize = 4_096;
+
+/// Stable sort by draw order.
+///
+/// Three paths, in the order they are worth taking:
+///
+/// 1. **Already ordered.** Primitives are pushed roughly back to front and
+///    everything inside a layer shares one order, so a scene's list is very
+///    often non-decreasing already. One pass proves it and the sort does
+///    nothing at all — no moves, no merge buffer, no allocation.
+/// 2. **Counting sort**, for a large list that is genuinely out of order.
+///    Draw orders are dense small integers with heavy repetition, which is the
+///    distribution a counting sort is for; it moves each item once, where the
+///    stable merge sort moves ~100 bytes per quad `n log n` times.
+/// 3. **Comparison sort**, for everything else — a short list, or orders spread
+///    too widely to histogram.
+///
+/// Stability is not optional in any of them: primitives that share an order are
+/// the contents of one layer, and their insertion order *is* their paint order.
+fn sort_by_draw_order<T: Copy>(
+    items: &mut Vec<T>,
+    scratch: &mut Vec<T>,
+    counts: &mut Vec<u32>,
+    order_of: fn(&T) -> DrawOrder,
+) {
+    // The pass that decides also collects what the counting path needs, so a
+    // list that turns out to be unordered has not paid for the check twice.
+    let mut max_order = 0;
+    let mut ordered = true;
+    let mut previous = 0;
+    for item in items.iter() {
+        let order = order_of(item);
+        ordered &= order >= previous;
+        previous = order;
+        max_order = max_order.max(order);
+    }
+    if ordered {
+        return;
+    }
+    if items.len() < COUNTING_SORT_MIN_LEN || max_order >= COUNTING_SORT_ORDER_LIMIT {
+        items.sort_by_key(order_of);
+        return;
+    }
+
+    // Histogram shifted by one, so the prefix sum lands each order's start.
+    counts.clear();
+    counts.resize(max_order as usize + 2, 0);
+    for item in items.iter() {
+        counts[order_of(item) as usize + 1] += 1;
+    }
+    for index in 1..counts.len() {
+        counts[index] += counts[index - 1];
+    }
+
+    scratch.clear();
+    scratch.resize(items.len(), items[0]);
+    for item in items.iter() {
+        let slot = &mut counts[order_of(item) as usize];
+        scratch[*slot as usize] = *item;
+        *slot += 1;
+    }
+    std::mem::swap(items, scratch);
 }
 
 #[expect(missing_docs)]
@@ -135,10 +224,33 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
-        self.shadows.sort_by_key(|shadow| shadow.order);
-        self.quads.sort_by_key(|quad| quad.order);
+        // The three bulk primitive kinds go through the counting sort. They are
+        // `Copy`, they are what a dense UI produces tens of thousands of, and
+        // they order on nothing but `order`.
+        sort_by_draw_order(
+            &mut self.shadows,
+            &mut self.sort.shadows,
+            &mut self.sort.counts,
+            |shadow| shadow.order,
+        );
+        sort_by_draw_order(
+            &mut self.quads,
+            &mut self.sort.quads,
+            &mut self.sort.counts,
+            |quad| quad.order,
+        );
+        sort_by_draw_order(
+            &mut self.underlines,
+            &mut self.sort.underlines,
+            &mut self.sort.counts,
+            |underline| underline.order,
+        );
+        // Paths and surfaces are not `Copy`, and sprites carry a secondary key:
+        // within one order they are grouped by atlas tile so the renderer can
+        // batch them, and losing that grouping would trade a cheaper sort for
+        // more draw calls. Both stay on the comparison sort, where their much
+        // smaller counts make it the right one anyway.
         self.paths.sort_by_key(|path| path.order);
-        self.underlines.sort_by_key(|underline| underline.order);
         self.monochrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.subpixel_sprites
@@ -897,5 +1009,166 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod draw_order_sort_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A quad carrying an order and a recognisable payload, so the tests can
+    /// tell two quads with the same order apart.
+    fn quad(order: DrawOrder, tag: f32) -> Quad {
+        let mut quad = Quad::default();
+        quad.order = order;
+        quad.bounds.origin.x = ScaledPixels(tag);
+        quad
+    }
+
+    fn orders(quads: &[Quad]) -> Vec<DrawOrder> {
+        quads.iter().map(|quad| quad.order).collect()
+    }
+
+    fn tags(quads: &[Quad]) -> Vec<f32> {
+        quads.iter().map(|quad| quad.bounds.origin.x.0).collect()
+    }
+
+    fn sorted(mut quads: Vec<Quad>) -> Vec<Quad> {
+        let (mut scratch, mut counts) = (Vec::new(), Vec::new());
+        sort_by_draw_order(&mut quads, &mut scratch, &mut counts, |quad| quad.order);
+        quads
+    }
+
+    /// Primitives that share an order are the contents of one layer, and their
+    /// insertion order *is* their paint order. A sort that reorders them draws
+    /// the layer inside out.
+    #[test]
+    fn the_sort_is_stable_within_an_order() {
+        let mut quads = Vec::new();
+        for index in 0..300 {
+            quads.push(quad(index % 3, index as f32));
+        }
+        let result = sorted(quads);
+        assert!(orders(&result).windows(2).all(|pair| pair[0] <= pair[1]));
+        // Every quad of order 0 came first, in the order it was pushed.
+        let zeros: Vec<f32> = tags(&result[..100]).to_vec();
+        let mut expected: Vec<f32> = (0..300).filter(|i| i % 3 == 0).map(|i| i as f32).collect();
+        expected.truncate(100);
+        assert_eq!(zeros, expected, "the layer was drawn out of order");
+    }
+
+    /// Whatever path it takes, the result has to be the same permutation the
+    /// comparison sort would have produced.
+    #[test]
+    fn the_counting_and_comparison_paths_agree() {
+        for len in [1_usize, 8, 127, 128, 2_000] {
+            let mut source = Vec::with_capacity(len);
+            for index in 0..len {
+                // Deliberately clustered and out of order, with repeats.
+                source.push(quad(((index * 7919) % 23) as DrawOrder, index as f32));
+            }
+            let mut expected = source.clone();
+            expected.sort_by_key(|quad| quad.order);
+            assert_eq!(
+                tags(&sorted(source)),
+                tags(&expected),
+                "len {len} disagreed with the comparison sort"
+            );
+        }
+    }
+
+    /// A scene whose orders run past the histogram limit must still come out
+    /// sorted — it just takes the other path.
+    #[test]
+    fn an_extreme_order_falls_back_and_stays_correct() {
+        let mut source = vec![quad(COUNTING_SORT_ORDER_LIMIT + 5, 0.0)];
+        for index in 1..500 {
+            source.push(quad((index % 40) as DrawOrder, index as f32));
+        }
+        let result = sorted(source);
+        assert!(orders(&result).windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(
+            result.last().map(|quad| quad.order),
+            Some(COUNTING_SORT_ORDER_LIMIT + 5)
+        );
+    }
+
+    #[test]
+    fn an_empty_scene_sorts_to_nothing() {
+        assert!(sorted(Vec::new()).is_empty());
+    }
+
+    /// What the change is for. A dense arrangement frame is tens of thousands
+    /// of quads across a handful of layers; the comparison sort moves every one
+    /// of them through a merge buffer, `n log n` times.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn draw_order_sort_cost() {
+        println!();
+        println!(
+            "{:>22} {:>10} {:>12} {:>12} {:>12}",
+            "scene", "quads", "new ms", "compare ms", "(copy ms)"
+        );
+        // Two shapes, because they take different paths and a frame can be
+        // either: a scene pushed back to front (what the fast path is for), and
+        // one whose orders interleave (what the counting sort is for).
+        let shapes: [(&str, fn(usize) -> DrawOrder); 2] = [
+            ("ordered back-to-front", |index| {
+                (index / 64) as DrawOrder % 4_096
+            }),
+            ("interleaved", |index| ((index * 7919) % 48) as DrawOrder),
+        ];
+        for (label, order_of_index) in shapes {
+            for len in [1_000_usize, 10_000, 50_000, 200_000] {
+                let source: Vec<Quad> = (0..len)
+                    .map(|index| quad(order_of_index(index), index as f32))
+                    .collect();
+
+                // Sorting is destructive, so each run needs a fresh copy — but the
+                // copy is not what is being measured. It goes into a buffer that is
+                // allocated once, and its cost is measured separately and reported,
+                // so the sort numbers can be read for what they are.
+                const RUNS: usize = 50;
+                let (mut scratch, mut counts) = (Vec::new(), Vec::new());
+                let mut work: Vec<Quad> = Vec::with_capacity(len);
+
+                let refill = |work: &mut Vec<Quad>| {
+                    work.clear();
+                    work.extend_from_slice(&source);
+                };
+
+                let started = Instant::now();
+                for _ in 0..RUNS {
+                    refill(&mut work);
+                    std::hint::black_box(&work);
+                }
+                let copy_ms = started.elapsed().as_secs_f64() * 1000.0 / RUNS as f64;
+
+                refill(&mut work);
+                sort_by_draw_order(&mut work, &mut scratch, &mut counts, |q| q.order);
+                let started = Instant::now();
+                for _ in 0..RUNS {
+                    refill(&mut work);
+                    sort_by_draw_order(&mut work, &mut scratch, &mut counts, |q| q.order);
+                    std::hint::black_box(&work);
+                }
+                let counting_ms =
+                    (started.elapsed().as_secs_f64() * 1000.0 / RUNS as f64 - copy_ms).max(0.0);
+
+                let started = Instant::now();
+                for _ in 0..RUNS {
+                    refill(&mut work);
+                    work.sort_by_key(|quad| quad.order);
+                    std::hint::black_box(&work);
+                }
+                let compare_ms =
+                    (started.elapsed().as_secs_f64() * 1000.0 / RUNS as f64 - copy_ms).max(0.0);
+                println!(
+                    "{label:>22} {len:>10} {counting_ms:>12.3} {compare_ms:>12.3} {copy_ms:>12.3}"
+                );
+            }
+        }
+        println!();
     }
 }

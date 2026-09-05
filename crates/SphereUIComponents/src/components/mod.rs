@@ -60,6 +60,7 @@ pub mod native_editor_shell;
 pub mod numeric_edit;
 pub mod panel;
 mod performance_overlay;
+pub mod performance_window;
 pub mod piano_roll;
 pub mod plugin_content_host;
 pub mod plugin_editor_chrome;
@@ -166,7 +167,7 @@ pub use midi_import_dialog::{open_midi_import_dialog, MidiImportDialog, MidiImpo
 pub use mixer_master_strip_view::MixerMasterStripView;
 pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};
-pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
+pub use mixer_window::{open_mixer_window, MixerContextMenu, MixerSnapshot, MixerWindow};
 pub use numeric_edit::{
     is_intermediate_draft, parse_draft, CommitPolicy, CommitTrigger, NumberFormat,
     NumericEditSession,

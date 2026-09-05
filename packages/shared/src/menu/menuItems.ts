@@ -685,6 +685,14 @@ export const APP_MENUS: AppMenuGroup[] = [
           "The same clock led by SMPTE timecode, at 24, 25, 29.97 DF or 30 fps",
       },
       {
+        id: "window.performance",
+        label: "Performance Monitor",
+        icon: "gauge",
+        action: "window:performance",
+        description:
+          "Audio engine latency and PDC, plus every CPU core, memory and local drive",
+      },
+      {
         type: "separator",
         id: "window.sep.extensions",
       },

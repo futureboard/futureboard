@@ -242,12 +242,17 @@ pub struct JsAudioFileInfo {
 // These live purely on the Rust side and are used for project snapshots
 // passed as JSON strings from the JS side.
 
-/// A hold-mode tempo marker passed from the UI project TempoMap.
+/// A tempo marker passed from the UI project TempoMap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineTempoPointSnapshot {
     pub beat: f64,
     pub bpm: f64,
+    /// How the tempo travels to the next marker, as
+    /// [`crate::tempo_map::TempoCurve::to_tag`]. Defaulted so a project written
+    /// before curves existed still loads as the step-hold map it was.
+    #[serde(default)]
+    pub curve: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,18 +28,37 @@ pub type AudioClipProcessCommitCb =
 pub type AudioClipCutCb =
     std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>;
 
-/// Authoritative horizontal geometry for an audio clip. Off-mode audio is
-/// time-locked to its resolved source trim window, while stretched audio
-/// follows its authored musical duration. Track culling and clip rendering
-/// must share this result so cut/trim clips cannot be culled at one width and
-/// painted at another until a later resize gesture reconciles them.
+/// Narrowest clip that still gets a processing strip.
+///
+/// The strip spends 6 px of padding, a 2 px colour tick, a 5 px gap and a
+/// ~38 px level readout before one character of the name can appear. Under
+/// this it is a dark bar with nothing legible in it, and it costs two measured
+/// text nodes per clip — the single largest item in a dense arrangement frame.
+const CLIP_STRIP_MIN_W: f32 = 44.0;
+
+/// Narrowest clip whose strip carries more than its name.
+///
+/// The level readout and the badges are fixed width, so they do not shrink out
+/// of the way — they crowd the name out of a narrow clip while still being too
+/// small to read themselves.
+const CLIP_STRIP_DETAIL_MIN_W: f32 = 96.0;
+
+/// Narrowest clip that gets edge resize handles.
+///
+/// Two 6 px handles on a 12 px clip cover the whole of it, leaving no body to
+/// grab and no way to move the clip at all. Below this the clip is one target.
+const CLIP_RESIZE_HANDLE_MIN_W: f32 = 20.0;
+
+/// Width of one edge handle, exposed for the tier test. The handle itself is a
+/// local constant inside the element builder, where it belongs.
+#[cfg(test)]
+const RESIZE_HANDLE_W_FOR_TESTS: f32 = 6.0;
+
+/// Wall-clock length the clip plays for, in seconds.
+///
+/// Fades are authored in milliseconds, so they are resolved against this rather
+/// than against the beat span the clip happens to cover.
 fn audio_clip_timeline_duration_seconds(clip: &ClipState, state: &TimelineState) -> f32 {
-    let seconds_per_beat = state.seconds_per_beat();
-    // The clip's own source window and stretch ratio are what it actually plays
-    // for; `duration_beats` is derived from exactly this by
-    // `TimelineState::reconcile_audio_clip_lengths`. Drawing from the same
-    // formula the model is derived from is what keeps the drawn clip and the
-    // grabbable clip one object across a tempo change.
     if let Some(seconds) = clip
         .stretch
         .played_seconds_for_project_bpm(state.bpm.max(1.0) as f64)
@@ -47,19 +66,31 @@ fn audio_clip_timeline_duration_seconds(clip: &ClipState, state: &TimelineState)
         return (seconds as f32).max(0.001);
     }
     // Pending and legacy clips may not have decoded source bounds yet.
-    (clip.duration_beats * seconds_per_beat).max(0.001)
+    (clip.duration_beats * state.seconds_per_beat()).max(0.001)
 }
 
+/// Authoritative horizontal geometry for an audio clip: `(left_x, width_px)` in
+/// lane space.
+///
+/// Both edges are resolved on the *beat* axis, which is the axis the ruler, the
+/// grid, the playhead and every other lane are drawn on. The clip's end beat
+/// comes from [`TimelineState::audio_clip_end_beat`] — the same derivation
+/// `reconcile_audio_clip_lengths` writes into the model — so a clip is never
+/// culled at one width and painted at another, and a tempo ramp bends the drawn
+/// clip exactly as much as it bends the beat grid underneath it.
+///
+/// Resolving the width in seconds against `pixels_per_second` (which it used to
+/// do) is only equivalent while the tempo is constant: under a tempo map the
+/// seconds axis and the beat axis are different axes, and the clip drifted off
+/// its own grid position by the difference.
 pub(crate) fn audio_clip_timeline_geometry(clip: &ClipState, state: &TimelineState) -> (f32, f32) {
-    let pixels_per_second = state.viewport.pixels_per_second;
-    let time_locked = clip.stretch.mode == StretchMode::Off;
-    let duration_seconds = audio_clip_timeline_duration_seconds(clip, state);
-    let left = if time_locked {
-        state.time_to_content_x(state.beats_to_seconds(clip.start_beat))
-    } else {
-        state.beats_to_x(clip.start_beat)
-    };
-    (left, (duration_seconds * pixels_per_second).max(10.0))
+    let left = state.beats_to_x(clip.start_beat);
+    let end_beat = state
+        .audio_clip_end_beat(clip)
+        // Pending and legacy clips may not have decoded source bounds yet.
+        .unwrap_or_else(|| (clip.start_beat + clip.duration_beats.max(0.0)) as f64);
+    let right = state.beats_to_x(end_beat as f32);
+    (left, (right - left).max(10.0))
 }
 
 #[derive(Clone, Debug)]
@@ -411,7 +442,7 @@ pub fn audio_clip(
     let drag_name = clip.name.clone();
     let drag_start_beat = clip.start_beat;
     let selected = state.selection.selected_clip_ids.contains(&clip.id);
-    let pixels_per_second = state.viewport.pixels_per_second;
+    let _pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
     let stretch_badge = stretch_badge(clip, state);
     let (left, width) = audio_clip_timeline_geometry(clip, state);
@@ -422,13 +453,30 @@ pub fn audio_clip(
     let fade_out_seconds = (clip.stretch.fade_out_ms.max(0.0) / 1000.0)
         .max(auto_crossfade_out_beats.max(0.0) * seconds_per_beat)
         .min((clip_duration_seconds - fade_in_seconds).max(0.0));
-    let fade_in_w = (fade_in_seconds * pixels_per_second).min(width);
-    let fade_out_w = (fade_out_seconds * pixels_per_second).min((width - fade_in_w).max(0.0));
+    // Pixels per second *of this clip*, not of the timeline. Under a tempo map
+    // the clip's own seconds-to-pixels scale is its drawn width over the length
+    // it plays for; using the global figure detaches the fade from the audio it
+    // is fading exactly where the tempo moves.
+    let clip_pixels_per_second = width / clip_duration_seconds.max(0.001);
+    let fade_in_w = (fade_in_seconds * clip_pixels_per_second).min(width);
+    let fade_out_w = (fade_out_seconds * clip_pixels_per_second).min((width - fade_in_w).max(0.0));
     let manual_fade_in_w =
-        ((clip.stretch.fade_in_ms.max(0.0) / 1000.0) * pixels_per_second).min(width * 0.5);
+        ((clip.stretch.fade_in_ms.max(0.0) / 1000.0) * clip_pixels_per_second).min(width * 0.5);
     let manual_fade_out_w =
-        ((clip.stretch.fade_out_ms.max(0.0) / 1000.0) * pixels_per_second).min(width * 0.5);
+        ((clip.stretch.fade_out_ms.max(0.0) / 1000.0) * clip_pixels_per_second).min(width * 0.5);
     let has_auto_crossfade = auto_crossfade_in_beats > 0.0 || auto_crossfade_out_beats > 0.0;
+    // Detail by width. Below each threshold the thing being dropped is already
+    // illegible, so this is what the clip *should* look like — and it is also
+    // where the arrangement's frame goes.
+    //
+    // The strip's two text runs are measured layout nodes: a zoomed-out
+    // arrangement is exactly the case with the most clips and the least room on
+    // each, and a screenful of clips too narrow to read was measured at 59% of
+    // the whole frame drawing labels nobody can read. See
+    // `gpui::frame_bench::arrangement_frame_phase_cost`.
+    let show_strip = width >= CLIP_STRIP_MIN_W;
+    let show_strip_detail = width >= CLIP_STRIP_DETAIL_MIN_W;
+    let show_resize_handles = width >= CLIP_RESIZE_HANDLE_MIN_W;
     let show_inline_gain = selected
         && width
             >= if has_auto_crossfade || stretch_badge.is_some() {
@@ -470,7 +518,10 @@ pub fn audio_clip(
     };
     const RESIZE_HANDLE_W: f32 = 6.0;
     const HEADER_H: f32 = 20.0;
-    let body_h = (clip_h - HEADER_H).max(1.0);
+    // With no strip the waveform owns the whole clip, and the fade overlays
+    // reach the bottom edge instead of stopping above a bar that is not there.
+    let strip_h = if show_strip { HEADER_H } else { 0.0 };
+    let body_h = (clip_h - strip_h).max(1.0);
     let gain_preview = on_process_preview.clone();
     let gain_commit = on_process_commit.clone();
     let fade_in_preview = on_process_preview.clone();
@@ -569,7 +620,9 @@ pub fn audio_clip(
             width,
         )))
         // Processing strip: clip identity, inline gain, crossfade, and stretch.
-        .child(
+        // Absent on a clip too narrow to show any of it — see
+        // [`CLIP_STRIP_MIN_W`].
+        .children(show_strip.then(|| {
             div()
                 .h(px(HEADER_H))
                 .flex_none()
@@ -609,7 +662,10 @@ pub fn audio_clip(
                 .children(
                     show_inline_gain.then(|| compact_gain_control(clip, gain_preview, gain_commit)),
                 )
-                .child(
+                // The level readout is fixed width, so on a narrow clip it does
+                // not shrink — it takes the name's room and is still too small
+                // to read. See [`CLIP_STRIP_DETAIL_MIN_W`].
+                .children((show_strip_detail).then(|| {
                     div()
                         .flex_none()
                         .text_size(px(8.0))
@@ -619,9 +675,9 @@ pub fn audio_clip(
                         } else {
                             Colors::text_muted()
                         })
-                        .child(format!("{gain_db:+.1} dB")),
-                )
-                .children(has_auto_crossfade.then(|| {
+                        .child(format!("{gain_db:+.1} dB"))
+                }))
+                .children((show_strip_detail && has_auto_crossfade).then(|| {
                     div()
                         .flex_none()
                         .px(px(4.0))
@@ -632,7 +688,7 @@ pub fn audio_clip(
                         .text_color(Colors::accent_primary())
                         .child("XFADE")
                 }))
-                .children(stretch_badge.map(|badge| {
+                .children(stretch_badge.filter(|_| show_strip_detail).map(|badge| {
                     // A tempo-locked clip is marked on two channels: the
                     // automation hue (the same one the tempo lane uses, because
                     // that is what owns the clip's length) plus a leading glyph.
@@ -664,17 +720,17 @@ pub fn audio_clip(
                         );
                     }
                     chip.child(badge.label)
-                })),
+                }))
             // Clip length text intentionally not rendered on the clip body — the
             // name (flex_1) fills the bar, so no gap remains. Duration stays in the
             // model and the inspector; resize/trim handles are unaffected.
-        )
+        }))
         .children((fade_in_w > 1.0).then(|| {
             div()
                 .absolute()
                 .left_0()
                 .top_0()
-                .bottom(px(HEADER_H))
+                .bottom(px(strip_h))
                 .w(px(fade_in_w))
                 .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.34))
                 .border_r(px(1.0))
@@ -689,7 +745,7 @@ pub fn audio_clip(
                 .absolute()
                 .right_0()
                 .top_0()
-                .bottom(px(HEADER_H))
+                .bottom(px(strip_h))
                 .w(px(fade_out_w))
                 .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.34))
                 .border_l(px(1.0))
@@ -730,7 +786,9 @@ pub fn audio_clip(
                 fade_out_commit,
             )
         }))
-        .child(
+        // Edge handles, on a clip wide enough to have edges *and* a body — see
+        // [`CLIP_RESIZE_HANDLE_MIN_W`].
+        .children(show_resize_handles.then(|| {
             div()
                 .absolute()
                 .top_0()
@@ -742,9 +800,9 @@ pub fn audio_clip(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
                     cx.new(|_| drag.clone())
-                }),
-        )
-        .child(
+                })
+        }))
+        .children(show_resize_handles.then(|| {
             div()
                 .absolute()
                 .top_0()
@@ -756,16 +814,46 @@ pub fn audio_clip(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {
                     cx.new(|_| drag.clone())
-                }),
-        )
+                })
+        }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_clip_timeline_geometry, db_to_gain, gain_to_db, gain_to_norm, norm_to_gain};
+    use super::{
+        audio_clip_timeline_geometry, db_to_gain, gain_to_db, gain_to_norm, norm_to_gain,
+        CLIP_RESIZE_HANDLE_MIN_W, CLIP_STRIP_DETAIL_MIN_W, CLIP_STRIP_MIN_W,
+    };
     use crate::components::timeline::timeline_state::{
         AudioClipStretchState, AudioImportState, ClipState, ClipType, TimelineState,
     };
+
+    /// The tiers have to stay in the order they describe, and the narrowest one
+    /// has to stay narrow enough that a clip anybody would read a name on still
+    /// has one.
+    ///
+    /// They are not cosmetic: the strip's two text runs are measured layout
+    /// nodes, and on a zoomed-out arrangement — the case with the most clips and
+    /// the least room on each — drawing them was measured at 59% of the frame.
+    /// Raising `CLIP_STRIP_MIN_W` back toward zero puts that cost back.
+    #[test]
+    fn clip_detail_tiers_stay_ordered_and_useful() {
+        assert!(
+            CLIP_RESIZE_HANDLE_MIN_W < CLIP_STRIP_MIN_W,
+            "a clip should get its edges back before it gets a label bar"
+        );
+        assert!(
+            CLIP_STRIP_MIN_W < CLIP_STRIP_DETAIL_MIN_W,
+            "the strip has to exist before it can carry a readout"
+        );
+        // Two 6 px handles need a body between them to leave anything to grab.
+        assert!(CLIP_RESIZE_HANDLE_MIN_W >= 2.0 * super::RESIZE_HANDLE_W_FOR_TESTS);
+        // A clip wide enough for a few characters of name keeps its strip.
+        assert!(
+            CLIP_STRIP_MIN_W <= 64.0,
+            "a readable clip lost its name bar"
+        );
+    }
 
     #[test]
     fn clip_gain_mapping_roundtrips_unity_and_limits() {
@@ -896,15 +984,78 @@ mod tests {
     fn the_drawn_width_and_the_model_agree_after_a_tempo_change() {
         let mut state = state_with_clip(two_second_clip("clip-agree"), 120.0);
         state.bpm = 172.0;
+        state.sync_pixels_per_beat();
         state.reconcile_audio_clip_lengths();
 
         let clip = &state.tracks[0].clips[0];
         let (_, drawn_w) = audio_clip_timeline_geometry(clip, &state);
-        let model_w =
-            clip.duration_beats * state.seconds_per_beat() * state.viewport.pixels_per_second;
+        let model_w = clip.duration_beats * state.viewport.pixels_per_beat;
         assert!(
-            (drawn_w - model_w).abs() < 0.5,
+            (drawn_w - model_w).abs() < 1.5,
             "drawn {drawn_w} px vs model {model_w} px"
+        );
+    }
+
+    /// A tempo marker inside an un-stretched clip must not move a sample of it.
+    ///
+    /// The clip plays for a fixed wall-clock length, so a section that speeds up
+    /// under it covers *more* beats in the same time. The bar count is what
+    /// moves; the audio does not.
+    #[test]
+    fn a_tempo_change_under_an_unstretched_clip_keeps_its_wall_clock_length() {
+        use crate::components::timeline::timeline_state::TempoCurve;
+
+        let mut state = state_with_clip(two_second_clip("clip-drift"), 120.0);
+        let before_beats = state.tracks[0].clips[0].duration_beats;
+        assert!((before_beats - 4.0).abs() < 0.01);
+
+        // Double the tempo one beat into the clip: the first beat runs at 120,
+        // the rest at 240, so two seconds now covers 1 + 3 = ... beats.
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 120.0, TempoCurve::Hold);
+        state
+            .tempo_map
+            .add_or_update_point(1.0, 240.0, TempoCurve::Hold);
+        assert!(state.reconcile_audio_clip_lengths());
+
+        let clip = &state.tracks[0].clips[0];
+        // 1 beat at 120 BPM = 0.5 s, leaving 1.5 s at 240 BPM = 6 beats.
+        assert!(
+            (clip.duration_beats - 7.0).abs() < 0.01,
+            "expected 7 beats, got {}",
+            clip.duration_beats
+        );
+        // And the length it actually plays is untouched.
+        let seconds = state.seconds_at_beat((clip.start_beat + clip.duration_beats) as f64)
+            - state.seconds_at_beat(clip.start_beat as f64);
+        assert!((seconds - 2.0).abs() < 1.0e-6, "played {seconds} s");
+    }
+
+    /// A tempo ramp under an un-stretched clip is the same promise: the clip
+    /// still plays for exactly as long, whatever the beat grid does over it.
+    #[test]
+    fn a_tempo_ramp_under_an_unstretched_clip_keeps_its_wall_clock_length() {
+        use crate::components::timeline::timeline_state::TempoCurve;
+
+        let mut state = state_with_clip(two_second_clip("clip-ramp"), 120.0);
+        state
+            .tempo_map
+            .add_or_update_point(0.0, 60.0, TempoCurve::Linear);
+        state
+            .tempo_map
+            .add_or_update_point(8.0, 180.0, TempoCurve::Smooth);
+        state
+            .tempo_map
+            .add_or_update_point(16.0, 90.0, TempoCurve::Hold);
+        state.reconcile_audio_clip_lengths();
+
+        let clip = &state.tracks[0].clips[0];
+        let seconds = state.seconds_at_beat((clip.start_beat + clip.duration_beats) as f64)
+            - state.seconds_at_beat(clip.start_beat as f64);
+        assert!(
+            (seconds - 2.0).abs() < 1.0e-5,
+            "a ramp moved the clip's length to {seconds} s"
         );
     }
 

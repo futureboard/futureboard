@@ -195,6 +195,30 @@ pub fn next_clip_id_number(tracks: &[TrackState]) -> u32 {
     n + 1
 }
 
+/// How many beats `seconds` of played audio covers for `clip`, starting where
+/// the clip starts.
+///
+/// This is the whole of "a tempo change must not move the audio". A clip that
+/// is *not* locked to the project tempo plays for a fixed wall-clock length, so
+/// its beat span is whatever that length covers under the tempo map from its
+/// own start — a ramp inside the clip shortens the bar count without touching a
+/// sample of audio. A clip that *is* locked (Tempo Sync / Warp) is defined in
+/// beats instead: its length already folds the tempo in through the stretch
+/// ratio, so it converts at the project tempo and keeps its bar count.
+fn audio_clip_beats_for_seconds(
+    clip: &ClipState,
+    seconds: f64,
+    tempo: &DirectAudio::TempoMap,
+    project_bpm: f64,
+) -> f64 {
+    if clip.stretch.follows_project_tempo() {
+        return seconds * project_bpm.max(1.0) / 60.0;
+    }
+    let start_beat = clip.start_beat.max(0.0) as f64;
+    let start_seconds = tempo.seconds_at_beat(start_beat);
+    (tempo.beat_at_seconds(start_seconds + seconds.max(0.0)) - start_beat).max(0.0)
+}
+
 impl TimelineState {
     /// Re-derive every audio clip's musical length from the audio it actually
     /// plays, at the current project tempo. Returns `true` when anything moved.
@@ -219,8 +243,12 @@ impl TimelineState {
     /// is nothing authoritative to derive from, and guessing would shrink a
     /// pending import to the minimum length.
     pub fn reconcile_audio_clip_lengths(&mut self) -> bool {
-        let seconds_per_beat = self.seconds_per_beat().max(1.0e-6) as f64;
+        // Every path that changes the tempo or the BPM ends here, which makes
+        // this the natural place to bring the resolved map back up to date.
+        self.refresh_tempo_cache();
         let project_bpm = self.bpm.max(1.0) as f64;
+        // One map for the whole pass, and the same map the transport plays.
+        let tempo = self.resolved_tempo_map();
         let mut changed = false;
         for track in &mut self.tracks {
             for clip in &mut track.clips {
@@ -230,7 +258,7 @@ impl TimelineState {
                 let Some(seconds) = clip.stretch.played_seconds_for_project_bpm(project_bpm) else {
                     continue;
                 };
-                let beats = (seconds / seconds_per_beat) as f32;
+                let beats = audio_clip_beats_for_seconds(clip, seconds, &tempo, project_bpm) as f32;
                 let beats = beats.max(MIN_AUDIO_CLIP_BEATS);
                 if (clip.duration_beats - beats).abs() > 1.0e-4 {
                     clip.duration_beats = beats;
@@ -239,6 +267,24 @@ impl TimelineState {
             }
         }
         changed
+    }
+
+    /// Beat the audio in `clip` finishes on, derived from what it actually
+    /// plays. `None` while the source window is still undecoded — there is
+    /// nothing authoritative to derive from yet.
+    ///
+    /// The single answer shared by the model ([`Self::reconcile_audio_clip_lengths`])
+    /// and by the drawing, so a clip is never grabbable at one length and
+    /// painted at another.
+    pub fn audio_clip_end_beat(&self, clip: &ClipState) -> Option<f64> {
+        let project_bpm = self.bpm.max(1.0) as f64;
+        let seconds = clip.stretch.played_seconds_for_project_bpm(project_bpm)?;
+        // The cached map: this runs once per audio clip per frame, and
+        // rebuilding it here made the arrangement's frame cost scale with the
+        // project's tempo-marker count.
+        let tempo = self.resolved_tempo_map();
+        let beats = audio_clip_beats_for_seconds(clip, seconds, &tempo, project_bpm);
+        Some(clip.start_beat as f64 + beats.max(MIN_AUDIO_CLIP_BEATS as f64))
     }
 
     pub fn next_clip_id(&self) -> String {
@@ -511,6 +557,12 @@ impl TimelineState {
                 track.clips.remove(index);
                 self.selection.selected_clip_ids.retain(|id| id != clip_id);
                 self.selection.selected_track_id = Some(track.id.clone());
+                // A take is a pointer to a clip, and this clip has gone. A take
+                // row pointing at nothing is a control that does nothing.
+                track.takes.retain(|take| take.clip_id != clip_id);
+                if track.takes.is_empty() {
+                    track.takes_expanded = false;
+                }
                 return;
             }
         }

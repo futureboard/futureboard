@@ -517,6 +517,24 @@ pub struct ProjectTrack {
     pub volume_automation_read: bool,
     /// Native Solfege instrument state (v37+).
     pub solfege: Option<ProjectSolfegeEngine>,
+    /// Recorded takes on this track (v44+), oldest first. A take names one of
+    /// the track's own clips, so the audio is stored once — as the clip — and
+    /// this list only records which pass produced it and whether it is the one
+    /// heard. Empty for older projects, which had no take list.
+    pub takes: Vec<ProjectTake>,
+    /// Whether the take sub-lane is open in the header (v44+).
+    pub takes_expanded: bool,
+}
+
+/// One persisted recorded take. See
+/// [`crate::components::timeline::timeline_state::TrackTake`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectTake {
+    pub id: String,
+    pub name: String,
+    pub clip_id: String,
+    pub active: bool,
+    pub recorded_at: String,
 }
 
 /// Persisted state of a track's built-in Soundfont Player.
@@ -1345,6 +1363,18 @@ impl From<&TimelineState> for FutureboardProject {
                             })
                             .collect(),
                     }),
+                    takes: t
+                        .takes
+                        .iter()
+                        .map(|take| ProjectTake {
+                            id: take.id.clone(),
+                            name: take.name.clone(),
+                            clip_id: take.clip_id.clone(),
+                            active: take.active,
+                            recorded_at: take.recorded_at.clone(),
+                        })
+                        .collect(),
+                    takes_expanded: t.takes_expanded,
                 }
             })
             .collect();
@@ -2094,6 +2124,20 @@ pub fn apply_to_timeline(
                     .as_ref()
                     .map(|sf| sf.quality)
                     .unwrap_or_default(),
+                takes: pt
+                    .takes
+                    .iter()
+                    .map(|take| {
+                        crate::components::timeline::timeline_state::TrackTake {
+                            id: take.id.clone(),
+                            name: take.name.clone(),
+                            clip_id: take.clip_id.clone(),
+                            active: take.active,
+                            recorded_at: take.recorded_at.clone(),
+                        }
+                    })
+                    .collect(),
+                takes_expanded: pt.takes_expanded,
                 solfege: pt.solfege.as_ref().map(|state| SolfegeTrackState {
                     model_path: state
                         .model_path
@@ -2907,10 +2951,10 @@ mod v33_routing_adapter_tests {
 
     #[test]
     fn the_encoder_writes_the_current_format_version() {
-        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v43"));
+        let bytes = crate::project::format::encode_project(&FutureboardProject::new("v44"));
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        assert_eq!(version, 43);
-        assert_eq!(crate::project::format::PROJECT_VERSION, 43);
+        assert_eq!(version, 44);
+        assert_eq!(crate::project::format::PROJECT_VERSION, 44);
     }
 
     // ── v35 Master / Monitor output routing ─────────────────────────────────

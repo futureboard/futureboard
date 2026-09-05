@@ -254,6 +254,7 @@ pub(crate) fn tempo_map_from_project_snapshot(project: &EngineProjectSnapshot) -
                 .map(|p| TempoPoint {
                     beat: p.beat,
                     bpm: p.bpm,
+                    curve: crate::tempo_map::TempoCurve::from_tag(p.curve),
                 })
                 .collect(),
         )

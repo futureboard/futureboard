@@ -12,7 +12,7 @@ use crate::components::plugin_picker::{
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::{
-    is_project_routing_track, ClipType, TrackTimebase, TrackType,
+    is_project_routing_track, ClipType, TempoCurve, TrackTimebase, TrackType,
 };
 use crate::i18n::I18n;
 
@@ -1867,13 +1867,24 @@ impl StudioLayout {
                 bpm,
                 point_id,
             } => {
-                let label = self.timeline.read(cx).state.format_position(*beat as f32);
-                if point_id.is_some() {
+                let state = &self.timeline.read(cx).state;
+                let label = state.format_position(*beat as f32);
+                if let Some(id) = point_id.as_deref() {
                     let bpm_label = if bpm.fract().abs() < 0.05 {
                         format!("{bpm:.0}")
                     } else {
                         format!("{bpm:.1}")
                     };
+                    // Which shape this marker is already on. Three plain items
+                    // gave no way to read the current one, which is how a lane
+                    // with working curves still feels like it does nothing.
+                    let curve = state
+                        .tempo_map
+                        .points
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.curve)
+                        .unwrap_or_default();
                     vec![
                         ContextMenuEntry::disabled_item(
                             format!("Tempo point: {bpm_label} BPM at {label}"),
@@ -1883,9 +1894,22 @@ impl StudioLayout {
                         ContextMenuEntry::item("Edit BPM…", "tempo:edit-bpm"),
                         ContextMenuEntry::item("Delete Tempo Point", "tempo:delete-point"),
                         ContextMenuEntry::Separator,
-                        ContextMenuEntry::item("Curve: Hold", "tempo:curve-hold"),
-                        ContextMenuEntry::item("Curve: Linear", "tempo:curve-linear"),
-                        ContextMenuEntry::item("Curve: Smooth", "tempo:curve-smooth"),
+                        ContextMenuEntry::Header("Curve to next marker".to_string()),
+                        ContextMenuEntry::checked_item(
+                            "Hold",
+                            "tempo:curve-hold",
+                            curve == TempoCurve::Hold,
+                        ),
+                        ContextMenuEntry::checked_item(
+                            "Linear",
+                            "tempo:curve-linear",
+                            curve == TempoCurve::Linear,
+                        ),
+                        ContextMenuEntry::checked_item(
+                            "Smooth",
+                            "tempo:curve-smooth",
+                            curve == TempoCurve::Smooth,
+                        ),
                     ]
                 } else {
                     let bpm_label = if bpm.fract().abs() < 0.05 {

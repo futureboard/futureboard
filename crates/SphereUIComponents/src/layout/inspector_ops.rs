@@ -528,19 +528,6 @@ impl StudioLayout {
             on_open_soundfont_player,
             open_routing_combo,
             on_toggle_routing_combo,
-            collapsed_sections: self.inspector_collapsed_sections.clone(),
-            on_toggle_section: {
-                let owner = owner.clone();
-                Arc::new(move |section: &String, _w, cx| {
-                    let section = section.clone();
-                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
-                        if !this.inspector_collapsed_sections.remove(&section) {
-                            this.inspector_collapsed_sections.insert(section);
-                        }
-                        cx.notify();
-                    });
-                })
-            },
         }
     }
 

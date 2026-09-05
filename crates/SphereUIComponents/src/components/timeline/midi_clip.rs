@@ -1,7 +1,7 @@
 use crate::components::timeline::render::clip_geometry::{
-    build_controller_preview, build_note_preview, controller_preview_band_h,
-    midi_controller_default_value, midi_controller_kind_label, visible_clip_px_range,
-    ControllerPreview, NotePreview,
+    controller_preview_band_h, controller_preview_cached, midi_controller_default_value,
+    midi_controller_kind_label, note_preview_cached, visible_clip_px_range, ControllerPreview,
+    NotePreview,
 };
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType,
@@ -12,6 +12,18 @@ use gpui::{
     canvas, div, fill, point, px, size, AppContext, Bounds, InteractiveElement, IntoElement,
     ParentElement, Pixels, StatefulInteractiveElement, Styled,
 };
+
+/// Height of the clip's name bar.
+const LABEL_H: f32 = 14.0;
+
+/// Narrowest clip that still gets a name bar. Under this the bar shows a
+/// character or two of a name nobody can read, at the cost of a measured text
+/// node on every clip in the arrangement.
+const MIDI_LABEL_MIN_W: f32 = 40.0;
+
+/// Narrowest clip that gets edge resize handles — below it the two 6 px
+/// handles would cover the body they sit on.
+const MIDI_RESIZE_HANDLE_MIN_W: f32 = 20.0;
 
 pub fn midi_clip(
     clip: &ClipState,
@@ -43,9 +55,16 @@ pub fn midi_clip(
     let left = state.beats_to_x(clip.start_beat);
     let width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
 
+    // Detail by width, for the same reason as an audio clip: the label bar is a
+    // measured text node per clip, and a zoomed-out arrangement has the most
+    // clips and the least room on each. See `audio_clip::CLIP_STRIP_MIN_W`.
+    let show_label = width >= MIDI_LABEL_MIN_W;
+    let show_resize_handles = width >= MIDI_RESIZE_HANDLE_MIN_W;
+    let label_h = if show_label { LABEL_H } else { 0.0 };
+
     let pad = 7.0;
     let clip_h = row_height - pad * 2.0;
-    let note_h = clip_h - 14.0; // height for notes preview
+    let note_h = clip_h - label_h; // height for notes preview
 
     // Draw notes and controller previews with canvases instead of one GPUI element
     // per note. Dense imported MIDI can contain thousands of notes per clip; the
@@ -68,8 +87,11 @@ pub fn midi_clip(
         // whole arrangement is mostly scrolled out of view, and the lane already
         // clips it — building spans for the hidden part was pure waste.
         let visible_px = visible_clip_px_range(left, width, state.viewport.viewport_width);
+        // Cached: this is a pass over every note in the clip, and the lane
+        // rebuilds on every scroll, zoom and selection. See
+        // `clip_geometry::note_preview_cached`.
         let preview = visible_px.and_then(|(px_start, px_end)| {
-            build_note_preview(notes, clip_len, ppb, px_start, px_end)
+            note_preview_cached(&clip.id, notes, clip_len, ppb, px_start, px_end)
         });
         let preview_count = preview.as_ref().map(|p| p.note_count).unwrap_or(0);
         if let Some(preview) = preview {
@@ -81,7 +103,8 @@ pub fn midi_clip(
             );
         }
 
-        let controller_preview = build_controller_preview(controller_lanes, clip_len, ppb, width);
+        let controller_preview =
+            controller_preview_cached(&clip.id, controller_lanes, clip_len, ppb, width);
         if let Some(controller_preview) = controller_preview {
             let lane_kinds = controller_preview.lane_kinds.clone();
             let lane_count = lane_kinds.len();
@@ -227,10 +250,11 @@ pub fn midi_clip(
         .justify_between()
         // Notes preview area
         .child(div().flex_1().min_h_0().relative().children(note_elements))
-        // Bottom Clip Label bar
-        .child(
+        // Bottom Clip Label bar. Absent on a clip too narrow to read it — see
+        // [`MIDI_LABEL_MIN_W`].
+        .children(show_label.then(|| {
             div()
-                .h(px(14.0))
+                .h(px(LABEL_H))
                 .bg(Colors::surface_panel_alt()) // dark bar
                 .border_t(px(1.0))
                 .border_color(Colors::divider())
@@ -251,15 +275,15 @@ pub fn midi_clip(
                             Colors::text_secondary()
                         })
                         .child(clip.name.clone()),
-                ),
+                )
             // Clip length text intentionally not rendered on the clip body — the
             // name (flex_1) fills the bar, so no gap remains. Duration stays in the
             // model and the inspector; resize/trim handles are unaffected.
-        )
+        }))
         // Left/right edge resize handles (absolute, on top). Each starts a
         // typed `ClipResizeDrag`; `stop_propagation` keeps the body move-drag
         // and track re-select from also firing on an edge grab.
-        .child(
+        .children(show_resize_handles.then(|| {
             div()
                 .absolute()
                 .top_0()
@@ -271,9 +295,9 @@ pub fn midi_clip(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_left, |drag, _offset, _window, cx| {
                     cx.new(|_| drag.clone())
-                }),
-        )
-        .child(
+                })
+        }))
+        .children(show_resize_handles.then(|| {
             div()
                 .absolute()
                 .top_0()
@@ -285,11 +309,14 @@ pub fn midi_clip(
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_drag(resize_right, |drag, _offset, _window, cx| {
                     cx.new(|_| drag.clone())
-                }),
-        )
+                })
+        }))
 }
 
-fn midi_note_preview_canvas(preview: NotePreview, track_color: gpui::Rgba) -> gpui::Canvas<()> {
+fn midi_note_preview_canvas(
+    preview: std::sync::Arc<NotePreview>,
+    track_color: gpui::Rgba,
+) -> gpui::Canvas<()> {
     canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {
@@ -333,7 +360,7 @@ fn midi_note_preview_canvas(preview: NotePreview, track_color: gpui::Rgba) -> gp
     )
 }
 
-fn midi_controller_preview_canvas(preview: ControllerPreview) -> gpui::Canvas<()> {
+fn midi_controller_preview_canvas(preview: std::sync::Arc<ControllerPreview>) -> gpui::Canvas<()> {
     canvas(
         |_bounds, _window, _cx| {},
         move |bounds: Bounds<Pixels>, (), window, _cx| {

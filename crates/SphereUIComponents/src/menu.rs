@@ -193,6 +193,7 @@ mod tests {
             "window:video-player",
             "window:audio-jam",
             "window:extensions",
+            "window:performance",
             "panel:toggle-bottom",
         ] {
             assert!(

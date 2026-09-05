@@ -721,8 +721,12 @@ impl TimelineState {
         let start_beat = start_beat.max(0.0) as f64;
         let end_beat = (end_beat.max(0.0) as f64).max(start_beat);
 
-        let start_seconds = self.seconds_at_beat(start_beat);
-        let end_seconds = self.seconds_at_beat(end_beat);
+        // One map for the whole sweep: this loop resolves up to
+        // `MAX_TIME_RULER_LINES` positions, and rebuilding the segment list per
+        // tick would make the ruler's cost scale with the tempo map.
+        let tempo = self.tempo_map.to_engine_map(self.bpm as f64);
+        let start_seconds = tempo.seconds_at_beat(start_beat);
+        let end_seconds = tempo.seconds_at_beat(end_beat);
         if !(end_seconds - start_seconds).is_finite() || end_seconds <= start_seconds {
             return Vec::new();
         }
@@ -745,7 +749,7 @@ impl TimelineState {
             if seconds < 0.0 {
                 continue;
             }
-            let beat = self.beat_at_seconds(seconds);
+            let beat = tempo.beat_at_seconds(seconds);
             let x = self.beat_to_x(beat as f32).round();
             if x < -1.0 || x > viewport_width + 1.0 {
                 continue;

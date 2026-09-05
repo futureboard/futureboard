@@ -67,7 +67,73 @@ pub fn performance_overlay(snapshot: &PerformanceOverlaySnapshot) -> impl IntoEl
             overlay_line("Build", &snapshot.build_stamp),
         ])
         .children(frame_accounting_rows(snapshot.ui_cpu_ms, snapshot.frame_ms))
+        .children(resource_rows())
         .children(hot_scope_rows(&snapshot.top_scopes))
+}
+
+/// What the session is costing the machine, split into the app and the plug-ins
+/// it is hosting.
+///
+/// Both halves, always. Studio runs plug-ins out of process, so its own numbers
+/// are not the session's: a sampler holding two gigabytes and pinning a core
+/// shows up nowhere in the Studio process, and "the DAW is using 400 MB" would
+/// be true and useless. Read on one shared one-second tick — see
+/// [`crate::perf::resource_usage`] — so the three figures always describe the
+/// same second.
+fn resource_rows() -> Vec<gpui::AnyElement> {
+    let usage = crate::perf::resource_usage();
+    if !usage.studio_known {
+        return Vec::new();
+    }
+    let total = usage.total();
+    let mb = |bytes: u64| format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0));
+    let rate = |bytes_per_sec: f64| {
+        if bytes_per_sec >= 1024.0 * 1024.0 {
+            format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+        } else if bytes_per_sec >= 1024.0 {
+            format!("{:.0} KB/s", bytes_per_sec / 1024.0)
+        } else {
+            "idle".to_string()
+        }
+    };
+    let hosts = match usage.plugin_host_count {
+        0 => "no plug-in hosts".to_string(),
+        1 => "1 plug-in host".to_string(),
+        n => format!("{n} plug-in hosts"),
+    };
+    vec![
+        section_label("Session load").into_any_element(),
+        overlay_line("CPU", &format!("{:.1}%", total.cpu_percent)).into_any_element(),
+        overlay_line(
+            "  app / hosts",
+            &format!(
+                "{:.1}% / {:.1}%",
+                usage.studio.cpu_percent, usage.plugin_hosts.cpu_percent
+            ),
+        )
+        .into_any_element(),
+        overlay_line("RAM", &mb(total.memory_bytes)).into_any_element(),
+        overlay_line(
+            "  app / hosts",
+            &format!(
+                "{} / {}",
+                mb(usage.studio.memory_bytes),
+                mb(usage.plugin_hosts.memory_bytes)
+            ),
+        )
+        .into_any_element(),
+        overlay_line("Disk", &rate(total.disk_bytes_per_sec)).into_any_element(),
+        overlay_line(
+            "  app / hosts",
+            &format!(
+                "{} / {}",
+                rate(usage.studio.disk_bytes_per_sec),
+                rate(usage.plugin_hosts.disk_bytes_per_sec)
+            ),
+        )
+        .into_any_element(),
+        overlay_line("Hosts", &hosts).into_any_element(),
+    ]
 }
 
 /// Split the frame into "code we measured" and "everything else".

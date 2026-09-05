@@ -77,6 +77,7 @@ pub mod shell_metrics;
 pub mod shutdown;
 pub mod solfege;
 pub mod soundfont_player;
+pub mod system_load;
 pub mod tap_tempo;
 pub mod update_service;
 pub mod window_lifecycle;

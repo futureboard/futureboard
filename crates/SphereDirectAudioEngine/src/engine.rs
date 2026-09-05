@@ -456,6 +456,13 @@ pub struct SharedState {
     pub recording_monitor_mix: AtomicBool,
     pub recording_monitor_l: AtomicU32,
     pub recording_monitor_r: AtomicU32,
+    /// Samples left in the audible record count-in, published once per block.
+    ///
+    /// The control thread waits on *this* rather than on a wall-clock timer:
+    /// the count-in is being rendered by the audio clock, and a take that
+    /// starts off a `std::time` deadline lands wherever the scheduler happened
+    /// to wake — which is the jitter a count-in exists to remove.
+    pub count_in_remaining_samples: AtomicU64,
     pub live_input_active: AtomicBool,
     pub live_input_l: AtomicU32,
     pub live_input_r: AtomicU32,
@@ -647,6 +654,7 @@ impl Default for SharedState {
             recording_monitor_mix: AtomicBool::new(false),
             recording_monitor_l: AtomicU32::new(f32_store(0.0)),
             recording_monitor_r: AtomicU32::new(f32_store(0.0)),
+            count_in_remaining_samples: AtomicU64::new(0),
             live_input_active: AtomicBool::new(false),
             live_input_l: AtomicU32::new(f32_store(0.0)),
             live_input_r: AtomicU32::new(f32_store(0.0)),
@@ -853,9 +861,29 @@ struct InputTestHandle {
     peak: Arc<AtomicU32>,
 }
 
+/// Outcome of trying to run a take on the already-open capture stream.
+///
+/// `Unavailable` is not an error: it means this route cannot serve the take and
+/// the own-stream fallback should. `Failed` is an error the fallback would hit
+/// too, so it is reported rather than retried.
+enum LiveTapStart {
+    Started,
+    Unavailable,
+    Failed(SphereAudioError),
+}
+
 struct LiveInputHandle {
     _stream: cpal::Stream,
     device_id: Option<String>,
+    /// Interleaved channel count and rate the stream actually opened at. A take
+    /// tapping this stream records exactly this geometry, so it has to be known
+    /// before the writers are built.
+    channels: usize,
+    sample_rate: u32,
+    /// Installs and removes a take's record fan-out without touching the
+    /// stream. See [`crate::capture_tap`] — this is why Record and Stop no
+    /// longer open and close a capture client mid-session.
+    tap: crate::capture_tap::CaptureTapControl,
 }
 
 pub struct EngineInner {
@@ -1449,6 +1477,65 @@ impl EngineInner {
             .metronome_enabled
             .store(enabled, Ordering::Relaxed);
         self.send_command(EngineCommand::SetMetronomeEnabled(enabled))
+    }
+
+    /// Start an audible record count-in of `beats` beats at `target_beat`'s
+    /// tempo, accented every `beats_per_bar`.
+    ///
+    /// The transport stays where it is: the count-in is a pre-roll *in place*,
+    /// not a rewind. That is what makes it work from bar 1, where there is no
+    /// earlier timeline to roll through — the case the old timer-driven
+    /// count-in spent as a silent wait.
+    ///
+    /// The click spacing is resolved here, from the tempo map at the beat the
+    /// take will start on, so counting into a slow section counts slowly.
+    pub fn start_count_in(
+        &self,
+        beats: u32,
+        beats_per_bar: u32,
+        target_beat: f64,
+    ) -> Result<(), SphereAudioError> {
+        let sample_rate = {
+            let rate = self.shared.sample_rate.load(Ordering::Relaxed);
+            if rate > 0 {
+                rate as f64
+            } else {
+                crate::native::DEFAULT_SAMPLE_RATE as f64
+            }
+        };
+        let map = self.last_sent_tempo_map.lock().clone();
+        let target_beat = target_beat.max(0.0);
+        // One beat *at the take's position*, in samples: the difference between
+        // the beat before it and the beat itself, which is exact under a ramp
+        // where `60 / bpm` would not be.
+        let samples_per_beat = map
+            .samples_at_beat(target_beat + 1.0, sample_rate)
+            .saturating_sub(map.samples_at_beat(target_beat, sample_rate))
+            .max(1);
+        self.shared.count_in_remaining_samples.store(
+            samples_per_beat.saturating_mul(beats.max(1) as u64),
+            Ordering::Relaxed,
+        );
+        self.send_command(EngineCommand::StartCountIn {
+            beats,
+            beats_per_bar,
+            samples_per_beat,
+        })
+    }
+
+    /// Abandon a count-in in progress.
+    pub fn cancel_count_in(&self) -> Result<(), SphereAudioError> {
+        self.shared
+            .count_in_remaining_samples
+            .store(0, Ordering::Relaxed);
+        self.send_command(EngineCommand::CancelCountIn)
+    }
+
+    /// Samples left in the count-in, `0` when none is running.
+    pub fn count_in_remaining_samples(&self) -> u64 {
+        self.shared
+            .count_in_remaining_samples
+            .load(Ordering::Relaxed)
     }
 
     /// Click level and timbre (Settings → Recording → Metronome).
@@ -3366,6 +3453,23 @@ impl EngineInner {
             return self.start_recording_asio(config, monitor_mix, &mut guard);
         }
 
+        // Preferred path: attach the take to the capture stream that is already
+        // running. Nothing in the device path moves, so Record does not stutter
+        // and neither does Stop.
+        match self.start_recording_live_tap(&config, monitor_mix, &mut guard) {
+            LiveTapStart::Started => {
+                drop(guard);
+                self.warm_output_for_monitoring();
+                return Ok(());
+            }
+            LiveTapStart::Failed(error) => {
+                drop(guard);
+                return Err(error);
+            }
+            // No usable live stream — fall through and open one for the take.
+            LiveTapStart::Unavailable => {}
+        }
+
         // Single-capture-stream invariant: the recording stream becomes the sole
         // input device client during a take (it feeds the monitor ring, preview
         // ring, and file writer). Stop the standalone monitor stream so two
@@ -3414,6 +3518,86 @@ impl EngineInner {
                 Err(e)
             }
         }
+    }
+
+    /// Try to run the take on the live input stream that is already open.
+    ///
+    /// Declines — rather than failing — when there is no live stream, or when
+    /// the take needs an input channel the open stream does not carry. Those
+    /// are both cases the own-stream path can still serve, and a take that can
+    /// be recorded must not be refused because the preferred route was busy.
+    fn start_recording_live_tap(
+        &self,
+        config: &JsStartRecordingConfig,
+        monitor_mix: bool,
+        guard: &mut Option<RecordingSession>,
+    ) -> LiveTapStart {
+        let (channels, sample_rate) = {
+            let live = self.live_input.lock();
+            let Some(handle) = live.as_ref() else {
+                return LiveTapStart::Unavailable;
+            };
+            // A previous take's sink may still be waiting to be dropped.
+            handle.tap.drain_trash();
+            (handle.channels, handle.sample_rate)
+        };
+        if channels == 0 || sample_rate == 0 {
+            return LiveTapStart::Unavailable;
+        }
+        // The open stream cannot carry a channel this take needs. Decline and
+        // let the own-stream path negotiate a configuration that can.
+        if config
+            .tracks
+            .iter()
+            .flat_map(|track| track.input_channels.iter())
+            .any(|channel| *channel as usize >= channels)
+        {
+            if recording_debug_enabled() {
+                eprintln!(
+                    "[recording] live-stream tap declined: take needs a channel beyond the open \
+                     stream's {channels}"
+                );
+            }
+            return LiveTapStart::Unavailable;
+        }
+
+        let (session, sink) = match recording::start_recording_live_tap(
+            config.clone(),
+            Arc::clone(&self.shared),
+            monitor_mix,
+            channels,
+            sample_rate,
+        ) {
+            Ok(pair) => pair,
+            // A real failure — no armed track, an unwritable Recordings folder,
+            // a bad channel selection. The own-stream path would fail the same
+            // way, so report it rather than retrying into the same error.
+            Err(error) => return LiveTapStart::Failed(error),
+        };
+
+        let installed = {
+            let live = self.live_input.lock();
+            match live.as_ref() {
+                Some(handle) => handle.tap.install(sink).is_ok(),
+                None => false,
+            }
+        };
+        if !installed {
+            // The stream went away between the two locks, or its callback has
+            // stopped draining. Unwind the armed pipeline (it finalizes and
+            // reports; the results are discarded because no take ever ran).
+            let _ = recording::stop_recording(session);
+            return LiveTapStart::Unavailable;
+        }
+
+        if recording_debug_enabled() {
+            eprintln!(
+                "[recording] session started on the live-stream tap tracks={} start_beat={:.3}",
+                session.track_count, session.start_beat
+            );
+        }
+        *guard = Some(session);
+        LiveTapStart::Started
     }
 
     /// ASIO take: build the writer pipeline, then hand the record sink to the
@@ -3531,7 +3715,29 @@ impl EngineInner {
             }
         }
 
+        // Live-stream tap: detach the record fan-out. The callback releases its
+        // senders on the next block, which disconnects the disk writer. The
+        // stream itself keeps running, so monitoring never drops out and the
+        // end of a take is silent in the way it should be.
+        let live_tap = session.is_live_stream_tap();
+        if live_tap {
+            if let Some(handle) = self.live_input.lock().as_ref() {
+                handle.tap.clear();
+            }
+        }
+
+        // How far after its declared start the take really began capturing.
+        // Read before the session is consumed.
+        let armed_start_sample = session.armed_start_sample;
+        let first_capture_sample = session.first_capture_sample.load(Ordering::Relaxed);
+
         let mut results = recording::stop_recording(session)?;
+
+        if live_tap {
+            if let Some(handle) = self.live_input.lock().as_ref() {
+                handle.tap.drain_trash();
+            }
+        }
 
         #[cfg(all(target_os = "windows", feature = "asio"))]
         if asio_tap {
@@ -3548,6 +3754,22 @@ impl EngineInner {
         let runtime = self.runtime.lock();
         let buffer_frames = self.status.lock().buffer_size;
         let sample_rate = runtime.sample_rate.max(1) as f64;
+        // A take is armed a block or two — or a whole count-in — before the
+        // first sample it captures. Placing it on the beat it was *asked* for
+        // puts the audio that far early; placing it on the beat it actually
+        // started on is what makes two takes cut against each other. Resolved
+        // through the tempo map, so a marker between the two lands right.
+        let capture_offset_beats =
+            if first_capture_sample != u64::MAX && first_capture_sample > armed_start_sample {
+                runtime
+                    .tempo_map
+                    .beat_at_samples(first_capture_sample, sample_rate)
+                    - runtime
+                        .tempo_map
+                        .beat_at_samples(armed_start_sample, sample_rate)
+            } else {
+                0.0
+            };
         // Round-trip compensation: driver-reported latencies when the ASIO
         // session provides them, else the 2×buffer estimate.
         let asio_round_trip = self.asio_caps.lock().as_ref().map(|caps| {
@@ -3581,12 +3803,17 @@ impl EngineInner {
             let offset_beats = runtime
                 .tempo_map
                 .beat_at_samples(offset_samples as u64, sample_rate);
-            result.start_beat = (result.start_beat - offset_beats).max(0.0);
+            result.start_beat = (result.start_beat + capture_offset_beats - offset_beats).max(0.0);
         }
         drop(runtime);
 
-        // Restore the standalone monitoring input stream from the last snapshot
-        // (re-opens it if any track is still armed/monitored).
+        // Re-sync the monitoring input stream against the current routing.
+        //
+        // After an own-stream take this re-opens the stream the take took away.
+        // After a tapped take it is nearly always free — `sync_live_input_stream`
+        // keeps the open stream when the device is unchanged — but it still has
+        // to run, because the user may have disarmed the last armed track
+        // during the take and the stream should close with it.
         if let Some(snapshot) = self.project.lock().clone() {
             let _ = self.sync_live_input_stream(&snapshot);
         }
@@ -4089,7 +4316,11 @@ impl EngineInner {
         // Try ALSA multi-period / matched-rate candidates first so live monitor
         // shares geometry with the open output stream.
         let mut last_error = None;
-        let mut opened: Option<(cpal::StreamConfig, cpal::Stream)> = None;
+        let mut opened: Option<(
+            cpal::StreamConfig,
+            cpal::Stream,
+            crate::capture_tap::CaptureTapControl,
+        )> = None;
         for (label, stream_config) in candidates {
             let channel_count = stream_config.channels.max(1) as usize;
             let input_sr = stream_config.sample_rate.0;
@@ -4102,17 +4333,33 @@ impl EngineInner {
             let rt_announcer = crate::backend::cpal_backend::spawn_capture_rt_promoter();
             #[cfg(target_os = "linux")]
             let mut rt_announced = false;
+            // The record fan-out for whatever take is attached, if any. Built
+            // per candidate because only the stream that actually opens keeps
+            // its half.
+            let (tap_control, mut tap) = crate::capture_tap::capture_tap();
 
             match device.build_input_stream::<f32, _, _>(
                 &stream_config,
-                move |data: &[f32], _info| {
+                move |data: &[f32], info| {
                     #[cfg(target_os = "linux")]
                     if !rt_announced {
                         rt_announcer.announce_current_thread();
                         rt_announced = true;
                     }
+                    tap.drain_commands();
                     let frames = data.len() / channel_count.max(1);
                     shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
+                    // Capture latency (ADC → callback) for the take's
+                    // round-trip compensation. Published from this stream now
+                    // that this stream is the one a take reads from.
+                    if tap.has_sink() {
+                        let stamps = info.timestamp();
+                        if let Some(delay) = stamps.callback.duration_since(&stamps.capture) {
+                            shared
+                                .record_input_latency_secs
+                                .store(f32_store(delay.as_secs_f32()), Ordering::Relaxed);
+                        }
+                    }
                     shared
                         .input_frames_received
                         .fetch_add(frames as u64, Ordering::Relaxed);
@@ -4146,6 +4393,9 @@ impl EngineInner {
                     atomic_max_f32_bits(&shared.live_input_peak_l, peak_l);
                     atomic_max_f32_bits(&shared.live_input_peak_r, peak_r);
                     shared.live_input_active.store(true, Ordering::Relaxed);
+                    // Feed the attached take, if there is one. A no-op — one
+                    // `Option` check — for the whole time there is not.
+                    tap.capture_block(data, channel_count, &shared);
                 },
                 |err| eprintln!("[SphereAudio] Live input stream error: {err}"),
                 None,
@@ -4170,7 +4420,7 @@ impl EngineInner {
                              is added"
                         );
                     }
-                    opened = Some((stream_config, stream));
+                    opened = Some((stream_config, stream, tap_control));
                     break;
                 }
                 Err(e) => {
@@ -4180,7 +4430,7 @@ impl EngineInner {
             }
         }
 
-        let (_stream_config, stream) = opened.ok_or_else(|| {
+        let (stream_config, stream, tap) = opened.ok_or_else(|| {
             self.shared.input_ring.set_active(false, 0, 0);
             SphereAudioError::NativeError(format!(
                 "Cannot open live input stream: {}",
@@ -4192,6 +4442,9 @@ impl EngineInner {
         *self.live_input.lock() = Some(LiveInputHandle {
             _stream: stream,
             device_id: desired_device,
+            channels: stream_config.channels.max(1) as usize,
+            sample_rate: stream_config.sample_rate.0,
+            tap,
         });
         self.shared.live_input_active.store(true, Ordering::Relaxed);
 
@@ -4876,6 +5129,8 @@ impl EngineInner {
                 EngineCommand::SetMetronomeEnabled(_) => "SetMetronomeEnabled",
                 EngineCommand::SetMetronomeSuspended(_) => "SetMetronomeSuspended",
                 EngineCommand::SetMetronomeVoice { .. } => "SetMetronomeVoice",
+                EngineCommand::StartCountIn { .. } => "StartCountIn",
+                EngineCommand::CancelCountIn => "CancelCountIn",
                 EngineCommand::SetBpm(_) => "SetBpm",
                 EngineCommand::SetTempoMap(_) => "SetTempoMap",
                 EngineCommand::SetTimeSignature(_, _) => "SetTimeSignature",
@@ -5434,6 +5689,17 @@ where
                                 volume,
                                 crate::backend::render::MetronomeSound::from_code(sound),
                             );
+                        }
+                        EngineCommand::StartCountIn {
+                            beats,
+                            beats_per_bar,
+                            samples_per_beat,
+                        } => {
+                            metronome.begin_count_in(beats, beats_per_bar, samples_per_beat);
+                        }
+                        EngineCommand::CancelCountIn => {
+                            metronome.cancel_count_in();
+                            shared.count_in_remaining_samples.store(0, Ordering::Relaxed);
                         }
                         EngineCommand::SetBpm(bpm) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);

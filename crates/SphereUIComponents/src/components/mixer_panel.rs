@@ -78,13 +78,16 @@ const MAX_INSERT_SLOTS: usize = 8;
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
 
+/// Height of the "Mixer  N ch" strip above the console.
+pub const MIXER_SUB_HEADER_H: f32 = 30.0;
+
 pub fn mixer_sub_header(track_count: usize, i18n: I18n) -> impl IntoElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .h(px(30.0))
+        .h(px(MIXER_SUB_HEADER_H))
         .px(px(10.0))
         .border_b(px(1.0))
         .border_color(Colors::border_default())
@@ -2849,7 +2852,20 @@ pub fn mixer_panel(
 
     let track_count = tracks.len();
     let on_master = callbacks.on_master_volume_change.clone();
-    let strip_available_px = (viewport_height - 30.0).max(STRIP_MIN_HEIGHT);
+    // What the panel actually has, and what a strip needs. They are not the
+    // same number, and pretending they were is what broke the mixer at small
+    // heights: the strips were laid out at their 320 px minimum inside a
+    // shorter panel and simply overflowed it, so the plate, the toggles and
+    // the foot of the fader were drawn outside the panel and clipped away —
+    // with the GPU decoration painting at the taller height too, which is what
+    // made the colours bleed past the bottom edge.
+    //
+    // Below the minimum the answer is to scroll, not to lie about the height.
+    let body_height = (viewport_height - MIXER_SUB_HEADER_H).max(0.0);
+    let strip_available_px = body_height.max(STRIP_MIN_HEIGHT);
+    // A panel shorter than one strip scrolls vertically; a taller one must not
+    // grow a scrollbar it never uses.
+    let body_scrolls = body_height + 0.5 < STRIP_MIN_HEIGHT;
 
     // Optional GPU primitive layer: when active, the channel strips drop their
     // background / accent bar / separator and a single batched `canvas` paints
@@ -2868,6 +2884,7 @@ pub fn mixer_panel(
             .flex_row()
             .flex_1()
             .min_h_0()
+            .when(body_scrolls, |row| row.h(px(strip_available_px)))
             .child(mixer_center_lightweight(viewport_width, strip_available_px))
             .child(div().w(px(1.0)).h_full().bg(console::rule()))
             .child(mixer_master_strip_pinned(
@@ -2890,12 +2907,14 @@ pub fn mixer_panel(
             channel_row
         };
 
+        let content_row = mixer_body_scroller(content_row, body_scrolls);
         let split_for_move = split.clone();
         let split_for_end = split.clone();
         return div()
             .flex()
             .flex_col()
             .size_full()
+            .overflow_hidden()
             .bg(Colors::surface_window())
             .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
                 let y: f32 = event.event.position.y.into();
@@ -2940,6 +2959,7 @@ pub fn mixer_panel(
         .flex_row()
         .flex_1()
         .min_h_0()
+        .when(body_scrolls, |row| row.h(px(strip_available_px)))
         .child(strip_row)
         .child(div().w(px(1.0)).h_full().bg(console::rule()))
         .child(master_block);
@@ -2974,6 +2994,7 @@ pub fn mixer_panel(
     } else {
         channel_row
     };
+    let content_row = mixer_body_scroller(content_row, body_scrolls);
 
     let split_for_move = split.clone();
     let split_for_end = split.clone();
@@ -2982,6 +3003,7 @@ pub fn mixer_panel(
         .flex()
         .flex_col()
         .size_full()
+        .overflow_hidden()
         .bg(Colors::surface_window())
         .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
             let y: f32 = event.event.position.y.into();
@@ -2992,6 +3014,27 @@ pub fn mixer_panel(
         })
         .child(mixer_sub_header(track_count, i18n))
         .child(content_row)
+}
+
+/// Wraps the mixer body so a panel shorter than one channel strip scrolls
+/// instead of spilling its strips out of the bottom.
+///
+/// Only when it has to. An always-scrollable body would take the wheel away
+/// from the horizontal strip scroller at every ordinary height, and the mixer
+/// is a thing you scroll sideways.
+fn mixer_body_scroller(body: gpui::Div, scrolls: bool) -> gpui::AnyElement {
+    if !scrolls {
+        return body.into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .id("mixer-body-scroll")
+        .overflow_y_scroll()
+        .child(body)
+        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -590,6 +590,9 @@ impl FileBrowserState {
     /// honest empty state.
     pub fn update_visible_nodes(&mut self) {
         let mut nodes = Vec::new();
+        // Folders already listed by an earlier, more specific group. See
+        // `push_root`.
+        let mut seen: HashSet<PathBuf> = HashSet::new();
 
         // ── Collections ───────────────────────────────────────────────
         if self.push_group_header(
@@ -634,6 +637,7 @@ impl FileBrowserState {
                     Some("browser.category.samples"),
                     &p,
                     BrowserIcon::Samples,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -660,6 +664,7 @@ impl FileBrowserState {
                     Some("browser.category.plugins"),
                     &p,
                     BrowserIcon::Plugins,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -670,6 +675,7 @@ impl FileBrowserState {
                     Some("browser.category.audio-files"),
                     &p,
                     BrowserIcon::AudioFiles,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -680,6 +686,7 @@ impl FileBrowserState {
                     Some("browser.category.projects"),
                     &p,
                     BrowserIcon::Projects,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -690,6 +697,7 @@ impl FileBrowserState {
                     Some("browser.category.user-library"),
                     &p,
                     BrowserIcon::UserLibrary,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -700,6 +708,7 @@ impl FileBrowserState {
                     Some("browser.category.templates"),
                     &p,
                     BrowserIcon::Templates,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -720,6 +729,7 @@ impl FileBrowserState {
                     None,
                     &proj,
                     BrowserIcon::Projects,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -730,6 +740,7 @@ impl FileBrowserState {
                     Some("browser.category.user-data"),
                     &p,
                     BrowserIcon::UserLibrary,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -744,6 +755,7 @@ impl FileBrowserState {
                     Some("browser.category.home"),
                     &p,
                     BrowserIcon::Home,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -754,6 +766,7 @@ impl FileBrowserState {
                     Some("browser.category.documents"),
                     &p,
                     BrowserIcon::Documents,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -764,6 +777,7 @@ impl FileBrowserState {
                     Some("browser.category.desktop"),
                     &p,
                     BrowserIcon::Desktop,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -774,6 +788,7 @@ impl FileBrowserState {
                     Some("browser.category.downloads"),
                     &p,
                     BrowserIcon::Downloads,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -784,6 +799,7 @@ impl FileBrowserState {
                     Some("browser.category.music"),
                     &p,
                     BrowserIcon::Music,
+                    &mut seen,
                     &mut nodes,
                 );
             }
@@ -810,6 +826,7 @@ impl FileBrowserState {
                         None,
                         drive_path,
                         BrowserIcon::Drive,
+                        &mut seen,
                         &mut nodes,
                     );
                 }
@@ -859,6 +876,19 @@ impl FileBrowserState {
 
     /// Push a real, filesystem-backed navigation item (depth 1) and, when
     /// expanded, its lazily-loaded children (depth 2+).
+    /// Push one root, unless the same folder is already on the list.
+    ///
+    /// The roots come from several sources that overlap on a real machine:
+    /// `standard_dirs()` resolves Projects, Audio Files and User Library under
+    /// paths that can be the same folder, and Music, Documents and Home come
+    /// from the platform, which is free to point two of them at one place. Each
+    /// of those pushed its own row, so the browser listed the same folder twice
+    /// — and because expansion is keyed by path, opening one opened the other,
+    /// which is the half of the bug that looked like the tree fighting back.
+    ///
+    /// First one wins, and the order the groups are built in is the priority:
+    /// the named Library entry keeps the folder, and the generic Place that
+    /// happens to resolve to it drops out.
     fn push_root(
         &self,
         id: &str,
@@ -866,8 +896,12 @@ impl FileBrowserState {
         label_key: Option<&'static str>,
         path: &Path,
         icon: BrowserIcon,
+        seen: &mut HashSet<PathBuf>,
         nodes: &mut Vec<BrowserVisibleNode>,
     ) {
+        if !seen.insert(dedupe_key(path)) {
+            return;
+        }
         let expanded = self.expanded_paths.contains(path);
         let selected = self.selected.as_deref() == Some(path);
         nodes.push(BrowserVisibleNode {
@@ -886,7 +920,7 @@ impl FileBrowserState {
             icon,
         });
         if expanded {
-            self.append_cached_dir(path, 2, nodes);
+            self.append_cached_dir(id, path, 2, nodes);
         }
     }
 
@@ -961,7 +995,21 @@ impl FileBrowserState {
         paths
     }
 
-    fn append_cached_dir(&self, dir: &Path, depth: usize, nodes: &mut Vec<BrowserVisibleNode>) {
+    /// Flatten one loaded directory into rows under `prefix`.
+    ///
+    /// `prefix` is the owning root's node id, and every row's id is built from
+    /// it. Rows used to be identified by their path alone, which is not unique
+    /// in a tree that can show one folder in two places — Documents under
+    /// Places and again under Home, say. Two rows with one id is a duplicate
+    /// element id to the UI toolkit, and the second row inherits the first's
+    /// hit-testing: clicking one folder opened another.
+    fn append_cached_dir(
+        &self,
+        prefix: &str,
+        dir: &Path,
+        depth: usize,
+        nodes: &mut Vec<BrowserVisibleNode>,
+    ) {
         if let Some(err) = self.index.errors.get(dir) {
             nodes.push(placeholder_row(dir, depth, err.clone(), true));
             return;
@@ -979,8 +1027,9 @@ impl FileBrowserState {
             let is_folder = entry.kind == FileEntryKind::Folder;
             let expanded = is_folder && self.expanded_paths.contains(&entry.path);
             let selected = self.selected.as_deref() == Some(entry.path.as_path());
+            let id = format!("{prefix}\u{1f}{}", entry.path.to_string_lossy());
             nodes.push(BrowserVisibleNode {
-                id: entry.path.to_string_lossy().to_string(),
+                id,
                 label: entry.name.clone(),
                 label_key: None,
                 path: Some(entry.path.clone()),
@@ -1000,7 +1049,8 @@ impl FileBrowserState {
             });
 
             if expanded {
-                self.append_cached_dir(&entry.path, depth + 1, nodes);
+                let child_prefix = format!("{prefix}\u{1f}{}", entry.path.to_string_lossy());
+                self.append_cached_dir(&child_prefix, &entry.path, depth + 1, nodes);
             }
         }
     }
@@ -1366,6 +1416,15 @@ fn entry_icon(is_folder: bool, expanded: bool, entry: &FileBrowserEntry) -> Brow
     }
 }
 
+/// Key two root paths are considered "the same folder" by.
+///
+/// Canonicalised where the filesystem allows it, so `C:\Users\me\Music` and a
+/// junction pointing at it collapse to one entry; the raw path otherwise,
+/// because a root that cannot be resolved is still a root worth listing once.
+fn dedupe_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn placeholder_row(dir: &Path, depth: usize, label: String, is_error: bool) -> BrowserVisibleNode {
     let label_key = if is_error {
         directory_error_label_key(&label)
@@ -1686,6 +1745,80 @@ mod tests {
 
     fn ids(state: &FileBrowserState) -> Vec<String> {
         state.visible_nodes.iter().map(|n| n.id.clone()).collect()
+    }
+
+    /// The tree may show one folder in two places, but it may never show two
+    /// rows the UI cannot tell apart: a duplicate id makes the second row
+    /// inherit the first's hit-testing, so clicking one folder opens another.
+    #[test]
+    fn every_visible_row_has_its_own_id() {
+        let mut state = FileBrowserState::default();
+        let dir = std::env::temp_dir().join("futureboard-browser-id-test");
+        let child = dir.join("child");
+        state.expanded_paths.insert(dir.clone());
+        // The same folder reached through two roots is the case that used to
+        // collide: both children were identified by their path alone.
+        state.apply_loaded(
+            dir.clone(),
+            vec![FileBrowserEntry {
+                name: "child".to_string(),
+                path: child,
+                kind: FileEntryKind::Folder,
+                extension: String::new(),
+                size_bytes: None,
+            }],
+        );
+        let mut nodes = Vec::new();
+        let mut seen = HashSet::new();
+        state.push_root(
+            "test:one",
+            "One",
+            None,
+            &dir,
+            BrowserIcon::Folder,
+            &mut seen,
+            &mut nodes,
+        );
+        // A second root on the same folder is refused outright.
+        state.push_root(
+            "test:two",
+            "Two",
+            None,
+            &dir,
+            BrowserIcon::Folder,
+            &mut seen,
+            &mut nodes,
+        );
+        assert_eq!(
+            nodes.iter().filter(|n| n.depth == 1).count(),
+            1,
+            "the same folder must not be listed as two roots"
+        );
+
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        let unique: HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate row ids in {ids:?}");
+    }
+
+    /// Two roots that resolve to the same folder collapse to one row rather
+    /// than listing it twice and sharing its expansion state.
+    #[test]
+    fn roots_pointing_at_one_folder_are_listed_once() {
+        let state = FileBrowserState::default();
+        let ids = ids(&state);
+        let paths: Vec<PathBuf> = state
+            .visible_nodes
+            .iter()
+            .filter(|node| node.depth == 1)
+            .filter_map(|node| node.path.clone())
+            .map(|path| dedupe_key(&path))
+            .collect();
+        let unique: HashSet<PathBuf> = paths.iter().cloned().collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "a folder is listed under more than one root: {ids:?}"
+        );
     }
 
     #[test]

@@ -810,6 +810,8 @@ mod tests {
             soundfont: None,
             volume_automation_read: true,
             solfege: None,
+            takes: Vec::new(),
+            takes_expanded: false,
         });
 
         let project_file = root.join("Portable.fbproj");
@@ -872,6 +874,8 @@ mod tests {
             soundfont: None,
             volume_automation_read: true,
             solfege: None,
+            takes: Vec::new(),
+            takes_expanded: false,
         }
     }
 

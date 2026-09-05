@@ -95,6 +95,15 @@ pub const WAVEFORM_ALGORITHM_VERSION: u32 = 2;
 
 pub const MAX_PEAKS_PER_COLUMN: usize = 16;
 
+/// Stored peaks aimed at each pixel column.
+///
+/// Four, not one: one peak per column makes every column's min/max a single
+/// stored pair, so the drawn envelope is whatever the LOD builder happened to
+/// bracket rather than what the audio did under that pixel. Four is enough for
+/// the column to be an envelope and still well inside [`MAX_PEAKS_PER_COLUMN`],
+/// which is what the aggregation reads.
+pub const PEAKS_PER_COLUMN: usize = 4;
+
 pub(crate) struct FileEntry {
     import: AudioImportState,
     meta: Option<Arc<WaveformFileMeta>>,
@@ -237,14 +246,38 @@ pub fn get_file_status(path: &str) -> WaveformDisplayStatus {
     }
 }
 
-/// WebUI `pickBestLevel` — coarsest LOD with ≤ ~2× ideal samples-per-peak.
+/// The coarsest shipped LOD that still puts [`PEAKS_PER_COLUMN`] peaks behind
+/// every pixel column.
+///
+/// # Why not the old rule
+///
+/// This used to allow a level up to **twice** as coarse as the pixel grid,
+/// which is where the arrangement's blocky waveform came from: at 2× a single
+/// stored peak spans two pixel columns, both columns draw the same min/max, and
+/// the envelope becomes a staircase with every second edge invented. Worse, it
+/// was doing that while the finer level was already sitting in the same peak
+/// file — the detail was paid for at import and then not drawn.
+///
+/// Asking for four peaks per column instead means a column's min/max is a real
+/// envelope of what happened under it rather than one stored pair, which is the
+/// difference between a waveform that looks sampled and one that looks drawn.
+/// The cost is bounded and small: a level `n` steps finer is `2^n` times more
+/// peaks *per second of audio*, but the drawing only ever reads the peaks under
+/// the visible columns, so the work per frame is the same — the columns are the
+/// budget, not the file.
+///
+/// Nothing here can make the waveform disappear. When the chosen level is not
+/// resident, [`best_available_samples_per_peak_in_entry`] falls back to whatever
+/// the entry does have, and the canvas keeps a coarse fallback level for any
+/// column the fine data has not reached yet.
 pub fn pick_best_samples_per_peak(pixels_per_second: f32, sample_rate: u32) -> usize {
-    let ideal = (sample_rate as f32 / pixels_per_second.max(1.0))
+    let frames_per_pixel = (sample_rate as f32 / pixels_per_second.max(1.0))
         .round()
         .max(1.0) as usize;
+    let target = (frames_per_pixel / PEAKS_PER_COLUMN).max(1);
     let mut best = LOD_LEVELS[0];
     for &spp in &LOD_LEVELS {
-        if spp <= ideal.saturating_mul(2) {
+        if spp <= target {
             best = spp;
         }
     }
@@ -1204,13 +1237,35 @@ mod tests {
         // Zoomed out (few px/s) → coarse LOD; zoomed in (thousands px/s) → finest.
         let coarse = pick_best_samples_per_peak(5.0, sr);
         let fine = pick_best_samples_per_peak(5_000.0, sr);
+        // Coarse in proportion to the zoom, not to a fixed floor: the picker
+        // now aims for peaks-per-column, so what counts as coarse moves with
+        // `PEAKS_PER_COLUMN` rather than being a number to memorise.
         assert!(
-            coarse >= 8192,
+            coarse >= 1024,
             "zoomed-out should pick a coarse LOD, got {coarse}"
         );
         assert_eq!(fine, LOD_LEVELS[0], "zoomed-in should pick the finest LOD");
         // Zooming in must never select a coarser LOD than zooming out.
         assert!(fine <= coarse);
+    }
+
+    /// The stair-step regression, stated as a rule: a pixel column must never
+    /// be drawn from fewer than one stored peak, and the picker aims for
+    /// several. A level coarser than the pixel grid is what made neighbouring
+    /// columns repeat each other's min/max.
+    #[test]
+    fn every_column_gets_at_least_one_peak() {
+        let sr = 48_000;
+        for pps in [5.0, 25.0, 60.0, 100.0, 240.0, 600.0, 1_500.0] {
+            let frames_per_pixel = sr as f32 / pps;
+            let spp = pick_best_samples_per_peak(pps, sr);
+            assert!(
+                (spp as f32) <= frames_per_pixel || spp == LOD_LEVELS[0],
+                "at {pps} px/s a column spans {frames_per_pixel} frames but the \
+                 picker chose {spp} frames per peak, so one peak covers more than \
+                 one column"
+            );
+        }
     }
 
     #[test]

@@ -38,8 +38,6 @@ pub(crate) struct RecordingSessionState {
     pub midi_preview_updated_at: Instant,
     /// Invalidates an outstanding count-in timer when the user cancels/restarts.
     pub count_in_token: u64,
-    /// Metronome state to restore after the temporary audible count-in.
-    pub count_in_restore_metronome: Option<bool>,
 }
 
 impl Default for RecordingSessionState {
@@ -52,7 +50,6 @@ impl Default for RecordingSessionState {
             midi_preview_dirty: false,
             midi_preview_updated_at: Instant::now() - Duration::from_secs(1),
             count_in_token: 0,
-            count_in_restore_metronome: None,
         }
     }
 }
@@ -122,23 +119,31 @@ impl StudioLayout {
             self.begin_record_count_in(count_in_bars, bpm, beats_per_bar, target_beat, cx);
             return;
         }
-        self.start_native_recording_now(cx);
+        self.start_native_recording_now(true, cx);
     }
 
     /// Run the record count-in, then start the take **at** `target_beat`.
     ///
-    /// The audible count-in is a transport pre-roll, so it can only use timeline
-    /// that exists *before* the record start. Rolling the requested number of
-    /// bars unconditionally overshoots whenever the playhead sits closer to bar 1
-    /// than the count-in is long: the seek clamps at beat 0 but the wait does
-    /// not, so the transport plays straight through the region about to be
-    /// recorded before snapping back. The roll is therefore clamped to the room
-    /// actually available and its wait is measured on the same tempo map the
-    /// transport reads, which lands playback exactly on `target_beat`.
+    /// The count-in is a pre-roll *in place*: the playhead stays on the beat
+    /// about to be recorded and the engine clicks the player in beside it. It
+    /// used to be a transport roll through the bars before the record start,
+    /// which meant it did nothing at all from bar 1 — there is no earlier
+    /// timeline there, and the engine metronome is scheduled off the playhead
+    /// and is silent while stopped. That is the most common way to start a
+    /// take, and it was the one that counted in silence.
     ///
-    /// With no room at all (playhead at beat 0) there is no timeline to roll
-    /// through, so the count-in is a silent wait in place — the engine metronome
-    /// is scheduled off the transport position and cannot click while stopped.
+    /// Two things happen during the click that used to happen after it:
+    ///
+    /// * the take is **armed** — files created, writers built, the record sink
+    ///   installed — so the downbeat costs nothing but starting the transport.
+    ///   The take is gated on the transport (`capture_on_transport`), so
+    ///   arming early captures nothing early.
+    /// * the wait is measured on the **engine's own sample clock**
+    ///   ([`count_in_remaining_samples`]), not on a wall-clock timer. A take
+    ///   that starts off a `std::time` deadline lands wherever the scheduler
+    ///   woke, which is exactly the jitter a count-in exists to remove.
+    ///
+    /// [`count_in_remaining_samples`]: DirectAudio::AudioEngine::count_in_remaining_samples
     fn begin_record_count_in(
         &mut self,
         bars: u32,
@@ -150,93 +155,165 @@ impl StudioLayout {
         self.recording.count_in_token = self.recording.count_in_token.wrapping_add(1);
         let token = self.recording.count_in_token;
 
-        let requested_beats = (bars as f32 * beats_per_bar).max(0.0);
+        let beats_per_bar = beats_per_bar.max(1.0).round() as u32;
+        let bars = bars.max(1);
+        let beats = bars.saturating_mul(beats_per_bar).max(1);
         let target_beat = target_beat.max(0.0);
-        let preroll_beats = requested_beats.min(target_beat);
-        let preroll_start = (target_beat - preroll_beats).max(0.0);
-        let rolls = preroll_beats > 0.0;
 
-        let seconds = if rolls {
+        // The click is rendered by the output callback, so the stream has to be
+        // running before the count-in is asked for — otherwise the first bar is
+        // spent opening the device.
+        self.ensure_audio_stream_warm();
+
+        let started = self
+            .audio_bridge
+            .engine
+            .as_ref()
+            .map(|engine| {
+                engine
+                    .start_count_in(beats, beats_per_bar, target_beat as f64)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|| Err("audio engine unavailable".to_string()));
+
+        self.recording.ui_state = RecordingUiState::CountingIn { bars };
+        cx.notify();
+
+        // Arm now, play at the downbeat.
+        self.start_native_recording_now(false, cx);
+        if !matches!(self.recording.ui_state, RecordingUiState::CountingIn { .. }) {
+            // Arming failed and reported why; there is no take to count into.
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
+                let _ = engine.cancel_count_in();
+            }
+            return;
+        }
+
+        // Fallback deadline when the engine could not run the click. The take
+        // still starts on time; the player just does not hear the count.
+        let fallback_seconds = {
             let timeline = self.timeline.read(cx);
             let base = timeline.state.bpm.max(1.0) as f64;
             let map = &timeline.state.tempo_map;
-            (map.seconds_at_beat(target_beat as f64, base)
-                - map.seconds_at_beat(preroll_start as f64, base))
-            .max(0.01) as f32
-        } else {
-            (requested_beats * 60.0 / bpm.max(1.0)).max(0.01)
+            let per_beat = map.seconds_at_beat(target_beat as f64 + 1.0, base).max(0.0)
+                - map.seconds_at_beat(target_beat as f64, base);
+            let per_beat = if per_beat > 0.0 {
+                per_beat
+            } else {
+                60.0 / bpm.max(1.0) as f64
+            };
+            (per_beat * beats as f64).max(0.05) as f32
         };
-
-        // Only force the metronome on when the roll can actually click.
-        if rolls {
-            let restore_metronome = self.timeline.update(cx, |timeline, cx| {
-                let previous = timeline.state.transport.metronome_enabled;
-                timeline.state.transport.metronome_enabled = true;
-                cx.notify();
-                previous
-            });
-            self.recording.count_in_restore_metronome = Some(restore_metronome);
+        if let Err(error) = &started {
+            eprintln!("[recording] count-in click unavailable: {error}");
         }
-        // Report the bars the count-in really covers, not the bars requested.
-        let counted_bars = if rolls {
-            (preroll_beats / beats_per_bar.max(1.0)).ceil().max(1.0) as u32
-        } else {
-            bars
-        };
-        self.recording.ui_state = RecordingUiState::CountingIn { bars: counted_bars };
-        self.sync_metronome_controls(cx);
-
-        if rolls {
-            self.seek_native_playhead(cx, preroll_start);
-            self.start_native_playback(cx);
-        }
-        cx.notify();
+        let engine_clocked = started.is_ok();
 
         let owner = cx.entity().clone();
         cx.spawn(async move |_this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs_f32(seconds))
-                .await;
+            let deadline =
+                std::time::Instant::now() + Duration::from_secs_f32(fallback_seconds + 1.0);
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(if engine_clocked { 5 } else { 20 }))
+                    .await;
+                let finished = owner.update(cx, |this, _cx| {
+                    if this.recording.count_in_token != token
+                        || !matches!(this.recording.ui_state, RecordingUiState::CountingIn { .. })
+                    {
+                        // Cancelled, or superseded by a newer Record.
+                        return None;
+                    }
+                    let remaining = this
+                        .audio_bridge
+                        .engine
+                        .as_ref()
+                        .map(|engine| engine.count_in_remaining_samples());
+                    // A stalled or absent engine must not leave the UI
+                    // counting forever — the deadline always ends it.
+                    let done = match remaining {
+                        Some(remaining) if engine_clocked => remaining == 0,
+                        _ => std::time::Instant::now() >= deadline,
+                    };
+                    Some(done || std::time::Instant::now() >= deadline)
+                });
+                match finished {
+                    None => return,
+                    Some(false) => continue,
+                    Some(true) => break,
+                }
+            }
             let _ = owner.update(cx, |this, cx| {
                 if this.recording.count_in_token != token
                     || !matches!(this.recording.ui_state, RecordingUiState::CountingIn { .. })
                 {
                     return;
                 }
-                if rolls {
-                    this.stop_native_playback(cx);
-                    // Re-seek so timer jitter cannot leave the take a few
-                    // milliseconds off the beat the user asked to record from.
-                    this.seek_native_playhead(cx, target_beat);
-                }
-                this.restore_record_count_in_metronome(cx);
-                this.start_native_recording_now(cx);
+                this.recording.ui_state = RecordingUiState::Recording;
+                this.start_native_playback(cx);
+                cx.notify();
             });
         })
         .detach();
     }
 
-    fn restore_record_count_in_metronome(&mut self, cx: &mut Context<Self>) {
-        let Some(enabled) = self.recording.count_in_restore_metronome.take() else {
-            return;
-        };
-        self.timeline.update(cx, |timeline, cx| {
-            timeline.state.transport.metronome_enabled = enabled;
-            cx.notify();
-        });
-        self.sync_metronome_controls(cx);
-    }
-
     fn cancel_record_count_in(&mut self, cx: &mut Context<Self>) {
         self.recording.count_in_token = self.recording.count_in_token.wrapping_add(1);
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            let _ = engine.cancel_count_in();
+        }
+        // The take was armed when the count-in began, so cancelling has to
+        // discard it — otherwise the writers stay open on a take nobody asked
+        // to keep and the next Record is refused as "already recording".
+        self.discard_armed_count_in_take(cx);
         self.stop_native_playback(cx);
-        self.restore_record_count_in_metronome(cx);
         self.recording.ui_state = RecordingUiState::Idle;
         cx.notify();
     }
 
-    fn start_native_recording_now(&mut self, cx: &mut Context<Self>) {
-        self.recording.ui_state = RecordingUiState::Preparing;
+    /// Throw away a take that was armed for a count-in that never reached its
+    /// downbeat. Nothing was captured — the take is gated on the transport and
+    /// the transport never rolled — so the files it created are deleted rather
+    /// than committed as an empty clip.
+    fn discard_armed_count_in_take(&mut self, cx: &mut Context<Self>) {
+        self.recording.midi = None;
+        self.clear_midi_recording_previews(cx);
+        let Some(engine) = self.audio_bridge.engine.clone() else {
+            return;
+        };
+        if !engine.recording_status().active {
+            return;
+        }
+        match engine.stop_recording() {
+            Ok(results) => {
+                for result in results {
+                    if result.file_path.is_empty() {
+                        continue;
+                    }
+                    let _ = std::fs::remove_file(&result.file_path);
+                    if !result.metadata_path.is_empty() {
+                        let _ = std::fs::remove_file(&result.metadata_path);
+                    }
+                }
+            }
+            Err(error) => eprintln!("[recording] discarding cancelled count-in take: {error}"),
+        }
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.state.transport.recording = false;
+            cx.notify();
+        });
+    }
+
+    /// Arm the take and, unless `start_transport` is false, roll.
+    ///
+    /// A count-in arms without rolling: the writers, the files and the record
+    /// sink are all built while the click runs, so the downbeat costs nothing
+    /// but a transport start. The take itself is gated on the transport, so
+    /// arming early captures nothing early.
+    fn start_native_recording_now(&mut self, start_transport: bool, cx: &mut Context<Self>) {
+        if start_transport {
+            self.recording.ui_state = RecordingUiState::Preparing;
+        }
         cx.notify();
 
         // Clone the engine handle (cheap, Arc-backed) so the local `engine`
@@ -516,12 +593,18 @@ impl StudioLayout {
             });
         }
         self.audio_bridge.last_error = None;
-        self.recording.ui_state = RecordingUiState::Recording;
+        if start_transport {
+            self.recording.ui_state = RecordingUiState::Recording;
+        }
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.recording = true;
             cx.notify();
         });
 
+        if !start_transport {
+            // Armed and waiting for the count-in's downbeat.
+            return;
+        }
         let playing = self
             .audio_bridge
             .stats
@@ -769,6 +852,9 @@ impl StudioLayout {
         let recording_offset_beats = recording_offset_ms as f32 / 1000.0 * bpm / 60.0;
         let mut import_paths: Vec<(PathBuf, String)> = Vec::new();
         let mut failed_tracks: Vec<String> = Vec::new();
+        // One stamp for the whole pass, so every track's take from this Record
+        // reads as the same moment — which is what they are.
+        let take_stamp = take_timestamp_label();
 
         let _ = self.timeline.update(cx, |timeline, cx| {
             for result in &results {
@@ -817,6 +903,15 @@ impl StudioLayout {
                     placed_beat,
                     result.duration_seconds,
                     bpm,
+                );
+                // Register the pass as a take. A second pass over the same bars
+                // becomes the active take and mutes the one it replaced, which
+                // is what makes Record twice a comp instead of two clips
+                // playing over each other.
+                timeline.state.register_recorded_take(
+                    &result.track_id,
+                    &clip_id,
+                    take_stamp.clone(),
                 );
                 if generate_waveforms {
                     import_paths.push((PathBuf::from(&result.file_path), result.file_path.clone()));
@@ -1101,6 +1196,25 @@ impl StudioLayout {
         eprintln!("[recording] start blocked: {message}");
         cx.notify();
     }
+}
+
+/// `HH:MM` local time for a take row's secondary line.
+///
+/// A label, never a value: it says which pass this was in a list of passes from
+/// the same session, and the hour and minute are enough for that. Derived from
+/// the wall clock without a date library — the seconds since the epoch modulo a
+/// day, offset by nothing, which is UTC. Good enough to order and tell apart
+/// takes recorded minutes from each other.
+fn take_timestamp_label() -> String {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return String::new();
+    };
+    let seconds_today = now.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}",
+        seconds_today / 3_600,
+        (seconds_today / 60) % 60
+    )
 }
 
 fn push_recorded_midi_note(track: &mut MidiRecordingTrack, active: ActiveMidiNote, end_beat: f32) {

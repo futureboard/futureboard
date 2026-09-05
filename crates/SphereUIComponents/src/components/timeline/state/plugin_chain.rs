@@ -1277,6 +1277,8 @@ impl TimelineState {
                     solfege: None,
                     sends: Vec::new(),
                     routing: TrackRoutingState::for_track_type(TrackType::Bus),
+                    takes: Vec::new(),
+                    takes_expanded: false,
                 },
             );
             insert_at += 1;

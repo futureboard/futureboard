@@ -1597,6 +1597,45 @@ impl Render for Timeline {
             on_assign_to_group,
             on_toggle_group_collapsed,
             on_context_menu: on_track_context_menu.clone(),
+            on_toggle_takes: {
+                let this = cx.entity().clone();
+                std::sync::Arc::new(move |track_id, _window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        // View state, not project content: opening the take
+                        // list is not an edit and must not mark the project
+                        // dirty. It is persisted with the track anyway, the way
+                        // a folder's collapse state is.
+                        if this.state.toggle_takes_expanded(track_id) {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            on_select_take: {
+                let this = cx.entity().clone();
+                std::sync::Arc::new(move |(track_id, take_id), _window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.state.set_active_take(track_id, take_id) {
+                            // Muting is what makes a take inactive, so the
+                            // engine has to hear about it like any other clip
+                            // change.
+                            this.mark_project_changed(cx);
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            on_delete_take: {
+                let this = cx.entity().clone();
+                std::sync::Arc::new(move |(track_id, take_id), _window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.state.delete_take(track_id, take_id) {
+                            this.mark_project_changed(cx);
+                            cx.notify();
+                        }
+                    });
+                })
+            },
         };
 
         // Shared with the cached lane views, so the row geometry and the

@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use gpui::{
     div, px, size, uniform_list, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollHandle, Styled,
-    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
-    WindowKind,
+    IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, ScrollHandle,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::components::controls::{fb_button, fb_field_label, FbButtonKind};
@@ -50,6 +50,53 @@ struct EditDialogState {
     recorder: KeyRecorderState,
     conflicts: Vec<KeymapConflict>,
     show_conflict: bool,
+    /// Filter over the action list, for a binding being created from nothing.
+    ///
+    /// Editing a row already knows its action. Creating one did not, and had no
+    /// way to be told: the dialog printed "Enter action id in JSON editor for
+    /// now" and saved an empty `action_id`, so the whole Create flow could not
+    /// produce a binding however carefully the keystroke was recorded. This is
+    /// the missing half.
+    action_query: String,
+}
+
+impl EditDialogState {
+    /// A dialog that knows its action from the row that opened it.
+    fn for_action(
+        action_id: String,
+        action_label: String,
+        arguments_json: String,
+        context: String,
+        captured: Option<String>,
+    ) -> Self {
+        Self {
+            action_id,
+            action_label,
+            arguments_json,
+            context,
+            recorder: KeyRecorderState {
+                captured,
+                ..KeyRecorderState::default()
+            },
+            conflicts: Vec::new(),
+            show_conflict: false,
+            action_query: String::new(),
+        }
+    }
+
+    /// A dialog with no action yet: the user picks one from the list.
+    fn for_new_binding() -> Self {
+        Self {
+            action_id: String::new(),
+            action_label: "New binding".into(),
+            arguments_json: String::new(),
+            context: "Studio".into(),
+            recorder: KeyRecorderState::default(),
+            conflicts: Vec::new(),
+            show_conflict: false,
+            action_query: String::new(),
+        }
+    }
 }
 
 pub struct KeymapWindow {
@@ -151,18 +198,13 @@ impl KeymapWindow {
     }
 
     fn open_edit_for_row(&mut self, row: &KeymapRow, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit_dialog = Some(EditDialogState {
-            action_id: row.action_id.clone(),
-            action_label: row.action_label.clone(),
-            arguments_json: row.arguments_json.clone().unwrap_or_default(),
-            context: row.context.clone().unwrap_or_else(|| "Studio".to_string()),
-            recorder: KeyRecorderState {
-                captured: row.keystrokes.first().cloned(),
-                ..KeyRecorderState::default()
-            },
-            conflicts: Vec::new(),
-            show_conflict: false,
-        });
+        self.edit_dialog = Some(EditDialogState::for_action(
+            row.action_id.clone(),
+            row.action_label.clone(),
+            row.arguments_json.clone().unwrap_or_default(),
+            row.context.clone().unwrap_or_else(|| "Studio".to_string()),
+            row.keystrokes.first().cloned(),
+        ));
         // Armed on open. Recording used to need a second, separate click on the
         // keystroke field — a small target inside a dialog the user had just
         // opened *to* record something — and if that click missed, every key
@@ -236,6 +278,12 @@ impl KeymapWindow {
         self.recorder_intercept = None;
         dialog.recorder.disarm();
         let action_id = dialog.action_id.clone();
+        if action_id.trim().is_empty() {
+            self.status_message = Some("Choose an action for this keybinding.".into());
+            self.edit_dialog = Some(dialog);
+            cx.notify();
+            return;
+        }
         let keys = dialog
             .recorder
             .captured
@@ -362,6 +410,59 @@ impl KeymapWindow {
         cx.notify();
     }
 
+    /// Types into the create dialog's action filter.
+    ///
+    /// The dialog is modal and has no text input of its own to focus, so the
+    /// window takes the keys itself: printable characters extend the query,
+    /// Backspace shortens it. Only reached while an action still has to be
+    /// chosen — once one is, every key belongs to the recorder again.
+    fn type_into_action_filter(&mut self, event: &KeyDownEvent) -> bool {
+        let Some(dialog) = self.edit_dialog.as_mut() else {
+            return false;
+        };
+        if !dialog.action_id.is_empty() || dialog.recorder.armed {
+            return false;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "backspace" => {
+                dialog.action_query.pop();
+                true
+            }
+            key => {
+                let text = event
+                    .keystroke
+                    .key_char
+                    .as_deref()
+                    .filter(|c| !c.is_empty() && !c.chars().any(char::is_control))
+                    .map(str::to_string)
+                    .or_else(|| (key.chars().count() == 1).then(|| key.to_string()));
+                match text {
+                    Some(text) => {
+                        dialog.action_query.push_str(&text);
+                        true
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+
+    /// Actions offered by the create dialog, newest match first.
+    fn action_choices(&self, query: &str) -> Vec<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        self.manager
+            .filtered_rows(query)
+            .into_iter()
+            .filter(|row| seen.insert(row.action_id.clone()))
+            .take(ACTION_CHOICE_LIMIT)
+            .map(|row| (row.action_id.clone(), row.action_label.clone()))
+            .collect()
+    }
+
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.edit_dialog.is_some() {
             if let Some(dialog) = self.edit_dialog.as_mut() {
@@ -402,6 +503,12 @@ impl KeymapWindow {
             return;
         }
 
+        // A create dialog waiting for an action takes plain typing as its
+        // filter before anything else looks at the key.
+        if self.type_into_action_filter(event) {
+            cx.notify();
+            return;
+        }
         let ctrl = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         let key = event.keystroke.key.as_str();
         match (ctrl, key) {
@@ -417,15 +524,7 @@ impl KeymapWindow {
             }
             (true, "k") => {
                 self.create_dialog_open = true;
-                self.edit_dialog = Some(EditDialogState {
-                    action_id: String::new(),
-                    action_label: "New binding".into(),
-                    arguments_json: String::new(),
-                    context: "Studio".into(),
-                    recorder: KeyRecorderState::default(),
-                    conflicts: Vec::new(),
-                    show_conflict: false,
-                });
+                self.edit_dialog = Some(EditDialogState::for_new_binding());
                 self.arm_recorder(window, cx);
             }
             _ => {
@@ -568,18 +667,16 @@ impl Render for KeymapWindow {
                 true,
                 {
                     let entity = entity.clone();
-                    move |_, _, cx| {
+                    move |_, window: &mut Window, cx: &mut App| {
                         let _ = entity.update(cx, |this, cx| {
-                            this.edit_dialog = Some(EditDialogState {
-                                action_id: String::new(),
-                                action_label: "New binding".into(),
-                                arguments_json: String::new(),
-                                context: "Studio".into(),
-                                recorder: KeyRecorderState::default(),
-                                conflicts: Vec::new(),
-                                show_conflict: false,
-                            });
-                            cx.notify();
+                            this.create_dialog_open = true;
+                            this.edit_dialog = Some(EditDialogState::for_new_binding());
+                            // Arm here as well as on Ctrl+K. The button and the
+                            // shortcut open the same dialog, and only one of
+                            // them used to start recording — so whether the
+                            // keystroke field listened depended on how you had
+                            // opened it.
+                            this.arm_recorder(window, cx);
                         });
                     }
                 },
@@ -746,10 +843,16 @@ impl Render for KeymapWindow {
                     .child(msg.clone())
             }));
 
+        let action_choices = self
+            .edit_dialog
+            .as_ref()
+            .filter(|dialog| dialog.action_id.is_empty())
+            .map(|dialog| self.action_choices(&dialog.action_query))
+            .unwrap_or_default();
         let edit_overlay = self
             .edit_dialog
             .as_ref()
-            .map(|dialog| edit_dialog_overlay(dialog, entity.clone()));
+            .map(|dialog| edit_dialog_overlay(dialog, action_choices, entity.clone()));
 
         let close_target = entity.clone();
         div()
@@ -909,8 +1012,88 @@ fn keymap_scrollbar_thumb(scroll: ScrollHandle) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// How many actions the create dialog offers at once. The list is filtered by
+/// typing, so this is a ceiling on the scroll, not on what is reachable.
+const ACTION_CHOICE_LIMIT: usize = 40;
+
+/// The action list a new binding is chosen from.
+fn action_picker(
+    dialog: &EditDialogState,
+    choices: Vec<(String, String)>,
+    entity: gpui::Entity<KeymapWindow>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(26.0))
+                .px(px(8.0))
+                .rounded(px(crate::theme::radius::CONTROL))
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .text_size(px(11.0))
+                .text_color(if dialog.action_query.is_empty() {
+                    Colors::text_muted()
+                } else {
+                    Colors::text_primary()
+                })
+                .child(if dialog.action_query.is_empty() {
+                    "Type to find an action…".to_string()
+                } else {
+                    dialog.action_query.clone()
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .max_h(px(150.0))
+                .id("keymap-action-choices")
+                .overflow_y_scroll()
+                .rounded(px(crate::theme::radius::CONTROL))
+                .bg(Colors::surface_card())
+                .children(choices.into_iter().map(|(action_id, label)| {
+                    let entity = entity.clone();
+                    let picked = action_id.clone();
+                    div()
+                        .id(gpui::SharedString::from(format!(
+                            "keymap-action-choice-{action_id}"
+                        )))
+                        .flex()
+                        .items_center()
+                        .h(px(24.0))
+                        .px(px(8.0))
+                        .text_size(px(11.0))
+                        .text_color(Colors::text_secondary())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .hover(|style| style.bg(Colors::state_hover()))
+                        .child(label.clone())
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            let picked = picked.clone();
+                            let label = label.clone();
+                            let _ = entity.update(cx, |this, cx| {
+                                if let Some(dialog) = this.edit_dialog.as_mut() {
+                                    dialog.action_id = picked.clone();
+                                    dialog.action_label = label.clone();
+                                }
+                                // Action chosen: the keys belong to the recorder
+                                // from here, which is the next thing the user
+                                // will do.
+                                this.arm_recorder(window, cx);
+                            });
+                        })
+                })),
+        )
+}
+
 fn edit_dialog_overlay(
     dialog: &EditDialogState,
+    choices: Vec<(String, String)>,
     entity: gpui::Entity<KeymapWindow>,
 ) -> gpui::AnyElement {
     let on_save = {
@@ -973,15 +1156,15 @@ fn edit_dialog_overlay(
                         }),
                 )
                 .child(fb_field_label("Action"))
-                .child(
+                .child(if dialog.action_id.is_empty() {
+                    action_picker(dialog, choices, entity.clone()).into_any_element()
+                } else {
                     div()
                         .text_size(px(11.0))
-                        .child(if dialog.action_id.is_empty() {
-                            "Enter action id in JSON editor for now".to_string()
-                        } else {
-                            dialog.action_id.clone()
-                        }),
-                )
+                        .text_color(Colors::text_primary())
+                        .child(dialog.action_id.clone())
+                        .into_any_element()
+                })
                 .child(fb_field_label("Keystroke"))
                 .child(
                     div()

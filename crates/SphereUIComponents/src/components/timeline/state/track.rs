@@ -292,6 +292,14 @@ pub struct TrackState {
     /// Persisted routing choices. Device discovery is not wired yet, so device
     /// variants are preserved but not created by the Inspector.
     pub routing: TrackRoutingState,
+    /// Recorded passes on this track, oldest first. See [`TrackTake`] — a take
+    /// is one of this track's own clips plus the record of which pass made it,
+    /// so an inactive take is a muted clip and nothing more exotic.
+    pub takes: Vec<TrackTake>,
+    /// Whether the take sub-lane is open in the track header. Opens itself on
+    /// the first pass that overlaps another; closed is the resting state for a
+    /// track nobody is comping.
+    pub takes_expanded: bool,
 }
 
 impl TrackState {
@@ -534,6 +542,8 @@ impl TimelineState {
             inserts: Vec::new(),
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(track_type),
+            takes: Vec::new(),
+            takes_expanded: false,
             instrument_plugin_instance_id: None,
             builtin_soundfont_player: false,
             soundfont_path: None,
