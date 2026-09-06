@@ -95,9 +95,15 @@ impl AudioEngineReading {
     }
 }
 
-/// Reads the current engine state. Runs on the UI thread against the owner's
-/// entity, so it must not block.
-pub type AudioEngineReader = Arc<dyn Fn(&App) -> AudioEngineReading + Send + Sync>;
+/// Takes a fresh reading from the audio engine.
+///
+/// **Called only from the refresh task, never from `render`.** The engine lives
+/// on the Studio entity, and this window is opened from inside a Studio update
+/// — reading that entity while it is leased is a double-lease panic, and with
+/// `panic = "abort"` in the release profile that is the whole application. The
+/// refresh task runs outside any lease, which is what makes the read safe;
+/// `render` uses the snapshot it left behind.
+pub type AudioEngineReader = Arc<dyn Fn(&mut App) -> AudioEngineReading + Send + Sync>;
 
 /// Tears the audio device down and brings it back up, rebuilding the project
 /// runtime against it.
@@ -105,7 +111,9 @@ pub type RestartEngineCb = Arc<dyn Fn(&mut App) + Send + Sync>;
 
 pub struct PerformanceWindow {
     focus_handle: FocusHandle,
-    read_engine: AudioEngineReader,
+    /// The last reading the refresh task took. `render` draws this and nothing
+    /// else — see [`AudioEngineReader`].
+    engine: AudioEngineReading,
     on_restart: RestartEngineCb,
     /// Set the moment Restart is pressed and cleared when the engine reports a
     /// running stream again, so the button cannot be pressed twice into the
@@ -115,15 +123,30 @@ pub struct PerformanceWindow {
 
 impl PerformanceWindow {
     fn new(
+        engine: AudioEngineReading,
         read_engine: AudioEngineReader,
         on_restart: RestartEngineCb,
         cx: &mut Context<Self>,
     ) -> Self {
-        // The machine's load moves whether or not anything in Studio is being
-        // edited, so this window drives its own repaint.
+        // The machine's load and the engine's counters both move whether or not
+        // anything in Studio is being edited, so this window drives its own
+        // refresh. Taking the engine reading here rather than in `render` is
+        // what keeps it off a leased entity.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(REFRESH).await;
-            if this.update(cx, |_this, cx| cx.notify()).is_err() {
+            // Two steps, deliberately not nested: take the reading with nothing
+            // leased, then apply it. Reading the Studio from inside this
+            // window's own update would be a nested entity update, which is the
+            // shape this project avoids everywhere else for the same reason.
+            let reading = cx.update(|cx| read_engine(cx));
+            let updated = this.update(cx, |view, cx| {
+                view.engine = reading;
+                if view.restarting && view.engine.running {
+                    view.restarting = false;
+                }
+                cx.notify();
+            });
+            if updated.is_err() {
                 break;
             }
         })
@@ -131,7 +154,7 @@ impl PerformanceWindow {
 
         Self {
             focus_handle: cx.focus_handle(),
-            read_engine,
+            engine,
             on_restart,
             restarting: false,
         }
@@ -140,10 +163,7 @@ impl PerformanceWindow {
 
 impl Render for PerformanceWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let engine = (self.read_engine)(cx);
-        if self.restarting && engine.running {
-            self.restarting = false;
-        }
+        let engine = self.engine.clone();
         let system = crate::system_load::system_load();
         let session = crate::perf::resource_usage();
         let restart_enabled = engine.present && !self.restarting;
@@ -632,8 +652,15 @@ pub fn rate_label(bytes_per_sec: Option<f64>) -> String {
 
 // ── Window ────────────────────────────────────────────────────────────────────
 
+/// Open the Performance Monitor.
+///
+/// `engine` is the reading to draw until the refresh task takes its own. It is
+/// passed in rather than read here because this is called from inside a Studio
+/// update: the window's first frame can land before that update returns, and
+/// reading the Studio entity then is a double-lease panic.
 pub fn open_performance_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
+    engine: AudioEngineReading,
     read_engine: AudioEngineReader,
     on_restart: RestartEngineCb,
     cx: &mut App,
@@ -654,7 +681,7 @@ pub fn open_performance_window(
     apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| PerformanceWindow::new(read_engine, on_restart, cx))
+        cx.new(|cx| PerformanceWindow::new(engine, read_engine, on_restart, cx))
     })
     .map_err(|error| error.to_string())
 }

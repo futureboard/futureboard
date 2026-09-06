@@ -67,8 +67,57 @@ pub fn performance_overlay(snapshot: &PerformanceOverlaySnapshot) -> impl IntoEl
             overlay_line("Build", &snapshot.build_stamp),
         ])
         .children(frame_accounting_rows(snapshot.ui_cpu_ms, snapshot.frame_ms))
+        .children(worst_frame_rows())
         .children(resource_rows())
         .children(hot_scope_rows(&snapshot.top_scopes))
+}
+
+/// The worst single frame of the last second, and what ran inside it.
+///
+/// Every other number on this panel is a per-second average, which is exactly
+/// the shape that hides a stutter: a run of 6 ms frames with one 90 ms frame in
+/// it averages to something that looks healthy, and the 90 ms frame is the only
+/// one anybody felt. This names that frame.
+fn worst_frame_rows() -> Vec<gpui::AnyElement> {
+    let Some(worst) = crate::perf::worst_frame() else {
+        return vec![
+            section_label("Worst frame").into_any_element(),
+            overlay_line("Gap", "none over 33 ms").into_any_element(),
+        ];
+    };
+    let mut rows = vec![
+        section_label("Worst frame").into_any_element(),
+        overlay_scope_row(
+            "Gap",
+            &format!("{:.1} ms  ({})", worst.gap_ms, worst.reason),
+            100.0,
+        )
+        .into_any_element(),
+    ];
+    if worst.scopes.is_empty() {
+        // A long gap with nothing instrumented inside it is itself the finding:
+        // the time went somewhere this build does not measure — a blocking
+        // call, another window's draw, or the frame simply not being scheduled.
+        rows.push(overlay_line("  in frame", "no instrumented work").into_any_element());
+    }
+    let share = |ms: f32| {
+        if worst.gap_ms > 0.0 {
+            100.0 * ms / worst.gap_ms
+        } else {
+            0.0
+        }
+    };
+    for scope in &worst.scopes {
+        rows.push(
+            overlay_scope_row(
+                &format!("  {}", scope.name),
+                &format!("{:.2} ms  {:.0}%", scope.total_ms, share(scope.total_ms)),
+                share(scope.total_ms),
+            )
+            .into_any_element(),
+        );
+    }
+    rows
 }
 
 /// What the session is costing the machine, split into the app and the plug-ins

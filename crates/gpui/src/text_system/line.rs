@@ -253,7 +253,7 @@ impl ShapedLine {
 }
 
 /// A line of text that has been shaped, decorated, and wrapped by the text layout system.
-#[derive(Default, Debug, Deref, DerefMut)]
+#[derive(Default, Debug, Clone, Deref, DerefMut)]
 pub struct WrappedLine {
     #[deref]
     #[deref_mut]

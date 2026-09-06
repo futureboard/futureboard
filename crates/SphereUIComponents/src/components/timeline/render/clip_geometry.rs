@@ -77,12 +77,38 @@ type CachedControllerPreview = Option<Arc<ControllerPreview>>;
 
 fn note_preview_cache() -> &'static Mutex<PreviewCache<CachedNotePreview>> {
     static CACHE: OnceLock<Mutex<PreviewCache<CachedNotePreview>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(PreviewCache::new(512)))
+    // Sized for the live working set, which is the visible clips times the two
+    // or three scroll tiles each has recently occupied. A dense arrangement
+    // shows a couple of hundred clips at once, so a few hundred entries is the
+    // floor — under it a wide session evicts its own previous tile and pays a
+    // rebuild for scrolling back the way it came. A preview is bounded by the
+    // pixels it covers, so this is single-digit megabytes at worst.
+    CACHE.get_or_init(|| Mutex::new(PreviewCache::new(2048)))
 }
 
 fn controller_preview_cache() -> &'static Mutex<PreviewCache<CachedControllerPreview>> {
     static CACHE: OnceLock<Mutex<PreviewCache<CachedControllerPreview>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(PreviewCache::new(256)))
+}
+
+thread_local! {
+    /// Note previews actually built on this thread.
+    ///
+    /// The arrangement's whole scaling claim is that this counts *geometry* —
+    /// one build per clip per window per content revision — and never grows
+    /// with the number of notes behind the clip. A test can assert that without
+    /// a stopwatch; a wall-clock comparison would only be measuring the machine.
+    ///
+    /// Per thread rather than global, for the same reason the arrangement is:
+    /// the builds a caller cares about are the ones it caused. A process-wide
+    /// counter would also be counting whatever another window — or another
+    /// test running beside this one — happened to draw.
+    static NOTE_PREVIEWS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// See [`NOTE_PREVIEWS_BUILT`].
+pub fn note_previews_built() -> u64 {
+    NOTE_PREVIEWS_BUILT.with(|built| built.get())
 }
 
 /// Everything a preview's shape depends on, as one integer.
@@ -151,6 +177,7 @@ pub fn note_preview_cached(
         return hit;
     }
     crate::perf::count("midi_preview_cache_miss", 1);
+    NOTE_PREVIEWS_BUILT.with(|built| built.set(built.get().saturating_add(1)));
     let built = build_note_preview(notes, clip_len, ppb, px_start, px_end).map(Arc::new);
     if let Ok(mut cache) = note_preview_cache().lock() {
         cache.insert(key, built.clone());

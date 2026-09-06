@@ -266,3 +266,85 @@ fn frame_cost_grows_no_faster_than_the_tree(cx: &mut TestAppContext) {
          in the element count"
     );
 }
+
+/// The window-opening invariant every caller has to design around.
+///
+/// [`App::open_window`] draws the new window **before it returns** — see the
+/// comment on the `window.draw(cx)` call there, which exists because a window
+/// that has never rendered crashes on Windows. So a window opened from inside
+/// an entity update renders its first frame while that entity is still leased,
+/// and anything that first frame does to the opener — `Entity::read`,
+/// `Entity::update` — is a double-lease panic.
+///
+/// That is not a bug to fix here; it is a constraint to know. A window opened
+/// this way must be handed the state its first frame needs, and read back only
+/// later, from outside the lease.
+#[cfg(test)]
+mod window_open_invariant {
+    use crate::{
+        AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, div, px, size,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Opener;
+
+    impl Render for Opener {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    struct Child {
+        rendered: Rc<Cell<bool>>,
+    }
+
+    impl Render for Child {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.rendered.set(true);
+            div()
+        }
+    }
+
+    #[crate::test]
+    fn a_window_renders_before_open_window_returns(cx: &mut TestAppContext) {
+        let opener: Entity<Opener> = cx.update(|cx| cx.new(|_| Opener));
+        let rendered = Rc::new(Cell::new(false));
+        let seen_inside_update = Rc::new(Cell::new(false));
+
+        let probe = Rc::clone(&rendered);
+        let seen = Rc::clone(&seen_inside_update);
+        cx.update(|cx| {
+            // Exactly the shape a command dispatch has: the opener is leased
+            // for the whole closure.
+            opener.update(cx, |_opener, cx| {
+                let child_flag = Rc::clone(&probe);
+                let _handle = cx
+                    .open_window(
+                        crate::WindowOptions {
+                            window_bounds: Some(crate::WindowBounds::Windowed(crate::Bounds {
+                                origin: crate::Point::default(),
+                                size: size(px(400.), px(300.)),
+                            })),
+                            ..Default::default()
+                        },
+                        |_window, cx| {
+                            cx.new(|_| Child {
+                                rendered: child_flag,
+                            })
+                        },
+                    )
+                    .expect("window opens");
+                // Still inside the opener's lease.
+                seen.set(probe.get());
+            });
+        });
+
+        assert!(
+            seen_inside_update.get(),
+            "open_window returned without drawing — a window opened from inside an entity \
+             update no longer renders under that lease, and the constraint this test pins \
+             (hand the first frame its state, read back later) can be relaxed"
+        );
+    }
+}

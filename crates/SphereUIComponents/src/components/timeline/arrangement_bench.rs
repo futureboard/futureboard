@@ -26,12 +26,12 @@ use std::time::Instant;
 
 use crate::components::timeline::audio_clip::audio_clip_timeline_geometry;
 use crate::components::timeline::render::clip_geometry::{
-    controller_preview_cached, note_preview_cached, visible_clip_px_range,
+    controller_preview_cached, note_preview_cached, note_previews_built, visible_clip_px_range,
 };
 use crate::components::timeline::timeline_state::{
-    AudioClipStretchState, AudioImportState, ClipState, ClipType, CreateTrackOptions,
-    InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNoteState,
-    TempoCurve, TimelineState, TrackRowLayout, TrackType,
+    tempo_maps_built, AudioClipStretchState, AudioImportState, ClipState, ClipType,
+    CreateTrackOptions, InputMonitorMode, MidiControllerKind, MidiControllerLane,
+    MidiControllerPoint, MidiNoteState, TempoCurve, TimelineState, TrackRowLayout, TrackType,
 };
 
 /// Viewport the numbers are quoted against: a normal editing window.
@@ -363,25 +363,46 @@ fn arrangement_frame_cost_by_session_size() {
 /// The property the arrangement has to have: a clip's cost is what it *shows*,
 /// not what it *holds*. Ten times the notes behind the same pixels must not be
 /// ten times the work, or a dense imported part makes scrolling unusable.
+///
+/// Asserted on *work done*, not on a stopwatch. A preview build is the whole
+/// per-note cost, so counting builds states the invariant exactly — and unlike
+/// a wall-clock comparison it says the same thing on a loaded machine as on an
+/// idle one. [`arrangement_frame_cost_by_session_size`] has the durations.
 #[test]
 fn a_clips_frame_cost_does_not_scale_with_the_notes_behind_it() {
     let mut sparse = Session::build(8, 4, 500, 0, 0, 0);
     let mut dense = Session::build(8, 4, 50_000, 0, 0, 0);
     assert_eq!(dense.total_notes(), sparse.total_notes() * 100);
 
-    let (sparse_work, sparse_ms) = time_scroll_frames(&mut sparse, 30);
-    let (dense_work, dense_ms) = time_scroll_frames(&mut dense, 30);
+    let before = note_previews_built();
+    let (sparse_work, _) = time_scroll_frames(&mut sparse, 30);
+    let sparse_builds = note_previews_built() - before;
+
+    let before = note_previews_built();
+    let (dense_work, _) = time_scroll_frames(&mut dense, 30);
+    let dense_builds = note_previews_built() - before;
 
     assert_eq!(
         sparse_work.clips, dense_work.clips,
         "the two sessions must show the same clips"
     );
-    // Generous: the assertion is about the *shape* of the curve, not a
-    // constant. 100x the notes may cost more, but nothing like 100x more.
+    // Not exact equality: the preview cache is process-wide and bounded, so
+    // anything else drawing (another window, another test beside this one) can
+    // evict an entry and cost a rebuild. The bound is still far below what a
+    // note-count-sensitive key would produce — that would be one build per clip
+    // per frame, roughly thirty times this.
     assert!(
-        dense_ms < sparse_ms * 12.0 + 1.0,
-        "100x the notes cost {dense_ms:.3} ms/frame against {sparse_ms:.3} ms/frame — \
-         the preview is scaling with note count, not with pixels"
+        dense_builds <= sparse_builds * 4,
+        "100x the notes caused {dense_builds} preview builds against {sparse_builds} — \
+         the cache is keyed on something that scales with the note count"
+    );
+    // The real invariant: builds are bounded by the scroll, not by the frames.
+    // 30 frames of 8 px is 240 px, so each clip crosses at most a tile or two.
+    assert!(
+        dense_builds <= dense_work.clips as u64 * 3,
+        "{dense_builds} builds for {} visible clips over 240 px of scroll — the window \
+         key is invalidating every frame",
+        dense_work.clips
     );
 }
 
@@ -452,12 +473,19 @@ fn audio_clip_geometry_does_not_scale_with_tempo_marker_count() {
             .add_or_update_point(marker as f64 * 4.0, 100.0, TempoCurve::Hold);
     }
 
-    let (flat_work, flat_ms) = time_scroll_frames(&mut flat, 30);
-    let (curved_work, curved_ms) = time_scroll_frames(&mut curved, 30);
+    let (flat_work, _) = time_scroll_frames(&mut flat, 30);
+    let before = tempo_maps_built();
+    let (curved_work, _) = time_scroll_frames(&mut curved, 30);
+    let builds = tempo_maps_built() - before;
+
     assert_eq!(flat_work.clips, curved_work.clips);
+    // The tempo did not move during the scroll, so one build covers all 30
+    // frames and all 165 clips. Anything proportional to either means the map
+    // is being rebuilt inside the per-clip geometry again.
     assert!(
-        curved_ms < flat_ms * 8.0 + 1.0,
-        "128 tempo markers cost {curved_ms:.3} ms/frame against {flat_ms:.3} ms/frame — \
-         the tempo map is being rebuilt per clip"
+        builds <= 2,
+        "{builds} tempo maps built across 30 frames of {} clips — the map is being rebuilt \
+         per clip",
+        curved_work.clips
     );
 }

@@ -420,6 +420,22 @@ pub struct ResolvedTempo {
 /// on every edit), the base BPM, and the marker count.
 type TempoCacheKey = (u64, u32, usize);
 
+thread_local! {
+    /// Engine tempo maps actually built on this thread.
+    ///
+    /// The arrangement resolves an audio clip's geometry through the tempo map
+    /// once per clip per frame, so counting builds against the *tempo* rather
+    /// than the *clips* is the invariant the cache exists for — and a test can
+    /// assert it without a stopwatch. Per thread, so a caller counts only the
+    /// builds it caused.
+    static TEMPO_MAPS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// See [`TEMPO_MAPS_BUILT`].
+pub fn tempo_maps_built() -> u64 {
+    TEMPO_MAPS_BUILT.with(|built| built.get())
+}
+
 impl Clone for ResolvedTempo {
     /// A clone starts empty rather than copying the entry. Cloning a timeline
     /// is not a hot path, and carrying a cache into a clone that may be edited
@@ -453,7 +469,10 @@ impl TimelineState {
     /// its tempo-marker count.
     pub fn resolved_tempo_map(&self) -> std::sync::Arc<DirectAudio::TempoMap> {
         let key = self.tempo_cache_key();
-        let build = || std::sync::Arc::new(self.tempo_map.to_engine_map(self.bpm.max(1.0) as f64));
+        let build = || {
+            TEMPO_MAPS_BUILT.with(|built| built.set(built.get().saturating_add(1)));
+            std::sync::Arc::new(self.tempo_map.to_engine_map(self.bpm.max(1.0) as f64))
+        };
         // A poisoned lock is not a reason to be wrong: build and move on.
         let Ok(mut cell) = self.resolved_tempo.cell.lock() else {
             return build();

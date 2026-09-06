@@ -13,6 +13,14 @@ fn playhead_debug_enabled() -> bool {
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _tl_scope = crate::perf::PerfScope::enter("Timeline");
+        // `Timeline` is the arrangement's whole render and it dominates the
+        // profiler's hot-scope list, which makes it the least useful entry on
+        // it: knowing the arrangement is expensive says nothing about which
+        // third of it to look at. These split it into the three phases it
+        // actually has — resolving this frame's geometry, building the ~60
+        // gesture callbacks the tree needs, and assembling the tree — so the
+        // next reading names one of them instead.
+        let mut phase = crate::perf::PerfScope::enter("Timeline:geometry");
         // One arrangement row layout per repaint. The build is O(track_count)
         // and clones every track id, so the scroll geometry, the GPUI track
         // list, and the arrangement snapshot all share this instance instead of
@@ -140,6 +148,11 @@ impl Render for Timeline {
                     .sum::<u64>(),
             );
         }
+
+        phase = {
+            drop(phase);
+            crate::perf::PerfScope::enter("Timeline:callbacks")
+        };
 
         let on_select_track = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.select_track(track_id);
@@ -2307,6 +2320,11 @@ impl Render for Timeline {
                 },
             )
         });
+
+        let _phase = {
+            drop(phase);
+            crate::perf::PerfScope::enter("Timeline:tree")
+        };
 
         div()
             .flex()

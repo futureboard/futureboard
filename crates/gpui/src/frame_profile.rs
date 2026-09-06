@@ -134,6 +134,7 @@ pub(crate) fn record_layout_measure(nanos: u64) {
 }
 
 pub(crate) fn record_draw(micros: u64) {
+    census_tick();
     DRAW_US.store(micros, Ordering::Relaxed);
     SHAPE_US.store(SHAPE_US_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
     SHAPE_MISSES.store(SHAPE_MISSES_ACC.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -213,5 +214,244 @@ mod tests {
         assert!(profile.has_sample());
         record_draw(0);
         record_present(0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Element census
+// ---------------------------------------------------------------------------
+//
+// `layout_nodes` and `measure_calls` say how big the tree is; they do not say
+// which code built it. In an app whose frame is 73% layout, that is the only
+// question worth answering, and it cannot be answered from the app side —
+// `request_layout` runs during GPUI's own tree walk, long after the app's
+// `render` function returned, so an app-level timing scope never encloses it.
+//
+// Enable with `FUTUREBOARD_ELEMENT_CENSUS=1`. Every `CENSUS_PERIOD` frames the
+// tallies are printed to stderr and cleared: node counts per `div()` call site,
+// and measure-call counts per distinct text string. Disabled builds pay one
+// relaxed atomic load per node.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// Frames between stderr dumps. Long enough not to flood the log, short enough
+/// to catch a transient state (a menu open, a track added) while it is up.
+const CENSUS_PERIOD: u64 = 120;
+/// Rows printed per section.
+const CENSUS_ROWS: usize = 24;
+
+/// `u64::MAX` = not yet resolved from the environment.
+static CENSUS_ENABLED: AtomicU64 = AtomicU64::new(u64::MAX);
+static CENSUS_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static SITE_CENSUS: RefCell<HashMap<&'static str, SiteTally>> =
+        RefCell::new(HashMap::new());
+    static TEXT_CENSUS: RefCell<HashMap<String, TextTally>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Default, Clone, Copy)]
+struct SiteTally {
+    nodes: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct TextTally {
+    nodes: u64,
+    measures: u64,
+    measure_ns: u64,
+}
+
+/// Whether the census is collecting. Read on every node, so the env lookup is
+/// resolved once into an atomic rather than hitting the environment each time.
+pub fn census_enabled() -> bool {
+    match CENSUS_ENABLED.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let on = std::env::var_os("FUTUREBOARD_ELEMENT_CENSUS").is_some();
+            CENSUS_ENABLED.store(on as u64, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Attribute one layout node to the call site that created its element.
+pub(crate) fn record_node_site(location: Option<&'static core::panic::Location<'static>>) {
+    if !census_enabled() {
+        return;
+    }
+    let (file, line) = match location {
+        Some(l) => (l.file(), l.line()),
+        None => ("<unknown>", 0),
+    };
+    SITE_CENSUS.with(|c| {
+        c.borrow_mut()
+            .entry(intern_site(file, line))
+            .or_insert_with(SiteTally::default)
+            .nodes += 1;
+    });
+}
+
+/// Intern a `file:line` key so the per-frame tally hashes a `&'static str`
+/// instead of allocating. Bounded by the number of element call sites in the
+/// binary, and only ever reached while the census is enabled.
+fn intern_site(file: &'static str, line: u32) -> &'static str {
+    thread_local! {
+        static INTERNED: RefCell<HashMap<(&'static str, u32), &'static str>> =
+            RefCell::new(HashMap::new());
+    }
+    INTERNED.with(|m| {
+        *m.borrow_mut()
+            .entry((file, line))
+            .or_insert_with(|| Box::leak(format!("{file}:{line}").into_boxed_str()))
+    })
+}
+
+/// Attribute one text element to its content.
+pub(crate) fn record_text_node(text: &str) {
+    if !census_enabled() {
+        return;
+    }
+    TEXT_CENSUS.with(|c| {
+        c.borrow_mut()
+            .entry(census_text_key(text))
+            .or_insert_with(TextTally::default)
+            .nodes += 1;
+    });
+}
+
+/// Attribute one measure callback, with its cost, to the text it measured.
+pub(crate) fn record_text_measure(text: &str, nanos: u64) {
+    if !census_enabled() {
+        return;
+    }
+    TEXT_CENSUS.with(|c| {
+        let mut c = c.borrow_mut();
+        let entry = c
+            .entry(census_text_key(text))
+            .or_insert_with(TextTally::default);
+        entry.measures += 1;
+        entry.measure_ns += nanos;
+    });
+}
+
+/// Collapse a label to a bounded key. Timeline labels are mostly unique (clip
+/// names, bar numbers), so keeping them verbatim would make every row a count
+/// of one and hide the pattern; the first few characters plus the length group
+/// them by shape instead.
+fn census_text_key(text: &str) -> String {
+    const HEAD: usize = 12;
+    let chars = text.chars().count();
+    if chars <= HEAD {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(HEAD).collect();
+    format!("{head}..[{chars}]")
+}
+
+/// Print and clear the census. Called once every `CENSUS_PERIOD` frames.
+fn dump_census(frame: u64) {
+    let mut sites: Vec<(&'static str, SiteTally)> =
+        SITE_CENSUS.with(|c| c.borrow().iter().map(|(k, v)| (*k, *v)).collect());
+    let mut texts: Vec<(String, TextTally)> =
+        TEXT_CENSUS.with(|c| c.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect());
+    SITE_CENSUS.with(|c| c.borrow_mut().clear());
+    TEXT_CENSUS.with(|c| c.borrow_mut().clear());
+
+    let frames = CENSUS_PERIOD.max(1) as f64;
+    sites.sort_by(|a, b| b.1.nodes.cmp(&a.1.nodes));
+    texts.sort_by(|a, b| b.1.measure_ns.cmp(&a.1.measure_ns));
+
+    let total_nodes: u64 = sites.iter().map(|(_, t)| t.nodes).sum();
+    let total_measures: u64 = texts.iter().map(|(_, t)| t.measures).sum();
+    let total_measure_ns: u64 = texts.iter().map(|(_, t)| t.measure_ns).sum();
+
+    use std::fmt::Write as _;
+    let mut report = String::with_capacity(4096);
+    let _ = writeln!(
+        report,
+        "\n[element-census] frame {frame} - averages over {frames:.0} frames"
+    );
+    let _ = writeln!(
+        report,
+        "[element-census] nodes/frame {:.0}   text measures/frame {:.0}   measure {:.2} ms/frame",
+        total_nodes as f64 / frames,
+        total_measures as f64 / frames,
+        total_measure_ns as f64 / frames / 1.0e6,
+    );
+    let _ = writeln!(report, "[element-census] --- layout nodes by call site ---");
+    for (site, tally) in sites.iter().take(CENSUS_ROWS) {
+        let _ = writeln!(
+            report,
+            "[element-census] {:>8.1}  {site}",
+            tally.nodes as f64 / frames
+        );
+    }
+    let _ = writeln!(report, "[element-census] --- text measure cost by label ---");
+    for (text, tally) in texts.iter().take(CENSUS_ROWS) {
+        let _ = writeln!(
+            report,
+            "[element-census] {:>8.3} ms  x{:<7.1} n{:<6.1} {text:?}",
+            tally.measure_ns as f64 / frames / 1.0e6,
+            tally.measures as f64 / frames,
+            tally.nodes as f64 / frames,
+        );
+    }
+
+    // A release build is linked against the Windows subsystem and has no
+    // console, so stderr alone would drop the report on exactly the build whose
+    // numbers matter. Write it to a file as well, and let the user redirect it.
+    eprint!("{report}");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(census_log_path())
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(report.as_bytes());
+    }
+}
+
+/// Where the census report is appended. `FUTUREBOARD_ELEMENT_CENSUS_LOG`
+/// overrides it; otherwise it lands next to the other temp artifacts.
+fn census_log_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("FUTUREBOARD_ELEMENT_CENSUS_LOG") {
+        return std::path::PathBuf::from(path);
+    }
+    std::env::temp_dir().join("futureboard-element-census.log")
+}
+
+/// Advance the census frame counter, dumping on the period boundary.
+pub(crate) fn census_tick() {
+    if !census_enabled() {
+        return;
+    }
+    let frame = CENSUS_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    if frame.is_multiple_of(CENSUS_PERIOD) {
+        dump_census(frame);
+    }
+}
+
+/// Times one text measure callback and attributes it to the measured string.
+/// Allocates only while the census is enabled.
+pub(crate) struct TextMeasureGuard(Option<(String, std::time::Instant)>);
+
+impl TextMeasureGuard {
+    pub(crate) fn new(text: &str) -> Self {
+        if !census_enabled() {
+            return Self(None);
+        }
+        Self(Some((text.to_string(), std::time::Instant::now())))
+    }
+}
+
+impl Drop for TextMeasureGuard {
+    fn drop(&mut self) {
+        if let Some((text, start)) = self.0.take() {
+            let nanos = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            record_text_measure(&text, nanos);
+        }
     }
 }

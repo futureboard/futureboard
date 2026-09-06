@@ -1655,6 +1655,7 @@ impl Element for Div {
             )
         });
 
+        crate::frame_profile::record_node_site(self.interactivity.source_location());
         (layout_id, DivFrameState { child_layout_ids })
     }
 

@@ -692,6 +692,13 @@ impl StudioLayout {
             let mut interval_handle: Option<Arc<AtomicU64>> = None;
             let mut transport_active = false;
             let mut midi_recording_active = false;
+            // Held only while the cadence below the OS timer tick is actually
+            // wanted. Without it `executor.timer(6.9 ms)` waits for the next
+            // ~15.6 ms Windows tick, so this loop — which is what schedules
+            // every repaint during playback — runs at ~64 Hz at best whatever
+            // the frame rate is set to. See
+            // [`crate::frame_scheduler::TimerResolutionGuard`].
+            let mut fast_timer: Option<crate::frame_scheduler::TimerResolutionGuard> = None;
             loop {
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;
@@ -720,6 +727,14 @@ impl StudioLayout {
                 } else {
                     requested_interval_nanos.max(IDLE_MIN_INTERVAL_NANOS)
                 };
+                // Acquired and released with the cadence, so an idle Studio
+                // does not keep the machine's timer at 1 ms.
+                if crate::frame_scheduler::wants_high_timer_resolution(interval_nanos) {
+                    fast_timer
+                        .get_or_insert_with(crate::frame_scheduler::TimerResolutionGuard::acquire);
+                } else {
+                    fast_timer = None;
+                }
                 executor.timer(Duration::from_nanos(interval_nanos)).await;
                 if crate::shutdown::ShutdownState::global().is_shutting_down() {
                     break;

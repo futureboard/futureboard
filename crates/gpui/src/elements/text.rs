@@ -615,7 +615,9 @@ pub struct TextLayout(Rc<RefCell<Option<TextLayoutInner>>>);
 
 struct TextLayoutInner {
     len: usize,
-    lines: SmallVec<[WrappedLine; 1]>,
+    /// Shared with the window text system's shaped-text cache: on a cache hit
+    /// this is an `Arc` clone rather than a rebuilt line vector.
+    lines: Arc<SmallVec<[WrappedLine; 1]>>,
     line_height: Pixels,
     wrap_width: Option<Pixels>,
     /// Truncation width this layout was produced with, so a later measure pass
@@ -647,10 +649,12 @@ impl TextLayout {
         } else {
             vec![text_style.to_run(text.len())]
         };
+        crate::frame_profile::record_text_node(&text);
         window.request_measured_layout(Default::default(), {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
+                let _census = crate::frame_profile::TextMeasureGuard::new(&text);
                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
                     known_dimensions.width.or(match available_space.width {
                         crate::AvailableSpace::Definite(x) => Some(x),
@@ -728,7 +732,7 @@ impl TextLayout {
 
                 let Some(lines) = window
                     .text_system()
-                    .shape_text(
+                    .shape_text_shared(
                         text,
                         font_size,
                         &runs,
@@ -750,7 +754,7 @@ impl TextLayout {
                 };
 
                 let mut size: Size<Pixels> = Size::default();
-                for line in &lines {
+                for line in lines.iter() {
                     let line_size = line.size(line_height);
                     size.height += line_size.height;
                     size.width = size.width.max(line_size.width).ceil();
@@ -794,7 +798,7 @@ impl TextLayout {
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;
         let text_style = window.text_style();
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             line.paint_background(
                 line_origin,
                 line_height,
@@ -834,7 +838,7 @@ impl TextLayout {
         let line_height = element_state.line_height;
         let mut line_origin = bounds.origin;
         let mut line_start_ix = 0;
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_bottom = line_origin.y + line.size(line_height).height;
             if position.y > line_bottom {
                 line_origin.y = line_bottom;
@@ -865,7 +869,7 @@ impl TextLayout {
         let mut line_origin = bounds.origin;
         let mut line_start_ix = 0;
 
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_end_ix = line_start_ix + line.len();
             if index < line_start_ix {
                 break;
@@ -896,7 +900,7 @@ impl TextLayout {
         let mut line_origin = bounds.origin;
         let mut line_start_ix = 0;
 
-        for line in &element_state.lines {
+        for line in element_state.lines.iter() {
             let line_end_ix = line_start_ix + line.len();
             if index < line_start_ix {
                 break;

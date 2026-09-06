@@ -547,6 +547,76 @@ impl FrameScheduler {
     }
 }
 
+// ── OS timer resolution ───────────────────────────────────────────────────────
+
+/// The tick Windows delivers timer expirations on by default, in nanoseconds.
+///
+/// This is the number that decides whether a configured cadence is real. GPUI's
+/// `executor.timer()` becomes a `ThreadPoolTimer`, and a threadpool timer fires
+/// on the system tick — so asking for 6.9 ms (144 Hz) and asking for 15 ms both
+/// get you ~15.6 ms. The continuous poll loop that drives every repaint during
+/// playback is therefore capped at ~64 Hz however the frame rate is set, and on
+/// a 144 Hz panel that is most of the frames missing.
+///
+/// Slightly under the real 15.625 ms so a cadence asking for exactly the tick
+/// does not raise the resolution to gain nothing.
+const DEFAULT_OS_TICK_NANOS: u64 = 15_000_000;
+
+/// Whether `interval_nanos` needs a finer OS timer than the default tick.
+///
+/// Split out from the guard so the decision is testable without touching the
+/// platform: the guard is a side effect, this is the rule.
+pub fn wants_high_timer_resolution(interval_nanos: u64) -> bool {
+    interval_nanos > 0 && interval_nanos < DEFAULT_OS_TICK_NANOS
+}
+
+/// Holds the OS timer at 1 ms for as long as it is alive.
+///
+/// `timeBeginPeriod` is process-scoped on Windows 10 2004 and later, and it
+/// costs power — a machine kept at 1 ms wakes more often and idles worse. So
+/// this is acquired only while something actually wants a sub-tick cadence (the
+/// transport rolling, a MIDI take being written) and dropped the moment nothing
+/// does. Idle Studio leaves the system timer alone.
+///
+/// Non-Windows platforms deliver timers at the resolution asked for, so this is
+/// an empty guard there.
+#[must_use = "the resolution is only raised for as long as the guard is alive"]
+pub struct TimerResolutionGuard {
+    #[cfg(windows)]
+    held: bool,
+}
+
+impl TimerResolutionGuard {
+    /// Raise the OS timer resolution to 1 ms until the guard is dropped.
+    pub fn acquire() -> Self {
+        #[cfg(windows)]
+        {
+            // 0 is TIMERR_NOERROR; anything else means the period was refused
+            // and there is nothing to release.
+            let held = unsafe { windows::Win32::Media::timeBeginPeriod(1) } == 0;
+            if !held {
+                eprintln!("[frame] timeBeginPeriod(1) refused; timers stay on the default tick");
+            }
+            Self { held }
+        }
+        #[cfg(not(windows))]
+        {
+            Self {}
+        }
+    }
+}
+
+impl Drop for TimerResolutionGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.held {
+            unsafe {
+                let _ = windows::Win32::Media::timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +747,44 @@ mod tests {
             "bs@50 was {}ms",
             ms(at_50)
         );
+    }
+
+    /// The rule the guard is acquired on. A cadence at or above the OS tick
+    /// gets nothing from raising the resolution, and raising it costs power —
+    /// so idle Studio, which clamps to 60 Hz, must not ask for it, while every
+    /// display rate above 60 Hz must.
+    #[test]
+    fn only_a_cadence_under_the_os_tick_asks_for_a_finer_timer() {
+        let nanos_for = |hz: u64| 1_000_000_000 / hz;
+        assert!(!wants_high_timer_resolution(0), "no cadence, no request");
+        assert!(
+            !wants_high_timer_resolution(nanos_for(30)),
+            "battery saver must not pin the system timer"
+        );
+        assert!(
+            !wants_high_timer_resolution(nanos_for(60)),
+            "60 Hz already lands on the default tick"
+        );
+        for hz in [90_u64, 120, 144, 240] {
+            assert!(
+                wants_high_timer_resolution(nanos_for(hz)),
+                "{hz} Hz cannot be delivered on the default tick"
+            );
+        }
+        // The MIDI-record cadence is far under it.
+        assert!(wants_high_timer_resolution(2_000_000));
+    }
+
+    /// Acquiring and dropping must be balanced and must not panic, whatever the
+    /// platform answers.
+    #[test]
+    fn the_resolution_guard_is_balanced() {
+        {
+            let _outer = TimerResolutionGuard::acquire();
+            let _inner = TimerResolutionGuard::acquire();
+        }
+        // A second round after both have been released still works.
+        drop(TimerResolutionGuard::acquire());
     }
 
     #[test]

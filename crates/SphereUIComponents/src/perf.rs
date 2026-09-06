@@ -46,6 +46,29 @@ const ROOT_CHILDREN: &[&str] = &[
     "StatusBar",
 ];
 
+/// The single worst frame of a window, and where its time went.
+///
+/// Per-second averages cannot describe a stutter: a run of 6 ms frames with one
+/// 90 ms frame in it averages out to something that looks fine, and the 90 ms
+/// frame is the only one the user felt. This keeps that frame — how long the
+/// gap was, what asked for it, and which instrumented scopes ran inside it —
+/// so the readout names the cost instead of hinting at it.
+#[derive(Default, Clone)]
+pub struct WorstFrame {
+    /// Gap before the frame, in milliseconds.
+    pub gap_ms: f32,
+    /// The repaint reason recorded for it.
+    pub reason: &'static str,
+    /// Scopes that ran during it, worst first.
+    pub scopes: Vec<ScopeSample>,
+}
+
+/// A frame slower than this is a stutter worth attributing.
+///
+/// Two frames at 60 Hz. Below it a frame is late but not seen; above it the
+/// motion visibly breaks, which is the thing being hunted.
+const STALL_FRAME_MS: f32 = 33.0;
+
 /// Completed 1-second window, kept so readers get stable per-second figures
 /// instead of whatever has accumulated since the last reset.
 #[derive(Default, Clone)]
@@ -55,6 +78,8 @@ struct WindowSummary {
     cpu_ms_per_frame: f32,
     /// Measured frame interval in the window.
     frame_ms: f32,
+    /// The worst frame of the window, when one crossed [`STALL_FRAME_MS`].
+    worst: Option<WorstFrame>,
 }
 
 struct Collector {
@@ -82,6 +107,11 @@ struct Collector {
     /// Per-reason frame count this window — drives the repaint-source
     /// attribution and the idle-loop detector.
     reason_counts: BTreeMap<&'static str, u64>,
+    /// Scope time accumulated since the last frame tick, so a slow frame can be
+    /// attributed to what ran inside it. Cleared every frame.
+    frame_scopes: BTreeMap<&'static str, u64>,
+    /// Worst frame seen this window.
+    worst: Option<WorstFrame>,
 }
 
 #[derive(Default)]
@@ -149,6 +179,8 @@ impl Collector {
             window_start: now,
             last_repaint_reason: "init",
             reason_counts: BTreeMap::new(),
+            frame_scopes: BTreeMap::new(),
+            worst: None,
         }
     }
 
@@ -159,6 +191,10 @@ impl Collector {
         if ns > entry.max_ns {
             entry.max_ns = ns;
         }
+        // Also against the frame in progress, so a stall can name what ran in
+        // it rather than what ran in the second around it.
+        let frame = self.frame_scopes.entry(name).or_insert(0);
+        *frame = frame.saturating_add(ns);
     }
 
     fn record_counter(&mut self, name: &'static str, value: u64) {
@@ -192,8 +228,37 @@ impl Collector {
                 if dt_ms < self.frame_min_ms {
                     self.frame_min_ms = dt_ms;
                 }
+                // Keep the window's worst frame with what ran inside it. The
+                // scopes are the ones recorded since the previous tick, which
+                // is exactly the frame this gap measures.
+                if dt_ms >= STALL_FRAME_MS
+                    && self.worst.as_ref().is_none_or(|worst| dt_ms > worst.gap_ms)
+                {
+                    let mut scopes: Vec<ScopeSample> = self
+                        .frame_scopes
+                        .iter()
+                        .map(|(name, ns)| ScopeSample {
+                            name,
+                            total_ms: *ns as f32 / 1_000_000.0,
+                            percent: 0.0,
+                            count: 0,
+                        })
+                        .collect();
+                    scopes.sort_by(|a, b| {
+                        b.total_ms
+                            .partial_cmp(&a.total_ms)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    scopes.truncate(4);
+                    self.worst = Some(WorstFrame {
+                        gap_ms: dt_ms,
+                        reason: self.last_repaint_reason,
+                        scopes,
+                    });
+                }
             }
         }
+        self.frame_scopes.clear();
         self.last_frame = Some(now);
         self.last_repaint_reason = reason;
         *self.reason_counts.entry(reason).or_insert(0) += 1;
@@ -317,6 +382,7 @@ impl Collector {
                 0.0
             },
             frame_ms: avg_ms,
+            worst: self.worst.take(),
         };
 
         if !self.dump {
@@ -489,6 +555,7 @@ impl Collector {
     fn reset_window(&mut self) {
         self.scopes.clear();
         self.reason_counts.clear();
+        self.worst = None;
         for c in self.counters.values_mut() {
             c.max = c.last;
         }
@@ -822,6 +889,23 @@ pub fn top_scopes(limit: usize) -> Vec<ScopeSample> {
                 return Vec::new();
             }
             c.last_window.scopes.iter().take(limit).cloned().collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The worst frame of the last completed window, when one stuttered.
+///
+/// `None` when every frame in the window came in under [`STALL_FRAME_MS`] —
+/// which is the answer "nothing stuttered", and reads differently from a stall
+/// with no attribution.
+pub fn worst_frame() -> Option<WorstFrame> {
+    COLLECTOR
+        .try_with(|c| {
+            let c = c.borrow();
+            if !c.enabled {
+                return None;
+            }
+            c.last_window.worst.clone()
         })
         .unwrap_or_default()
 }

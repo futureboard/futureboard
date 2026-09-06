@@ -2018,11 +2018,22 @@ impl StudioLayout {
         }
 
         // The window owns no engine handle of its own: it asks the Studio for a
-        // reading when it repaints, and asks it to restart when the user does.
-        // One owner of the engine, whatever is on screen.
-        let reader_owner = cx.entity().clone();
+        // reading on its own refresh tick, and asks it to restart when the user
+        // does. One owner of the engine, whatever is on screen.
+        //
+        // `update`, not `read`, and never from the window's `render`. This
+        // function runs inside a Studio update — the window's first frame can
+        // land before that update returns — and touching a leased entity is a
+        // double-lease panic, which the release profile turns into an abort.
+        // The reader is only ever called from the window's refresh task, which
+        // runs outside any lease.
+        let reader_owner = cx.entity().downgrade();
         let read_engine: crate::components::performance_window::AudioEngineReader =
-            Arc::new(move |app: &gpui::App| reader_owner.read(app).audio_engine_reading());
+            Arc::new(move |app: &mut gpui::App| {
+                reader_owner
+                    .update(app, |layout, _cx| layout.audio_engine_reading())
+                    .unwrap_or_default()
+            });
         let restart_owner = cx.entity().clone();
         let on_restart: crate::components::performance_window::RestartEngineCb =
             Arc::new(move |app: &mut gpui::App| {
@@ -2031,8 +2042,14 @@ impl StudioLayout {
                 });
             });
 
+        // Taken here, where `self` is already borrowed, so the window has
+        // something real to draw on its first frame without reading back into
+        // an entity that is still leased.
+        let reading = self.audio_engine_reading();
+
         match crate::components::performance_window::open_performance_window(
             owner_bounds,
+            reading,
             read_engine,
             on_restart,
             cx,

@@ -394,10 +394,61 @@ impl TextSystem {
     }
 }
 
+/// Identifies one shaped-text result. Floats are keyed by their bit pattern so
+/// the key can derive `Hash`/`Eq`; the run list is kept verbatim rather than
+/// digested, so a hash collision cannot hand back the wrong text.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ShapedTextKey {
+    text: SharedString,
+    font_size_bits: u32,
+    wrap_width_bits: Option<u32>,
+    line_clamp: Option<usize>,
+    runs: SmallVec<[TextRun; 1]>,
+}
+
+/// Two-frame cache of shaped multi-line text.
+///
+/// `shape_text` is called from Taffy measure callbacks, which run more than
+/// once per node per frame, and a UI that redraws on a transport tick reshapes
+/// every visible label every time even though almost none of them changed.
+/// The underlying line layouts were already cached — what was not cached was
+/// everything around them: run splitting, font resolution, and a fresh
+/// `DecorationRun` vector per line, per call.
+///
+/// Retention mirrors [`LineLayoutCache`]: entries live for the frame they were
+/// used in plus the one after, so text that stops being drawn is dropped
+/// without the cache needing a size limit.
+#[derive(Default)]
+struct ShapedTextCache {
+    current: FxHashMap<ShapedTextKey, Arc<SmallVec<[WrappedLine; 1]>>>,
+    previous: FxHashMap<ShapedTextKey, Arc<SmallVec<[WrappedLine; 1]>>>,
+}
+
+impl ShapedTextCache {
+    /// Look up a shaped result, promoting a previous-frame hit into this frame.
+    fn get(&mut self, key: &ShapedTextKey) -> Option<Arc<SmallVec<[WrappedLine; 1]>>> {
+        if let Some(lines) = self.current.get(key) {
+            return Some(lines.clone());
+        }
+        let lines = self.previous.remove(key)?;
+        self.current.insert(key.clone(), lines.clone());
+        Some(lines)
+    }
+
+    fn insert(&mut self, key: ShapedTextKey, lines: Arc<SmallVec<[WrappedLine; 1]>>) {
+        self.current.insert(key, lines);
+    }
+
+    fn finish_frame(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
+}
+
 /// The GPUI text layout subsystem.
 #[derive(Deref)]
 pub struct WindowTextSystem {
     line_layout_cache: LineLayoutCache,
+    shaped_text_cache: Mutex<ShapedTextCache>,
     #[deref]
     text_system: Arc<TextSystem>,
 }
@@ -407,6 +458,7 @@ impl WindowTextSystem {
     pub fn new(text_system: Arc<TextSystem>) -> Self {
         Self {
             line_layout_cache: LineLayoutCache::new(text_system.platform_text_system.clone()),
+            shaped_text_cache: Mutex::new(ShapedTextCache::default()),
             text_system,
         }
     }
@@ -549,6 +601,48 @@ impl WindowTextSystem {
         wrap_width: Option<Pixels>,
         line_clamp: Option<usize>,
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        let lines = self.shape_text_shared(text, font_size, runs, wrap_width, line_clamp)?;
+        Ok((*lines).clone())
+    }
+
+    /// [`Self::shape_text`] without the copy.
+    ///
+    /// Callers that only read the shaped lines — which is every caller that
+    /// keeps them for a later paint — should prefer this: a cache hit is one
+    /// `Arc` clone instead of rebuilding the line vector and its per-line
+    /// decoration runs.
+    pub fn shape_text_shared(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+    ) -> Result<Arc<SmallVec<[WrappedLine; 1]>>> {
+        let key = ShapedTextKey {
+            text: text.clone(),
+            font_size_bits: f32::from(font_size).to_bits(),
+            wrap_width_bits: wrap_width.map(|w| f32::from(w).to_bits()),
+            line_clamp,
+            runs: runs.iter().filter(|run| run.len > 0).cloned().collect(),
+        };
+        if let Some(lines) = self.shaped_text_cache.lock().get(&key) {
+            return Ok(lines);
+        }
+
+        let lines = Arc::new(self.shape_text_uncached(text, font_size, runs, wrap_width, line_clamp)?);
+        self.shaped_text_cache.lock().insert(key, lines.clone());
+        Ok(lines)
+    }
+
+    fn shape_text_uncached(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+    ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
 
@@ -670,7 +764,8 @@ impl WindowTextSystem {
     }
 
     pub(crate) fn finish_frame(&self) {
-        self.line_layout_cache.finish_frame()
+        self.line_layout_cache.finish_frame();
+        self.shaped_text_cache.lock().finish_frame();
     }
 
     /// Layout the given line of text, at the given font_size.
@@ -1018,7 +1113,9 @@ impl Display for FontStyle {
 }
 
 /// A styled run of text, for use in [`crate::TextLayout`].
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+///
+/// `Hash` is derived so a run list can key the shaped-text cache.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct TextRun {
     /// A number of utf8 bytes
     pub len: usize,
@@ -1260,5 +1357,63 @@ mod tests {
                 ..requested
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod shaped_text_cache_tests {
+    use super::*;
+
+    fn key(text: &str, wrap_width: Option<f32>) -> ShapedTextKey {
+        ShapedTextKey {
+            text: SharedString::new(text),
+            font_size_bits: 14.0f32.to_bits(),
+            wrap_width_bits: wrap_width.map(f32::to_bits),
+            line_clamp: None,
+            runs: SmallVec::new(),
+        }
+    }
+
+    fn lines() -> Arc<SmallVec<[WrappedLine; 1]>> {
+        Arc::new(SmallVec::from_iter([WrappedLine::default()]))
+    }
+
+    #[test]
+    fn a_shaped_line_is_reused_rather_than_reshaped() {
+        let mut cache = ShapedTextCache::default();
+        let shaped = lines();
+        cache.insert(key("Insert", None), shaped.clone());
+
+        let hit = cache.get(&key("Insert", None)).expect("same key hits");
+        assert!(
+            Arc::ptr_eq(&hit, &shaped),
+            "a hit must hand back the same allocation, not a copy"
+        );
+        // Taffy measures a node again with a definite width; that is a
+        // different shaping request and must not silently reuse the unwrapped
+        // layout.
+        assert!(cache.get(&key("Insert", Some(64.0))).is_none());
+        assert!(cache.get(&key("Send", None)).is_none());
+    }
+
+    #[test]
+    fn text_drawn_last_frame_survives_one_frame_then_falls_out() {
+        let mut cache = ShapedTextCache::default();
+        cache.insert(key("Insert", None), lines());
+
+        cache.finish_frame();
+        // Still drawn: found in the previous-frame map and promoted back.
+        assert!(cache.get(&key("Insert", None)).is_some());
+        cache.finish_frame();
+        assert!(
+            cache.get(&key("Insert", None)).is_some(),
+            "promotion must renew the entry, or continuously drawn text would \
+             be reshaped every other frame"
+        );
+
+        // Now stop drawing it: one idle frame demotes it, the next drops it.
+        cache.finish_frame();
+        cache.finish_frame();
+        assert!(cache.get(&key("Insert", None)).is_none());
     }
 }
